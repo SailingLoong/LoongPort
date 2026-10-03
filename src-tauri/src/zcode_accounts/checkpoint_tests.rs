@@ -142,7 +142,7 @@ fn checkpoint_catalog_rejects_unknown_schema_duplicate_identity_and_extra_scope(
 }
 
 #[test]
-fn checkpoint_reopens_and_restores_exact_preimage_without_whole_file_replay() {
+fn checkpoint_reopens_exact_preimages_for_read_only_whole_image_confirmation() {
     let vault = VaultContext::generate().unwrap();
     let native = native();
     let mut current = native_document(OAuthFamily::Zai, "a", "fresh");
@@ -172,19 +172,22 @@ fn checkpoint_reopens_and_restores_exact_preimage_without_whole_file_replay() {
         "ssh:unrelated",
         "newer-third-party-value".into(),
     );
-    match reopened.recover(&changed, JournalOrigin::Live).unwrap() {
-        RecoveryOutcome::Restore(restored) => {
-            assert_eq!(restored.get(&b_cache), Some("old-native-b-cache-opaque"));
-            assert_eq!(
-                restored.get("ssh:unrelated"),
-                Some("newer-third-party-value")
-            );
-            for key in b.identity().credential_keys() {
-                assert_eq!(restored.get(&key), current.get(&key));
-            }
-        }
-        _ => panic!("expected scoped restoration"),
-    }
+    let unchanged = changed.to_bytes().unwrap();
+    assert_eq!(
+        reopened.match_touched_image(&changed),
+        Some(TouchedImage::After)
+    );
+    assert_eq!(changed.to_bytes().unwrap(), unchanged);
+    assert_eq!(
+        reopened.match_touched_image(&current),
+        Some(TouchedImage::Before)
+    );
+    assert_eq!(
+        reopened.plan.target_preimages().get(&b_cache),
+        Some(&Some("old-native-b-cache-opaque".into()))
+    );
+    let stale_cache = replace(&current, &b_cache, "different-b-cache".into());
+    assert_eq!(reopened.match_touched_image(&stale_cache), None);
 }
 
 #[test]
@@ -217,7 +220,7 @@ fn checkpoint_rejects_invalid_preimage_scope_shared_values_and_unknown_phase() {
 }
 
 #[test]
-fn checkpoint_origin_and_commit_phase_control_recovery_without_native_write() {
+fn checkpoint_every_reopened_phase_is_inspection_only_and_keeps_exact_images() {
     let vault = VaultContext::generate().unwrap();
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
@@ -232,28 +235,30 @@ fn checkpoint_origin_and_commit_phase_control_recovery_without_native_write() {
         TransactionPhase::Committed,
     ] {
         let mut checkpoint = SwitchCheckpoint::prepare(&current, &b, &native).unwrap();
+        let after = checkpoint.apply(&current).unwrap();
         checkpoint.set_phase(phase).unwrap();
         let reopened =
             SwitchCheckpoint::open(&checkpoint.seal(&vault, &native).unwrap(), &vault, &native)
                 .unwrap();
+        assert_eq!(reopened.phase, phase);
         assert!(matches!(
-            reopened.recover(&current, JournalOrigin::Restored),
-            Ok(RecoveryOutcome::Quarantine)
+            reopened.apply(&current),
+            Err(CheckpointError::RecoveryOnly)
         ));
-        match phase {
-            TransactionPhase::Committed => assert!(matches!(
-                reopened.recover(&current, JournalOrigin::Live),
-                Ok(RecoveryOutcome::CleanupOnly)
-            )),
-            TransactionPhase::CommitUncertain => assert!(matches!(
-                reopened.recover(&current, JournalOrigin::Live),
-                Ok(RecoveryOutcome::ReconcileCommit)
-            )),
-            _ => assert!(matches!(
-                reopened.recover(&current, JournalOrigin::Live),
-                Ok(RecoveryOutcome::Restore(_))
-            )),
-        }
+        assert!(matches!(
+            reopened.apply(&after),
+            Err(CheckpointError::RecoveryOnly)
+        ));
+        assert_eq!(
+            reopened.match_touched_image(&current),
+            Some(TouchedImage::Before)
+        );
+        assert_eq!(
+            reopened.match_touched_image(&after),
+            Some(TouchedImage::After)
+        );
+        let refreshed = native_document(OAuthFamily::Zai, "b", "newer");
+        assert_eq!(reopened.match_touched_image(&refreshed), None);
     }
     let a = native.inspect(&current).unwrap();
     assert!(matches!(
@@ -263,22 +268,47 @@ fn checkpoint_origin_and_commit_phase_control_recovery_without_native_write() {
 }
 
 #[test]
-fn checkpoint_cannot_downgrade_a_known_commit_marker() {
+fn checkpoint_phase_is_monotonic_and_published_states_cannot_apply() {
+    let vault = VaultContext::generate().unwrap();
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let b = native
         .inspect(&native_document(OAuthFamily::Zai, "b", "fresh"))
         .unwrap();
-    let mut checkpoint = SwitchCheckpoint::prepare(&current, &b, &native).unwrap();
-    checkpoint.set_phase(TransactionPhase::Committed).unwrap();
-    assert!(matches!(
-        checkpoint.set_phase(TransactionPhase::Captured),
-        Err(CheckpointError::InvalidPhase)
-    ));
-    assert!(matches!(
-        checkpoint.recover(&current, JournalOrigin::Live),
-        Ok(RecoveryOutcome::CleanupOnly)
-    ));
+    let phases = [
+        TransactionPhase::Prepared,
+        TransactionPhase::Captured,
+        TransactionPhase::CredentialsPublished,
+        TransactionPhase::CommitUncertain,
+        TransactionPhase::Committed,
+    ];
+    for phase in phases {
+        for next in phases {
+            let mut checkpoint = SwitchCheckpoint::prepare(&current, &b, &native).unwrap();
+            checkpoint.set_phase(phase).unwrap();
+            let changed = checkpoint.set_phase(next);
+            let expected = if next < phase {
+                assert_eq!(changed, Err(CheckpointError::InvalidPhase));
+                phase
+            } else {
+                changed.unwrap();
+                next
+            };
+            assert_eq!(checkpoint.phase, expected);
+            if expected >= TransactionPhase::CredentialsPublished {
+                assert!(matches!(
+                    checkpoint.apply(&current),
+                    Err(CheckpointError::RecoveryOnly)
+                ));
+            } else {
+                assert!(checkpoint.apply(&current).is_ok());
+            }
+            let reopened =
+                SwitchCheckpoint::open(&checkpoint.seal(&vault, &native).unwrap(), &vault, &native)
+                    .unwrap();
+            assert_eq!(reopened.phase, expected);
+        }
+    }
 }
 
 #[test]
@@ -324,4 +354,198 @@ fn checkpoint_transaction_binding_roundtrips_and_cannot_be_rebound() {
         });
         assert!(SwitchCheckpoint::open(&invalid, &vault, &native).is_err());
     }
+}
+
+#[test]
+fn checkpoint_matches_only_one_whole_touched_image_for_both_families() {
+    let native = native();
+    for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+        let current = native_document(family, "a", "fresh");
+        let target = native
+            .inspect(&native_document(family, "b", "saved"))
+            .unwrap();
+        let checkpoint = SwitchCheckpoint::prepare(&current, &target, &native).unwrap();
+        let after = checkpoint.apply(&current).unwrap();
+        assert_eq!(
+            checkpoint.match_touched_image(&current),
+            Some(TouchedImage::Before)
+        );
+        assert_eq!(
+            checkpoint.match_touched_image(&after),
+            Some(TouchedImage::After)
+        );
+        let mixed = replace(
+            &after,
+            &target.identity().credential_keys()[1],
+            current
+                .get(&target.identity().credential_keys()[1])
+                .unwrap()
+                .to_owned(),
+        );
+        assert!(native.inspect(&mixed).unwrap().identity() == target.identity());
+        assert_eq!(checkpoint.match_touched_image(&mixed), None);
+        let refresh = native_document(family, "b", "new-refresh");
+        assert_eq!(checkpoint.match_touched_image(&refresh), None);
+        let third = native_document(family, "c", "official-login");
+        assert_eq!(checkpoint.match_touched_image(&third), None);
+        let unrelated = replace(&after, "ssh:unrelated", "new-value".into());
+        assert_eq!(
+            checkpoint.match_touched_image(&unrelated),
+            Some(TouchedImage::After)
+        );
+        let source_only = checkpoint.fresh_source().identity().credential_keys()[5].clone();
+        let untouched = replace(&after, &source_only, "new-untouched-value".into());
+        assert_eq!(
+            checkpoint.match_touched_image(&untouched),
+            Some(TouchedImage::After)
+        );
+    }
+}
+
+#[test]
+fn checkpoint_whole_image_includes_optional_absence_and_target_specific_preimages() {
+    let native = native();
+    let mut current = native_document(OAuthFamily::Zai, "a", "fresh");
+    let target_document = native_document(OAuthFamily::Zai, "b", "saved");
+    let id = AccountIdentity::new(TEST_CONTEXT, OAuthFamily::Zai, "b").unwrap();
+    let keys = id.credential_keys();
+    let mut entries = target_document.entries().clone();
+    entries.remove(&keys[2]);
+    entries.remove(&keys[6]);
+    let target_document =
+        CredentialDocument::parse(&serde_json::to_vec(&entries).unwrap()).unwrap();
+    let target = native.inspect(&target_document).unwrap();
+    current = replace(&current, &keys[5], "opaque-existing-b-preimage".into());
+    let checkpoint = SwitchCheckpoint::prepare(&current, &target, &native).unwrap();
+    let after = checkpoint.apply(&current).unwrap();
+    assert_eq!(
+        checkpoint.match_touched_image(&current),
+        Some(TouchedImage::Before)
+    );
+    assert_eq!(
+        checkpoint.match_touched_image(&after),
+        Some(TouchedImage::After)
+    );
+    let altered_before = replace(&current, &keys[5], "different-existing-b".into());
+    assert_eq!(checkpoint.match_touched_image(&altered_before), None);
+    let missing_is_not_empty = replace(&after, &keys[6], String::new());
+    assert_eq!(checkpoint.match_touched_image(&missing_is_not_empty), None);
+    let mixed_optional = replace(&after, &keys[2], current.get(&keys[2]).unwrap().into());
+    assert_eq!(checkpoint.match_touched_image(&mixed_optional), None);
+}
+
+#[test]
+fn checkpoint_rejects_every_partial_image_and_changed_touched_value_after_reopen() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+        for cache_present in [false, true] {
+            let mut before = native_document(family, "a", "fresh");
+            let identity = AccountIdentity::new(TEST_CONTEXT, family, "b").unwrap();
+            let keys = identity.credential_keys();
+            if cache_present {
+                before = replace(&before, &keys[5], "old-opaque-b-cache".into());
+            }
+            let mut entries = native_document(family, "b", "saved").entries().clone();
+            entries.remove(&keys[2]);
+            entries.remove(&keys[6]);
+            let target_document =
+                CredentialDocument::parse(&serde_json::to_vec(&entries).unwrap()).unwrap();
+            let target = native.inspect(&target_document).unwrap();
+            let checkpoint = SwitchCheckpoint::prepare(&before, &target, &native).unwrap();
+            let after = checkpoint.apply(&before).unwrap();
+            let checkpoint =
+                SwitchCheckpoint::open(&checkpoint.seal(&vault, &native).unwrap(), &vault, &native)
+                    .unwrap();
+            let changed_keys: Vec<_> = keys
+                .iter()
+                .filter(|key| before.get(key) != after.get(key))
+                .collect();
+            let full_mask = (1 << changed_keys.len()) - 1;
+            for mask in 0..=full_mask {
+                let mut entries = before.entries().clone();
+                for (index, key) in changed_keys.iter().enumerate() {
+                    if mask & (1 << index) != 0 {
+                        match after.get(key) {
+                            Some(value) => {
+                                entries.insert((*key).clone(), value.into());
+                            }
+                            None => {
+                                entries.remove(*key);
+                            }
+                        }
+                    }
+                }
+                entries.insert("ssh:unrelated".into(), "new-unrelated-value".into());
+                let partial =
+                    CredentialDocument::parse(&serde_json::to_vec(&entries).unwrap()).unwrap();
+                let unchanged = partial.to_bytes().unwrap();
+                let expected = if mask == 0 {
+                    Some(TouchedImage::Before)
+                } else if mask == full_mask {
+                    Some(TouchedImage::After)
+                } else {
+                    None
+                };
+                assert_eq!(checkpoint.match_touched_image(&partial), expected);
+                assert_eq!(partial.to_bytes().unwrap(), unchanged);
+            }
+            for image in [&before, &after] {
+                for key in &keys {
+                    let changed = replace(image, key, "unknown-touched-value".into());
+                    let unchanged = changed.to_bytes().unwrap();
+                    assert_eq!(checkpoint.match_touched_image(&changed), None);
+                    assert_eq!(changed.to_bytes().unwrap(), unchanged);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpoint_journal_authentication_rejects_wrong_keys_context_and_legacy_recovery_layout() {
+    use super::super::recovery::RecoveryLedger;
+    use crate::secrets::owned_file::RECOVERY_FILE;
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let current = native_document(OAuthFamily::Zai, "a", "fresh");
+    let target = native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "saved"))
+        .unwrap();
+    let encoded = SwitchCheckpoint::prepare(&current, &target, &native)
+        .unwrap()
+        .seal(&vault, &native)
+        .unwrap();
+    assert!(matches!(
+        SwitchCheckpoint::open(&encoded, &VaultContext::generate().unwrap(), &native),
+        Err(CheckpointError::Vault)
+    ));
+    assert!(matches!(
+        SwitchCheckpoint::open(
+            &encoded,
+            &vault,
+            &NativeCipher::new(TEST_CONTEXT, "wrong-key").unwrap()
+        ),
+        Err(CheckpointError::Native(_))
+    ));
+    assert!(matches!(
+        SwitchCheckpoint::open(
+            &encoded,
+            &vault,
+            &NativeCipher::new("wrong-context", TEST_SECRET).unwrap()
+        ),
+        Err(CheckpointError::WrongContext)
+    ));
+    let payload = vault
+        .open(&["file", JOURNAL_FILE, "content"], &encoded)
+        .unwrap();
+    let old_recovery = vault
+        .seal(&["file", RECOVERY_FILE, "content"], &payload)
+        .unwrap();
+    assert!(matches!(
+        SwitchCheckpoint::open(&old_recovery, &vault, &native),
+        Err(CheckpointError::Vault)
+    ));
+    assert!(RecoveryLedger::open(&old_recovery, &vault).is_err());
+    assert!(RecoveryLedger::open(&encoded, &vault).is_err());
 }

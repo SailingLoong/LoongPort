@@ -1,9 +1,10 @@
 //! Existing LoongPort lifecycle owner for ZCode account operations.
 //! Backend probes produce admission evidence; no real probe or IPC bypass lives here.
 use super::admission::{BlockedReason, ContextObservation, ContractEntry, VerifiedContext};
-use super::core::{AccountIdentity, JournalOrigin};
+use super::core::AccountIdentity;
 use super::transaction::{
-    AccountStore, Admission, CaptureOutcome, CatalogStatus, SwitchOutcome, TransactionError,
+    AccountStore, Admission, ArchiveOutcome, CaptureOutcome, CatalogStatus, RecoveryStatus,
+    SwitchOutcome, TransactionError, VaultAccountStore,
 };
 use crate::database::Database;
 use std::sync::Arc;
@@ -11,14 +12,11 @@ use std::sync::Arc;
 pub(super) trait ContextProbe: Send + Sync {
     /// Read only installation/storage/process/settings evidence, never credentials.
     fn observe(&self) -> Result<ContextObservation, BlockedReason>;
-    /// Trusted local lifecycle classification, not data decoded from a journal or IPC.
-    fn journal_origin(&self) -> Option<JournalOrigin>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuntimeError {
     Blocked(BlockedReason),
     VaultUnavailable,
-    OriginUnverified,
     Transaction(TransactionError),
     TaskFailed,
 }
@@ -35,14 +33,28 @@ impl From<TransactionError> for RuntimeError {
 enum Operation {
     Switch(AccountIdentity),
     Status,
-    Capture { revision: String },
-    SwitchSaved { id: String, revision: String },
-    Recover,
+    Capture {
+        revision: String,
+    },
+    SwitchSaved {
+        id: String,
+        revision: String,
+    },
+    ConfirmArchived {
+        id: String,
+        recovery_revision: String,
+    },
+    CaptureAndConfirm {
+        id: String,
+        recovery_revision: String,
+        catalog_revision: String,
+    },
 }
 enum OperationResult {
     Status(CatalogStatus),
     Captured(CaptureOutcome),
     Switched(SwitchOutcome),
+    Confirmed,
 }
 
 pub(super) async fn switch_account(
@@ -97,15 +109,85 @@ pub(super) async fn switch_saved_account(
         _ => Err(RuntimeError::TaskFailed),
     }
 }
-pub(super) async fn recover_account(
+/// Local recovery status does not inspect the ZCode installation or credentials.
+pub(super) async fn recovery_status(db: Arc<Database>) -> Result<RecoveryStatus, RuntimeError> {
+    run_vault(db, |store| store.status()).await
+}
+/// Explicitly retain the native state and archive the authenticated pending record.
+pub(super) async fn archive_pending_recovery(
+    db: Arc<Database>,
+    revision: String,
+) -> Result<ArchiveOutcome, RuntimeError> {
+    run_vault(db, move |store| store.archive_pending(&revision)).await
+}
+/// The caller must obtain per-action confirmation naming this record and explaining
+/// permanent loss before invoking this operation. No native credential is changed.
+pub(super) async fn delete_confirmed_recovery(
+    db: Arc<Database>,
+    id: String,
+    revision: String,
+) -> Result<(), RuntimeError> {
+    run_vault(db, move |store| store.delete_confirmed(&id, &revision)).await
+}
+pub(super) async fn confirm_archived_recovery(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
     contracts: Vec<ContractEntry>,
-) -> Result<SwitchOutcome, RuntimeError> {
-    match run(db, probe, contracts, Operation::Recover).await? {
-        OperationResult::Switched(outcome) => Ok(outcome),
+    id: String,
+    recovery_revision: String,
+) -> Result<(), RuntimeError> {
+    match run(
+        db,
+        probe,
+        contracts,
+        Operation::ConfirmArchived {
+            id,
+            recovery_revision,
+        },
+    )
+    .await?
+    {
+        OperationResult::Confirmed => Ok(()),
         _ => Err(RuntimeError::TaskFailed),
     }
+}
+/// A new explicit capture authorization saves the current native login before
+/// resolving the selected recovery record; passive confirmation never captures.
+pub(super) async fn capture_and_confirm_recovery(
+    db: Arc<Database>,
+    probe: Arc<dyn ContextProbe>,
+    contracts: Vec<ContractEntry>,
+    id: String,
+    recovery_revision: String,
+    catalog_revision: String,
+) -> Result<CaptureOutcome, RuntimeError> {
+    match run(
+        db,
+        probe,
+        contracts,
+        Operation::CaptureAndConfirm {
+            id,
+            recovery_revision,
+            catalog_revision,
+        },
+    )
+    .await?
+    {
+        OperationResult::Captured(outcome) => Ok(outcome),
+        _ => Err(RuntimeError::TaskFailed),
+    }
+}
+async fn run_vault<T: Send + 'static>(
+    db: Arc<Database>,
+    operation: impl FnOnce(&VaultAccountStore<'_>) -> Result<T, TransactionError> + Send + 'static,
+) -> Result<T, RuntimeError> {
+    run_owned(db, move |db| {
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        operation(&store).map_err(Into::into)
+    })
+    .await
 }
 async fn run(
     db: Arc<Database>,
@@ -113,26 +195,11 @@ async fn run(
     contracts: Vec<ContractEntry>,
     operation: Operation,
 ) -> Result<OperationResult, RuntimeError> {
-    let sync = crate::services::sync_protocol::sync_mutex().lock().await;
-    tauri::async_runtime::spawn_blocking(move || {
-        // The physical worker owns the existing mutex. Dropping/cancelling its
-        // caller future cannot admit another operation while this worker continues.
-        let _sync = sync;
+    run_owned(db, move |db| {
         let context = VerifiedContext::assess(probe.observe()?, &contracts)?;
-        let origin = match &operation {
-            Operation::Switch(target) => {
-                context.accept_target(target)?;
-                None
-            }
-            Operation::Recover => match probe.journal_origin() {
-                Some(JournalOrigin::Live) => Some(JournalOrigin::Live),
-                Some(JournalOrigin::Restored) => {
-                    return Err(RuntimeError::Transaction(TransactionError::Imported))
-                }
-                None => return Err(RuntimeError::OriginUnverified),
-            },
-            Operation::Status | Operation::Capture { .. } | Operation::SwitchSaved { .. } => None,
-        };
+        if let Operation::Switch(target) = &operation {
+            context.accept_target(target)?;
+        }
         // Admission is established before obtaining a cipher or reading a native
         // credential. The existing session guard fixes the vault generation through IO.
         let session = db.secret_session();
@@ -170,11 +237,35 @@ async fn run(
                 .switch_saved(&id, &revision, context.family())
                 .map(OperationResult::Switched)
                 .map_err(Into::into),
-            Operation::Recover => store
-                .recover(origin.ok_or(RuntimeError::OriginUnverified)?)
-                .map(OperationResult::Switched)
+            Operation::ConfirmArchived {
+                id,
+                recovery_revision,
+            } => store
+                .confirm_archived(&id, &recovery_revision)
+                .map(|()| OperationResult::Confirmed)
+                .map_err(Into::into),
+            Operation::CaptureAndConfirm {
+                id,
+                recovery_revision,
+                catalog_revision,
+            } => store
+                .capture_and_confirm(&id, &recovery_revision, &catalog_revision, context.family())
+                .map(OperationResult::Captured)
                 .map_err(Into::into),
         }
+    })
+    .await
+}
+async fn run_owned<T: Send + 'static>(
+    db: Arc<Database>,
+    operation: impl FnOnce(&Database) -> Result<T, RuntimeError> + Send + 'static,
+) -> Result<T, RuntimeError> {
+    let sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Every branch shares the existing physical owner. Cancelling the caller
+        // cannot release it before this worker and its session guard finish.
+        let _sync = sync;
+        operation(&db)
     })
     .await
     .map_err(|_| RuntimeError::TaskFailed)?

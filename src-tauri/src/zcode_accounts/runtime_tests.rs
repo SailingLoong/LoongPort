@@ -4,9 +4,14 @@ use super::super::admission::{
 use super::super::checkpoint::{ProfileCatalog, PROFILE_FILE};
 use super::super::core::{CredentialDocument, OAuthFamily};
 use super::super::native::tests::native_document_with_context;
+use super::super::recovery::{RecoveryError, RecoveryLedger};
 use super::*;
 use crate::config_file_io::{ensure_private_directory, write_durable};
-use crate::secrets::{session::SecretSession, testing::MemoryKeyStore};
+use crate::secrets::{
+    owned_file::{JOURNAL_FILE, RECOVERY_FILE},
+    session::SecretSession,
+    testing::MemoryKeyStore,
+};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{
@@ -20,7 +25,6 @@ struct FakeProbe {
     pause: Mutex<Option<(usize, std::sync::mpsc::Receiver<()>)>>,
     fail_at: AtomicUsize,
     entered: tokio::sync::Notify,
-    origin: Mutex<Option<JournalOrigin>>,
 }
 impl ContextProbe for FakeProbe {
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
@@ -49,9 +53,6 @@ impl ContextProbe for FakeProbe {
             return Err(BlockedReason::AppRunning);
         }
         Ok(self.observation.lock().unwrap().clone())
-    }
-    fn journal_origin(&self) -> Option<JournalOrigin> {
-        *self.origin.lock().unwrap()
     }
 }
 struct Fixture {
@@ -162,7 +163,6 @@ impl Fixture {
             pause: Mutex::new(None),
             fail_at: AtomicUsize::new(0),
             entered: tokio::sync::Notify::new(),
-            origin: Mutex::new(Some(JournalOrigin::Live)),
         });
         Self {
             db,
@@ -176,6 +176,50 @@ impl Fixture {
             old_home,
             _temporary: temporary,
         }
+    }
+    async fn interrupt_before_native(&self) {
+        // Admission1, constructor2, lock3/4, prepared5, profile6, captured7;
+        // refuse native publication at8, relative to earlier fixture operations.
+        self.probe.fail_at.store(
+            self.probe.calls.load(Ordering::Relaxed) + 8,
+            Ordering::Relaxed,
+        );
+        assert_eq!(
+            switch_account(
+                self.db.clone(),
+                self.probe.clone(),
+                self.contracts.clone(),
+                self.b.clone(),
+            )
+            .await,
+            Err(RuntimeError::Transaction(TransactionError::Admission(
+                BlockedReason::AppRunning
+            )))
+        );
+        self.probe.fail_at.store(0, Ordering::Relaxed);
+        assert!(self.db.secret_session().root().join(JOURNAL_FILE).exists());
+        assert!(self.current() == self.fresh);
+    }
+    async fn archive_pending(&self) -> RecoveryStatus {
+        let pending = recovery_status(self.db.clone()).await.unwrap();
+        assert!(pending.pending && pending.native_unconfirmed);
+        assert_eq!(
+            archive_pending_recovery(self.db.clone(), pending.revision).await,
+            Ok(ArchiveOutcome::Archived)
+        );
+        let archived = recovery_status(self.db.clone()).await.unwrap();
+        assert!(!archived.pending && archived.native_unconfirmed);
+        assert_eq!(archived.records.len(), 1);
+        assert_eq!(archived.records[0].disposition, "native-unconfirmed");
+        archived
+    }
+    fn recovery_payload(&self) -> Vec<u8> {
+        let encoded =
+            std::fs::read_to_string(self.db.secret_session().root().join(RECOVERY_FILE)).unwrap();
+        let vault = self.db.secret_session().read().unwrap();
+        let ledger = RecoveryLedger::open(&encoded, &vault).unwrap();
+        let record = ledger.archived().next().unwrap();
+        record.evidence().raw_payload().to_vec()
     }
     fn current(&self) -> CredentialDocument {
         CredentialDocument::parse(
@@ -277,7 +321,7 @@ async fn runtime_rejects_unverified_context_before_native_credentials_are_read()
 }
 #[tokio::test]
 #[serial_test::serial]
-async fn runtime_rejects_blocked_vault_and_untrusted_recovery_source() {
+async fn runtime_rejects_blocked_vault_for_native_and_local_recovery_operations() {
     let f = Fixture::new();
     f.db.secrets.set_blocked(true);
     assert_eq!(
@@ -290,12 +334,19 @@ async fn runtime_rejects_blocked_vault_and_untrusted_recovery_source() {
         .await,
         Err(RuntimeError::VaultUnavailable)
     );
-    f.db.secrets.set_blocked(false);
-    *f.probe.origin.lock().unwrap() = None;
+    assert!(matches!(
+        recovery_status(f.db.clone()).await,
+        Err(RuntimeError::VaultUnavailable)
+    ));
     assert_eq!(
-        recover_account(f.db.clone(), f.probe.clone(), f.contracts.clone()).await,
-        Err(RuntimeError::OriginUnverified)
+        archive_pending_recovery(f.db.clone(), "unused revision".into()).await,
+        Err(RuntimeError::VaultUnavailable)
     );
+    assert_eq!(
+        delete_confirmed_recovery(f.db.clone(), "unused id".into(), "unused revision".into()).await,
+        Err(RuntimeError::VaultUnavailable)
+    );
+    f.db.secrets.set_blocked(false);
     assert!(f.current() == f.fresh);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -511,26 +562,10 @@ async fn runtime_session_writer_waits_until_physical_account_io_finishes() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn runtime_pending_transaction_blocks_real_vault_maintenance_then_recovers() {
+async fn runtime_pending_transaction_blocks_maintenance_then_archive_preserves_disposition() {
     let f = Fixture::new();
-    // Initial admission1, constructor2, lock3/4, prepared5, profile6,
-    // captured7; refuse the native publication at8.
-    f.probe.fail_at.store(8, Ordering::Relaxed);
-    assert_eq!(
-        switch_account(
-            f.db.clone(),
-            f.probe.clone(),
-            f.contracts.clone(),
-            f.b.clone()
-        )
-        .await,
-        Err(RuntimeError::Transaction(TransactionError::Admission(
-            BlockedReason::AppRunning
-        )))
-    );
+    f.interrupt_before_native().await;
     let root = f.db.secret_session().root();
-    assert!(root.join(crate::secrets::owned_file::JOURNAL_FILE).exists());
-    assert!(f.current() == f.fresh);
     let metadata = std::fs::read(root.join("vault.json")).unwrap();
     let profiles = std::fs::read(root.join(PROFILE_FILE)).unwrap();
     {
@@ -562,25 +597,443 @@ async fn runtime_pending_transaction_blocks_real_vault_maintenance_then_recovers
     }
     assert_eq!(std::fs::read(root.join("vault.json")).unwrap(), metadata);
     assert_eq!(std::fs::read(root.join(PROFILE_FILE)).unwrap(), profiles);
-    assert!(f.current() == f.fresh);
-    f.probe.fail_at.store(0, Ordering::Relaxed);
-    assert_eq!(
-        recover_account(f.db.clone(), f.probe.clone(), f.contracts.clone()).await,
-        Ok(SwitchOutcome::Recovered)
-    );
-    {
-        let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
-        crate::secrets::rewrap::change_password(
-            &f.db,
-            &f._store,
-            "synthetic maintenance password",
-            false,
-        )
-        .unwrap();
+    let archived = f.archive_pending().await;
+    let original_payload = f.recovery_payload();
+    let original_key =
+        f.db.secret_session()
+            .read()
+            .unwrap()
+            .metadata()
+            .key_id
+            .clone();
+    for rotate in [false, true] {
+        {
+            let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+            if rotate {
+                crate::secrets::transition::rotate(
+                    &f.db,
+                    &f._store,
+                    "synthetic maintenance password",
+                    false,
+                )
+                .unwrap();
+            } else {
+                crate::secrets::rewrap::change_password(
+                    &f.db,
+                    &f._store,
+                    "synthetic maintenance password",
+                    false,
+                )
+                .unwrap();
+            }
+            assert!(matches!(
+                crate::secrets::reset::reset(root, "unused revision", "synthetic reset password"),
+                Err(crate::error::AppError::Config(code)) if code == "secret.zcode_recovery_required"
+            ));
+        }
+        let status = recovery_status(f.db.clone()).await.unwrap();
+        assert!(!status.pending && status.native_unconfirmed);
+        assert_eq!(status.records[0].id, archived.records[0].id);
+        assert_eq!(status.records[0].disposition, "native-unconfirmed");
+        assert_eq!(f.recovery_payload(), original_payload);
+        let catalog = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+            .await
+            .unwrap();
+        assert!(catalog.native_unconfirmed && !catalog.pending);
+        assert_eq!(
+            capture_account(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                catalog.revision.clone()
+            )
+            .await,
+            Err(RuntimeError::Transaction(
+                TransactionError::NativeUnconfirmed
+            ))
+        );
+        assert_eq!(
+            switch_saved_account(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                f.b.opaque_id(),
+                catalog.revision
+            )
+            .await,
+            Err(RuntimeError::Transaction(
+                TransactionError::NativeUnconfirmed
+            ))
+        );
+        assert_eq!(
+            switch_account(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                f.b.clone()
+            )
+            .await,
+            Err(RuntimeError::Transaction(
+                TransactionError::NativeUnconfirmed
+            ))
+        );
+        assert!(f.current() == f.fresh);
     }
-    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+    assert_ne!(
+        f.db.secret_session().read().unwrap().metadata().key_id,
+        original_key
+    );
+    let status = recovery_status(f.db.clone()).await.unwrap();
+    assert_eq!(
+        confirm_archived_recovery(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.records[0].id.clone(),
+            status.revision
+        )
+        .await,
+        Ok(())
+    );
+    let confirmed = recovery_status(f.db.clone()).await.unwrap();
+    assert!(!confirmed.native_unconfirmed);
+    assert_eq!(confirmed.records[0].disposition, "full-before");
+    assert!(f.current() == f.fresh);
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    assert!(matches!(
+        crate::secrets::reset::reset(root, "unused revision", "synthetic reset password"),
+        Err(crate::error::AppError::Config(code)) if code == "secret.zcode_recovery_required"
+    ));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_vault_recovery_status_and_archive_need_no_native_context() {
+    let f = Fixture::new();
+    f.interrupt_before_native().await;
+    let root = f.db.secret_session().root();
+    let journal = std::fs::read(root.join(JOURNAL_FILE)).unwrap();
+    let profiles = std::fs::read(root.join(PROFILE_FILE)).unwrap();
+    let parked = f.native_root.with_file_name("unavailable-native-root");
+    std::fs::rename(&f.native_root, &parked).unwrap();
+    f.probe.observation.lock().unwrap().install.artifact_sha256 = [9; 32];
+    let calls = f.probe.calls.load(Ordering::Relaxed);
+    let status = recovery_status(f.db.clone()).await.unwrap();
+    assert!(status.pending && status.native_unconfirmed);
+    assert_eq!(std::fs::read(root.join(JOURNAL_FILE)).unwrap(), journal);
+    assert_eq!(
+        archive_pending_recovery(f.db.clone(), "stale revision".into()).await,
+        Err(RuntimeError::Transaction(TransactionError::RecoveryChanged))
+    );
+    assert_eq!(std::fs::read(root.join(JOURNAL_FILE)).unwrap(), journal);
+    let archived = f.archive_pending().await;
+    assert_eq!(
+        archive_pending_recovery(f.db.clone(), archived.revision.clone()).await,
+        Ok(ArchiveOutcome::NothingPending)
+    );
+    assert_eq!(
+        delete_confirmed_recovery(
+            f.db.clone(),
+            archived.records[0].id.clone(),
+            archived.revision
+        )
+        .await,
+        Err(RuntimeError::Transaction(TransactionError::Recovery(
+            RecoveryError::Unconfirmed
+        )))
+    );
+    assert_eq!(f.probe.calls.load(Ordering::Relaxed), calls);
+    assert!(!f.native_root.exists());
+    assert_eq!(
+        std::fs::read(parked.join("credentials.json")).unwrap(),
+        f.fresh.to_bytes().unwrap()
+    );
+    assert_eq!(std::fs::read(root.join(PROFILE_FILE)).unwrap(), profiles);
+    assert!(!root.join(JOURNAL_FILE).exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_recovery_confirmation_and_recapture_require_native_admission() {
+    let f = Fixture::new();
+    f.interrupt_before_native().await;
+    let archived = f.archive_pending().await;
+    let catalog = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
         .await
         .unwrap();
-    assert!(!status.pending);
-    assert_eq!(status.profiles.len(), 2);
+    let root = f.db.secret_session().root();
+    let record = std::fs::read(root.join(RECOVERY_FILE)).unwrap();
+    let profiles = std::fs::read(root.join(PROFILE_FILE)).unwrap();
+    // Admission and root gates must win over an unavailable native credential file.
+    std::fs::remove_file(f.native_root.join("credentials.json")).unwrap();
+    for reason in [
+        BlockedReason::UnsupportedBuild,
+        BlockedReason::AppRunning,
+        BlockedReason::ContextChanged,
+    ] {
+        {
+            let mut observation = f.probe.observation.lock().unwrap();
+            observation.install.artifact_sha256 = if reason == BlockedReason::UnsupportedBuild {
+                [9; 32]
+            } else {
+                [7; 32]
+            };
+            observation.writers = if reason == BlockedReason::AppRunning {
+                WriterState::Running
+            } else {
+                WriterState::Stopped
+            };
+            if reason == BlockedReason::ContextChanged {
+                observation.root_identity[1] ^= 1;
+            }
+        }
+        assert_eq!(
+            confirm_archived_recovery(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                archived.records[0].id.clone(),
+                archived.revision.clone()
+            )
+            .await,
+            Err(RuntimeError::Blocked(reason))
+        );
+        assert_eq!(
+            capture_and_confirm_recovery(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                archived.records[0].id.clone(),
+                archived.revision.clone(),
+                catalog.revision.clone()
+            )
+            .await,
+            Err(RuntimeError::Blocked(reason))
+        );
+    }
+    assert_eq!(std::fs::read(root.join(RECOVERY_FILE)).unwrap(), record);
+    assert_eq!(std::fs::read(root.join(PROFILE_FILE)).unwrap(), profiles);
+    assert!(!f.native_root.join("credentials.json").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_explicit_recapture_saves_new_native_login_before_resolving_record() {
+    for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+        let f = Fixture::for_family(family);
+        f.interrupt_before_native().await;
+        let archived = f.archive_pending().await;
+        let payload = f.recovery_payload();
+        let fresh_c = f.native_login(family, "c", "new-login-c");
+        let catalog = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+            .await
+            .unwrap();
+        let id = archived.records[0].id.clone();
+        let recovery_revision = archived.revision.clone();
+        assert_eq!(
+            confirm_archived_recovery(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                id.clone(),
+                recovery_revision.clone()
+            )
+            .await,
+            Err(RuntimeError::Transaction(TransactionError::Recovery(
+                RecoveryError::ConfirmationMismatch
+            )))
+        );
+        let profiles = std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap();
+        for (recovery_revision, catalog_revision, expected) in [
+            (
+                "stale recovery revision".to_owned(),
+                catalog.revision.clone(),
+                TransactionError::RecoveryChanged,
+            ),
+            (
+                recovery_revision.clone(),
+                "stale catalog revision".to_owned(),
+                TransactionError::CatalogChanged,
+            ),
+        ] {
+            assert_eq!(
+                capture_and_confirm_recovery(
+                    f.db.clone(),
+                    f.probe.clone(),
+                    f.contracts.clone(),
+                    id.clone(),
+                    recovery_revision,
+                    catalog_revision
+                )
+                .await,
+                Err(RuntimeError::Transaction(expected))
+            );
+            assert_eq!(
+                std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
+                profiles
+            );
+        }
+        assert_eq!(
+            capture_and_confirm_recovery(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                id,
+                recovery_revision,
+                catalog.revision
+            )
+            .await,
+            Ok(CaptureOutcome::Saved)
+        );
+        let status = recovery_status(f.db.clone()).await.unwrap();
+        assert!(!status.pending && !status.native_unconfirmed);
+        assert_eq!(status.records[0].disposition, "explicit-capture");
+        assert_eq!(f.recovery_payload(), payload);
+        assert!(f.current() == fresh_c);
+        let catalog = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+            .await
+            .unwrap();
+        assert_eq!(catalog.profiles.len(), 3);
+        assert_eq!(
+            switch_saved_account(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                f.b.opaque_id(),
+                catalog.revision
+            )
+            .await,
+            Ok(SwitchOutcome::Switched)
+        );
+        let status = recovery_status(f.db.clone()).await.unwrap();
+        assert_eq!(status.records.len(), 2);
+        assert!(status
+            .records
+            .iter()
+            .any(|record| !record.latest_completed && record.disposition == "explicit-capture"));
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_vault_delete_requires_current_selected_confirmed_record_without_native_access() {
+    let f = Fixture::new();
+    f.interrupt_before_native().await;
+    let archived = f.archive_pending().await;
+    let archive_id = archived.records[0].id.clone();
+    assert_eq!(
+        confirm_archived_recovery(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            archive_id.clone(),
+            archived.revision.clone()
+        )
+        .await,
+        Ok(())
+    );
+    assert_eq!(
+        switch_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            f.b.clone()
+        )
+        .await,
+        Ok(SwitchOutcome::Switched)
+    );
+    let status = recovery_status(f.db.clone()).await.unwrap();
+    assert_eq!(status.records.len(), 2);
+    let latest = status
+        .records
+        .iter()
+        .find(|record| record.latest_completed)
+        .unwrap()
+        .id
+        .clone();
+    let root = f.db.secret_session().root();
+    let recovery = std::fs::read(root.join(RECOVERY_FILE)).unwrap();
+    let native = std::fs::read(f.native_root.join("credentials.json")).unwrap();
+    let parked = f.native_root.with_file_name("unavailable-native-root");
+    std::fs::rename(&f.native_root, &parked).unwrap();
+    f.probe.observation.lock().unwrap().install.artifact_sha256 = [9; 32];
+    let calls = f.probe.calls.load(Ordering::Relaxed);
+    assert_eq!(
+        delete_confirmed_recovery(f.db.clone(), archive_id.clone(), archived.revision).await,
+        Err(RuntimeError::Transaction(TransactionError::RecoveryChanged))
+    );
+    assert_eq!(std::fs::read(root.join(RECOVERY_FILE)).unwrap(), recovery);
+    assert_eq!(
+        delete_confirmed_recovery(f.db.clone(), archive_id, status.revision).await,
+        Ok(())
+    );
+    let remaining = recovery_status(f.db.clone()).await.unwrap();
+    assert_eq!(remaining.records.len(), 1);
+    assert_eq!(remaining.records[0].id, latest);
+    {
+        let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+        assert!(matches!(
+            crate::secrets::reset::reset(root, "unused revision", "synthetic reset password"),
+            Err(crate::error::AppError::Config(code)) if code == "secret.zcode_recovery_required"
+        ));
+    }
+    assert_eq!(
+        delete_confirmed_recovery(f.db.clone(), latest, remaining.revision).await,
+        Ok(())
+    );
+    let empty = recovery_status(f.db.clone()).await.unwrap();
+    assert!(empty.records.is_empty() && !empty.native_unconfirmed && !empty.pending);
+    assert!(!root.join(RECOVERY_FILE).exists());
+    assert_eq!(f.probe.calls.load(Ordering::Relaxed), calls);
+    assert!(!f.native_root.exists());
+    assert_eq!(
+        std::fs::read(parked.join("credentials.json")).unwrap(),
+        native
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn runtime_vault_recovery_cancellation_retains_owner_while_session_is_locked() {
+    let f = Fixture::new();
+    let writer_db = f.db.clone();
+    let (acquired_send, acquired) = std::sync::mpsc::channel();
+    let (release, receive) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let _write = writer_db.secret_session().write().unwrap();
+        acquired_send.send(()).unwrap();
+        receive.recv().unwrap();
+    });
+    acquired
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let operation = tokio::spawn(recovery_status(f.db.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if crate::services::sync_protocol::sync_mutex()
+                .try_lock()
+                .is_err()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    operation.abort();
+    assert!(matches!(operation.await, Err(error) if error.is_cancelled()));
+    assert!(crate::services::sync_protocol::sync_mutex()
+        .try_lock()
+        .is_err());
+    release.send(()).unwrap();
+    writer.join().unwrap();
+    let _sync = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::services::sync_protocol::sync_mutex().lock(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.probe.calls.load(Ordering::Relaxed), 0);
+    assert!(f.current() == f.fresh);
 }

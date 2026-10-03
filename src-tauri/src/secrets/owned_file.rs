@@ -193,17 +193,84 @@ mod tests {
 /// Caller holds the existing sync owner and, when available, the vault write guard.
 /// This admission check never prevents unlocking the vault for account recovery.
 pub(crate) fn ensure_no_pending_zcode_transaction(root: &std::path::Path) -> Result<(), AppError> {
-    let path = root.join(JOURNAL_FILE);
-    match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::io(&path, error)),
-        Ok(_) => Err(AppError::Config("secret.zcode_recovery_required".into())),
+    ensure_absent_zcode_markers(root, &[JOURNAL_FILE])
+}
+
+/// A key-loss reset cannot inspect an encrypted account disposition.
+pub(crate) fn ensure_zcode_reset_allowed(root: &std::path::Path) -> Result<(), AppError> {
+    ensure_absent_zcode_markers(root, &[JOURNAL_FILE, RECOVERY_FILE])
+}
+
+fn ensure_absent_zcode_markers(root: &std::path::Path, names: &[&str]) -> Result<(), AppError> {
+    for name in names {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::io(&path, error)),
+            Ok(_) => return Err(AppError::Config("secret.zcode_recovery_required".into())),
+        }
     }
+    Ok(())
+}
+
+pub(crate) fn is_zcode_reset_archive_member(name: &str) -> bool {
+    [JOURNAL_FILE, RECOVERY_FILE]
+        .iter()
+        .any(|file| name.strip_prefix("data/") == Some(*file))
 }
 
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    #[test]
+    fn reset_refuses_recovery_material_without_parsing_or_requiring_the_old_key() {
+        let root = tempfile::tempdir().unwrap();
+        ensure_zcode_reset_allowed(root.path()).unwrap();
+        std::fs::write(root.path().join(PROFILE_FILE), b"synthetic profiles").unwrap();
+        ensure_zcode_reset_allowed(root.path()).unwrap();
+        let path = root.path().join(RECOVERY_FILE);
+        std::fs::write(&path, b"unknown encrypted disposition").unwrap();
+        assert!(ensure_zcode_reset_allowed(root.path()).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"unknown encrypted disposition"
+        );
+        // Byte-preserving maintenance retains its existing journal-only gate.
+        ensure_no_pending_zcode_transaction(root.path()).unwrap();
+    }
+    #[test]
+    fn reset_archive_member_gate_only_covers_original_live_account_markers() {
+        assert!(is_zcode_reset_archive_member(&format!(
+            "data/{JOURNAL_FILE}"
+        )));
+        assert!(is_zcode_reset_archive_member(&format!(
+            "data/{RECOVERY_FILE}"
+        )));
+        for name in [
+            format!("data/{PROFILE_FILE}"),
+            format!("data/backups/vault-recovery/{RECOVERY_FILE}"),
+            format!("data/notes/{JOURNAL_FILE}"),
+            "device-settings.json".to_owned(),
+        ] {
+            assert!(!is_zcode_reset_archive_member(&name));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn reset_refuses_a_dangling_recovery_marker_or_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(RECOVERY_FILE);
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(ensure_zcode_reset_allowed(root.path()).is_err());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(ensure_zcode_reset_allowed(root.path()).is_err());
+        assert!(path.is_dir());
+    }
     #[test]
     fn pending_journal_blocks_maintenance_without_parsing_or_deleting_it() {
         let root = tempfile::tempdir().unwrap();

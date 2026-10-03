@@ -2,21 +2,18 @@
 //! Uses the single OwnedFile registry and existing vault codec.
 
 use super::core::{
-    recovery_action, AccountIdentity, AccountSnapshot, CoreError, CredentialDocument,
-    JournalOrigin, RecoveryAction, StrictRecord, SwitchPlan, TransactionPhase,
+    AccountIdentity, AccountSnapshot, CoreError, CredentialDocument, StrictRecord, SwitchPlan,
+    TransactionPhase,
 };
 use super::native::{NativeCipher, NativeError};
 pub(crate) use crate::secrets::owned_file::{JOURNAL_FILE, PROFILE_FILE};
-use crate::secrets::{
-    owned_file::{OwnedFile, RECOVERY_FILE},
-    VaultContext,
-};
+use crate::secrets::{owned_file::OwnedFile, VaultContext};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
-const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROFILES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +50,11 @@ pub(super) struct TransactionBinding {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JournalPayload {
-    binding: Option<TransactionBinding>,
+pub(super) struct JournalPayload {
+    pub(super) binding: Option<TransactionBinding>,
     version: u32,
-    context: String,
-    phase: TransactionPhase,
+    pub(super) context: String,
+    pub(super) phase: TransactionPhase,
     source: StrictRecord<String>,
     target: StrictRecord<String>,
     before: StrictRecord<Option<String>>,
@@ -131,6 +128,12 @@ impl ProfileCatalog {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TouchedImage {
+    Before,
+    After,
+}
+
 pub(crate) struct SwitchCheckpoint {
     phase: TransactionPhase,
     context: String,
@@ -139,14 +142,24 @@ pub(crate) struct SwitchCheckpoint {
     binding: Option<TransactionBinding>,
 }
 
-pub(crate) enum RecoveryOutcome {
-    Restore(CredentialDocument),
-    ReconcileCommit,
-    CleanupOnly,
-    Quarantine,
-}
-
 impl SwitchCheckpoint {
+    /// Compare complete touched images, including missing values and target-only
+    /// preimages. A mixture of individually authentic before/after values fails.
+    pub(crate) fn match_touched_image(&self, current: &CredentialDocument) -> Option<TouchedImage> {
+        let before = self.plan.target_preimages();
+        if before
+            .iter()
+            .all(|(key, value)| current.get(key) == value.as_deref())
+        {
+            return Some(TouchedImage::Before);
+        }
+        let after = self.plan.target_snapshot().scoped_document();
+        if before.keys().all(|key| current.get(key) == after.get(key)) {
+            return Some(TouchedImage::After);
+        }
+        None
+    }
+
     pub(super) fn bind(&mut self, binding: TransactionBinding) -> Result<(), CheckpointError> {
         if self.recovery_only || self.binding.is_some() || self.phase != TransactionPhase::Prepared
         {
@@ -186,7 +199,7 @@ impl SwitchCheckpoint {
     }
 
     /// The IO owner may only advance after establishing the corresponding fact.
-    /// A known commit/uncertain marker can never be downgraded to a rollback phase.
+    /// A known commit/uncertain marker can never be downgraded to an earlier phase.
     pub(crate) fn set_phase(&mut self, phase: TransactionPhase) -> Result<(), CheckpointError> {
         if phase < self.phase {
             return Err(CheckpointError::InvalidPhase);
@@ -215,23 +228,6 @@ impl SwitchCheckpoint {
         vault: &VaultContext,
         native: &NativeCipher,
     ) -> Result<String, CheckpointError> {
-        self.seal_at(vault, native, JOURNAL_FILE)
-    }
-
-    pub(super) fn seal_recovery(
-        &self,
-        vault: &VaultContext,
-        native: &NativeCipher,
-    ) -> Result<String, CheckpointError> {
-        self.seal_at(vault, native, RECOVERY_FILE)
-    }
-
-    fn seal_at(
-        &self,
-        vault: &VaultContext,
-        native: &NativeCipher,
-        file: &str,
-    ) -> Result<String, CheckpointError> {
         validate_header(1, &self.context, native)?;
         verify_snapshot(self.plan.fresh_source(), native)?;
         verify_snapshot(self.plan.target_snapshot(), native)?;
@@ -245,7 +241,7 @@ impl SwitchCheckpoint {
                 target: record(self.plan.target_snapshot()),
                 before: StrictRecord(self.plan.target_preimages()),
             },
-            file,
+            JOURNAL_FILE,
             vault,
         )
     }
@@ -255,28 +251,15 @@ impl SwitchCheckpoint {
         vault: &VaultContext,
         native: &NativeCipher,
     ) -> Result<Self, CheckpointError> {
-        Self::open_at(encoded, vault, native, JOURNAL_FILE)
+        Self::from_payload_bytes(&open_payload_bytes(encoded, JOURNAL_FILE, vault)?, native)
     }
 
-    pub(super) fn open_recovery(
-        encoded: &str,
-        vault: &VaultContext,
+    pub(super) fn from_payload_bytes(
+        bytes: &[u8],
         native: &NativeCipher,
     ) -> Result<Self, CheckpointError> {
-        Self::open_at(encoded, vault, native, RECOVERY_FILE)
-    }
-
-    fn open_at(
-        encoded: &str,
-        vault: &VaultContext,
-        native: &NativeCipher,
-        file: &str,
-    ) -> Result<Self, CheckpointError> {
-        let payload: JournalPayload = open_payload(encoded, file, vault)?;
+        let payload = parse_journal_payload(bytes)?;
         validate_header(payload.version, &payload.context, native)?;
-        if let Some(binding) = &payload.binding {
-            validate_binding(binding)?;
-        }
         let source = inspect_record(payload.source, native)?;
         let target = inspect_record(payload.target, native)?;
         let target_keys = target.identity().credential_keys();
@@ -318,28 +301,6 @@ impl SwitchCheckpoint {
             recovery_only: true,
             binding: payload.binding,
         })
-    }
-
-    pub(super) fn recovery_policy(&self, origin: JournalOrigin) -> RecoveryAction {
-        recovery_action(origin, self.phase)
-    }
-
-    /// Origin is a trusted lifecycle input, never deserialized from the payload.
-    pub(crate) fn recover(
-        &self,
-        current: &CredentialDocument,
-        origin: JournalOrigin,
-    ) -> Result<RecoveryOutcome, CheckpointError> {
-        match self.recovery_policy(origin) {
-            RecoveryAction::RestorePreimage => self
-                .plan
-                .rollback(current)
-                .map(RecoveryOutcome::Restore)
-                .map_err(CheckpointError::Core),
-            RecoveryAction::ReconcileCommit => Ok(RecoveryOutcome::ReconcileCommit),
-            RecoveryAction::CleanupOnly => Ok(RecoveryOutcome::CleanupOnly),
-            RecoveryAction::Quarantine => Ok(RecoveryOutcome::Quarantine),
-        }
     }
 }
 
@@ -394,16 +355,23 @@ fn verify_snapshot(
     Ok(())
 }
 
-fn seal_payload(
+pub(super) fn encode_payload(
     value: &impl Serialize,
-    file: &str,
-    vault: &VaultContext,
-) -> Result<String, CheckpointError> {
+) -> Result<Zeroizing<Vec<u8>>, CheckpointError> {
     let bytes =
         Zeroizing::new(serde_json::to_vec(value).map_err(|_| CheckpointError::InvalidPayload)?);
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(CheckpointError::ResourceLimit);
     }
+    Ok(bytes)
+}
+
+pub(super) fn seal_payload(
+    value: &impl Serialize,
+    file: &str,
+    vault: &VaultContext,
+) -> Result<String, CheckpointError> {
+    let bytes = encode_payload(value)?;
     let encoded = OwnedFile::registered(file)
         .and_then(|file| file.encode(vault, &bytes))
         .map_err(|_| CheckpointError::Vault)?;
@@ -414,11 +382,11 @@ fn seal_payload(
     Ok(encoded)
 }
 
-fn open_payload<T: DeserializeOwned>(
+pub(super) fn open_payload_bytes(
     encoded: &str,
     file: &str,
     vault: &VaultContext,
-) -> Result<T, CheckpointError> {
+) -> Result<Zeroizing<Vec<u8>>, CheckpointError> {
     if encoded.len() > MAX_ENVELOPE_BYTES {
         return Err(CheckpointError::ResourceLimit);
     }
@@ -428,7 +396,33 @@ fn open_payload<T: DeserializeOwned>(
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(CheckpointError::ResourceLimit);
     }
-    serde_json::from_slice(&bytes).map_err(|_| CheckpointError::InvalidPayload)
+    Ok(bytes)
+}
+
+pub(super) fn open_payload<T: DeserializeOwned>(
+    encoded: &str,
+    file: &str,
+    vault: &VaultContext,
+) -> Result<T, CheckpointError> {
+    serde_json::from_slice(&open_payload_bytes(encoded, file, vault)?)
+        .map_err(|_| CheckpointError::InvalidPayload)
+}
+
+/// A supported authenticated journal can be preserved without decrypting native
+/// credentials. Account identity and scope are checked separately with NativeCipher.
+pub(super) fn parse_journal_payload(bytes: &[u8]) -> Result<JournalPayload, CheckpointError> {
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(CheckpointError::ResourceLimit);
+    }
+    let payload: JournalPayload =
+        serde_json::from_slice(bytes).map_err(|_| CheckpointError::InvalidPayload)?;
+    if payload.version != 1 || payload.context.trim().is_empty() {
+        return Err(CheckpointError::InvalidPayload);
+    }
+    if let Some(binding) = &payload.binding {
+        validate_binding(binding)?;
+    }
+    Ok(payload)
 }
 
 #[cfg(test)]

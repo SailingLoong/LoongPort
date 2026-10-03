@@ -1,11 +1,10 @@
 //! Explicit temporary-directory composition tests, not native durability tests.
-use super::checkpoint::{
-    ProfileCatalog, RecoveryOutcome, SwitchCheckpoint, JOURNAL_FILE, PROFILE_FILE,
-};
-use super::core::{CredentialDocument, JournalOrigin, OAuthFamily, TransactionPhase};
+use super::checkpoint::{ProfileCatalog, SwitchCheckpoint, JOURNAL_FILE, PROFILE_FILE};
+use super::core::{CredentialDocument, OAuthFamily, TransactionPhase};
 use super::native::tests::{native_document, replace, TEST_SECRET};
 use super::native::NativeCipher;
-use crate::secrets::VaultContext;
+use super::recovery::{DispositionKind, JournalEvidence, RecoveryConfirmation, RecoveryLedger};
+use crate::secrets::{owned_file::RECOVERY_FILE, VaultContext};
 use std::path::Path;
 
 fn read_document(path: &Path) -> CredentialDocument {
@@ -71,6 +70,27 @@ fn encrypted_roundtrip_a_b_a_reopens_and_retains_both_latest_refreshes() {
         std::fs::write(&path, to_b.apply(&current).unwrap().to_bytes().unwrap()).unwrap();
         to_b.set_phase(TransactionPhase::Committed).unwrap();
         std::fs::write(root.join(JOURNAL_FILE), to_b.seal(&vault, &native).unwrap()).unwrap();
+        let mut ledger = RecoveryLedger::default();
+        ledger
+            .record_completion(
+                JournalEvidence::open_journal(
+                    &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
+                    &vault,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        std::fs::write(root.join(RECOVERY_FILE), ledger.seal(&vault).unwrap()).unwrap();
+        let saved = RecoveryLedger::open(
+            &std::fs::read_to_string(root.join(RECOVERY_FILE)).unwrap(),
+            &vault,
+        )
+        .unwrap();
+        assert_eq!(
+            saved.latest_completed().unwrap().disposition(),
+            DispositionKind::FullAfter
+        );
+        std::fs::remove_file(root.join(JOURNAL_FILE)).unwrap();
         assert!(native.inspect(&read_document(&path)).unwrap().identity() == &b_identity);
         let refreshed_b = merge_synthetic_refresh(&read_document(&path), &b_prime, &native);
         std::fs::write(&path, refreshed_b.to_bytes().unwrap()).unwrap();
@@ -78,17 +98,21 @@ fn encrypted_roundtrip_a_b_a_reopens_and_retains_both_latest_refreshes() {
         drop(catalog);
         vault = reopen_vault(vault);
 
-        let committed = SwitchCheckpoint::open(
-            &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
+        let completed = RecoveryLedger::open(
+            &std::fs::read_to_string(root.join(RECOVERY_FILE)).unwrap(),
             &vault,
-            &native,
         )
         .unwrap();
-        assert!(matches!(
-            committed.recover(&read_document(&path), JournalOrigin::Live),
-            Ok(RecoveryOutcome::CleanupOnly)
-        ));
-        std::fs::remove_file(root.join(JOURNAL_FILE)).unwrap();
+        let committed = completed.latest_completed().unwrap().evidence();
+        assert_eq!(committed.phase(), TransactionPhase::Committed);
+        assert_eq!(
+            committed
+                .native_checkpoint(&native)
+                .unwrap()
+                .match_touched_image(&read_document(&path)),
+            None
+        );
+        assert!(!completed.needs_confirmation());
         let mut catalog = ProfileCatalog::open(
             &std::fs::read_to_string(root.join(PROFILE_FILE)).unwrap(),
             &vault,
@@ -137,95 +161,113 @@ fn encrypted_roundtrip_a_b_a_reopens_and_retains_both_latest_refreshes() {
 }
 
 #[test]
-fn encrypted_roundtrip_precommit_recovery_refreshes_old_catalog_and_preserves_unrelated_writes() {
+fn encrypted_roundtrip_archive_preserves_old_catalog_and_both_native_publish_outcomes() {
     for phase in [
         TransactionPhase::Prepared,
         TransactionPhase::Captured,
         TransactionPhase::CredentialsPublished,
+        TransactionPhase::CommitUncertain,
+        TransactionPhase::Committed,
     ] {
         for cache_present in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path();
-            let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
-            let vault = VaultContext::generate().unwrap();
-            let path = root.join("synthetic-credentials.json");
-            let mut source = native_document(OAuthFamily::Zai, "a", "refreshed");
-            let target = native
-                .inspect(&native_document(OAuthFamily::Zai, "b", "initial"))
-                .unwrap();
-            let cache = target.identity().credential_keys()[5].clone();
-            if cache_present {
-                source = replace(&source, &cache, "old-b-cache-opaque".into());
-            }
-            let source_identity = native.inspect(&source).unwrap().identity().clone();
-            let mut old_catalog = ProfileCatalog::default();
-            old_catalog.upsert(
-                native
-                    .inspect(&native_document(OAuthFamily::Zai, "a", "stale"))
-                    .unwrap(),
-            );
-            std::fs::write(
-                root.join(PROFILE_FILE),
-                old_catalog.seal(&vault, &native).unwrap(),
-            )
-            .unwrap();
-            let mut checkpoint = SwitchCheckpoint::prepare(&source, &target, &native).unwrap();
-            let changed = replace(
-                &checkpoint.apply(&source).unwrap(),
-                "ssh:unrelated",
-                "newer-unrelated-value".into(),
-            );
-            std::fs::write(&path, changed.to_bytes().unwrap()).unwrap();
-            checkpoint.set_phase(phase).unwrap();
-            std::fs::write(
-                root.join(JOURNAL_FILE),
-                checkpoint.seal(&vault, &native).unwrap(),
-            )
-            .unwrap();
-            drop(checkpoint);
-            drop(old_catalog);
-
-            let vault = reopen_vault(vault);
-            let reopened = SwitchCheckpoint::open(
-                &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
-                &vault,
-                &native,
-            )
-            .unwrap();
-            let mut catalog = ProfileCatalog::open(
-                &std::fs::read_to_string(root.join(PROFILE_FILE)).unwrap(),
-                &vault,
-                &native,
-            )
-            .unwrap();
-            catalog.upsert(reopened.fresh_source().clone());
-            std::fs::write(
-                root.join(PROFILE_FILE),
-                catalog.seal(&vault, &native).unwrap(),
-            )
-            .unwrap();
-            match reopened
-                .recover(&read_document(&path), JournalOrigin::Live)
-                .unwrap()
-            {
-                RecoveryOutcome::Restore(restored) => {
-                    std::fs::write(&path, restored.to_bytes().unwrap()).unwrap()
+            for published in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path();
+                let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
+                let vault = VaultContext::generate().unwrap();
+                let path = root.join("synthetic-credentials.json");
+                let mut source = native_document(OAuthFamily::Zai, "a", "refreshed");
+                let target = native
+                    .inspect(&native_document(OAuthFamily::Zai, "b", "initial"))
+                    .unwrap();
+                let cache = target.identity().credential_keys()[5].clone();
+                if cache_present {
+                    source = replace(&source, &cache, "old-b-cache-opaque".into());
                 }
-                _ => panic!("expected exact preimage restore"),
-            }
-            let result = read_document(&path);
-            for key in target.identity().credential_keys() {
-                assert_eq!(result.get(&key), source.get(&key));
-            }
-            assert_eq!(result.get("ssh:unrelated"), Some("newer-unrelated-value"));
-            for key in source_identity.credential_keys() {
+                let mut old_catalog = ProfileCatalog::default();
+                old_catalog.upsert(
+                    native
+                        .inspect(&native_document(OAuthFamily::Zai, "a", "stale"))
+                        .unwrap(),
+                );
+                let catalog_bytes = old_catalog.seal(&vault, &native).unwrap();
+                std::fs::write(root.join(PROFILE_FILE), &catalog_bytes).unwrap();
+                let mut checkpoint = SwitchCheckpoint::prepare(&source, &target, &native).unwrap();
+                let image = if published {
+                    checkpoint.apply(&source).unwrap()
+                } else {
+                    source.clone()
+                };
+                let changed = replace(&image, "ssh:unrelated", "newer-unrelated-value".into());
+                let native_bytes = changed.to_bytes().unwrap();
+                std::fs::write(&path, &native_bytes).unwrap();
+                checkpoint.set_phase(phase).unwrap();
+                std::fs::write(
+                    root.join(JOURNAL_FILE),
+                    checkpoint.seal(&vault, &native).unwrap(),
+                )
+                .unwrap();
+                drop(checkpoint);
+                drop(old_catalog);
+
+                let vault = reopen_vault(vault);
+                let journal = JournalEvidence::open_journal(
+                    &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
+                    &vault,
+                )
+                .unwrap();
+                let raw = journal.raw_payload().to_vec();
+                let id = journal.id().to_owned();
+                let mut ledger = RecoveryLedger::default();
+                ledger.archive(journal).unwrap();
+                std::fs::write(root.join(RECOVERY_FILE), ledger.seal(&vault).unwrap()).unwrap();
+                let mut reopened = RecoveryLedger::open(
+                    &std::fs::read_to_string(root.join(RECOVERY_FILE)).unwrap(),
+                    &vault,
+                )
+                .unwrap();
+                assert!(reopened.needs_confirmation());
+                let record = reopened.archived().next().unwrap();
+                assert_eq!(record.evidence().raw_payload(), raw);
+                assert_eq!(record.evidence().phase(), phase);
+                std::fs::remove_file(root.join(JOURNAL_FILE)).unwrap();
+                let confirmation = RecoveryConfirmation::from_image(
+                    record.evidence(),
+                    &read_document(&path),
+                    &native,
+                )
+                .unwrap();
+                reopened.confirm(&id, confirmation).unwrap();
+                let expected = if published {
+                    DispositionKind::FullAfter
+                } else {
+                    DispositionKind::FullBefore
+                };
+                assert_eq!(reopened.archived().next().unwrap().disposition(), expected);
+                std::fs::write(root.join(RECOVERY_FILE), reopened.seal(&vault).unwrap()).unwrap();
+                let confirmed = RecoveryLedger::open(
+                    &std::fs::read_to_string(root.join(RECOVERY_FILE)).unwrap(),
+                    &vault,
+                )
+                .unwrap();
+                assert!(!confirmed.needs_confirmation());
                 assert_eq!(
-                    catalog
-                        .get(&source_identity)
+                    confirmed
+                        .archived()
+                        .next()
                         .unwrap()
-                        .scoped_document()
-                        .get(&key),
-                    source.get(&key)
+                        .evidence()
+                        .raw_payload(),
+                    raw
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), native_bytes);
+                assert_eq!(
+                    std::fs::read_to_string(root.join(PROFILE_FILE)).unwrap(),
+                    catalog_bytes
+                );
+                assert_eq!(
+                    read_document(&path).get("ssh:unrelated"),
+                    Some("newer-unrelated-value")
                 );
             }
         }
@@ -233,7 +275,8 @@ fn encrypted_roundtrip_precommit_recovery_refreshes_old_catalog_and_preserves_un
 }
 
 #[test]
-fn encrypted_roundtrip_stale_import_commit_uncertainty_and_new_refresh_do_not_rewrite_live_file() {
+fn encrypted_roundtrip_all_archived_phases_leave_mixed_refreshed_and_third_account_files_unchanged()
+{
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
@@ -244,52 +287,61 @@ fn encrypted_roundtrip_stale_import_commit_uncertainty_and_new_refresh_do_not_re
     let path = root.join("synthetic-credentials.json");
     for phase in [
         TransactionPhase::Prepared,
+        TransactionPhase::Captured,
+        TransactionPhase::CredentialsPublished,
         TransactionPhase::CommitUncertain,
         TransactionPhase::Committed,
     ] {
         let mut checkpoint = SwitchCheckpoint::prepare(&source, &target, &native).unwrap();
         let published = checkpoint.apply(&source).unwrap();
-        std::fs::write(&path, published.to_bytes().unwrap()).unwrap();
         checkpoint.set_phase(phase).unwrap();
         let encoded = checkpoint.seal(&vault, &native).unwrap();
         std::fs::write(root.join(JOURNAL_FILE), &encoded).unwrap();
-        drop(checkpoint);
-        let reopened = SwitchCheckpoint::open(
-            &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
-            &vault,
+        let access_key = &target.identity().credential_keys()[1];
+        let mixed = replace(
+            &published,
+            access_key,
+            source.get(access_key).unwrap().into(),
+        );
+        assert!(native.inspect(&mixed).unwrap().identity() == target.identity());
+        let newer = merge_synthetic_refresh(
+            &published,
+            &native_document(OAuthFamily::Zai, "b", "newer"),
             &native,
-        )
-        .unwrap();
-        let before = std::fs::read(&path).unwrap();
-        assert!(matches!(
-            reopened.recover(&read_document(&path), JournalOrigin::Restored),
-            Ok(RecoveryOutcome::Quarantine)
-        ));
-        match phase {
-            TransactionPhase::CommitUncertain => assert!(matches!(
-                reopened.recover(&read_document(&path), JournalOrigin::Live),
-                Ok(RecoveryOutcome::ReconcileCommit)
-            )),
-            TransactionPhase::Committed => assert!(matches!(
-                reopened.recover(&read_document(&path), JournalOrigin::Live),
-                Ok(RecoveryOutcome::CleanupOnly)
-            )),
-            _ => {
-                let newer = merge_synthetic_refresh(
-                    &read_document(&path),
-                    &native_document(OAuthFamily::Zai, "b", "newer"),
-                    &native,
-                );
-                std::fs::write(&path, newer.to_bytes().unwrap()).unwrap();
-                let before = std::fs::read(&path).unwrap();
-                assert!(reopened
-                    .recover(&read_document(&path), JournalOrigin::Live)
-                    .is_err());
-                assert_eq!(std::fs::read(&path).unwrap(), before);
-                continue;
-            }
+        );
+        let third = native_document(OAuthFamily::Zai, "c", "official-login");
+        for image in [mixed, newer, third] {
+            let image_bytes = image.to_bytes().unwrap();
+            std::fs::write(&path, &image_bytes).unwrap();
+            let evidence = JournalEvidence::open_journal(
+                &std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
+                &vault,
+            )
+            .unwrap();
+            let raw = evidence.raw_payload().to_vec();
+            let mut ledger = RecoveryLedger::default();
+            ledger.archive(evidence).unwrap();
+            std::fs::write(root.join(RECOVERY_FILE), ledger.seal(&vault).unwrap()).unwrap();
+            let archived = RecoveryLedger::open(
+                &std::fs::read_to_string(root.join(RECOVERY_FILE)).unwrap(),
+                &vault,
+            )
+            .unwrap();
+            let record = archived.archived().next().unwrap();
+            assert_eq!(record.evidence().raw_payload(), raw);
+            assert!(RecoveryConfirmation::from_image(
+                record.evidence(),
+                &read_document(&path),
+                &native
+            )
+            .is_err());
+            assert!(archived.needs_confirmation());
+            assert_eq!(std::fs::read(&path).unwrap(), image_bytes);
+            assert_eq!(
+                std::fs::read_to_string(root.join(JOURNAL_FILE)).unwrap(),
+                encoded
+            );
         }
-        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
 

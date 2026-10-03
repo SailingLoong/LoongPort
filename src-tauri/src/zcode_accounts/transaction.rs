@@ -4,14 +4,14 @@
 //! Process-crash recovery is supported; this does not promise cross-file power-loss
 //! atomicity or defend against a malicious process already running as this user.
 use super::admission::BlockedReason;
-use super::checkpoint::{
-    CheckpointError, ProfileCatalog, RecoveryOutcome, SwitchCheckpoint, TransactionBinding,
-};
+use super::checkpoint::{CheckpointError, ProfileCatalog, SwitchCheckpoint, TransactionBinding};
 use super::core::{
-    AccountIdentity, AccountSnapshot, CredentialDocument, JournalOrigin, OAuthFamily,
-    RecoveryAction, TransactionPhase,
+    AccountIdentity, AccountSnapshot, CredentialDocument, OAuthFamily, TransactionPhase,
 };
 use super::native::NativeCipher;
+use super::recovery::{
+    DispositionKind, JournalEvidence, RecoveryConfirmation, RecoveryError, RecoveryLedger,
+};
 use crate::config_file_io::write_durable;
 use crate::secrets::{
     owned_file::{JOURNAL_FILE, PROFILE_FILE, RECOVERY_FILE},
@@ -48,6 +48,10 @@ pub(crate) enum TransactionError {
     MissingSavedSource,
     MissingTarget,
     CatalogChanged,
+    RecoveryChanged,
+    NativeUnconfirmed,
+    ArchiveNeedsCleanup,
+    Recovery(RecoveryError),
     Checkpoint(CheckpointError),
 }
 impl From<CheckpointError> for TransactionError {
@@ -55,12 +59,15 @@ impl From<CheckpointError> for TransactionError {
         Self::Checkpoint(value)
     }
 }
+impl From<RecoveryError> for TransactionError {
+    fn from(value: RecoveryError) -> Self {
+        Self::Recovery(value)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwitchOutcome {
     Switched,
     Refreshed,
-    Recovered,
-    NothingPending,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +90,32 @@ pub(crate) struct CatalogStatus {
     /// Passive status never reads native credentials to claim a current identity.
     pub current: Option<String>,
     pub pending: bool,
+    pub native_unconfirmed: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveOutcome {
+    Archived,
+    NothingPending,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchivePoint {
+    RecoveryPublished,
+    JournalRemoved,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryRecordStatus {
+    pub id: String,
+    pub disposition: &'static str,
+    pub latest_completed: bool,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryStatus {
+    pub revision: String,
+    pub pending: bool,
+    pub native_unconfirmed: bool,
+    pub records: Vec<RecoveryRecordStatus>,
 }
 enum SwitchTarget<'a> {
     Identity(&'a AccountIdentity),
@@ -128,6 +161,201 @@ struct FileImage {
     bytes: Vec<u8>,
     stamp: [u64; 7],
     _file: File,
+}
+
+/// Local preservation has no native path, cipher, process probe or replay route.
+pub(crate) struct VaultAccountStore<'a> {
+    root: &'a Path,
+    root_id: [u64; 2],
+    vault: &'a VaultContext,
+}
+impl<'a> VaultAccountStore<'a> {
+    pub(crate) fn new(root: &'a Path, vault: &'a VaultContext) -> Result<Self, TransactionError> {
+        Ok(Self {
+            root,
+            root_id: root_identity(root)?,
+            vault,
+        })
+    }
+    pub(crate) fn status(&self) -> Result<RecoveryStatus, TransactionError> {
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        let pending = journal
+            .as_ref()
+            .map(|journal| {
+                JournalEvidence::open_journal(text(journal)?, self.vault)
+                    .map_err(TransactionError::from)
+            })
+            .transpose()?;
+        let ledger = self.open_ledger(recovery.as_deref())?;
+        let record_status =
+            |record: &super::recovery::RecoveryRecord, latest_completed| RecoveryRecordStatus {
+                id: record.evidence().id().to_owned(),
+                disposition: match if pending
+                    .as_ref()
+                    .is_some_and(|journal: &JournalEvidence| journal.id() == record.evidence().id())
+                {
+                    DispositionKind::NativeUnconfirmed
+                } else {
+                    record.disposition()
+                } {
+                    DispositionKind::NativeUnconfirmed => "native-unconfirmed",
+                    DispositionKind::FullBefore => "full-before",
+                    DispositionKind::FullAfter => "full-after",
+                    DispositionKind::ExplicitCapture => "explicit-capture",
+                },
+                latest_completed,
+            };
+        let records = ledger
+            .latest_completed()
+            .into_iter()
+            .map(|record| record_status(record, true))
+            .chain(ledger.archived().map(|record| record_status(record, false)))
+            .collect();
+        Ok(RecoveryStatus {
+            revision: recovery_revision(journal.as_deref(), recovery.as_deref()),
+            pending: journal.is_some(),
+            native_unconfirmed: journal.is_some() || ledger.needs_confirmation(),
+            records,
+        })
+    }
+    pub(crate) fn archive_pending(
+        &self,
+        revision: &str,
+    ) -> Result<ArchiveOutcome, TransactionError> {
+        self.archive_with_hook(revision, &mut |_| Ok(()))
+    }
+    fn archive_with_hook(
+        &self,
+        revision: &str,
+        hook: &mut dyn FnMut(ArchivePoint) -> Result<(), TransactionError>,
+    ) -> Result<ArchiveOutcome, TransactionError> {
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        if recovery_revision(journal.as_deref(), recovery.as_deref()) != revision {
+            return Err(TransactionError::RecoveryChanged);
+        }
+        let mut ledger = self.open_ledger(recovery.as_deref())?;
+        let Some(journal) = journal else {
+            return Ok(ArchiveOutcome::NothingPending);
+        };
+        let evidence = JournalEvidence::open_journal(text(&journal)?, self.vault)?;
+        let id = ledger.archive(evidence.clone())?;
+        let encoded = ledger.seal(self.vault)?;
+        self.expect(Role::Journal, Some(&journal))?;
+        let published = self.publish(Role::Recovery, recovery.as_ref(), encoded.as_bytes())?;
+        let verified = self.open_ledger(Some(&published))?;
+        let retained = verified
+            .latest_completed()
+            .into_iter()
+            .chain(verified.archived())
+            .find(|record| record.evidence().id() == id)
+            .ok_or(TransactionError::Storage)?;
+        if retained.evidence().raw_payload() != evidence.raw_payload()
+            || retained.disposition() != DispositionKind::NativeUnconfirmed
+        {
+            return Err(TransactionError::Storage);
+        }
+        hook(ArchivePoint::RecoveryPublished)?;
+        // Deleting J is allowed only while its authenticated replacement is still
+        // the exact file that was read back, as well as the same original J.
+        self.expect(Role::Recovery, Some(&published))?;
+        self.remove(Role::Journal, &journal)?;
+        hook(ArchivePoint::JournalRemoved).map_err(|_| TransactionError::ArchiveNeedsCleanup)?;
+        Ok(ArchiveOutcome::Archived)
+    }
+    pub(crate) fn delete_confirmed(
+        &self,
+        id: &str,
+        revision: &str,
+    ) -> Result<(), TransactionError> {
+        self.delete_with_hook(id, revision, &mut || Ok(()))
+    }
+    fn delete_with_hook(
+        &self,
+        id: &str,
+        revision: &str,
+        before_publication: &mut dyn FnMut() -> Result<(), TransactionError>,
+    ) -> Result<(), TransactionError> {
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        if recovery_revision(journal.as_deref(), recovery.as_deref()) != revision {
+            return Err(TransactionError::RecoveryChanged);
+        }
+        if let Some(journal) = &journal {
+            let pending = JournalEvidence::open_journal(text(journal)?, self.vault)?;
+            if pending.id() == id {
+                return Err(RecoveryError::Unconfirmed.into());
+            }
+        }
+        let mut ledger = self.open_ledger(recovery.as_deref())?;
+        ledger.delete_confirmed(id)?;
+        let encoded = if ledger.is_empty() {
+            None
+        } else {
+            Some(ledger.seal(self.vault)?)
+        };
+        before_publication()?;
+        // A full archive may be freed while another journal is pending. Preserve
+        // that journal exactly; only the selected, already-confirmed record changes.
+        self.expect(Role::Journal, journal.as_ref())?;
+        if encoded.is_none() {
+            self.remove(
+                Role::Recovery,
+                recovery.as_ref().ok_or(TransactionError::Storage)?,
+            )?;
+        } else {
+            self.publish(
+                Role::Recovery,
+                recovery.as_ref(),
+                encoded
+                    .as_ref()
+                    .ok_or(TransactionError::Storage)?
+                    .as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+    fn open_ledger(&self, bytes: Option<&[u8]>) -> Result<RecoveryLedger, TransactionError> {
+        match bytes {
+            None => Ok(RecoveryLedger::default()),
+            Some(bytes) => Ok(RecoveryLedger::open(text(bytes)?, self.vault)?),
+        }
+    }
+    fn validate_root(&self) -> Result<(), TransactionError> {
+        if root_identity(self.root)? != self.root_id {
+            return Err(TransactionError::UnsafePath);
+        }
+        Ok(())
+    }
+    fn read(&self, role: Role) -> Result<Option<FileImage>, TransactionError> {
+        if matches!(role, Role::Credentials) {
+            return Err(TransactionError::NotAdmitted);
+        }
+        self.validate_root()?;
+        read_private(&self.root.join(role.name()))
+    }
+    fn expect(&self, role: Role, before: Option<&FileImage>) -> Result<(), TransactionError> {
+        expect_image(self.read(role)?, before)
+    }
+    fn publish(
+        &self,
+        role: Role,
+        before: Option<&FileImage>,
+        bytes: &[u8],
+    ) -> Result<FileImage, TransactionError> {
+        self.expect(role, before)?;
+        publish_private(&self.root.join(role.name()), bytes, || {
+            self.read(role)?.ok_or(TransactionError::Storage)
+        })
+    }
+    fn remove(&self, role: Role, before: &FileImage) -> Result<(), TransactionError> {
+        self.expect(role, Some(before))?;
+        fs::remove_file(self.root.join(role.name())).map_err(|_| TransactionError::Storage)?;
+        File::open(self.root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| TransactionError::ArchiveNeedsCleanup)
+    }
 }
 impl std::ops::Deref for FileImage {
     type Target = [u8];
@@ -199,6 +427,122 @@ impl<'a> AccountStore<'a> {
         self.native_id
     }
 
+    pub(crate) fn confirm_archived(
+        &self,
+        id: &str,
+        revision: &str,
+    ) -> Result<(), TransactionError> {
+        let _lock = self.lock()?;
+        let (journal, recovery, mut ledger) = self.archived_candidate(revision)?;
+        let evidence = find_evidence(&ledger, id)?.clone();
+        self.check_binding(&evidence.native_checkpoint(self.native)?)?;
+        let current_bytes = self.required(Role::Credentials)?;
+        let current = document(&current_bytes)?;
+        let proof = RecoveryConfirmation::from_image(&evidence, &current, self.native)?;
+        ledger.confirm(id, proof)?;
+        self.publish_checked(
+            Role::Recovery,
+            recovery.as_ref(),
+            ledger.seal(self.vault)?.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Journal, journal.as_ref()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn capture_and_confirm(
+        &self,
+        id: &str,
+        recovery_revision: &str,
+        catalog_revision: &str,
+        family: OAuthFamily,
+    ) -> Result<CaptureOutcome, TransactionError> {
+        let _lock = self.lock()?;
+        let (journal, recovery, mut ledger) = self.archived_candidate(recovery_revision)?;
+        let evidence = find_evidence(&ledger, id)?.clone();
+        let (catalog_bytes, mut catalog) = self.checked_catalog(catalog_revision)?;
+        let current_bytes = self.required(Role::Credentials)?;
+        let current = document(&current_bytes)?;
+        let fresh = self
+            .native
+            .inspect(&current)
+            .map_err(|error| TransactionError::Checkpoint(CheckpointError::Native(error)))?;
+        if !fresh
+            .identity()
+            .matches_scope(self.native.context(), family)
+        {
+            return Err(TransactionError::UnsupportedScope);
+        }
+        let outcome = if catalog.get(fresh.identity()).is_some() {
+            CaptureOutcome::Refreshed
+        } else {
+            CaptureOutcome::Saved
+        };
+        catalog.upsert(fresh.clone());
+        let encoded = catalog.seal(self.vault, self.native)?;
+        // Validate the exact prospective resolution before saving anything, then
+        // publish the profile first. An interruption cannot resolve first/save later.
+        let proof = RecoveryConfirmation::after_persisted_capture(
+            &evidence,
+            &current,
+            &fresh,
+            self.native,
+            hash(encoded.as_bytes()),
+            hash(&current_bytes),
+        )?;
+        let mut preview = ledger.clone();
+        preview.confirm(id, proof)?;
+        preview.seal(self.vault)?;
+        let published_profile = self.publish_checked(
+            Role::Profiles,
+            catalog_bytes.as_ref(),
+            encoded.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Journal, journal.as_ref()),
+                (Role::Recovery, recovery.as_ref()),
+            ],
+        )?;
+        let proof = RecoveryConfirmation::after_persisted_capture(
+            &evidence,
+            &current,
+            &fresh,
+            self.native,
+            hash(&published_profile),
+            hash(&current_bytes),
+        )?;
+        ledger.confirm(id, proof)?;
+        self.publish_checked(
+            Role::Recovery,
+            recovery.as_ref(),
+            ledger.seal(self.vault)?.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Journal, journal.as_ref()),
+                (Role::Profiles, Some(&published_profile)),
+            ],
+        )?;
+        Ok(outcome)
+    }
+    fn archived_candidate(
+        &self,
+        revision: &str,
+    ) -> Result<(Option<FileImage>, Option<FileImage>, RecoveryLedger), TransactionError> {
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        if recovery_revision(journal.as_deref(), recovery.as_deref()) != revision {
+            return Err(TransactionError::RecoveryChanged);
+        }
+        if let Some(journal) = &journal {
+            JournalEvidence::open_journal(text(journal)?, self.vault)?;
+        }
+        let ledger = VaultAccountStore::new(self.vault_root, self.vault)?
+            .open_ledger(recovery.as_deref())?;
+        Ok((journal, recovery, ledger))
+    }
+
     pub(crate) fn status(&self) -> Result<CatalogStatus, TransactionError> {
         (self.gate)().map_err(TransactionError::Admission)?;
         let bytes = self.read(Role::Profiles)?;
@@ -218,11 +562,13 @@ impl<'a> AccountStore<'a> {
                 })
             })
             .collect::<Result<Vec<_>, TransactionError>>()?;
+        let recovery = VaultAccountStore::new(self.vault_root, self.vault)?.status()?;
         Ok(CatalogStatus {
             revision: catalog_revision(bytes.as_deref()),
             profiles,
             current: None,
-            pending: self.read(Role::Journal)?.is_some(),
+            pending: recovery.pending,
+            native_unconfirmed: recovery.native_unconfirmed,
         })
     }
 
@@ -235,7 +581,7 @@ impl<'a> AccountStore<'a> {
         if self.read(Role::Journal)?.is_some() {
             return Err(TransactionError::RecoveryRequired);
         }
-        self.valid_recovery_record()?;
+        let recovery = self.valid_recovery_record()?;
         let (bytes, mut catalog) = self.checked_catalog(expected_revision)?;
         let current_bytes = self.required(Role::Credentials)?;
         let current = document(&current_bytes)?;
@@ -256,7 +602,16 @@ impl<'a> AccountStore<'a> {
         };
         catalog.upsert(fresh);
         let encoded = catalog.seal(self.vault, self.native)?;
-        self.publish_profile(&current_bytes, bytes.as_ref(), encoded.as_bytes())?;
+        self.publish_checked(
+            Role::Profiles,
+            bytes.as_ref(),
+            encoded.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Journal, None),
+                (Role::Recovery, recovery.as_ref()),
+            ],
+        )?;
         Ok(outcome)
     }
 
@@ -281,48 +636,6 @@ impl<'a> AccountStore<'a> {
         target: &AccountIdentity,
     ) -> Result<SwitchOutcome, TransactionError> {
         self.switch_with_hook(target, &mut |_| Ok(()))
-    }
-    pub(crate) fn recover(&self, origin: JournalOrigin) -> Result<SwitchOutcome, TransactionError> {
-        let pending = self.read(Role::Journal)?;
-        let Some(encoded) = pending else {
-            return Ok(SwitchOutcome::NothingPending);
-        };
-        if origin != JournalOrigin::Live {
-            return Err(TransactionError::Imported);
-        }
-        let _lock = self.lock()?;
-        self.expect(Role::Journal, Some(&encoded))?;
-        let checkpoint = self.open_checkpoint(&encoded)?;
-        self.check_binding(&checkpoint)?;
-        let recovery = self.valid_recovery_record()?;
-        let current_bytes = self.required(Role::Credentials)?;
-        let current = document(&current_bytes)?;
-        let outcome = checkpoint.recover(&current, origin)?;
-        match outcome {
-            RecoveryOutcome::Restore(ref restored) => {
-                // Check conflicts before touching either file. A newer saved source is
-                // not silently replaced by this older pending transaction.
-                self.preserve_fresh_source(&checkpoint, &current_bytes)?;
-                self.publish(
-                    Role::Credentials,
-                    Some(&current_bytes),
-                    &restored.to_bytes().map_err(|_| TransactionError::Storage)?,
-                )?;
-            }
-            RecoveryOutcome::CleanupOnly => {}
-            RecoveryOutcome::ReconcileCommit | RecoveryOutcome::Quarantine => {
-                return Err(TransactionError::RecoveryRequired)
-            }
-        }
-        self.finish(&checkpoint, &encoded, recovery.as_ref(), &mut |_| Ok(()))
-            .map_err(|error| {
-                if matches!(outcome, RecoveryOutcome::CleanupOnly) {
-                    TransactionError::CommittedNeedsCleanup
-                } else {
-                    error
-                }
-            })?;
-        Ok(SwitchOutcome::Recovered)
     }
     fn switch_with_hook(
         &self,
@@ -382,7 +695,16 @@ impl<'a> AccountStore<'a> {
         if fresh.identity() == &target_id {
             catalog.upsert(fresh);
             let next = catalog.seal(self.vault, self.native)?;
-            self.publish_profile(&current_bytes, catalog_bytes.as_ref(), next.as_bytes())?;
+            self.publish_checked(
+                Role::Profiles,
+                catalog_bytes.as_ref(),
+                next.as_bytes(),
+                &[
+                    (Role::Credentials, Some(&current_bytes)),
+                    (Role::Journal, None),
+                    (Role::Recovery, recovery.as_ref()),
+                ],
+            )?;
             return Ok(SwitchOutcome::Refreshed);
         }
         let mut checkpoint = SwitchCheckpoint::prepare(&current, &target, self.native)?;
@@ -394,29 +716,76 @@ impl<'a> AccountStore<'a> {
             source_profile_revision,
         })?;
         let prepared = checkpoint.seal(self.vault, self.native)?;
-        let mut journal = self.publish(Role::Journal, None, prepared.as_bytes())?;
+        let ledger = VaultAccountStore::new(self.vault_root, self.vault)?
+            .open_ledger(recovery.as_deref())?;
+        ledger.ensure_switch_capacity(
+            &JournalEvidence::open_journal(&prepared, self.vault)?,
+            self.vault,
+        )?;
+        let mut journal = self.publish_checked(
+            Role::Journal,
+            None,
+            prepared.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Profiles, catalog_bytes.as_ref()),
+                (Role::Recovery, recovery.as_ref()),
+            ],
+        )?;
         hook(WritePoint::Prepared)?;
         catalog.upsert(checkpoint.fresh_source().clone());
-        self.publish_profile(
-            &current_bytes,
+        let captured_profile = self.publish_checked(
+            Role::Profiles,
             catalog_bytes.as_ref(),
             catalog.seal(self.vault, self.native)?.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Journal, Some(&journal)),
+                (Role::Recovery, recovery.as_ref()),
+            ],
         )?;
         hook(WritePoint::OutgoingProfile)?;
         checkpoint.set_phase(TransactionPhase::Captured)?;
         let captured = checkpoint.seal(self.vault, self.native)?;
-        journal = self.publish(Role::Journal, Some(&journal), captured.as_bytes())?;
+        journal = self.publish_checked(
+            Role::Journal,
+            Some(&journal),
+            captured.as_bytes(),
+            &[
+                (Role::Credentials, Some(&current_bytes)),
+                (Role::Profiles, Some(&captured_profile)),
+                (Role::Recovery, recovery.as_ref()),
+            ],
+        )?;
         hook(WritePoint::Captured)?;
         let applied = checkpoint
             .apply(&current)?
             .to_bytes()
             .map_err(|_| TransactionError::Storage)?;
-        self.publish(Role::Credentials, Some(&current_bytes), &applied)?;
+        let published_native = self.publish_checked(
+            Role::Credentials,
+            Some(&current_bytes),
+            &applied,
+            &[
+                (Role::Journal, Some(&journal)),
+                (Role::Profiles, Some(&captured_profile)),
+                (Role::Recovery, recovery.as_ref()),
+            ],
+        )?;
         hook(WritePoint::NativeCredentials)?;
         checkpoint.set_phase(TransactionPhase::Committed)?;
         let committed = checkpoint.seal(self.vault, self.native)?;
         let published = self
-            .publish(Role::Journal, Some(&journal), committed.as_bytes())
+            .publish_checked(
+                Role::Journal,
+                Some(&journal),
+                committed.as_bytes(),
+                &[
+                    (Role::Credentials, Some(&published_native)),
+                    (Role::Profiles, Some(&captured_profile)),
+                    (Role::Recovery, recovery.as_ref()),
+                ],
+            )
             .and_then(|image| {
                 hook(WritePoint::Committed)?;
                 Ok(image)
@@ -424,26 +793,31 @@ impl<'a> AccountStore<'a> {
         if published.is_err() {
             // A rename may have succeeded before sync or notification failed. Read
             // the authenticated marker; never downgrade it or auto-rollback here.
-            if let Ok(Some(actual)) = self.read(Role::Journal) {
-                if let Ok(actual) = self.open_checkpoint(&actual) {
-                    if actual.binding() == checkpoint.binding() {
-                        // Marker authentication is local-vault work. Do not read native
-                        // credentials here: a failed gate may mean its writer restarted.
-                        if actual.recovery_policy(JournalOrigin::Live)
-                            == RecoveryAction::CleanupOnly
-                        {
-                            return Err(TransactionError::CommittedNeedsCleanup);
-                        }
-                    }
-                }
+            let actual = VaultAccountStore::new(self.vault_root, self.vault)
+                .ok()
+                .and_then(|local| local.read(Role::Journal).ok().flatten())
+                .and_then(|bytes| {
+                    JournalEvidence::open_journal(text(&bytes).ok()?, self.vault).ok()
+                });
+            if actual.is_some_and(|actual| {
+                actual.binding() == checkpoint.binding()
+                    && actual.phase() == TransactionPhase::Committed
+            }) {
+                return Err(TransactionError::CommittedNeedsCleanup);
             }
             return Err(TransactionError::RecoveryRequired);
         }
         let committed = published?;
         // Native publication and its COMMITTED marker are confirmed. Cleanup or
         // acknowledgment failure cannot be reported as an uncommitted admission error.
-        self.finish(&checkpoint, &committed, recovery.as_ref(), hook)
-            .map_err(|_| TransactionError::CommittedNeedsCleanup)?;
+        self.finish(
+            &committed,
+            recovery.as_ref(),
+            &published_native,
+            &captured_profile,
+            hook,
+        )
+        .map_err(|_| TransactionError::CommittedNeedsCleanup)?;
         Ok(SwitchOutcome::Switched)
     }
     fn checked_catalog(
@@ -457,54 +831,38 @@ impl<'a> AccountStore<'a> {
         let catalog = self.open_catalog(bytes.as_deref())?;
         Ok((bytes, catalog))
     }
-    fn preserve_fresh_source(
-        &self,
-        checkpoint: &SwitchCheckpoint,
-        current: &FileImage,
-    ) -> Result<(), TransactionError> {
-        let before = self.read(Role::Profiles)?;
-        let mut catalog = self.open_catalog(before.as_deref())?;
-        let fresh = checkpoint.fresh_source();
-        let saved = catalog
-            .get(fresh.identity())
-            .ok_or(TransactionError::SourceChanged)?;
-        let saved_hash = snapshot_hash(saved)?;
-        if saved_hash
-            != checkpoint
-                .binding()
-                .ok_or(TransactionError::Imported)?
-                .source_profile_revision
-            && saved_hash != snapshot_hash(fresh)?
-        {
-            return Err(TransactionError::SourceChanged);
-        }
-        if saved_hash != snapshot_hash(fresh)? {
-            catalog.upsert(fresh.clone());
-            self.publish_profile(
-                current,
-                before.as_ref(),
-                catalog.seal(self.vault, self.native)?.as_bytes(),
-            )?;
-        }
-        Ok(())
-    }
     fn finish(
         &self,
-        checkpoint: &SwitchCheckpoint,
         journal: &FileImage,
         recovery: Option<&FileImage>,
+        native: &FileImage,
+        profile: &FileImage,
         hook: &mut dyn FnMut(WritePoint) -> Result<(), TransactionError>,
     ) -> Result<(), TransactionError> {
-        self.publish(
+        let mut ledger = VaultAccountStore::new(self.vault_root, self.vault)?
+            .open_ledger(recovery.map(|bytes| &**bytes))?;
+        let evidence = JournalEvidence::open_journal(text(journal)?, self.vault)?;
+        ledger.record_completion(evidence.clone())?;
+        let published = self.publish_checked(
             Role::Recovery,
             recovery,
-            checkpoint
-                .seal_recovery(self.vault, self.native)?
-                .as_bytes(),
+            ledger.seal(self.vault)?.as_bytes(),
+            &[
+                (Role::Journal, Some(journal)),
+                (Role::Credentials, Some(native)),
+                (Role::Profiles, Some(profile)),
+            ],
         )?;
+        let verified = RecoveryLedger::open(text(&published)?, self.vault)?;
+        if find_evidence(&verified, evidence.id())?.raw_payload() != evidence.raw_payload() {
+            return Err(TransactionError::Storage);
+        }
         hook(WritePoint::RecoveryRecord)?;
         (self.gate)().map_err(TransactionError::Admission)?;
+        self.expect(Role::Recovery, Some(&published))?;
         self.expect(Role::Journal, Some(journal))?;
+        self.expect(Role::Credentials, Some(native))?;
+        self.expect(Role::Profiles, Some(profile))?;
         fs::remove_file(self.vault_root.join(JOURNAL_FILE))
             .map_err(|_| TransactionError::Storage)?;
         File::open(self.vault_root)
@@ -514,17 +872,12 @@ impl<'a> AccountStore<'a> {
     }
     fn valid_recovery_record(&self) -> Result<Option<FileImage>, TransactionError> {
         let bytes = self.read(Role::Recovery)?;
-        if let Some(bytes) = &bytes {
-            SwitchCheckpoint::open_recovery(text(bytes)?, self.vault, self.native)?;
+        let ledger =
+            VaultAccountStore::new(self.vault_root, self.vault)?.open_ledger(bytes.as_deref())?;
+        if ledger.needs_confirmation() {
+            return Err(TransactionError::NativeUnconfirmed);
         }
         Ok(bytes)
-    }
-    fn open_checkpoint(&self, bytes: &[u8]) -> Result<SwitchCheckpoint, TransactionError> {
-        Ok(SwitchCheckpoint::open(
-            text(bytes)?,
-            self.vault,
-            self.native,
-        )?)
     }
     fn check_binding(&self, checkpoint: &SwitchCheckpoint) -> Result<(), TransactionError> {
         let binding = checkpoint.binding().ok_or(TransactionError::Imported)?;
@@ -573,56 +926,79 @@ impl<'a> AccountStore<'a> {
         self.read(role)?.ok_or(TransactionError::Storage)
     }
     fn expect(&self, role: Role, before: Option<&FileImage>) -> Result<(), TransactionError> {
-        match (self.read(role)?, before) {
-            (None, None) => Ok(()),
-            (Some(current), Some(before))
-                if current.stamp == before.stamp && current.bytes == before.bytes =>
-            {
-                Ok(())
-            }
-            _ => Err(TransactionError::SourceChanged),
-        }
-    }
-    fn publish(
-        &self,
-        role: Role,
-        before: Option<&FileImage>,
-        bytes: &[u8],
-    ) -> Result<FileImage, TransactionError> {
-        self.publish_checked(role, before, bytes, None)
-    }
-    fn publish_profile(
-        &self,
-        native_source: &FileImage,
-        before: Option<&FileImage>,
-        bytes: &[u8],
-    ) -> Result<FileImage, TransactionError> {
-        self.publish_checked(Role::Profiles, before, bytes, Some(native_source))
+        expect_image(self.read(role)?, before)
     }
     fn publish_checked(
         &self,
         role: Role,
         before: Option<&FileImage>,
         bytes: &[u8],
-        native_source: Option<&FileImage>,
+        dependencies: &[(Role, Option<&FileImage>)],
     ) -> Result<FileImage, TransactionError> {
         (self.gate)().map_err(TransactionError::Admission)?;
-        // The final probe can take time. Revalidate a captured native source only
-        // after it returns, alongside the catalog CAS immediately before writing.
-        if let Some(source) = native_source {
-            self.expect(Role::Credentials, Some(source))?;
+        // The final probe can take time. Revalidate every fixed-file dependency
+        // after it returns, alongside the destination CAS immediately before writing.
+        for (role, source) in dependencies {
+            self.expect(*role, *source)?;
         }
         self.expect(role, before)?;
-        write_durable(&self.root(role).join(role.name()), bytes)
-            .map_err(|_| TransactionError::Storage)?;
-        // Our own atomic replacement establishes a new file identity. Retain it
-        // for the next write/cleanup, rather than binding recovery to old inodes.
-        let current = self.required(role)?;
-        if current.bytes != bytes {
-            return Err(TransactionError::SourceChanged);
-        }
-        Ok(current)
+        publish_private(&self.root(role).join(role.name()), bytes, || {
+            self.required(role)
+        })
     }
+}
+fn find_evidence<'a>(
+    ledger: &'a RecoveryLedger,
+    id: &str,
+) -> Result<&'a JournalEvidence, TransactionError> {
+    ledger
+        .latest_completed()
+        .into_iter()
+        .chain(ledger.archived())
+        .find(|record| record.evidence().id() == id)
+        .map(|record| record.evidence())
+        .ok_or(TransactionError::Recovery(RecoveryError::NotFound))
+}
+fn expect_image(
+    current: Option<FileImage>,
+    before: Option<&FileImage>,
+) -> Result<(), TransactionError> {
+    match (current, before) {
+        (None, None) => Ok(()),
+        (Some(current), Some(before))
+            if current.stamp == before.stamp && current.bytes == before.bytes =>
+        {
+            Ok(())
+        }
+        _ => Err(TransactionError::SourceChanged),
+    }
+}
+fn publish_private(
+    path: &Path,
+    bytes: &[u8],
+    readback: impl FnOnce() -> Result<FileImage, TransactionError>,
+) -> Result<FileImage, TransactionError> {
+    write_durable(path, bytes).map_err(|_| TransactionError::Storage)?;
+    let current = readback()?;
+    if current.bytes != bytes {
+        return Err(TransactionError::SourceChanged);
+    }
+    Ok(current)
+}
+fn recovery_revision(journal: Option<&[u8]>, recovery: Option<&[u8]>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"zcode-recovery-revision:v1\0");
+    for bytes in [journal, recovery] {
+        match bytes {
+            None => digest.update([0]),
+            Some(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_be_bytes());
+                digest.update(hash(bytes));
+            }
+        }
+    }
+    format!("sha256:{}", URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 fn text(bytes: &[u8]) -> Result<&str, TransactionError> {
     std::str::from_utf8(bytes).map_err(|_| TransactionError::Storage)
@@ -754,7 +1130,9 @@ mod unsupported_platform_tests {
             )
             .unwrap();
             assert!(store.switch(&identity).is_err());
-            assert!(store.recover(JournalOrigin::Live).is_err());
+            assert!(store
+                .confirm_archived("synthetic-record", "synthetic-revision")
+                .is_err());
         }
     }
 }

@@ -24,7 +24,6 @@ pub enum CoreError {
     DifferentContext,
     DifferentFamily,
     SourceChanged,
-    RecoveryConflict,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -267,40 +266,6 @@ impl SwitchPlan {
     pub fn is_noop(&self) -> bool {
         self.fresh_source.identity == self.target.identity
     }
-
-    /// Use only after authenticating and classifying the current live journal.
-    pub fn rollback(&self, current: &CredentialDocument) -> Result<CredentialDocument, CoreError> {
-        if self.is_noop() {
-            return Ok(current.clone());
-        }
-        // Validate the entire scope before constructing a replacement. A partial
-        // rollback must not erase a newer native refresh or any unknown writer.
-        for (key, after) in &self.target.values {
-            let observed = current.get(key);
-            if observed != self.source.get(key) && observed != after.as_deref() {
-                return Err(CoreError::RecoveryConflict);
-            }
-        }
-        let mut restored = current.clone();
-        for key in self.target.values.keys() {
-            match self.source.0.get(key) {
-                Some(before) => {
-                    restored.0.insert(key.clone(), before.clone());
-                }
-                None => {
-                    restored.0.remove(key);
-                }
-            }
-        }
-        restored.to_bytes()?;
-        Ok(restored)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JournalOrigin {
-    Live,
-    Restored,
 }
 
 #[derive(
@@ -313,28 +278,6 @@ pub enum TransactionPhase {
     CredentialsPublished,
     CommitUncertain,
     Committed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryAction {
-    RestorePreimage,
-    ReconcileCommit,
-    CleanupOnly,
-    Quarantine,
-}
-
-/// Origin is supplied by the trusted lifecycle owner, never by journal contents.
-pub fn recovery_action(origin: JournalOrigin, phase: TransactionPhase) -> RecoveryAction {
-    if origin == JournalOrigin::Restored {
-        return RecoveryAction::Quarantine;
-    }
-    match phase {
-        TransactionPhase::Prepared
-        | TransactionPhase::Captured
-        | TransactionPhase::CredentialsPublished => RecoveryAction::RestorePreimage,
-        TransactionPhase::CommitUncertain => RecoveryAction::ReconcileCommit,
-        TransactionPhase::Committed => RecoveryAction::CleanupOnly,
-    }
 }
 
 // Rust's is_whitespace differs from ECMAScript trim (notably U+0085 and U+FEFF).

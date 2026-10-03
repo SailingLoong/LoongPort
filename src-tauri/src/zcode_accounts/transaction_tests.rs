@@ -83,6 +83,27 @@ impl Fixture {
         .unwrap()
     }
 }
+fn archive_and_confirm(f: &Fixture, store: &AccountStore<'_>) -> ArchiveOutcome {
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let outcome = local
+        .archive_pending(&local.status().unwrap().revision)
+        .unwrap();
+    let status = local.status().unwrap();
+    for record in status.records {
+        if record.disposition == "native-unconfirmed" {
+            store
+                .confirm_archived(&record.id, &local.status().unwrap().revision)
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        before
+    );
+    assert!(!local.status().unwrap().native_unconfirmed);
+    outcome
+}
 #[test]
 fn io_switch_refreshes_outgoing_a_then_restores_fresh_a_for_each_family() {
     for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
@@ -168,14 +189,16 @@ fn io_unadmitted_or_unsaved_source_never_writes() {
     assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
 }
 #[test]
-fn io_precommit_failure_restores_target_preimages_and_keeps_unrelated_changes() {
+fn io_precommit_failure_keeps_target_image_and_unrelated_changes() {
     let f = Fixture::new(OAuthFamily::Zai);
     assert!(f
         .store()
-        .switch_with_hook(&f.b, &mut |p| if p == WritePoint::NativeCredentials {
-            Err(TransactionError::Storage)
-        } else {
-            Ok(())
+        .switch_with_hook(&f.b, &mut |p| {
+            if p == WritePoint::NativeCredentials {
+                Err(TransactionError::Storage)
+            } else {
+                Ok(())
+            }
         })
         .is_err());
     let altered = replace(&f.current(), "future:unrelated", "after-failure".into());
@@ -185,46 +208,35 @@ fn io_precommit_failure_restores_target_preimages_and_keeps_unrelated_changes() 
     )
     .unwrap();
     assert_eq!(
-        f.store().recover(JournalOrigin::Live),
-        Ok(SwitchOutcome::Recovered)
+        archive_and_confirm(&f, &f.store()),
+        ArchiveOutcome::Archived
     );
-    for key in f.a.credential_keys() {
-        assert_eq!(f.current().get(&key), f.fresh.get(&key));
-    }
-    for key in
-        f.b.credential_keys()
-            .into_iter()
-            .filter(|key| key.starts_with("account-provider:"))
-    {
-        assert!(f.current().get(&key).is_none());
-    }
-    assert_eq!(f.current().get("future:unrelated"), Some("after-failure"));
+    assert!(f.current() == altered);
+    assert!(f.native.inspect(&f.current()).unwrap().identity() == &f.b);
 }
+
 #[test]
-fn io_committed_or_imported_journals_cannot_roll_back_native_account() {
+fn io_committed_journal_is_archived_without_native_write() {
     let f = Fixture::new(OAuthFamily::Zai);
     assert!(f
         .store()
-        .switch_with_hook(&f.b, &mut |p| if p == WritePoint::Committed {
-            Err(TransactionError::Storage)
-        } else {
-            Ok(())
+        .switch_with_hook(&f.b, &mut |p| {
+            if p == WritePoint::Committed {
+                Err(TransactionError::Storage)
+            } else {
+                Ok(())
+            }
         })
         .is_err());
     let current = f.current();
     assert_eq!(
-        f.store().recover(JournalOrigin::Restored),
-        Err(TransactionError::Imported)
+        archive_and_confirm(&f, &f.store()),
+        ArchiveOutcome::Archived
     );
     assert!(f.current() == current);
     assert_eq!(
-        f.store().recover(JournalOrigin::Live),
-        Ok(SwitchOutcome::Recovered)
-    );
-    assert!(f.current() == current);
-    assert_eq!(
-        f.store().recover(JournalOrigin::Live),
-        Ok(SwitchOutcome::NothingPending)
+        archive_and_confirm(&f, &f.store()),
+        ArchiveOutcome::NothingPending
     );
 }
 
@@ -328,24 +340,44 @@ fn io_actual_process_crash_at_every_publication_recovers_from_disk() {
             ADMITTED,
         )
         .unwrap();
-        let result = reopened.recover(JournalOrigin::Live).unwrap();
+        let result = archive_and_confirm(&f, &reopened);
         assert_eq!(
             result,
             if point == WritePoint::JournalRemoved {
-                SwitchOutcome::NothingPending
+                ArchiveOutcome::NothingPending
             } else {
-                SwitchOutcome::Recovered
+                ArchiveOutcome::Archived
             }
         );
-        let expected = if index < 4 { &f.a } else { &f.b };
+        let expected = if index < 3 { &f.a } else { &f.b };
         assert!(
             f.native.inspect(&f.current()).unwrap().identity() == expected,
             "crash point {point:?}"
         );
-        assert!(
-            f.catalog().get(&f.a).unwrap().scoped_document()
-                == f.native.inspect(&f.fresh).unwrap().scoped_document()
-        );
+        if point != WritePoint::Prepared {
+            assert!(
+                f.catalog().get(&f.a).unwrap().scoped_document()
+                    == f.native.inspect(&f.fresh).unwrap().scoped_document()
+            );
+        }
+        let local = VaultAccountStore::new(f.vault_root.path(), &vault).unwrap();
+        let ledger = local
+            .open_ledger(Some(
+                &fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+            ))
+            .unwrap();
+        assert!(ledger
+            .archived()
+            .chain(ledger.latest_completed())
+            .any(|record| {
+                record
+                    .evidence()
+                    .native_checkpoint(&native)
+                    .unwrap()
+                    .fresh_source()
+                    .scoped_document()
+                    == f.native.inspect(&f.fresh).unwrap().scoped_document()
+            }));
         assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
         assert_eq!(
             fs::read_to_string(f.native_root.path().join("telemetry.json")).unwrap(),
@@ -371,18 +403,21 @@ fn io_each_error_boundary_keeps_recoverable_state() {
                 Ok(())
             })
             .is_err());
-        let outcome = f.store().recover(JournalOrigin::Live).unwrap();
+        let outcome = archive_and_confirm(&f, &f.store());
         assert_eq!(
             outcome,
             if point == WritePoint::JournalRemoved {
-                SwitchOutcome::NothingPending
+                ArchiveOutcome::NothingPending
             } else {
-                SwitchOutcome::Recovered
+                ArchiveOutcome::Archived
             }
         );
         let committed = matches!(
             point,
-            WritePoint::Committed | WritePoint::RecoveryRecord | WritePoint::JournalRemoved
+            WritePoint::NativeCredentials
+                | WritePoint::Committed
+                | WritePoint::RecoveryRecord
+                | WritePoint::JournalRemoved
         );
         assert!(
             f.native.inspect(&f.current()).unwrap().identity()
@@ -391,15 +426,17 @@ fn io_each_error_boundary_keeps_recoverable_state() {
     }
 }
 #[test]
-fn io_conflicting_new_source_profile_or_touched_native_key_preserves_pending_journal() {
+fn io_archive_keeps_newer_profiles_and_unknown_native_values() {
     for change_profile in [false, true] {
         let f = Fixture::new(OAuthFamily::Zai);
         assert!(f
             .store()
-            .switch_with_hook(&f.b, &mut |p| if p == WritePoint::NativeCredentials {
-                Err(TransactionError::Storage)
-            } else {
-                Ok(())
+            .switch_with_hook(&f.b, &mut |p| {
+                if p == WritePoint::NativeCredentials {
+                    Err(TransactionError::Storage)
+                } else {
+                    Ok(())
+                }
             })
             .is_err());
         if change_profile {
@@ -428,7 +465,19 @@ fn io_conflicting_new_source_profile_or_touched_native_key_preserves_pending_jou
         }
         let current = fs::read(f.native_root.path().join("credentials.json")).unwrap();
         let profiles = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
-        assert!(f.store().recover(JournalOrigin::Live).is_err());
+        let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+        local
+            .archive_pending(&local.status().unwrap().revision)
+            .unwrap();
+        let status = local.status().unwrap();
+        let result = f
+            .store()
+            .confirm_archived(&status.records[0].id, &status.revision);
+        if change_profile {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert!(result.is_err());
+        }
         assert_eq!(
             fs::read(f.native_root.path().join("credentials.json")).unwrap(),
             current
@@ -437,9 +486,11 @@ fn io_conflicting_new_source_profile_or_touched_native_key_preserves_pending_jou
             fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
             profiles
         );
-        assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
+        assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+        assert_eq!(local.status().unwrap().native_unconfirmed, !change_profile);
     }
 }
+
 #[test]
 fn io_native_revision_change_before_publication_does_not_overwrite_other_writer() {
     let f = Fixture::new(OAuthFamily::Zai);
@@ -457,7 +508,7 @@ fn io_native_revision_change_before_publication_does_not_overwrite_other_writer(
         fs::read(f.native_root.path().join("credentials.json")).unwrap(),
         altered
     );
-    f.store().recover(JournalOrigin::Live).unwrap();
+    archive_and_confirm(&f, &f.store());
     assert_eq!(f.current().get("future:other-writer"), Some("preserve"));
 }
 #[cfg(unix)]
@@ -571,7 +622,7 @@ fn io_same_bytes_replacement_of_any_observed_file_fails_identity_cas() {
         assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
         // Recovery is a new operation: it validates current identities, rather
         // than insisting on the inode we replaced before the crash/error.
-        f.store().recover(JournalOrigin::Live).unwrap();
+        archive_and_confirm(&f, &f.store());
     }
 }
 
@@ -608,7 +659,7 @@ fn io_publication_gate_blocks_restarted_writer_without_native_write() {
     assert!(f.current() == f.fresh);
     assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
     running.set(false);
-    store.recover(JournalOrigin::Live).unwrap();
+    archive_and_confirm(&f, &store);
 }
 #[test]
 fn io_postcommit_gate_failure_keeps_committed_marker_and_target() {
@@ -640,47 +691,46 @@ fn io_postcommit_gate_failure_keeps_committed_marker_and_target() {
     let current = f.current();
     assert!(f.native.inspect(&current).unwrap().identity() == &f.b);
     changed.set(false);
-    store.recover(JournalOrigin::Live).unwrap();
+    archive_and_confirm(&f, &store);
     assert!(f.current() == current);
 }
 #[test]
-fn io_committed_recovery_cleanup_failure_keeps_commit_classification() {
+fn io_archive_cleanup_error_retains_authenticated_record_and_native_image() {
     let f = Fixture::new(OAuthFamily::Zai);
-    let interrupted = f.store().switch_with_hook(&f.b, &mut |point| {
-        if point == WritePoint::Committed {
-            return Err(TransactionError::Storage);
-        }
-        Ok(())
-    });
-    assert_eq!(interrupted, Err(TransactionError::CommittedNeedsCleanup));
-    let current = f.current();
-    let calls = std::cell::Cell::new(0);
-    let gate = || {
-        calls.set(calls.get() + 1);
-        if calls.get() == 4 {
-            Err(BlockedReason::AppRunning)
-        } else {
-            Ok(())
-        }
-    };
-    let store = AccountStore::new_guarded(
-        f.native_root.path(),
-        f.vault_root.path(),
-        &f.vault,
-        &f.native,
-        ADMITTED,
-        &gate,
-    )
-    .unwrap();
     assert_eq!(
-        store.recover(JournalOrigin::Live),
+        f.store().switch_with_hook(&f.b, &mut |point| {
+            if point == WritePoint::Committed {
+                Err(TransactionError::Storage)
+            } else {
+                Ok(())
+            }
+        }),
         Err(TransactionError::CommittedNeedsCleanup)
     );
-    assert!(f.current() == current);
-    assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
-    store.recover(JournalOrigin::Live).unwrap();
-    assert!(f.current() == current);
+    let current = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    assert_eq!(
+        local.archive_with_hook(&local.status().unwrap().revision, &mut |point| {
+            if point == ArchivePoint::JournalRemoved {
+                Err(TransactionError::Storage)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(TransactionError::ArchiveNeedsCleanup)
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    assert!(local.status().unwrap().native_unconfirmed);
+    assert_eq!(
+        local.archive_pending(&local.status().unwrap().revision),
+        Ok(ArchiveOutcome::NothingPending)
+    );
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        current
+    );
 }
+
 #[test]
 fn io_visible_committed_marker_reconciliation_does_not_read_native_credentials() {
     let f = Fixture::new(OAuthFamily::Zai);
@@ -794,7 +844,10 @@ fn io_capture_rejects_stale_scope_pending_and_unknown_catalog_without_writes() {
         b"synthetic-pending",
     )
     .unwrap();
-    assert!(f.store().status().unwrap().pending);
+    assert!(matches!(
+        f.store().status(),
+        Err(TransactionError::Recovery(_))
+    ));
     assert_eq!(
         f.store().capture(OAuthFamily::Zai, &revision),
         Err(TransactionError::RecoveryRequired)
@@ -908,4 +961,721 @@ fn io_profile_publication_rechecks_native_source_after_the_final_admission_probe
             operation == "switch"
         );
     }
+}
+
+fn leave_captured_journal(f: &Fixture) -> JournalEvidence {
+    assert!(f
+        .store()
+        .switch_with_hook(&f.b, &mut |point| {
+            if point == WritePoint::Captured {
+                Err(TransactionError::Storage)
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+    JournalEvidence::open_journal(
+        &fs::read_to_string(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        &f.vault,
+    )
+    .unwrap()
+}
+#[test]
+fn vault_only_archive_retains_evidence_without_any_native_file_or_cipher() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let evidence = leave_captured_journal(&f);
+    let profile = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let status = local.status().unwrap();
+    assert!(status.pending);
+    assert_eq!(
+        local.archive_pending(&status.revision),
+        Ok(ArchiveOutcome::Archived)
+    );
+    let status = local.status().unwrap();
+    assert!(!status.pending && status.native_unconfirmed);
+    assert_eq!(status.records.len(), 1);
+    assert_eq!(status.records[0].id, evidence.id());
+    let ledger = RecoveryLedger::open(
+        &fs::read_to_string(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        &f.vault,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.archived().next().unwrap().evidence().raw_payload(),
+        evidence.raw_payload()
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        profile
+    );
+    assert!(!f.native_root.path().join("credentials.json").exists());
+    assert_eq!(
+        local.archive_pending(&status.revision),
+        Ok(ArchiveOutcome::NothingPending)
+    );
+    assert_eq!(
+        local.delete_confirmed(evidence.id(), &status.revision),
+        Err(TransactionError::Recovery(RecoveryError::Unconfirmed))
+    );
+}
+#[test]
+fn vault_only_archive_cas_keeps_journal_when_published_record_or_source_is_replaced() {
+    for replace in [Role::Recovery, Role::Journal] {
+        let f = Fixture::new(OAuthFamily::Zai);
+        leave_captured_journal(&f);
+        let native = f.current();
+        let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+        let status = local.status().unwrap();
+        let result = local.archive_with_hook(&status.revision, &mut |point| {
+            if point == ArchivePoint::RecoveryPublished {
+                let path = f.vault_root.path().join(replace.name());
+                let bytes = fs::read(&path).unwrap();
+                write_durable(&path, &bytes).unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(TransactionError::SourceChanged));
+        assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
+        assert!(f.current() == native);
+    }
+}
+#[test]
+fn vault_only_archive_rejects_stale_revision_and_unknown_existing_record_without_loss() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    leave_captured_journal(&f);
+    let journal = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    assert_eq!(
+        local.archive_pending("stale"),
+        Err(TransactionError::RecoveryChanged)
+    );
+    write_durable(
+        &f.vault_root.path().join(RECOVERY_FILE),
+        b"unsupported protected format",
+    )
+    .unwrap();
+    assert!(local.status().is_err());
+    assert!(local.archive_pending("stale").is_err());
+    assert_eq!(
+        fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        journal
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        b"unsupported protected format"
+    );
+}
+
+#[test]
+fn io_unconfirmed_archive_blocks_native_operations_before_native_read() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    leave_captured_journal(&f);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    local
+        .archive_pending(&local.status().unwrap().revision)
+        .unwrap();
+    fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+    assert_eq!(
+        f.store().capture(OAuthFamily::Zai, &saved_revision(&f)),
+        Err(TransactionError::NativeUnconfirmed)
+    );
+    assert_eq!(
+        f.store()
+            .switch_saved(&f.b.opaque_id(), &saved_revision(&f), OAuthFamily::Zai),
+        Err(TransactionError::NativeUnconfirmed)
+    );
+    assert_eq!(
+        f.store().switch(&f.a),
+        Err(TransactionError::NativeUnconfirmed)
+    );
+    assert!(!f.native_root.path().join("credentials.json").exists());
+}
+#[test]
+fn io_switch_reserves_archive_capacity_before_any_publication() {
+    use super::super::recovery::RecoveryConfirmation;
+    let f = Fixture::new(OAuthFamily::Zai);
+    let mut ledger = RecoveryLedger::default();
+    for _ in 0..2 {
+        let evidence = leave_captured_journal(&f);
+        let proof = RecoveryConfirmation::from_image(&evidence, &f.current(), &f.native).unwrap();
+        let id = ledger.archive(evidence).unwrap();
+        ledger.confirm(&id, proof).unwrap();
+        fs::remove_file(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    }
+    write_durable(
+        &f.vault_root.path().join(RECOVERY_FILE),
+        ledger.seal(&f.vault).unwrap().as_bytes(),
+    )
+    .unwrap();
+    let profile = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let native = f.current();
+    assert_eq!(
+        f.store()
+            .switch_saved(&f.b.opaque_id(), &saved_revision(&f), OAuthFamily::Zai),
+        Err(TransactionError::Recovery(RecoveryError::ArchiveFull))
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        profile
+    );
+    assert!(f.current() == native);
+}
+
+#[test]
+fn io_archive_confirmation_preserves_native_and_allows_only_whole_known_images() {
+    for mix in [false, true] {
+        let f = Fixture::new(OAuthFamily::Zai);
+        let evidence = leave_captured_journal(&f);
+        let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+        local
+            .archive_pending(&local.status().unwrap().revision)
+            .unwrap();
+        if mix {
+            let target = f.catalog().get(&f.b).unwrap().scoped_document();
+            let changed = replace(
+                &target,
+                "oauth:zai:access_token",
+                f.fresh.get("oauth:zai:access_token").unwrap().to_owned(),
+            );
+            write_durable(
+                &f.native_root.path().join("credentials.json"),
+                &changed.to_bytes().unwrap(),
+            )
+            .unwrap();
+        }
+        let native = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+        let status = local.status().unwrap();
+        let result = f.store().confirm_archived(evidence.id(), &status.revision);
+        if mix {
+            assert_eq!(
+                result,
+                Err(TransactionError::Recovery(
+                    RecoveryError::ConfirmationMismatch
+                ))
+            );
+            assert!(local.status().unwrap().native_unconfirmed);
+        } else {
+            assert_eq!(result, Ok(()));
+            let confirmed = local.status().unwrap();
+            assert!(!confirmed.native_unconfirmed);
+            assert_eq!(
+                local.delete_confirmed(evidence.id(), &status.revision),
+                Err(TransactionError::RecoveryChanged)
+            );
+            assert_eq!(
+                local.delete_confirmed(evidence.id(), &confirmed.revision),
+                Ok(())
+            );
+            assert!(!f.vault_root.path().join(RECOVERY_FILE).exists());
+        }
+        assert_eq!(
+            fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+            native
+        );
+    }
+}
+#[test]
+fn io_explicit_recapture_persists_new_login_before_confirmation_without_native_writes() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let evidence = leave_captured_journal(&f);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    local
+        .archive_pending(&local.status().unwrap().revision)
+        .unwrap();
+    let current = native_document(OAuthFamily::Zai, "c", "official-relogin");
+    let identity = f.native.inspect(&current).unwrap().identity().clone();
+    write_durable(
+        &f.native_root.path().join("credentials.json"),
+        &current.to_bytes().unwrap(),
+    )
+    .unwrap();
+    let revision = local.status().unwrap().revision;
+    assert_eq!(
+        f.store().capture_and_confirm(
+            evidence.id(),
+            &revision,
+            &saved_revision(&f),
+            OAuthFamily::Zai
+        ),
+        Ok(CaptureOutcome::Saved)
+    );
+    assert!(f.current() == current);
+    assert!(
+        f.catalog().get(&identity).unwrap().scoped_document()
+            == f.native.inspect(&current).unwrap().scoped_document()
+    );
+    assert!(!local.status().unwrap().native_unconfirmed);
+    let ledger = RecoveryLedger::open(
+        &fs::read_to_string(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        &f.vault,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.archived().next().unwrap().evidence().raw_payload(),
+        evidence.raw_payload()
+    );
+}
+
+#[test]
+fn io_old_journal_after_newer_completion_never_replays_native_or_overwrites_latest() {
+    for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+        let f = Fixture::new(family);
+        let old = leave_captured_journal(&f);
+        let encoded = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+        archive_and_confirm(&f, &f.store());
+        f.store().switch(&f.b).unwrap();
+        let before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+        let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+        let latest = local
+            .status()
+            .unwrap()
+            .records
+            .into_iter()
+            .find(|record| record.latest_completed)
+            .unwrap()
+            .id;
+        write_durable(&f.vault_root.path().join(JOURNAL_FILE), &encoded).unwrap();
+        local
+            .archive_pending(&local.status().unwrap().revision)
+            .unwrap();
+        let status = local.status().unwrap();
+        assert!(status.native_unconfirmed);
+        assert_eq!(status.records.len(), 2);
+        assert!(status
+            .records
+            .iter()
+            .any(|record| record.latest_completed && record.id == latest));
+        f.store()
+            .confirm_archived(old.id(), &status.revision)
+            .unwrap();
+        assert_eq!(
+            fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+            before
+        );
+        assert!(f.native.inspect(&f.current()).unwrap().identity() == &f.b);
+        assert_eq!(local.status().unwrap().records.len(), 2);
+    }
+}
+
+#[test]
+fn io_cleanup_is_selected_revision_bound_and_cancel_is_read_only() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let first = leave_captured_journal(&f);
+    archive_and_confirm(&f, &f.store());
+    let second = leave_captured_journal(&f);
+    archive_and_confirm(&f, &f.store());
+    let before = fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap();
+    let preview = local.status().unwrap();
+    // A dismissed future UI confirmation dispatches no deletion. The only
+    // preview operation is read-only, and stale/unknown selections cannot clear.
+    assert_eq!(local.status().unwrap().revision, preview.revision);
+    assert_eq!(
+        fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        before
+    );
+    assert_eq!(
+        local.delete_confirmed("unknown-record", &preview.revision),
+        Err(TransactionError::Recovery(RecoveryError::NotFound))
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        before
+    );
+    local
+        .delete_confirmed(first.id(), &preview.revision)
+        .unwrap();
+    let after = local.status().unwrap();
+    assert_eq!(after.records.len(), 1);
+    assert_eq!(after.records[0].id, second.id());
+    assert_eq!(
+        local.delete_confirmed(second.id(), &preview.revision),
+        Err(TransactionError::RecoveryChanged)
+    );
+    assert_eq!(f.store().switch(&f.b), Ok(SwitchOutcome::Switched));
+    let status = local.status().unwrap();
+    assert_eq!(status.records.len(), 2);
+    assert!(status
+        .records
+        .iter()
+        .any(|record| record.id == second.id() && !record.latest_completed));
+    assert!(status.records.iter().any(|record| record.latest_completed));
+}
+
+#[test]
+fn io_recapture_final_native_cas_leaves_evidence_unconfirmed_and_saved_profile_intact() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let evidence = leave_captured_journal(&f);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    local
+        .archive_pending(&local.status().unwrap().revision)
+        .unwrap();
+    let current = native_document(OAuthFamily::Zai, "c", "official-relogin");
+    let identity = f.native.inspect(&current).unwrap().identity().clone();
+    write_durable(
+        &f.native_root.path().join("credentials.json"),
+        &current.to_bytes().unwrap(),
+    )
+    .unwrap();
+    let original_profile = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let changed = replace(&current, "future:concurrent-writer", "changed".into())
+        .to_bytes()
+        .unwrap();
+    let modified = std::cell::Cell::new(false);
+    let gate = || {
+        if !modified.get()
+            && fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap() != original_profile
+        {
+            write_durable(&f.native_root.path().join("credentials.json"), &changed).unwrap();
+            modified.set(true);
+        }
+        Ok(())
+    };
+    let store = AccountStore::new_guarded(
+        f.native_root.path(),
+        f.vault_root.path(),
+        &f.vault,
+        &f.native,
+        ADMITTED,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(
+        store.capture_and_confirm(
+            evidence.id(),
+            &local.status().unwrap().revision,
+            &saved_revision(&f),
+            OAuthFamily::Zai
+        ),
+        Err(TransactionError::SourceChanged)
+    );
+    assert!(modified.get());
+    assert!(f.catalog().get(&identity).is_some());
+    assert!(local.status().unwrap().native_unconfirmed);
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        changed
+    );
+}
+
+#[test]
+#[ignore = "invoked only by the synthetic archive subprocess matrix"]
+fn synthetic_archive_crash_child() {
+    use std::io::Read;
+    assert_eq!(
+        std::env::var("LOONGPORT_ZCODE_SYNTHETIC_CHILD").as_deref(),
+        Ok("1")
+    );
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(16384)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let input: ChildInput = serde_json::from_slice(&bytes).unwrap();
+    let vault = VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap();
+    let local = VaultAccountStore::new(&input.vault_root, &vault).unwrap();
+    local
+        .archive_with_hook(&local.status().unwrap().revision, &mut |point| {
+            if (point == ArchivePoint::RecoveryPublished && input.checkpoint == 0)
+                || (point == ArchivePoint::JournalRemoved && input.checkpoint == 1)
+            {
+                std::process::exit(74);
+            }
+            Ok(())
+        })
+        .unwrap();
+    panic!("requested archive crash point was not reached");
+}
+
+#[test]
+fn io_archive_real_process_crashes_preserve_evidence_and_repeat_without_native_reads() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for checkpoint in 0..2 {
+        let f = Fixture::new(OAuthFamily::Zai);
+        let evidence = leave_captured_journal(&f);
+        fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+        let input = ChildInput {
+            native_root: f.native_root.path().into(),
+            vault_root: f.vault_root.path().into(),
+            metadata: f.vault.metadata().clone(),
+            key: f.vault.export_key().to_vec(),
+            checkpoint,
+        };
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "zcode_accounts::transaction::tests::synthetic_archive_crash_child",
+                "--nocapture",
+            ])
+            .env("LOONGPORT_ZCODE_SYNTHETIC_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&input).unwrap());
+        child.stdin.take().unwrap().write_all(&bytes).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(74),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let vault =
+            VaultContext::from_key(f.vault.metadata().clone(), f.vault.export_key()).unwrap();
+        let local = VaultAccountStore::new(f.vault_root.path(), &vault).unwrap();
+        assert_eq!(local.status().unwrap().pending, checkpoint == 0);
+        assert!(local.status().unwrap().native_unconfirmed);
+        assert_eq!(
+            local.archive_pending(&local.status().unwrap().revision),
+            Ok(if checkpoint == 0 {
+                ArchiveOutcome::Archived
+            } else {
+                ArchiveOutcome::NothingPending
+            })
+        );
+        let ledger = RecoveryLedger::open(
+            &fs::read_to_string(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+            &vault,
+        )
+        .unwrap();
+        assert_eq!(ledger.archived().count(), 1);
+        assert_eq!(
+            ledger.archived().next().unwrap().evidence().raw_payload(),
+            evidence.raw_payload()
+        );
+        assert!(!f.native_root.path().join("credentials.json").exists());
+    }
+}
+
+#[test]
+fn io_full_archive_can_clear_only_confirmed_old_record_while_preserving_pending_journal() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let mut journals = Vec::new();
+    for _ in 0..3 {
+        let evidence = leave_captured_journal(&f);
+        let encoded = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+        journals.push((evidence, encoded));
+        fs::remove_file(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    }
+    let mut ledger = RecoveryLedger::default();
+    for (evidence, _) in &journals[..2] {
+        let proof = RecoveryConfirmation::from_image(evidence, &f.current(), &f.native).unwrap();
+        let id = ledger.archive(evidence.clone()).unwrap();
+        ledger.confirm(&id, proof).unwrap();
+    }
+    write_durable(
+        &f.vault_root.path().join(RECOVERY_FILE),
+        ledger.seal(&f.vault).unwrap().as_bytes(),
+    )
+    .unwrap();
+    write_durable(&f.vault_root.path().join(JOURNAL_FILE), &journals[2].1).unwrap();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let status = local.status().unwrap();
+    assert_eq!(
+        local.archive_pending(&status.revision),
+        Err(TransactionError::Recovery(RecoveryError::ArchiveFull))
+    );
+    local
+        .delete_confirmed(journals[0].0.id(), &status.revision)
+        .unwrap();
+    assert_eq!(
+        fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        journals[2].1
+    );
+    let freed = local.status().unwrap();
+    assert!(freed.pending && freed.native_unconfirmed);
+    assert_eq!(freed.records.len(), 1);
+    assert_eq!(freed.records[0].id, journals[1].0.id());
+    local.archive_pending(&freed.revision).unwrap();
+    let archived = local.status().unwrap();
+    assert_eq!(archived.records.len(), 2);
+    assert_eq!(
+        local.delete_confirmed(journals[2].0.id(), &archived.revision),
+        Err(TransactionError::Recovery(RecoveryError::Unconfirmed))
+    );
+    assert!(f.current() == f.fresh);
+}
+
+#[test]
+fn io_confirmed_cleanup_checks_original_journal_identity_and_reappeared_evidence() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let evidence = leave_captured_journal(&f);
+    let original_journal = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    archive_and_confirm(&f, &f.store());
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    write_durable(&f.vault_root.path().join(JOURNAL_FILE), &original_journal).unwrap();
+    let status = local.status().unwrap();
+    assert_eq!(status.records[0].disposition, "native-unconfirmed");
+    assert_eq!(
+        local.delete_confirmed(evidence.id(), &status.revision),
+        Err(TransactionError::Recovery(RecoveryError::Unconfirmed))
+    );
+    archive_and_confirm(&f, &f.store());
+    let other = leave_captured_journal(&f);
+    assert_ne!(other.id(), evidence.id());
+    let journal = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    let recovery = fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap();
+    let status = local.status().unwrap();
+    let pinned = fs::File::open(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    assert_eq!(
+        local.delete_with_hook(evidence.id(), &status.revision, &mut || {
+            write_durable(&f.vault_root.path().join(JOURNAL_FILE), &journal).unwrap();
+            Ok(())
+        }),
+        Err(TransactionError::SourceChanged)
+    );
+    drop(pinned);
+    assert_eq!(
+        fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        journal
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(RECOVERY_FILE)).unwrap(),
+        recovery
+    );
+}
+
+#[test]
+fn io_full_unconfirmed_archive_allows_explicit_recapture_then_selected_cleanup_with_pending_journal(
+) {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let mut journals = Vec::new();
+    for _ in 0..3 {
+        let evidence = leave_captured_journal(&f);
+        journals.push((
+            evidence,
+            fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        ));
+        fs::remove_file(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+    }
+    let mut ledger = RecoveryLedger::default();
+    for (evidence, _) in &journals[..2] {
+        ledger.archive(evidence.clone()).unwrap();
+    }
+    write_durable(
+        &f.vault_root.path().join(RECOVERY_FILE),
+        ledger.seal(&f.vault).unwrap().as_bytes(),
+    )
+    .unwrap();
+    write_durable(&f.vault_root.path().join(JOURNAL_FILE), &journals[2].1).unwrap();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let status = local.status().unwrap();
+    assert_eq!(
+        local.archive_pending(&status.revision),
+        Err(TransactionError::Recovery(RecoveryError::ArchiveFull))
+    );
+    assert_eq!(
+        local.delete_confirmed(journals[0].0.id(), &status.revision),
+        Err(TransactionError::Recovery(RecoveryError::Unconfirmed))
+    );
+    let current = native_document(OAuthFamily::Zai, "c", "official-relogin");
+    write_durable(
+        &f.native_root.path().join("credentials.json"),
+        &current.to_bytes().unwrap(),
+    )
+    .unwrap();
+    f.store()
+        .capture_and_confirm(
+            journals[0].0.id(),
+            &status.revision,
+            &saved_revision(&f),
+            OAuthFamily::Zai,
+        )
+        .unwrap();
+    let captured = local.status().unwrap();
+    assert!(captured.pending && captured.native_unconfirmed);
+    assert_eq!(
+        fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap(),
+        journals[2].1
+    );
+    assert_eq!(
+        f.store().switch(&f.b),
+        Err(TransactionError::RecoveryRequired)
+    );
+    local
+        .delete_confirmed(journals[0].0.id(), &captured.revision)
+        .unwrap();
+    local
+        .archive_pending(&local.status().unwrap().revision)
+        .unwrap();
+    assert!(!local.status().unwrap().pending);
+    assert!(local.status().unwrap().native_unconfirmed);
+    assert!(f.current() == current);
+}
+
+#[test]
+fn io_ordinary_publications_recheck_journal_and_recovery_after_final_gate() {
+    let mut failures = Vec::new();
+    for operation in ["capture", "refresh", "switch"] {
+        for role in [Role::Journal, Role::Recovery] {
+            let f = Fixture::new(OAuthFamily::Zai);
+            let evidence = leave_captured_journal(&f);
+            let old_journal = fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+            fs::remove_file(f.vault_root.path().join(JOURNAL_FILE)).unwrap();
+            let mut ledger = RecoveryLedger::default();
+            ledger.archive(evidence).unwrap();
+            let restored_recovery = ledger.seal(&f.vault).unwrap().into_bytes();
+            if operation == "capture" {
+                let current = native_document(OAuthFamily::Zai, "c", "explicit-capture");
+                write_durable(
+                    &f.native_root.path().join("credentials.json"),
+                    &current.to_bytes().unwrap(),
+                )
+                .unwrap();
+            }
+            let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+            let profile_before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+            let revision = saved_revision(&f);
+            let calls = std::cell::Cell::new(0);
+            let gate = || {
+                calls.set(calls.get() + 1);
+                if calls.get() == if operation == "switch" { 7 } else { 4 } {
+                    let data = match role {
+                        Role::Recovery => restored_recovery.clone(),
+                        Role::Journal if operation == "switch" => {
+                            fs::read(f.vault_root.path().join(JOURNAL_FILE)).unwrap()
+                        }
+                        Role::Journal => old_journal.clone(),
+                        _ => unreachable!(),
+                    };
+                    write_durable(&f.vault_root.path().join(role.name()), &data).unwrap();
+                }
+                Ok(())
+            };
+            let store = AccountStore::new_guarded(
+                f.native_root.path(),
+                f.vault_root.path(),
+                &f.vault,
+                &f.native,
+                ADMITTED,
+                &gate,
+            )
+            .unwrap();
+            let result = match operation {
+                "capture" => store.capture(OAuthFamily::Zai, &revision).map(|_| ()),
+                "refresh" => store.switch(&f.a).map(|_| ()),
+                "switch" => store.switch(&f.b).map(|_| ()),
+                _ => unreachable!(),
+            };
+            let native_changed =
+                fs::read(f.native_root.path().join("credentials.json")).unwrap() != native_before;
+            let profile_changed =
+                fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap() != profile_before;
+            println!("{operation}/{}: result={result:?}, native_changed={native_changed}, profile_changed={profile_changed}", role.name());
+            if result != Err(TransactionError::SourceChanged)
+                || native_changed
+                || (operation != "switch" && profile_changed)
+            {
+                failures.push(format!("{operation}/{}: {result:?}, native_changed={native_changed}, profile_changed={profile_changed}", role.name()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("; "));
 }
