@@ -483,6 +483,10 @@ fn io_rejects_links_unsafe_modes_and_replaced_roots_without_writing() {
     }
     let f = Fixture::new(OAuthFamily::Zai);
     let store = f.store();
+    assert_eq!(
+        store.native_root_identity(),
+        root_identity(f.native_root.path()).unwrap()
+    );
     let moved = f.native_root.path().with_extension("moved");
     fs::rename(f.native_root.path(), &moved).unwrap();
     fs::create_dir(f.native_root.path()).unwrap();
@@ -554,7 +558,16 @@ fn io_same_bytes_replacement_of_any_observed_file_fails_identity_cas() {
             }
             Ok(())
         });
-        assert_eq!(result, Err(TransactionError::SourceChanged));
+        // Replacing the recovery record is detected after the durable commit;
+        // callers must retain that outcome while they reconcile the CAS failure.
+        assert_eq!(
+            result,
+            Err(if point == WritePoint::Committed {
+                TransactionError::CommittedNeedsCleanup
+            } else {
+                TransactionError::SourceChanged
+            })
+        );
         assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
         // Recovery is a new operation: it validates current identities, rather
         // than insisting on the inode we replaced before the crash/error.
@@ -623,13 +636,48 @@ fn io_postcommit_gate_failure_keeps_committed_marker_and_target() {
         }
         Ok(())
     });
-    assert_eq!(
-        result,
-        Err(TransactionError::Admission(BlockedReason::ContextChanged))
-    );
+    assert_eq!(result, Err(TransactionError::CommittedNeedsCleanup));
     let current = f.current();
     assert!(f.native.inspect(&current).unwrap().identity() == &f.b);
     changed.set(false);
+    store.recover(JournalOrigin::Live).unwrap();
+    assert!(f.current() == current);
+}
+#[test]
+fn io_committed_recovery_cleanup_failure_keeps_commit_classification() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let interrupted = f.store().switch_with_hook(&f.b, &mut |point| {
+        if point == WritePoint::Committed {
+            return Err(TransactionError::Storage);
+        }
+        Ok(())
+    });
+    assert_eq!(interrupted, Err(TransactionError::CommittedNeedsCleanup));
+    let current = f.current();
+    let calls = std::cell::Cell::new(0);
+    let gate = || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 4 {
+            Err(BlockedReason::AppRunning)
+        } else {
+            Ok(())
+        }
+    };
+    let store = AccountStore::new_guarded(
+        f.native_root.path(),
+        f.vault_root.path(),
+        &f.vault,
+        &f.native,
+        ADMITTED,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(
+        store.recover(JournalOrigin::Live),
+        Err(TransactionError::CommittedNeedsCleanup)
+    );
+    assert!(f.current() == current);
+    assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
     store.recover(JournalOrigin::Live).unwrap();
     assert!(f.current() == current);
 }

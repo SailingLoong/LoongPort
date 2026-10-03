@@ -35,6 +35,27 @@ fn distinct_settings_home_and_data_base_bind_one_explicit_standard_context() {
     context.cipher().unwrap();
 }
 #[test]
+fn data_base_path_uses_ecmascript_trim_exactly() {
+    for (setting, effective) in [
+        ("\u{feff}/synthetic/data\u{feff}", "/synthetic/data"),
+        ("/synthetic/data\u{0085}", "/synthetic/data\u{0085}"),
+    ] {
+        let mut input = observation();
+        input.credential_root = Path::new(effective).join(".zcode/v2");
+        input.settings = serde_json::to_vec(&serde_json::json!({
+            "dataBaseDir": setting,
+            "providerFamilyDomain": "zai",
+            "providerFamilyConnectionSelections": {"zai": {"kind": "individual-coding-plan"}}
+        }))
+        .unwrap();
+        let context = VerifiedContext::assess(input, &contracts()).unwrap();
+        assert_eq!(
+            context.native_root(),
+            Path::new(effective).join(".zcode/v2")
+        );
+    }
+}
+#[test]
 fn both_individual_families_and_start_plan_are_supported_without_guessing() {
     for (family, name) in [
         (OAuthFamily::Zai, "zai"),
@@ -121,6 +142,10 @@ fn settings_do_not_migrate_or_guess_legacy_missing_team_or_corrupt_selection() {
         ),
         (
             r#"{"providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"start-plan","kind":"team-coding-plan"}}}"#,
+            BlockedReason::SettingsInvalid,
+        ),
+        (
+            r#"{"dataBaseDir":" ","providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"start-plan"}}}"#,
             BlockedReason::SettingsInvalid,
         ),
         ("broken", BlockedReason::SettingsInvalid),
@@ -247,4 +272,14 @@ fn admitted_context_rejects_target_from_another_family_or_storage_scope() {
             Err(BlockedReason::TargetScopeMismatch)
         );
     }
+}
+
+#[test]
+fn admission_must_bind_the_root_opened_by_the_transaction() {
+    let context = VerifiedContext::assess(observation(), &contracts()).unwrap();
+    context.confirm_root([1, 2]).unwrap();
+    assert_eq!(
+        context.confirm_root([1, 999]),
+        Err(BlockedReason::ContextChanged)
+    );
 }

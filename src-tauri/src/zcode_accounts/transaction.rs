@@ -163,6 +163,10 @@ impl<'a> AccountStore<'a> {
             gate,
         })
     }
+    pub(super) fn native_root_identity(&self) -> [u64; 2] {
+        self.native_id
+    }
+
     pub(crate) fn switch(
         &self,
         target: &AccountIdentity,
@@ -201,7 +205,14 @@ impl<'a> AccountStore<'a> {
                 return Err(TransactionError::RecoveryRequired)
             }
         }
-        self.finish(&checkpoint, &encoded, recovery.as_ref(), &mut |_| Ok(()))?;
+        self.finish(&checkpoint, &encoded, recovery.as_ref(), &mut |_| Ok(()))
+            .map_err(|error| {
+                if matches!(outcome, RecoveryOutcome::CleanupOnly) {
+                    TransactionError::CommittedNeedsCleanup
+                } else {
+                    error
+                }
+            })?;
         Ok(SwitchOutcome::Recovered)
     }
     fn switch_with_hook(
@@ -292,7 +303,10 @@ impl<'a> AccountStore<'a> {
             return Err(TransactionError::RecoveryRequired);
         }
         let committed = published?;
-        self.finish(&checkpoint, &committed, recovery.as_ref(), hook)?;
+        // Native publication and its COMMITTED marker are confirmed. Cleanup or
+        // acknowledgment failure cannot be reported as an uncommitted admission error.
+        self.finish(&checkpoint, &committed, recovery.as_ref(), hook)
+            .map_err(|_| TransactionError::CommittedNeedsCleanup)?;
         Ok(SwitchOutcome::Switched)
     }
     fn preserve_fresh_source(&self, checkpoint: &SwitchCheckpoint) -> Result<(), TransactionError> {

@@ -7,6 +7,7 @@ use super::super::native::tests::native_document_with_context;
 use super::*;
 use crate::config_file_io::{ensure_private_directory, write_durable};
 use crate::secrets::{session::SecretSession, testing::MemoryKeyStore};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -88,8 +89,27 @@ impl Fixture {
             native_gate_passed: true,
         }];
         let home_text = home.to_str().unwrap().to_owned();
-        let observation=ContextObservation{install,credential_root:native_root.clone(),settings_file:home.join(".zcode/v2/setting.json"),root_identity:[1,2],settings_identity:[1,3],home:home_text.clone(),settings_home:home_text.clone(),bootstrap_home:home_text.clone(),username:"synthetic-user".into(),standard_desktop_launch:true,key_choice:KeyContextChoice::ExplicitStandard,writers:WriterState::Stopped,
-            settings:serde_json::to_vec(&serde_json::json!({"dataBaseDir":data,"providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"individual-coding-plan"}}})).unwrap()};
+        let metadata = std::fs::metadata(&native_root).unwrap();
+        let observation = ContextObservation {
+            install,
+            credential_root: native_root.clone(),
+            settings_file: home.join(".zcode/v2/setting.json"),
+            root_identity: [metadata.dev(), metadata.ino()],
+            settings_identity: [1, 3],
+            home: home_text.clone(),
+            settings_home: home_text.clone(),
+            bootstrap_home: home_text.clone(),
+            username: "synthetic-user".into(),
+            standard_desktop_launch: true,
+            key_choice: KeyContextChoice::ExplicitStandard,
+            writers: WriterState::Stopped,
+            settings: serde_json::to_vec(&serde_json::json!({
+                "dataBaseDir": data,
+                "providerFamilyDomain": "zai",
+                "providerFamilyConnectionSelections": {"zai": {"kind": "individual-coding-plan"}}
+            }))
+            .unwrap(),
+        };
         let context = VerifiedContext::assess(observation.clone(), &contracts).unwrap();
         let secret = zeroize::Zeroizing::new(format!(
             "zcode-credential-fallback:darwin:{home_text}:synthetic-user"
@@ -216,6 +236,22 @@ async fn runtime_rejects_unverified_context_before_native_credentials_are_read()
         Err(RuntimeError::Blocked(BlockedReason::UnsupportedBuild))
     );
     assert!(!f.native_root.join("credentials.json").exists());
+    {
+        let mut observation = f.probe.observation.lock().unwrap();
+        observation.install.artifact_sha256 = [7; 32];
+        observation.root_identity[1] ^= 1;
+    }
+    assert_eq!(
+        switch_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            f.b.clone()
+        )
+        .await,
+        Err(RuntimeError::Blocked(BlockedReason::ContextChanged))
+    );
+    assert!(!f.native_root.join("credentials.json").exists());
 }
 #[tokio::test]
 #[serial_test::serial]
@@ -270,5 +306,21 @@ async fn runtime_caller_cancellation_does_not_release_owner_before_blocking_work
     )
     .await
     .unwrap();
-    assert!(f.current() != f.fresh);
+    let context =
+        VerifiedContext::assess(f.probe.observation.lock().unwrap().clone(), &f.contracts).unwrap();
+    assert!(
+        context
+            .cipher()
+            .unwrap()
+            .inspect(&f.current())
+            .unwrap()
+            .identity()
+            == &f.b
+    );
+    assert!(!f
+        .db
+        .secret_session()
+        .root()
+        .join(crate::secrets::owned_file::JOURNAL_FILE)
+        .exists());
 }

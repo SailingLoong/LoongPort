@@ -1,6 +1,6 @@
 //! ZCode-specific admission facts. No filesystem, environment, process or credential reads.
 //! Observations come from the backend probe; none of these types are IPC inputs.
-use super::core::{AccountIdentity, OAuthFamily, StrictRecord};
+use super::core::{js_trim, AccountIdentity, OAuthFamily, StrictRecord};
 use super::native::NativeCipher;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
@@ -165,7 +165,6 @@ impl VerifiedContext {
         contracts: &[ContractEntry],
     ) -> Result<Self, BlockedReason> {
         let settings_bytes = Zeroizing::new(std::mem::take(&mut observation.settings));
-        let settings_revision = Sha256::digest(&*settings_bytes).into();
         if observation.install.platform != Platform::MacOs {
             return Err(BlockedReason::UnsupportedPlatform);
         }
@@ -205,12 +204,11 @@ impl VerifiedContext {
         }
         let settings: NativeSettings =
             serde_json::from_slice(&settings_bytes).map_err(|_| BlockedReason::SettingsInvalid)?;
-        let data_base = settings
-            .data_base_dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|base| !base.is_empty())
-            .unwrap_or(&observation.home);
+        let data_base = match settings.data_base_dir.as_deref() {
+            Some(base) if !js_trim(base).is_empty() => js_trim(base),
+            Some(_) => return Err(BlockedReason::SettingsInvalid),
+            None => &observation.home,
+        };
         if data_base.contains('\0')
             || !absolute_path(Path::new(data_base))
             || observation.credential_root != Path::new(data_base).join(".zcode/v2")
@@ -251,6 +249,7 @@ impl VerifiedContext {
         ))
         .map_err(|_| BlockedReason::RootUnverified)?;
         let context_id = URL_SAFE_NO_PAD.encode(Sha256::digest(identity));
+        let settings_revision = Sha256::digest(&*settings_bytes).into();
         Ok(Self {
             observation,
             family,
@@ -274,6 +273,13 @@ impl VerifiedContext {
     pub(super) fn accept_target(&self, target: &AccountIdentity) -> Result<(), BlockedReason> {
         if !target.matches_scope(&self.context_id, self.family) {
             return Err(BlockedReason::TargetScopeMismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn confirm_root(&self, actual: [u64; 2]) -> Result<(), BlockedReason> {
+        if actual != self.observation.root_identity {
+            return Err(BlockedReason::ContextChanged);
         }
         Ok(())
     }
