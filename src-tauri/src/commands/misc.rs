@@ -3513,6 +3513,7 @@ fn wait_child_output(
 
 /// Run one already-discovered installation with the shared bounded process and
 /// pipe cleanup. Fixed metadata arguments do not invoke the normal tool locator.
+#[cfg(any(not(test), unix))]
 pub(crate) fn run_tool_at_path_with_timeout(
     path: &Path,
     args: &[&str],

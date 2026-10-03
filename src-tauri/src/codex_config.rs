@@ -2305,6 +2305,7 @@ const CODEX_CLI_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_mil
 #[cfg(not(test))]
 const CODEX_CLI_SCAN_LIMIT: std::time::Duration = std::time::Duration::from_secs(6);
 
+#[cfg(any(not(test), unix))]
 fn probe_codex_cli_sources(
     candidates: &[PathBuf],
     per_candidate: std::time::Duration,
