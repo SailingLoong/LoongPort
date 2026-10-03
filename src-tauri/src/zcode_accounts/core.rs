@@ -19,6 +19,10 @@ pub enum CoreError {
     InvalidDocument,
     DocumentTooLarge,
     InvalidIdentity,
+    MissingSessionCredential,
+    DifferentContext,
+    DifferentFamily,
+    SourceChanged,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -36,6 +40,14 @@ impl CredentialDocument {
 
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CoreError> {
+        let bytes = serde_json::to_vec(&self.0).map_err(|_| CoreError::InvalidDocument)?;
+        if bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(CoreError::DocumentTooLarge);
+        }
+        Ok(bytes)
     }
 }
 
@@ -107,6 +119,96 @@ impl AccountIdentity {
             format!("account-provider:coding-plan:account:{provider}-individual-coding-plan:account:{account}:api-key"),
             format!("account-provider:start-plan:account:{provider}-start-plan:account:{account}:api-key"),
         ]
+    }
+}
+
+#[derive(Clone)]
+pub struct AccountSnapshot {
+    identity: AccountIdentity,
+    values: BTreeMap<String, Option<String>>,
+}
+
+impl AccountSnapshot {
+    /// The caller must already have authenticated this document's native identity.
+    pub fn capture(
+        identity: AccountIdentity,
+        document: &CredentialDocument,
+    ) -> Result<Self, CoreError> {
+        let keys = identity.credential_keys();
+        for index in [0, 1, 3] {
+            if document.get(&keys[index]).is_none_or(str::is_empty) {
+                return Err(CoreError::MissingSessionCredential);
+            }
+        }
+        let values = keys
+            .into_iter()
+            .map(|key| {
+                let value = document.0.get(&key).cloned();
+                (key, value)
+            })
+            .collect();
+        Ok(Self { identity, values })
+    }
+}
+
+pub struct SwitchPlan {
+    source: CredentialDocument,
+    fresh_source: AccountSnapshot,
+    target: AccountSnapshot,
+}
+
+impl SwitchPlan {
+    pub fn prepare(
+        current: &CredentialDocument,
+        identity: &AccountIdentity,
+        target: &AccountSnapshot,
+    ) -> Result<Self, CoreError> {
+        if identity.context != target.identity.context {
+            return Err(CoreError::DifferentContext);
+        }
+        if identity.family != target.identity.family {
+            return Err(CoreError::DifferentFamily);
+        }
+        let fresh_source = AccountSnapshot::capture(identity.clone(), current)?;
+        Ok(Self {
+            source: current.clone(),
+            target: if identity == &target.identity {
+                fresh_source.clone()
+            } else {
+                target.clone()
+            },
+            fresh_source,
+        })
+    }
+
+    pub fn apply(&self, current: &CredentialDocument) -> Result<CredentialDocument, CoreError> {
+        if current != &self.source {
+            return Err(CoreError::SourceChanged);
+        }
+        if self.is_noop() {
+            return Ok(current.clone());
+        }
+        let mut result = current.clone();
+        for (key, value) in &self.target.values {
+            match value {
+                Some(value) => {
+                    result.0.insert(key.clone(), value.clone());
+                }
+                None => {
+                    result.0.remove(key);
+                }
+            }
+        }
+        result.to_bytes()?;
+        Ok(result)
+    }
+
+    pub fn fresh_source(&self) -> &AccountSnapshot {
+        &self.fresh_source
+    }
+
+    pub fn is_noop(&self) -> bool {
+        self.fresh_source.identity == self.target.identity
     }
 }
 
