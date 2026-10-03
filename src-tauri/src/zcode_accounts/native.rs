@@ -32,6 +32,9 @@ pub struct NativeCipher {
 }
 
 impl NativeCipher {
+    pub(super) fn context(&self) -> &str {
+        &self.context
+    }
     pub fn new(context: &str, secret: &str) -> Result<Self, NativeError> {
         if context.trim().is_empty() {
             return Err(NativeError::MissingContext);

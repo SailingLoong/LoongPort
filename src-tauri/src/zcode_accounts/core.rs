@@ -30,6 +30,9 @@ pub enum CoreError {
 pub struct CredentialDocument(BTreeMap<String, String>);
 
 impl CredentialDocument {
+    pub(super) fn entries(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
     pub fn parse(bytes: &[u8]) -> Result<Self, CoreError> {
         if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(CoreError::DocumentTooLarge);
@@ -52,6 +55,7 @@ impl CredentialDocument {
     }
 }
 
+#[derive(serde::Serialize)]
 pub(super) struct StrictRecord<T>(pub(super) BTreeMap<String, T>);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for StrictRecord<T> {
@@ -134,6 +138,15 @@ impl AccountSnapshot {
         &self.identity
     }
 
+    pub(super) fn scoped_document(&self) -> CredentialDocument {
+        CredentialDocument(
+            self.values
+                .iter()
+                .filter_map(|(key, value)| value.as_ref().map(|value| (key.clone(), value.clone())))
+                .collect(),
+        )
+    }
+
     /// The caller must already have authenticated this document's native identity.
     pub fn capture(
         identity: AccountIdentity,
@@ -163,6 +176,17 @@ pub struct SwitchPlan {
 }
 
 impl SwitchPlan {
+    pub(super) fn target_snapshot(&self) -> &AccountSnapshot {
+        &self.target
+    }
+
+    pub(super) fn target_preimages(&self) -> BTreeMap<String, Option<String>> {
+        self.target
+            .values
+            .keys()
+            .map(|key| (key.clone(), self.source.0.get(key).cloned()))
+            .collect()
+    }
     pub fn prepare(
         current: &CredentialDocument,
         identity: &AccountIdentity,
@@ -251,7 +275,10 @@ pub enum JournalOrigin {
     Restored,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum TransactionPhase {
     Prepared,
     Captured,

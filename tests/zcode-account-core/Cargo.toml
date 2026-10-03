@@ -6,15 +6,22 @@ publish = false
 
 # Compile the product source itself; this harness contains no second implementation.
 [lib]
-path = "../../src-tauri/src/zcode_accounts/mod.rs"
+path = "harness.rs"
 
 [dependencies]
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 base64 = "0.23"
 sha2 = "0.11"
 zeroize = "1.8"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+argon2 = { version = "0.6", features = ["zeroize"] }
+getrandom = "0.4"
+uuid = { version = "1.11", features = ["v4"] }
+thiserror = "2.0"
+toml = "1.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
