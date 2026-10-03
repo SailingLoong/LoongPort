@@ -9,6 +9,7 @@ The harness source graph is test-only and does not compile the Tauri application
 cargo test --locked --manifest-path tests/zcode-account-core/Cargo.toml -- --test-threads=2
 cargo clippy --locked --manifest-path tests/zcode-account-core/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path tests/zcode-account-core/Cargo.toml --check
+python3 tests/zcode-account-core/check-openat-abi.py
 ```
 
 Use an explicit `CARGO_TARGET_DIR` when disk space is limited. All account fixtures
@@ -48,3 +49,7 @@ Other cryptographic families match the existing product. No new key manager,
 login flow or environment-secret resolver is present. Contract facts come from
 `zai-org/ZCode@29628c9acdb81b703bbd4080c207a0e7ce5e276e`; no upstream source
 implementation is vendored. Existing license files remain unchanged.
+
+The ABI probe compiles the actual product openat call expression with synthetic
+16-bit and 32-bit mode_t declarations. It performs no file operation and does not
+replace the required macOS native compile/test gate.

@@ -316,7 +316,8 @@ fn open_owner(
                 directory_file.as_raw_fd(),
                 name.as_ptr(),
                 flags,
-                0o600 as libc::mode_t,
+                // C variadic arguments require integer promotion; macOS mode_t is u16.
+                0o600 as libc::c_uint,
             )
         };
         if fd < 0 {
@@ -464,6 +465,18 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(entries.len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(entries[0].path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(entries[0].path()).unwrap()).unwrap();
         assert_eq!(value["pid"], std::process::id());
