@@ -17,6 +17,10 @@ use std::sync::{
     Mutex,
 };
 
+tokio::task_local! {
+    pub(super) static OWNER_ENTERED: Arc<tokio::sync::Notify>;
+}
+
 struct FakeProbe {
     observation: Mutex<ContextObservation>,
     calls: AtomicUsize,
@@ -1004,12 +1008,13 @@ async fn runtime_vault_recovery_cancellation_retains_owner_while_session_is_lock
     acquired
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
-    // Reproduce a different operation owning the process-global mutex while
-    // this recovery request has only queued for it.
+    // A different operation may own the process-global mutex while this request
+    // is only queued. Its ownership must not satisfy target-worker readiness.
     let unrelated_owner = crate::services::sync_protocol::sync_mutex().lock().await;
     let db = f.db.clone();
     let (queued_send, queued) = tokio::sync::oneshot::channel();
-    let operation = tokio::spawn(async move {
+    let owner_entered = Arc::new(tokio::sync::Notify::new());
+    let operation = tokio::spawn(OWNER_ENTERED.scope(owner_entered.clone(), async move {
         let mut recovery = Box::pin(recovery_status(db));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(recovery.as_mut(), cx).is_pending());
@@ -1018,33 +1023,28 @@ async fn runtime_vault_recovery_cancellation_retains_owner_while_session_is_lock
         .await;
         queued_send.send(()).unwrap();
         recovery.await
-    });
+    }));
     queued.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if crate::services::sync_protocol::sync_mutex()
-                .try_lock()
-                .is_err()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+    let mut entered = Box::pin(owner_entered.notified());
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(entered.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
     })
-    .await
-    .unwrap();
+    .await;
+    drop(unrelated_owner);
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), entered).await;
     operation.abort();
     let caller_cancelled = matches!(operation.await, Err(error) if error.is_cancelled());
-    drop(unrelated_owner);
     let owner_retained = crate::services::sync_protocol::sync_mutex()
         .try_lock()
         .is_err();
     release.send(()).unwrap();
     writer.join().unwrap();
+    assert!(ready.is_ok(), "the target blocking worker must enter");
     assert!(caller_cancelled);
     assert!(
         owner_retained,
-        "a busy unrelated owner was mistaken for recovery worker readiness"
+        "caller cancellation must retain the entered blocking worker's owner"
     );
     let _sync = tokio::time::timeout(
         std::time::Duration::from_secs(5),

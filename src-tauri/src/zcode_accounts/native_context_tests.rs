@@ -200,12 +200,28 @@ fn malformed_or_changed_artifacts_never_match_a_contract() {
 fn artifact_replacement_same_bytes_and_in_place_edit_invalidate_cached_hash() {
     for in_place in [false, true] {
         let fixture = Fixture::new();
-        let probe = fixture.probe();
-        probe.observe().unwrap();
         let path = fixture
             .selection
             .install_path
             .join(fixture.manifest.artifacts[0].relative_path);
+        // Filesystems may coalesce writes within one clock tick. Authenticate a
+        // known old mtime so an in-place write must expose a new modification.
+        let original_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let set_original_modified = |path: &Path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(original_modified))
+                .unwrap();
+        };
+        set_original_modified(&path);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            original_modified
+        );
+        let probe = fixture.probe();
+        probe.observe().unwrap();
         let bytes = fs::read(&path).unwrap();
         let stamp = |path: &Path| {
             let meta = fs::metadata(path).unwrap();
@@ -229,8 +245,16 @@ fn artifact_replacement_same_bytes_and_in_place_edit_invalidate_cached_hash() {
             let moved = path.with_extension("old");
             fs::rename(&path, moved).unwrap();
             fs::write(&path, &bytes).unwrap();
+            set_original_modified(&path);
         }
         let after = stamp(&path);
+        if in_place {
+            assert_eq!((before.0, before.1, before.2), (after.0, after.1, after.2));
+            assert_ne!((before.3, before.4), (after.3, after.4));
+        } else {
+            assert_ne!((before.0, before.1), (after.0, after.1));
+            assert_eq!((before.2, before.3, before.4), (after.2, after.3, after.4));
+        }
         let outcome = probe.observe().map(|_| ());
         eprintln!("in_place={in_place}, before={before:?}, after={after:?}, outcome={outcome:?}");
         assert!(

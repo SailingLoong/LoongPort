@@ -1,9 +1,9 @@
 //! Existing LoongPort lifecycle owner for ZCode account operations.
 //! Backend probes produce admission evidence; no real probe or IPC bypass lives here.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::admission::ContextObservation;
 use super::admission::{BlockedReason, ContextProbe, ContractEntry, VerifiedContext};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::core::AccountIdentity;
 use super::transaction::{
     AccountStore, Admission, ArchiveOutcome, CaptureOutcome, CatalogStatus, RecoveryStatus,
@@ -30,7 +30,7 @@ impl From<TransactionError> for RuntimeError {
     }
 }
 enum Operation {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     Switch(AccountIdentity),
     Status,
     Capture {
@@ -57,7 +57,7 @@ enum OperationResult {
     Confirmed,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn switch_account(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
@@ -198,7 +198,7 @@ async fn run(
 ) -> Result<OperationResult, RuntimeError> {
     run_owned(db, move |db| {
         let context = VerifiedContext::assess(probe.observe()?, &contracts)?;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if let Operation::Switch(target) = &operation {
             context.accept_target(target)?;
         }
@@ -223,7 +223,7 @@ async fn run(
         )?;
         context.confirm_root(store.native_root_identity())?;
         match operation {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             Operation::Switch(target) => store
                 .switch(&target)
                 .map(OperationResult::Switched)
@@ -264,10 +264,16 @@ pub(super) async fn run_owned<T: Send + 'static>(
     operation: impl FnOnce(&Database) -> Result<T, RuntimeError> + Send + 'static,
 ) -> Result<T, RuntimeError> {
     let sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    #[cfg(all(test, unix))]
+    let owner_entered = tests::OWNER_ENTERED.try_with(Arc::clone).ok();
     tauri::async_runtime::spawn_blocking(move || {
         // Every branch shares the existing physical owner. Cancelling the caller
         // cannot release it before this worker and its session guard finish.
         let _sync = sync;
+        #[cfg(all(test, unix))]
+        if let Some(owner_entered) = owner_entered {
+            owner_entered.notify_one();
+        }
         operation(&db)
     })
     .await
