@@ -2546,9 +2546,20 @@ impl SkillService {
         Self::sync_to_app_unlocked(db, app)
     }
 
+    /// Skills 不由 `sync_to_app` 投影的应用：Claude Desktop、OpenClaw 不支持 Skills，
+    /// Pi 没有数据库列、按目录是否存在现算。这些应用的 skills 目录不归本应用管，
+    /// 同步时一个字节都不能碰——否则 OpenClaw 自己的 `~/.openclaw/skills` 里和受管
+    /// Skill 同名的真实目录，会被当成「已关掉的投影」删掉。
+    fn is_sync_managed_app(app: &AppType) -> bool {
+        !matches!(
+            app,
+            AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Pi
+        )
+    }
+
     /// Caller must hold either the Skills state read or write guard.
     fn sync_to_app_unlocked(db: &Arc<Database>, app: &AppType) -> Result<()> {
-        if matches!(app, AppType::ClaudeDesktop | AppType::Pi) {
+        if !Self::is_sync_managed_app(app) {
             return Ok(());
         }
 
@@ -6219,6 +6230,38 @@ mod tests {
             app_dir.join("good-skill").exists(),
             "the healthy skill must still be synced despite the poisoned row"
         );
+    }
+
+    /// OpenClaw 不支持 Skills，`~/.openclaw/skills` 归它自己：里面和受管 Skill 同名的
+    /// 真实目录不能被当成「已关掉的投影」删掉。（适配：本仓无 resync_all_apps，走
+    /// sync_to_app 单应用入口，语义同一守卫。）
+    #[test]
+    #[serial_test::serial]
+    fn sync_to_app_leaves_openclaw_skills_dir_alone() {
+        let home = tempdir().expect("home");
+        let _home = TestHomeGuard::set(home.path());
+        let ssot_dir = SkillService::get_ssot_dir().expect("ssot dir");
+        write_skill(&ssot_dir.join("shared-name"), "managed copy");
+
+        let openclaw_dir = SkillService::get_app_skills_dir(&AppType::OpenClaw).expect("dir");
+        let own_skill = openclaw_dir.join("shared-name").join("SKILL.md");
+        fs::create_dir_all(own_skill.parent().unwrap()).unwrap();
+        fs::write(&own_skill, "openclaw's own skill").unwrap();
+        write_skill(&openclaw_dir.join("other"), "untouched");
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut skill = poisoned_skill("owner/repo:shared", "shared-name");
+        skill.name = "shared".to_string();
+        skill.apps = SkillApps::only(&AppType::Claude);
+        db.save_skill(&skill).expect("seed row");
+
+        SkillService::sync_to_app(&db, &AppType::OpenClaw).expect("sync openclaw");
+
+        assert_eq!(
+            fs::read_to_string(&own_skill).expect("openclaw skill intact"),
+            "openclaw's own skill"
+        );
+        assert!(openclaw_dir.join("other").join("SKILL.md").is_file());
     }
 
     #[test]
