@@ -207,6 +207,22 @@ fn artifact_replacement_same_bytes_and_in_place_edit_invalidate_cached_hash() {
             .install_path
             .join(fixture.manifest.artifacts[0].relative_path);
         let bytes = fs::read(&path).unwrap();
+        let stamp = |path: &Path| {
+            let meta = fs::metadata(path).unwrap();
+            (
+                meta.dev(),
+                meta.ino(),
+                meta.len(),
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+                meta.mode(),
+                meta.uid(),
+                meta.nlink(),
+            )
+        };
+        let before = stamp(&path);
         if in_place {
             fs::write(&path, &bytes).unwrap();
         } else {
@@ -214,10 +230,13 @@ fn artifact_replacement_same_bytes_and_in_place_edit_invalidate_cached_hash() {
             fs::rename(&path, moved).unwrap();
             fs::write(&path, &bytes).unwrap();
         }
-        assert!(matches!(
-            probe.observe(),
-            Err(BlockedReason::ContextChanged)
-        ));
+        let after = stamp(&path);
+        let outcome = probe.observe().map(|_| ());
+        eprintln!("in_place={in_place}, before={before:?}, after={after:?}, outcome={outcome:?}");
+        assert!(
+            matches!(outcome, Err(BlockedReason::ContextChanged)),
+            "in_place={in_place}, before={before:?}, after={after:?}, outcome={outcome:?}"
+        );
     }
 }
 #[test]
