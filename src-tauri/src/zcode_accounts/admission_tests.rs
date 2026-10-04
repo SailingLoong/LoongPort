@@ -7,7 +7,7 @@ fn observation() -> ContextObservation {
         settings_file:PathBuf::from("/synthetic/home/.zcode/v2/setting.json"),
         root_identity:[1,2], settings_identity:[1,3],
         home:"/synthetic/home".into(),settings_home:"/synthetic/home".into(),bootstrap_home:"/synthetic/home".into(),username:"synthetic-user".into(),
-        standard_desktop_launch:true,key_choice:KeyContextChoice::ExplicitStandard,writers:WriterState::Stopped,
+        key_choice:KeyMode::Standard,writers:WriterState::Stopped,
         settings:br#"{"dataBaseDir":"/synthetic/data","providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"individual-coding-plan"}},"unknown":{"preserve":true}}"#.to_vec(),
     }
 }
@@ -105,13 +105,10 @@ fn root_and_key_context_sources_must_be_explicit_and_consistent() {
     input.bootstrap_home = "/other-home".into();
     rejected(input, BlockedReason::RootUnverified);
     let mut input = observation();
-    input.standard_desktop_launch = false;
-    rejected(input, BlockedReason::RootUnverified);
-    let mut input = observation();
-    input.key_choice = KeyContextChoice::Unknown;
+    input.key_choice = KeyMode::Unknown;
     rejected(input, BlockedReason::KeyContextUnknown);
     let mut input = observation();
-    input.key_choice = KeyContextChoice::Custom;
+    input.key_choice = KeyMode::Custom;
     rejected(input, BlockedReason::CustomKeyContext);
     let mut input = observation();
     input.username.clear();
@@ -282,4 +279,32 @@ fn admission_must_bind_the_root_opened_by_the_transaction() {
         context.confirm_root([1, 999]),
         Err(BlockedReason::ContextChanged)
     );
+}
+
+#[test]
+fn explicit_standard_selection_does_not_claim_or_require_historical_launch_provenance() {
+    assert!(VerifiedContext::assess(observation(), &contracts()).is_ok());
+}
+
+#[test]
+fn context_revision_binds_build_settings_root_and_family_without_exposing_sources() {
+    let original = VerifiedContext::assess(observation(), &contracts()).unwrap();
+    assert_eq!(
+        original.context_revision(),
+        VerifiedContext::assess(observation(), &contracts())
+            .unwrap()
+            .context_revision()
+    );
+    assert!(!original.context_revision().contains("synthetic"));
+    for change in 0..5 {
+        let mut input = observation();
+        let mut entries = contracts();
+        match change {0=>input.root_identity[1]+=1,1=>input.settings_identity[1]+=1,2=>input.settings.push(b' '),3=>{input.install.artifact_sha256[0]^=1;entries[0].fingerprint=input.install.clone();},_=>input.settings=br#"{"dataBaseDir":"/synthetic/data","providerFamilyDomain":"bigmodel","providerFamilyConnectionSelections":{"bigmodel":{"kind":"start-plan"}}}"#.to_vec()}
+        assert_ne!(
+            original.context_revision(),
+            VerifiedContext::assess(input, &entries)
+                .unwrap()
+                .context_revision()
+        );
+    }
 }

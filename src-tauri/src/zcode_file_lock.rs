@@ -61,7 +61,6 @@ impl FileLock {
     }
 
     /// Account crash recovery. Unsupported platforms and uncertain liveness fail closed.
-    #[cfg(test)]
     pub(crate) fn acquire_recoverable(path: &Path, timeout: Duration) -> Result<Self, AppError> {
         Self::acquire_with_policy(path, timeout, true)
     }

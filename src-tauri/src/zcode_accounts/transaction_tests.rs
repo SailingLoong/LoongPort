@@ -1679,3 +1679,112 @@ fn io_ordinary_publications_recheck_journal_and_recovery_after_final_gate() {
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
 }
+
+#[test]
+fn io_official_native_directory_may_be_readable_but_never_writable_by_others() {
+    use std::os::unix::fs::PermissionsExt;
+    for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+        let f = Fixture::new(family);
+        // The official private-file writer uses recursive mkdir's normal mode,
+        // while credentials and temporary files are always created as 0600.
+        fs::set_permissions(f.native_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(f.store().switch(&f.b), Ok(SwitchOutcome::Switched));
+        assert_eq!(
+            fs::metadata(f.native_root.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(f.native_root.path().join("credentials.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    for mode in [0o770, 0o777, 0o722, 0o702] {
+        let f = Fixture::new(OAuthFamily::Zai);
+        let before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+        fs::set_permissions(f.native_root.path(), fs::Permissions::from_mode(mode)).unwrap();
+        assert!(matches!(
+            AccountStore::new(
+                f.native_root.path(),
+                f.vault_root.path(),
+                &f.vault,
+                &f.native,
+                ADMITTED
+            ),
+            Err(TransactionError::UnsafePath)
+        ));
+        assert_eq!(
+            fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+            before
+        );
+        assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    }
+}
+#[test]
+fn io_vault_root_and_credential_file_remain_private_with_readable_native_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    for widen_vault in [false, true] {
+        let f = Fixture::new(OAuthFamily::Zai);
+        fs::set_permissions(f.native_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+        let profile = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+        if widen_vault {
+            fs::set_permissions(f.vault_root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        } else {
+            fs::set_permissions(
+                f.native_root.path().join("credentials.json"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        let result = AccountStore::new(
+            f.native_root.path(),
+            f.vault_root.path(),
+            &f.vault,
+            &f.native,
+            ADMITTED,
+        )
+        .and_then(|store| store.switch(&f.b));
+        assert_eq!(result, Err(TransactionError::UnsafePath));
+        assert_eq!(
+            fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+            profile
+        );
+        assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    }
+}
+
+#[test]
+fn io_native_root_rejects_symlink_alias_and_foreign_ownership_metadata() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new(OAuthFamily::Zai);
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("native-alias");
+    symlink(f.native_root.path(), &alias).unwrap();
+    assert_eq!(
+        native_root_identity(&alias),
+        Err(TransactionError::UnsafePath)
+    );
+    let metadata = fs::symlink_metadata(f.native_root.path()).unwrap();
+    let current_uid = unsafe { libc::geteuid() };
+    assert!(directory_metadata_is_safe(&metadata, current_uid, 0o022));
+    // Exercise the owner predicate with real metadata without chown privileges or
+    // touching another account's files. Production always uses the actual euid.
+    assert!(!directory_metadata_is_safe(
+        &metadata,
+        current_uid.wrapping_add(1),
+        0o022
+    ));
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}

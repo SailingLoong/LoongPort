@@ -41,6 +41,10 @@ mod openclaw;
 mod pi;
 mod zcode;
 pub use zcode::*;
+#[cfg(feature = "gui")]
+mod zcode_accounts;
+#[cfg(feature = "gui")]
+pub(crate) use zcode_accounts::*;
 mod plugin;
 mod profile;
 mod prompt;

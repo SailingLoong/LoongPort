@@ -1,6 +1,8 @@
 //! ZCode-specific admission facts. No filesystem, environment, process or credential reads.
 //! Observations come from the backend probe; none of these types are IPC inputs.
-use super::core::{js_trim, AccountIdentity, OAuthFamily, StrictRecord};
+#[cfg(test)]
+use super::core::AccountIdentity;
+use super::core::{js_trim, OAuthFamily, StrictRecord};
 use super::native::NativeCipher;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
@@ -11,7 +13,9 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Platform {
     MacOs,
+    #[cfg(test)]
     Linux,
+    #[cfg(test)]
     Windows,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -26,12 +30,17 @@ pub(super) struct ContractEntry {
     pub fingerprint: BuildFingerprint,
     pub native_gate_passed: bool,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum KeyContextChoice {
-    ExplicitStandard,
+/// A user's requested verification mode, never proof about an earlier process.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum KeyMode {
+    Standard,
     Custom,
     Unknown,
 }
+// Unsupported production platforms return before making any writer observation.
+// Keep strict dead-code checks for the implemented macOS producer and all tests.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WriterState {
     Stopped,
@@ -49,10 +58,13 @@ pub(super) struct ContextObservation {
     pub settings_home: String,
     pub bootstrap_home: String,
     pub username: String,
-    pub standard_desktop_launch: bool,
-    pub key_choice: KeyContextChoice,
+    pub key_choice: KeyMode,
     pub writers: WriterState,
     pub settings: Vec<u8>,
+}
+pub(super) trait ContextProbe: Send + Sync {
+    /// Read only installation/storage/process/settings evidence, never credentials.
+    fn observe(&self) -> Result<ContextObservation, BlockedReason>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockedReason {
@@ -70,6 +82,7 @@ pub(crate) enum BlockedReason {
     AppRunning,
     WriterStateUnknown,
     ContextChanged,
+    #[cfg(test)]
     TargetScopeMismatch,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +96,7 @@ pub(crate) enum Remedy {
     QuitNativeWriters,
     VerifyWriterState,
     RefreshContext,
+    #[cfg(test)]
     ChooseSavedAccount,
 }
 impl BlockedReason {
@@ -102,6 +116,7 @@ impl BlockedReason {
             Self::AppRunning => "zcode.account.app_running",
             Self::WriterStateUnknown => "zcode.account.writer_state_unknown",
             Self::ContextChanged => "zcode.account.context_changed",
+            #[cfg(test)]
             Self::TargetScopeMismatch => "zcode.account.target_scope_mismatch",
         }
     }
@@ -119,6 +134,7 @@ impl BlockedReason {
             Self::AppRunning => Remedy::QuitNativeWriters,
             Self::WriterStateUnknown => Remedy::VerifyWriterState,
             Self::ContextChanged => Remedy::RefreshContext,
+            #[cfg(test)]
             Self::TargetScopeMismatch => Remedy::ChooseSavedAccount,
         }
     }
@@ -175,8 +191,7 @@ impl VerifiedContext {
         if !contract.native_gate_passed {
             return Err(BlockedReason::NativeGatePending);
         }
-        if !observation.standard_desktop_launch
-            || observation.home != observation.settings_home
+        if observation.home != observation.settings_home
             || observation.home != observation.bootstrap_home
             || observation.home.contains('\0')
             || !absolute_path(Path::new(&observation.home))
@@ -187,9 +202,9 @@ impl VerifiedContext {
             return Err(BlockedReason::RootUnverified);
         }
         match observation.key_choice {
-            KeyContextChoice::Custom => return Err(BlockedReason::CustomKeyContext),
-            KeyContextChoice::Unknown => return Err(BlockedReason::KeyContextUnknown),
-            KeyContextChoice::ExplicitStandard => {}
+            KeyMode::Custom => return Err(BlockedReason::CustomKeyContext),
+            KeyMode::Unknown => return Err(BlockedReason::KeyContextUnknown),
+            KeyMode::Standard => {}
         }
         if observation.username.is_empty() || observation.username.contains('\0') {
             return Err(BlockedReason::KeyContextUnknown);
@@ -270,6 +285,7 @@ impl VerifiedContext {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn accept_target(&self, target: &AccountIdentity) -> Result<(), BlockedReason> {
         if !target.matches_scope(&self.context_id, self.family) {
             return Err(BlockedReason::TargetScopeMismatch);
@@ -292,6 +308,24 @@ impl VerifiedContext {
     }
     pub(super) fn context_id(&self) -> &str {
         &self.context_id
+    }
+    /// Opaque click-time binding; no registry, secret or historical launch claim.
+    pub(super) fn context_revision(&self) -> String {
+        let observation = &self.observation;
+        let binding = serde_json::to_vec(&(
+            "zcode-context-revision-v1",
+            &self.context_id,
+            &observation.install.version,
+            &observation.install.build,
+            observation.install.artifact_sha256,
+            &observation.credential_root,
+            observation.root_identity,
+            &observation.settings_file,
+            observation.settings_identity,
+            self.settings_revision,
+        ))
+        .expect("fixed serializable context fields");
+        URL_SAFE_NO_PAD.encode(Sha256::digest(binding))
     }
     pub(super) fn cipher(&self) -> Result<NativeCipher, BlockedReason> {
         // Never read an environment variable or try another source after a failure.

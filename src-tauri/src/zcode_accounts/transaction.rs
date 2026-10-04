@@ -5,9 +5,9 @@
 //! atomicity or defend against a malicious process already running as this user.
 use super::admission::BlockedReason;
 use super::checkpoint::{CheckpointError, ProfileCatalog, SwitchCheckpoint, TransactionBinding};
-use super::core::{
-    AccountIdentity, AccountSnapshot, CredentialDocument, OAuthFamily, TransactionPhase,
-};
+#[cfg(test)]
+use super::core::AccountIdentity;
+use super::core::{AccountSnapshot, CredentialDocument, OAuthFamily, TransactionPhase};
 use super::native::NativeCipher;
 use super::recovery::{
     DispositionKind, JournalEvidence, RecoveryConfirmation, RecoveryError, RecoveryLedger,
@@ -118,6 +118,7 @@ pub(crate) struct RecoveryStatus {
     pub records: Vec<RecoveryRecordStatus>,
 }
 enum SwitchTarget<'a> {
+    #[cfg(test)]
     Identity(&'a AccountIdentity),
     Saved {
         id: &'a str,
@@ -408,7 +409,7 @@ impl<'a> AccountStore<'a> {
             return Err(TransactionError::UnsupportedScope);
         }
         gate().map_err(TransactionError::Admission)?;
-        let native_id = root_identity(native_root)?;
+        let native_id = native_root_identity(native_root)?;
         let vault_id = root_identity(vault_root)?;
         if native_id == vault_id {
             return Err(TransactionError::UnsafePath);
@@ -631,12 +632,14 @@ impl<'a> AccountStore<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn switch(
         &self,
         target: &AccountIdentity,
     ) -> Result<SwitchOutcome, TransactionError> {
         self.switch_with_hook(target, &mut |_| Ok(()))
     }
+    #[cfg(test)]
     fn switch_with_hook(
         &self,
         target_id: &AccountIdentity,
@@ -655,6 +658,7 @@ impl<'a> AccountStore<'a> {
         }
         let recovery = self.valid_recovery_record()?;
         let (catalog_bytes, mut catalog, target_id) = match selection {
+            #[cfg(test)]
             SwitchTarget::Identity(identity) => {
                 let bytes = self.read(Role::Profiles)?;
                 let catalog = self.open_catalog(bytes.as_deref())?;
@@ -911,7 +915,7 @@ impl<'a> AccountStore<'a> {
         }
     }
     fn validate_roots(&self) -> Result<(), TransactionError> {
-        if root_identity(self.native_root)? != self.native_id
+        if native_root_identity(self.native_root)? != self.native_id
             || root_identity(self.vault_root)? != self.vault_id
         {
             return Err(TransactionError::UnsafePath);
@@ -1025,8 +1029,24 @@ fn snapshot_hash(snapshot: &AccountSnapshot) -> Result<[u8; 32], TransactionErro
     ))
 }
 
+pub(super) fn root_identity(path: &Path) -> Result<[u64; 2], TransactionError> {
+    checked_root_identity(path, 0o077)
+}
+/// Official ZCode creates directories with ordinary mkdir permissions; its
+/// credential files are private. Other users must not be able to replace entries.
+pub(super) fn native_root_identity(path: &Path) -> Result<[u64; 2], TransactionError> {
+    checked_root_identity(path, 0o022)
+}
 #[cfg(unix)]
-fn root_identity(path: &Path) -> Result<[u64; 2], TransactionError> {
+fn directory_metadata_is_safe(meta: &fs::Metadata, expected_uid: u32, forbidden: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.is_dir()
+        && !meta.file_type().is_symlink()
+        && meta.uid() == expected_uid
+        && meta.mode() & forbidden == 0
+}
+#[cfg(unix)]
+fn checked_root_identity(path: &Path, forbidden: u32) -> Result<[u64; 2], TransactionError> {
     use std::os::unix::fs::MetadataExt;
     if !path.is_absolute()
         || path.components().any(|part| {
@@ -1040,17 +1060,13 @@ fn root_identity(path: &Path) -> Result<[u64; 2], TransactionError> {
         return Err(TransactionError::UnsafePath);
     }
     let meta = fs::symlink_metadata(path).map_err(|_| TransactionError::UnsafePath)?;
-    if !meta.is_dir()
-        || meta.file_type().is_symlink()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-    {
+    if !directory_metadata_is_safe(&meta, unsafe { libc::geteuid() }, forbidden) {
         return Err(TransactionError::UnsafePath);
     }
     Ok([meta.dev(), meta.ino()])
 }
 #[cfg(not(unix))]
-fn root_identity(_path: &Path) -> Result<[u64; 2], TransactionError> {
+fn checked_root_identity(_path: &Path, _forbidden: u32) -> Result<[u64; 2], TransactionError> {
     Err(TransactionError::NotAdmitted)
 }
 #[cfg(unix)]

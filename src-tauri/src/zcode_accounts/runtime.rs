@@ -1,6 +1,9 @@
 //! Existing LoongPort lifecycle owner for ZCode account operations.
 //! Backend probes produce admission evidence; no real probe or IPC bypass lives here.
-use super::admission::{BlockedReason, ContextObservation, ContractEntry, VerifiedContext};
+#[cfg(test)]
+use super::admission::ContextObservation;
+use super::admission::{BlockedReason, ContextProbe, ContractEntry, VerifiedContext};
+#[cfg(test)]
 use super::core::AccountIdentity;
 use super::transaction::{
     AccountStore, Admission, ArchiveOutcome, CaptureOutcome, CatalogStatus, RecoveryStatus,
@@ -9,10 +12,6 @@ use super::transaction::{
 use crate::database::Database;
 use std::sync::Arc;
 
-pub(super) trait ContextProbe: Send + Sync {
-    /// Read only installation/storage/process/settings evidence, never credentials.
-    fn observe(&self) -> Result<ContextObservation, BlockedReason>;
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuntimeError {
     Blocked(BlockedReason),
@@ -31,6 +30,7 @@ impl From<TransactionError> for RuntimeError {
     }
 }
 enum Operation {
+    #[cfg(test)]
     Switch(AccountIdentity),
     Status,
     Capture {
@@ -57,6 +57,7 @@ enum OperationResult {
     Confirmed,
 }
 
+#[cfg(test)]
 pub(super) async fn switch_account(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
@@ -197,6 +198,7 @@ async fn run(
 ) -> Result<OperationResult, RuntimeError> {
     run_owned(db, move |db| {
         let context = VerifiedContext::assess(probe.observe()?, &contracts)?;
+        #[cfg(test)]
         if let Operation::Switch(target) = &operation {
             context.accept_target(target)?;
         }
@@ -221,6 +223,7 @@ async fn run(
         )?;
         context.confirm_root(store.native_root_identity())?;
         match operation {
+            #[cfg(test)]
             Operation::Switch(target) => store
                 .switch(&target)
                 .map(OperationResult::Switched)
@@ -256,7 +259,7 @@ async fn run(
     })
     .await
 }
-async fn run_owned<T: Send + 'static>(
+pub(super) async fn run_owned<T: Send + 'static>(
     db: Arc<Database>,
     operation: impl FnOnce(&Database) -> Result<T, RuntimeError> + Send + 'static,
 ) -> Result<T, RuntimeError> {

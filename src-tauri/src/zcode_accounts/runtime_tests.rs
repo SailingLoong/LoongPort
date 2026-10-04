@@ -1,6 +1,4 @@
-use super::super::admission::{
-    BuildFingerprint, KeyContextChoice, Platform, VerifiedContext, WriterState,
-};
+use super::super::admission::{BuildFingerprint, KeyMode, Platform, VerifiedContext, WriterState};
 use super::super::checkpoint::{ProfileCatalog, PROFILE_FILE};
 use super::super::core::{CredentialDocument, OAuthFamily};
 use super::super::native::tests::native_document_with_context;
@@ -119,8 +117,7 @@ impl Fixture {
             settings_home: home_text.clone(),
             bootstrap_home: home_text.clone(),
             username: "synthetic-user".into(),
-            standard_desktop_launch: true,
-            key_choice: KeyContextChoice::ExplicitStandard,
+            key_choice: KeyMode::Standard,
             writers: WriterState::Stopped,
             settings: serde_json::to_vec(&serde_json::json!({
                 "dataBaseDir": data,

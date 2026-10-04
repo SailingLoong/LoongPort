@@ -246,6 +246,7 @@ impl SwitchCheckpoint {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn open(
         encoded: &str,
         vault: &VaultContext,
