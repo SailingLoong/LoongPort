@@ -108,8 +108,9 @@ fn installed_contract() -> InstalledContract {
 pub(super) fn supported_contracts() -> Vec<ContractEntry> {
     vec![ContractEntry {
         fingerprint: installed_contract().fingerprint(),
-        // Cloud fixture tests do not establish the real macOS native gate.
-        native_gate_passed: false,
+        // Exact macOS contract verified by the native/main/UI gate on 2026-10-04.
+        // Other platforms have no accepted native writer/probe implementation.
+        native_gate_passed: cfg!(target_os = "macos"),
     }]
 }
 

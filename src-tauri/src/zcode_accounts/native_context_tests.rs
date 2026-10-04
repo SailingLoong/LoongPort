@@ -101,12 +101,12 @@ fn renderer_selection_contains_only_untrusted_paths_and_key_mode() {
     );
 }
 #[test]
-fn manifest_is_exact_and_native_gate_remains_pending() {
+fn manifest_is_exact_and_native_gate_is_macos_only() {
     let contracts = supported_contracts();
     assert_eq!(contracts.len(), 1);
     assert_eq!(contracts[0].fingerprint.version, "3.14.4");
     assert_eq!(contracts[0].fingerprint.build, "3.14.4.7912");
-    assert!(!contracts[0].native_gate_passed);
+    assert_eq!(contracts[0].native_gate_passed, cfg!(target_os = "macos"));
     // Independent SHA256 calculation over the documented fixed framing.
     let digest = contracts[0]
         .fingerprint
@@ -124,6 +124,22 @@ fn manifest_is_exact_and_native_gate_remains_pending() {
         contracts[0].fingerprint.artifact_sha256,
         manifest.fingerprint().artifact_sha256
     );
+    // Bind admission to the actual product manifest, using only synthetic paths
+    // and settings. The artifact reader has separate exact-hash fixture tests.
+    let fixture = Fixture::new();
+    let mut observation = fixture.probe().observe().unwrap();
+    observation.install = manifest.fingerprint();
+    let result = VerifiedContext::assess(observation.clone(), &contracts);
+    if cfg!(target_os = "macos") {
+        assert!(result.is_ok());
+    } else {
+        assert!(matches!(result, Err(BlockedReason::NativeGatePending)));
+    }
+    observation.install.artifact_sha256[0] ^= 1;
+    assert!(matches!(
+        VerifiedContext::assess(observation, &contracts),
+        Err(BlockedReason::UnsupportedBuild)
+    ));
 }
 #[test]
 fn exact_fixture_artifacts_and_standard_os_identity_admit_without_credentials() {
