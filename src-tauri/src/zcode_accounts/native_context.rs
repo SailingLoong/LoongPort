@@ -1,20 +1,20 @@
 //! Read-only native installation, settings and writer observations for one operation.
 //! The renderer chooses a source; only the backend supplies OS identity and evidence.
 use super::admission::{BlockedReason, ContextObservation, ContextProbe, ContractEntry};
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use super::admission::{BuildFingerprint, Platform, WriterState};
 use serde::Deserialize;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::{
     fs::{self, File},
     io::Read,
     path::Path,
     sync::Mutex,
 };
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use zeroize::Zeroizing;
 
 #[derive(Clone, Deserialize)]
@@ -25,30 +25,30 @@ pub(crate) struct ContextSelection {
     pub key_mode: KeyMode,
 }
 pub(crate) use super::admission::KeyMode;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 #[derive(Clone, PartialEq, Eq)]
 struct OsUser {
     home: String,
     username: String,
     uid: u32,
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 #[derive(Clone)]
 struct SystemFacts {
     user: OsUser,
     writers: WriterState,
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 struct ArtifactContract {
     relative_path: &'static str,
     sha256: [u8; 32],
     exact_size: Option<u64>,
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 struct InstalledContract {
     artifacts: [ArtifactContract; 3],
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 impl InstalledContract {
     fn fingerprint(&self) -> BuildFingerprint {
         // Fixed-order length framing binds each path to its complete file hash.
@@ -68,7 +68,7 @@ impl InstalledContract {
         }
     }
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn installed_contract() -> InstalledContract {
     // Exact installed public artifacts reported 2026-10-03. Matching Info.plist
     // bytes bind version/build; no permissive plist or ASAR parser is involved.
@@ -104,7 +104,7 @@ fn installed_contract() -> InstalledContract {
         ],
     }
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(super) fn supported_contracts() -> Vec<ContractEntry> {
     vec![ContractEntry {
         fingerprint: installed_contract().fingerprint(),
@@ -114,7 +114,7 @@ pub(super) fn supported_contracts() -> Vec<ContractEntry> {
     }]
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 #[derive(PartialEq, Eq)]
 struct FileStamp {
     identity: [u64; 2],
@@ -125,7 +125,7 @@ struct FileStamp {
     owner: u32,
     links: u64,
 }
-#[cfg(all(unix, any(test, target_os = "macos")))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn file_stamp(meta: &fs::Metadata) -> FileStamp {
     use std::os::unix::fs::MetadataExt;
     FileStamp {
@@ -138,13 +138,13 @@ fn file_stamp(meta: &fs::Metadata) -> FileStamp {
         links: meta.nlink(),
     }
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 struct ObservedFile {
     path: PathBuf,
     file: File,
     stamp: FileStamp,
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 impl ObservedFile {
     #[cfg(unix)]
     fn open(path: PathBuf, max_size: u64) -> Result<Self, ()> {
@@ -167,10 +167,6 @@ impl ObservedFile {
         observed.recheck()?;
         Ok(observed)
     }
-    #[cfg(not(unix))]
-    fn open(_path: PathBuf, _max_size: u64) -> Result<Self, ()> {
-        Err(())
-    }
     #[cfg(unix)]
     fn recheck(&self) -> Result<(), ()> {
         require_canonical(&self.path)?;
@@ -185,12 +181,8 @@ impl ObservedFile {
         }
         Ok(())
     }
-    #[cfg(not(unix))]
-    fn recheck(&self) -> Result<(), ()> {
-        Err(())
-    }
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn is_local_mount(flags: u32) -> bool {
     // Darwin MNT_LOCAL; remote PID ownership cannot satisfy the native lock contract.
     flags & 0x0000_1000 != 0
@@ -207,7 +199,7 @@ fn native_local_root(root: &File) -> Result<(), BlockedReason> {
     Ok(())
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn require_canonical(path: &Path) -> Result<(), ()> {
     if !path.is_absolute()
         || path.components().any(|part| {
@@ -223,7 +215,7 @@ fn require_canonical(path: &Path) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(super) struct NativeContextProbe {
     selection: ContextSelection,
     user: OsUser,
@@ -237,7 +229,7 @@ pub(super) struct NativeContextProbe {
     #[cfg(test)]
     test_facts: Mutex<Option<Result<SystemFacts, BlockedReason>>>,
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 impl NativeContextProbe {
     #[cfg(target_os = "macos")]
     pub(super) fn new(selection: ContextSelection) -> Result<Self, BlockedReason> {
@@ -365,7 +357,7 @@ impl NativeContextProbe {
         }
     }
 }
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 impl ContextProbe for NativeContextProbe {
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
         let facts = self.system_facts()?;
@@ -411,7 +403,7 @@ impl ContextProbe for NativeContextProbe {
     }
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn classify_executable(install: &Path, executable: &Path) -> WriterState {
     let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
         return WriterState::Unknown;
@@ -569,13 +561,13 @@ fn native_writers(install: &Path, uid: u32) -> WriterState {
     WriterState::Unknown
 }
 
-#[cfg(all(not(test), not(target_os = "macos")))]
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
 pub(super) fn supported_contracts() -> Vec<ContractEntry> {
     Vec::new()
 }
-#[cfg(all(not(test), not(target_os = "macos")))]
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
 pub(super) struct NativeContextProbe;
-#[cfg(all(not(test), not(target_os = "macos")))]
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
 impl NativeContextProbe {
     pub(super) fn new(selection: ContextSelection) -> Result<Self, BlockedReason> {
         // Consume the untrusted DTO without touching the selected filesystem.
@@ -587,7 +579,7 @@ impl NativeContextProbe {
         Err(BlockedReason::UnsupportedPlatform)
     }
 }
-#[cfg(all(not(test), not(target_os = "macos")))]
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
 impl ContextProbe for NativeContextProbe {
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
         Err(BlockedReason::UnsupportedPlatform)
@@ -597,3 +589,22 @@ impl ContextProbe for NativeContextProbe {
 #[cfg(all(test, unix))]
 #[path = "native_context_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(unix)))]
+#[test]
+fn unsupported_platform_facade_rejects_without_reading_any_selected_path() {
+    assert!(supported_contracts().is_empty());
+    let selected = ContextSelection {
+        install_path: PathBuf::from("this-path-must-not-be-opened"),
+        data_root: PathBuf::new(),
+        key_mode: KeyMode::Custom,
+    };
+    assert!(matches!(
+        NativeContextProbe::new(selected),
+        Err(BlockedReason::UnsupportedPlatform)
+    ));
+    assert!(matches!(
+        NativeContextProbe.observe(),
+        Err(BlockedReason::UnsupportedPlatform)
+    ));
+}

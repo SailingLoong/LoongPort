@@ -792,6 +792,27 @@ describe("ZCode saved accounts", () => {
     ).not.toContain("secret-canary");
     expect(client.getMutationCache().getAll()).toHaveLength(0);
   });
+  it("reports unsupported local storage without promising recovery or reading the native source", async () => {
+    vi.mocked(zcodeAccountsApi.recoveryStatus).mockRejectedValue({
+      code: "zcode.account.unsupported_platform",
+      remedy: "finishPlatformCheck",
+      committed: false,
+    });
+    mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This platform does not support the requested account operation.",
+    );
+    expect(document.body.textContent).not.toContain(
+      "Local recovery can be inspected",
+    );
+    expect(
+      screen.getByRole("button", { name: "Archive pending recovery" }),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.status).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.archive).not.toHaveBeenCalled();
+  });
 });
 
 describe("ZCode account command bindings", () => {

@@ -1,14 +1,31 @@
 use super::*;
 
 fn observation() -> ContextObservation {
+    let home = super::super::synthetic_test_path("home");
+    let data = super::super::synthetic_test_path("data");
     ContextObservation {
-        install:BuildFingerprint {platform:Platform::MacOs,version:"synthetic-3.14.4".into(),build:"synthetic-build".into(),artifact_sha256:[7;32]},
-        credential_root:PathBuf::from("/synthetic/data/.zcode/v2"),
-        settings_file:PathBuf::from("/synthetic/home/.zcode/v2/setting.json"),
-        root_identity:[1,2], settings_identity:[1,3],
-        home:"/synthetic/home".into(),settings_home:"/synthetic/home".into(),bootstrap_home:"/synthetic/home".into(),username:"synthetic-user".into(),
-        key_choice:KeyMode::Standard,writers:WriterState::Stopped,
-        settings:br#"{"dataBaseDir":"/synthetic/data","providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"individual-coding-plan"}},"unknown":{"preserve":true}}"#.to_vec(),
+        install: BuildFingerprint {
+            platform: Platform::MacOs,
+            version: "synthetic-3.14.4".into(),
+            build: "synthetic-build".into(),
+            artifact_sha256: [7; 32],
+        },
+        credential_root: data.join(".zcode/v2"),
+        settings_file: home.join(".zcode/v2/setting.json"),
+        root_identity: [1, 2],
+        settings_identity: [1, 3],
+        home: home.to_str().unwrap().into(),
+        settings_home: home.to_str().unwrap().into(),
+        bootstrap_home: home.to_str().unwrap().into(),
+        username: "synthetic-user".into(),
+        key_choice: KeyMode::Standard,
+        writers: WriterState::Stopped,
+        settings: serde_json::to_vec(&serde_json::json!({
+            "dataBaseDir": data, "providerFamilyDomain": "zai",
+            "providerFamilyConnectionSelections": {"zai": {"kind": "individual-coding-plan"}},
+            "unknown": {"preserve": true}
+        }))
+        .unwrap(),
     }
 }
 fn contracts() -> Vec<ContractEntry> {
@@ -27,21 +44,23 @@ fn distinct_settings_home_and_data_base_bind_one_explicit_standard_context() {
     let context = VerifiedContext::assess(observation(), &contracts()).unwrap();
     assert_eq!(
         context.native_root(),
-        Path::new("/synthetic/data/.zcode/v2")
+        super::super::synthetic_test_path("data").join(".zcode/v2")
     );
     assert_eq!(context.family(), OAuthFamily::Zai);
     assert!(!context.context_id().contains("synthetic-user"));
-    assert!(!context.context_id().contains("/synthetic/"));
+    assert!(!context.context_id().contains("synthetic"));
     context.cipher().unwrap();
 }
 #[test]
 fn data_base_path_uses_ecmascript_trim_exactly() {
+    let data = super::super::synthetic_test_path("data");
+    let data = data.to_str().unwrap();
     for (setting, effective) in [
-        ("\u{feff}/synthetic/data\u{feff}", "/synthetic/data"),
-        ("/synthetic/data\u{0085}", "/synthetic/data\u{0085}"),
+        (format!("\u{feff}{data}\u{feff}"), data.to_owned()),
+        (format!("{data}\u{0085}"), format!("{data}\u{0085}")),
     ] {
         let mut input = observation();
-        input.credential_root = Path::new(effective).join(".zcode/v2");
+        input.credential_root = Path::new(&effective).join(".zcode/v2");
         input.settings = serde_json::to_vec(&serde_json::json!({
             "dataBaseDir": setting,
             "providerFamilyDomain": "zai",
@@ -51,7 +70,7 @@ fn data_base_path_uses_ecmascript_trim_exactly() {
         let context = VerifiedContext::assess(input, &contracts()).unwrap();
         assert_eq!(
             context.native_root(),
-            Path::new(effective).join(".zcode/v2")
+            Path::new(&effective).join(".zcode/v2")
         );
     }
 }
@@ -63,7 +82,7 @@ fn both_individual_families_and_start_plan_are_supported_without_guessing() {
     ] {
         for kind in ["start-plan", "individual-coding-plan"] {
             let mut input = observation();
-            input.settings=serde_json::to_vec(&serde_json::json!({"dataBaseDir":"/synthetic/data","providerFamilyDomain":name,"providerFamilyConnectionSelections":{name:{"kind":kind}}})).unwrap();
+            input.settings=serde_json::to_vec(&serde_json::json!({"dataBaseDir":super::super::synthetic_test_path("data"),"providerFamilyDomain":name,"providerFamilyConnectionSelections":{name:{"kind":kind}}})).unwrap();
             assert_eq!(
                 VerifiedContext::assess(input, &contracts())
                     .unwrap()
@@ -96,13 +115,19 @@ fn unknown_build_platform_and_unpassed_gate_are_rejected() {
 #[test]
 fn root_and_key_context_sources_must_be_explicit_and_consistent() {
     let mut input = observation();
-    input.credential_root = PathBuf::from("/synthetic/wrong/.zcode/v2");
+    input.credential_root = super::super::synthetic_test_path("wrong").join(".zcode/v2");
     rejected(input, BlockedReason::RootUnverified);
     let mut input = observation();
-    input.settings_home = "/other-home".into();
+    input.settings_home = super::super::synthetic_test_path("other-home")
+        .to_str()
+        .unwrap()
+        .into();
     rejected(input, BlockedReason::RootUnverified);
     let mut input = observation();
-    input.bootstrap_home = "/other-home".into();
+    input.bootstrap_home = super::super::synthetic_test_path("other-home")
+        .to_str()
+        .unwrap()
+        .into();
     rejected(input, BlockedReason::RootUnverified);
     let mut input = observation();
     input.key_choice = KeyMode::Unknown;
@@ -149,7 +174,7 @@ fn settings_do_not_migrate_or_guess_legacy_missing_team_or_corrupt_selection() {
     ] {
         let mut input = observation();
         input.settings = settings.as_bytes().into();
-        input.credential_root = PathBuf::from("/synthetic/home/.zcode/v2");
+        input.credential_root = super::super::synthetic_test_path("home").join(".zcode/v2");
         rejected(input, reason);
     }
 }
@@ -216,8 +241,29 @@ fn blocked_reasons_give_specific_nonsecret_codes_and_next_actions() {
 fn admission_does_not_retain_native_settings_body_and_uses_exact_node_fallback() {
     let context = VerifiedContext::assess(observation(), &contracts()).unwrap();
     assert!(context.observation.settings.is_empty());
-    // Independent Node crypto fixture: platform must be darwin, not Rust's macos.
-    let golden="enc:v1:AAECAwQFBgcICQoL.S6gMI3s7kCj45-xBCrUuHw.cluasfKzjsFSqJnNkVDnLJCwP57BlBmDqsfui9h8y8Cp";
+    // Independent Node vectors: the protocol platform is darwin even when a
+    // Windows test host needs a drive-qualified virtual path for admission.
+    let unix_golden = "enc:v1:AAECAwQFBgcICQoL.S6gMI3s7kCj45-xBCrUuHw.cluasfKzjsFSqJnNkVDnLJCwP57BlBmDqsfui9h8y8Cp";
+    let windows_golden = "enc:v1:AAECAwQFBgcICQoL.mS0mjyCG1gkIyO0s9iRvKQ.bOYao0LtpLpFa_RqFUM-XGbm7jlXVKVqENLzQiYz1J5N";
+    for (home, vector) in [
+        ("/synthetic/home", unix_golden),
+        (r"C:\synthetic\home", windows_golden),
+    ] {
+        let secret = format!("zcode-credential-fallback:darwin:{home}:synthetic-user");
+        assert_eq!(
+            NativeCipher::new("synthetic-vector", &secret)
+                .unwrap()
+                .decrypt(vector)
+                .unwrap()
+                .as_str(),
+            "SYNTHETIC_STANDARD_CONTEXT_CANARY"
+        );
+    }
+    let golden = if cfg!(windows) {
+        windows_golden
+    } else {
+        unix_golden
+    };
     assert_eq!(
         context.cipher().unwrap().decrypt(golden).unwrap().as_str(),
         "SYNTHETIC_STANDARD_CONTEXT_CANARY"
@@ -235,7 +281,7 @@ fn admission_does_not_retain_native_settings_body_and_uses_exact_node_fallback()
 fn stable_context_identity_excludes_active_family_but_binds_home_user_and_data_root() {
     let a = VerifiedContext::assess(observation(), &contracts()).unwrap();
     let mut other = observation();
-    other.settings=br#"{"dataBaseDir":"/synthetic/data","providerFamilyDomain":"bigmodel","providerFamilyConnectionSelections":{"bigmodel":{"kind":"start-plan"}}}"#.to_vec();
+    other.settings=serde_json::to_vec(&serde_json::json!({"dataBaseDir":super::super::synthetic_test_path("data"),"providerFamilyDomain":"bigmodel","providerFamilyConnectionSelections":{"bigmodel":{"kind":"start-plan"}}})).unwrap();
     let b = VerifiedContext::assess(other, &contracts()).unwrap();
     assert_eq!(a.context_id(), b.context_id());
     let mut other = observation();
@@ -299,7 +345,7 @@ fn context_revision_binds_build_settings_root_and_family_without_exposing_source
     for change in 0..5 {
         let mut input = observation();
         let mut entries = contracts();
-        match change {0=>input.root_identity[1]+=1,1=>input.settings_identity[1]+=1,2=>input.settings.push(b' '),3=>{input.install.artifact_sha256[0]^=1;entries[0].fingerprint=input.install.clone();},_=>input.settings=br#"{"dataBaseDir":"/synthetic/data","providerFamilyDomain":"bigmodel","providerFamilyConnectionSelections":{"bigmodel":{"kind":"start-plan"}}}"#.to_vec()}
+        match change {0=>input.root_identity[1]+=1,1=>input.settings_identity[1]+=1,2=>input.settings.push(b' '),3=>{input.install.artifact_sha256[0]^=1;entries[0].fingerprint=input.install.clone();},_=>input.settings=serde_json::to_vec(&serde_json::json!({"dataBaseDir":super::super::synthetic_test_path("data"),"providerFamilyDomain":"bigmodel","providerFamilyConnectionSelections":{"bigmodel":{"kind":"start-plan"}}})).unwrap()}
         assert_ne!(
             original.context_revision(),
             VerifiedContext::assess(input, &entries)

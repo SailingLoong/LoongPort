@@ -4185,7 +4185,7 @@
       "cancel": "取消账号操作",
       "errors": {
         "select_context": "请选择并检查 ZCode 安装位置和数据目录。",
-        "unsupported_platform": "此平台尚未通过账号切换验证。本地恢复仍可使用。",
+        "unsupported_platform": "此平台尚不支持所请求的账号操作。请在官方 ZCode 中管理账号，并保留现有 LoongPort 恢复数据。",
         "unsupported_build": "此 ZCode 构建尚未验证。请使用已验证的构建后重新检查。",
         "native_gate_pending": "原生兼容性验证仍未完成。账号采集和切换继续禁用。",
         "root_unverified": "无法验证所选数据目录。请在 ZCode 设置中核对位置。",

@@ -41,7 +41,7 @@ export interface AccountError {
 export const accountErrorText = {
   select_context: "Choose and inspect a ZCode installation and data directory.",
   unsupported_platform:
-    "Account switching is not verified on this platform. Local recovery remains available.",
+    "This platform does not support the requested account operation. Manage your account in official ZCode and keep existing LoongPort recovery data.",
   unsupported_build:
     "This ZCode build is not verified. Use a verified build before inspecting again.",
   native_gate_pending:

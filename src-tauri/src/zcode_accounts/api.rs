@@ -113,7 +113,13 @@ impl From<TransactionError> for PublicError {
                 committed: true,
             },
             TransactionError::NotAdmitted => {
-                Self::new("zcode.account.not_admitted", "refreshContext")
+                if cfg!(unix) {
+                    Self::new("zcode.account.not_admitted", "refreshContext")
+                } else {
+                    // Account storage has no non-Unix adapter. Inspecting the
+                    // native source cannot make local recovery available there.
+                    BlockedReason::UnsupportedPlatform.into()
+                }
             }
             TransactionError::UnsupportedScope => {
                 Self::new("zcode.account.unsupported_scope", "openNativeSettings")

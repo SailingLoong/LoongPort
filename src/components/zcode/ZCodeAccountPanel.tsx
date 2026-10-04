@@ -601,12 +601,14 @@ export function ZCodeAccountPanel({
         <h4 className="text-sm font-medium">
           {copy("recoveryTitle", "Local account recovery")}
         </h4>
-        <p className="text-xs text-muted-foreground">
-          {copy(
-            "localHelp",
-            "Local recovery can be inspected, preserved and cleaned up without a verified ZCode installation. Unconfirmed records require explicit verification before deletion.",
-          )}
-        </p>
+        {recovery.data && !recovery.isError && (
+          <p className="text-xs text-muted-foreground">
+            {copy(
+              "localHelp",
+              "Local recovery can be inspected, preserved and cleaned up without a verified ZCode installation. Unconfirmed records require explicit verification before deletion.",
+            )}
+          </p>
+        )}
         <Button
           type="button"
           variant="outline"

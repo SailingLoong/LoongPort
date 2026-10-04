@@ -4185,7 +4185,7 @@
       "cancel": "Cancel account action",
       "errors": {
         "select_context": "Choose and inspect a ZCode installation and data directory.",
-        "unsupported_platform": "Account switching is not verified on this platform. Local recovery remains available.",
+        "unsupported_platform": "This platform does not support the requested account operation. Manage your account in official ZCode and keep existing LoongPort recovery data.",
         "unsupported_build": "This ZCode build is not verified. Use a verified build before inspecting again.",
         "native_gate_pending": "Native compatibility verification is still pending. Account capture and switching remain blocked.",
         "root_unverified": "The selected data directory could not be verified. Review its location in ZCode settings.",

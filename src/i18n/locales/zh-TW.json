@@ -4186,7 +4186,7 @@
       "cancel": "取消帳號操作",
       "errors": {
         "select_context": "請選擇並檢查 ZCode 安裝位置和資料目錄。",
-        "unsupported_platform": "此平台尚未通過帳號切換驗證。本機復原仍可使用。",
+        "unsupported_platform": "此平台尚不支援所要求的帳號操作。請在官方 ZCode 中管理帳號，並保留現有 LoongPort 復原資料。",
         "unsupported_build": "此 ZCode 組建尚未驗證。請使用已驗證的組建後重新檢查。",
         "native_gate_pending": "原生相容性驗證仍未完成。帳號擷取和切換繼續禁用。",
         "root_unverified": "無法驗證所選資料目錄。請在 ZCode 設定中核對位置。",

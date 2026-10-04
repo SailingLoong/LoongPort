@@ -1,17 +1,33 @@
 use super::super::admission::{BuildFingerprint, KeyMode, Platform, WriterState};
 use super::*;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 fn observation() -> ContextObservation {
+    let home = super::super::synthetic_test_path("home");
+    let selected = super::super::synthetic_test_path("selected");
     ContextObservation {
-        install: BuildFingerprint { platform: Platform::MacOs, version: "synthetic-version".into(), build: "synthetic-build".into(), artifact_sha256: [9;32] },
-        credential_root: PathBuf::from("/synthetic/selected/.zcode/v2"),
-        settings_file: PathBuf::from("/synthetic/home/.zcode/v2/setting.json"),
-        root_identity: [1,2], settings_identity: [1,3],
-        home: "/synthetic/home".into(), settings_home: "/synthetic/home".into(), bootstrap_home: "/synthetic/home".into(), username: "private-system-user".into(),
-        key_choice: KeyMode::Standard, writers: WriterState::Stopped,
-        settings: br#"{"dataBaseDir":"/synthetic/selected","providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"individual-coding-plan"}},"unknown":"SYNTHETIC_SETTINGS_CANARY"}"#.to_vec(),
+        install: BuildFingerprint {
+            platform: Platform::MacOs,
+            version: "synthetic-version".into(),
+            build: "synthetic-build".into(),
+            artifact_sha256: [9; 32],
+        },
+        credential_root: selected.join(".zcode/v2"),
+        settings_file: home.join(".zcode/v2/setting.json"),
+        root_identity: [1, 2],
+        settings_identity: [1, 3],
+        home: home.to_str().unwrap().into(),
+        settings_home: home.to_str().unwrap().into(),
+        bootstrap_home: home.to_str().unwrap().into(),
+        username: "private-system-user".into(),
+        key_choice: KeyMode::Standard,
+        writers: WriterState::Stopped,
+        settings: serde_json::to_vec(&serde_json::json!({
+            "dataBaseDir": selected, "providerFamilyDomain": "zai",
+            "providerFamilyConnectionSelections": {"zai": {"kind": "individual-coding-plan"}},
+            "unknown": "SYNTHETIC_SETTINGS_CANARY"
+        }))
+        .unwrap(),
     }
 }
 fn contracts() -> Vec<ContractEntry> {
@@ -49,12 +65,16 @@ fn source_summary_exposes_only_reviewed_path_and_public_metadata() {
     let status = summary(observation(), &contracts()).unwrap();
     let json = serde_json::to_value(status).unwrap();
     assert_eq!(json.as_object().unwrap().len(), 6);
-    assert_eq!(json["dataRoot"], "/synthetic/selected/.zcode/v2");
+    assert_eq!(
+        json["dataRoot"],
+        serde_json::to_value(super::super::synthetic_test_path("selected").join(".zcode/v2"))
+            .unwrap()
+    );
     assert_eq!(json["family"], "zai");
     let text = json.to_string();
     assert!(!text.contains("SYNTHETIC_SETTINGS_CANARY"));
     assert!(!text.contains("private-system-user"));
-    assert!(!text.contains("/synthetic/home"));
+    assert!(!text.contains("home"));
 }
 #[test]
 fn expected_context_rejects_settings_or_root_replacement_between_review_and_action() {
@@ -114,6 +134,15 @@ fn expected_context_rechecks_unknown_build_and_writer_even_when_revision_is_unch
 #[test]
 fn public_errors_keep_known_commit_and_static_codes_without_dynamic_error_text() {
     for (error, code, committed) in [
+        (
+            RuntimeError::Transaction(TransactionError::NotAdmitted),
+            if cfg!(unix) {
+                "zcode.account.not_admitted"
+            } else {
+                "zcode.account.unsupported_platform"
+            },
+            false,
+        ),
         (
             RuntimeError::Transaction(TransactionError::CommittedNeedsCleanup),
             "zcode.account.committed_recovery_required",

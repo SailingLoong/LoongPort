@@ -14,3 +14,16 @@ pub(crate) mod transaction;
 
 #[cfg(test)]
 mod roundtrip_tests;
+
+/// Absolute virtual paths for pure fixtures; never creates or opens these paths.
+#[cfg(test)]
+fn synthetic_test_path(relative: &str) -> std::path::PathBuf {
+    let root = if cfg!(windows) {
+        r"C:\synthetic"
+    } else {
+        "/synthetic"
+    };
+    let path = std::path::Path::new(root).join(relative);
+    assert!(path.is_absolute());
+    path
+}
