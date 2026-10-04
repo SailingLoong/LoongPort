@@ -536,11 +536,47 @@ mod tests {
             .unwrap()
             .path();
         let bytes = fs::read(&owner).unwrap();
-        fs::rename(lock_dir(&path), root.path().join("old.lock")).unwrap();
+        let old_directory = root.path().join("old.lock");
+        let old_owner = old_directory.join(owner.file_name().unwrap());
+        #[cfg(windows)]
+        {
+            // Windows rejects renaming a directory with an open child even when
+            // both handles share DELETE access (MS-FSA 2.1.5.15.12 / 2.1.4.2).
+            let error = fs::rename(lock_dir(&path), &old_directory).unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+            );
+            assert!(guard.0.unchanged());
+            assert!(!old_directory.exists());
+        }
+        // Move the open child aside, rename the empty directory, then restore
+        // the child there. Both original identities stay pinned throughout.
+        let displaced_owner = root.path().join("displaced-owner.json");
+        fs::rename(&owner, &displaced_owner).unwrap();
+        fs::rename(lock_dir(&path), &old_directory).unwrap();
+        fs::rename(&displaced_owner, &old_owner).unwrap();
         fs::create_dir(lock_dir(&path)).unwrap();
         fs::write(&owner, &bytes).unwrap();
+        assert!(same_identity(
+            &open_directory(&old_directory).unwrap(),
+            &guard.0.directory_file
+        )
+        .unwrap());
+        assert!(same_identity(
+            &File::open(&old_owner).unwrap(),
+            guard.0.owner_file.as_ref().unwrap()
+        )
+        .unwrap());
+        assert!(!same_identity(
+            &open_directory(&lock_dir(&path)).unwrap(),
+            &guard.0.directory_file
+        )
+        .unwrap());
+        assert!(!guard.0.unchanged());
         drop(guard);
         assert_eq!(fs::read(owner).unwrap(), bytes);
+        assert_eq!(fs::read(old_owner).unwrap(), bytes);
     }
 
     #[test]
