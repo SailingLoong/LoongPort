@@ -42,6 +42,13 @@ beta.2 版本 PR 和发布流程。
 [官方通用插件校验](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.5/crates/tauri-cli/src/info/plugins.rs)。
 major/minor 判据和已知插件集合由官方 CLI 维护，本仓不复制版本比较算法。
 
+审查又复现了官方 CLI 吞掉批量 pnpm 查询失败的路径：展示逐包版本仍成功，
+实际比较集合却为空。只检查展示与 mismatch 文本会误放行。门禁现在仅在
+官方 info 子进程的临时 PATH 中转发 pnpm，将实际批量查询的状态和解析结果
+写入临时回执；查询未执行、失败、解析错误或 counterpart 不完整都拒绝。
+不另跑预查询，不改变解析或比较算法；检查结束删除临时目录，无全局修改。
+当前回执要求已安装的正式三段版本；不支持的版本格式保守拒绝，不能静默放行。
+
 包装器把官方 mismatch 诊断变为失败状态，并检查 package.json 声明的 API
 和插件的 Rust/NPM 两边都被官方报告解析。缺失报告、命令失败和超时均失败
 关闭，不只关注本次四个包。诊断只读已安装包及锁文件；关闭无关的 latest

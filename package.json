@@ -16,7 +16,7 @@
     "ci:rust": "bash scripts/ci-checks.sh",
     "test:unit:watch": "vitest watch",
     "check:tauri": "node scripts/check-tauri-compatibility.mjs",
-    "test:tauri-compatibility": "node --test scripts/check-tauri-compatibility.test.mjs scripts/check-tauri-report.test.mjs"
+    "test:tauri-compatibility": "node --test scripts/check-tauri-compatibility.test.mjs scripts/check-tauri-report.test.mjs scripts/check-tauri-forwarding.test.mjs"
   },
   "keywords": [],
   "author": "Jason Young",
