@@ -496,7 +496,7 @@ pub(super) async fn cancel_capture_preview(
     })
     .await
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn switch_saved_account(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,

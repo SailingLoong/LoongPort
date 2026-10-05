@@ -787,7 +787,7 @@ impl<'a> AccountStore<'a> {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn capture(
         &self,
         family: OAuthFamily,
@@ -919,7 +919,7 @@ impl<'a> AccountStore<'a> {
         Ok(outcome)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn switch_saved(
         &self,
         profile_id: &str,
@@ -933,7 +933,7 @@ impl<'a> AccountStore<'a> {
             &uuid::Uuid::new_v4().to_string(),
         )
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn switch_saved_operation(
         &self,
         profile_id: &str,
