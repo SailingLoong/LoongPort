@@ -315,14 +315,17 @@ npx tsc --noEmit && npx prettier --check "{src,tests}/**/*.{js,jsx,ts,tsx,css,js
   `pnpm format:check` 最省事，别手写 glob。
 
 **`cargo test` / `clippy` 全绿不代表能打包** —— CI 的 Backend Checks 不跑 `tauri build`，
-Tauri 的 npm↔crate 版本校验只在打包时触发（已踩过，见 `ca82a908`）。
+Tauri 的 npm↔crate 兼容性必须另外检查。冻结安装后运行 `pnpm check:tauri`
+与 `pnpm test:tauri-compatibility`；普通 CI 和 Release 都执行该门禁。失败复盘、
+依赖对齐与发布验收标准见 [Tauri 打包兼容性门禁](docs/tauri-packaging-compatibility.md)。
 
 ### 推送前快速预判会不会红
 
-六道闸不用每次全跑 —— CI 红不红可以按改动面跑**最小集**预判，本地绿 ⇒ CI 必绿：
+六道闸不用每次全跑 —— CI 红不红可以按改动面跑**最小集**预判，远程精确提交仍须通过 CI：
 
 - 只动 `src/` / `tests/`：前端三件套（typecheck / format:check / test:unit）。
-- 只动 `src-tauri/`：后端三件套（fmt / clippy / test）。
+- 只动 `src-tauri/`：后端三件套（fmt / clippy / test）。改 Cargo manifest、
+  锁文件或 Tauri NPM 包时，另跑上述跨生态兼容性门禁。
 - 依据有两条：CI 的 clippy 与本地同一条命令（都带 `--all-targets`，2026-08-25
   起对齐——此前 CI 不带它，测试代码的 lint 线上隐形，攒过 9 处存量才补齐）；
   CI 工具链走 `rust-toolchain.toml`（同本机版本，2026-08-16 #150 起 —— 别在
@@ -370,7 +373,8 @@ dependabot 的，别照搬。PR 模板在 `.github/pull_request_template.md`。
 别在 CLAUDE.md 里复制第二遍（见全局准则 §1.4）。要打包时去读那份。
 
 唯一属于 CLAUDE.md（维护视角）的是上面那条警告：**`cargo test` / `clippy` 全绿
-不代表能打包** —— Tauri 的 npm↔crate 版本校验只在打包时触发。
+不代表能打包** —— 跨生态兼容性另由 `pnpm check:tauri` 预检，完整发布产物
+仍按 [Tauri 打包兼容性门禁](docs/tauri-packaging-compatibility.md) 验收。
 
 ## 五、打 tag 发版：必须写清这一版干了啥
 

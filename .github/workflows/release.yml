@@ -209,6 +209,9 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Check Tauri package compatibility before packaging
+        run: pnpm check:tauri
+
       - name: Prepare Tauri signing key
         # 给**自动更新包**签名的密钥。2026-08-04 起真的在用（那天接上了自己的发布渠道：
         # 注册 updater 插件 + 配 `plugins.updater` 的自有 endpoints/pubkey +
