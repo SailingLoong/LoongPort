@@ -15,6 +15,7 @@ mod codex_state_db;
 #[cfg(feature = "gui")]
 mod commands;
 mod config;
+mod config_file_io;
 mod crowd;
 mod database;
 mod deeplink;
@@ -48,8 +49,13 @@ mod relay;
 mod rt;
 mod secrets;
 mod services;
+// Native account commands remain gated by the reviewed platform manifest.
+#[cfg(any(feature = "gui", test))]
+mod zcode_accounts;
 #[cfg(any(feature = "gui", test))]
 mod zcode_config;
+#[cfg(any(feature = "gui", test))]
+mod zcode_file_lock;
 pub use secrets::key_store::{KeyStore, KeyStoreError};
 pub use secrets::session::SecretSession;
 mod session_manager;
@@ -1899,6 +1905,15 @@ pub fn run() {
             commands::get_zcode_config,
             commands::save_zcode_provider,
             commands::remove_zcode_provider,
+            commands::inspect_zcode_account_context,
+            commands::get_zcode_account_status,
+            commands::capture_zcode_current_account,
+            commands::switch_zcode_saved_account,
+            commands::get_zcode_account_recovery,
+            commands::archive_zcode_account_recovery,
+            commands::confirm_zcode_account_recovery,
+            commands::recapture_zcode_account_recovery,
+            commands::delete_zcode_account_recovery,
             commands::update_pi_provider_usage_script,
             commands::get_pi_session_discovery,
             // Profile management (项目配置方案)

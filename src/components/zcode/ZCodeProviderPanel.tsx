@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ZCodeAccountPanel } from "@/components/zcode/ZCodeAccountPanel";
 
 const queryKey = ["zcodeConfig"];
 type Draft = Omit<ZCodeProviderInput, "models"> & { modelText: string };
@@ -48,7 +49,9 @@ export function ZCodeProviderPanel({
     provider: ZCodeProvider;
     revision: string;
   } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [providerBusy, setBusy] = useState(false);
+  const [accountBusy, setAccountBusy] = useState(false);
+  const busy = providerBusy || accountBusy;
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -61,7 +64,7 @@ export function ZCodeProviderPanel({
     [onNavigationBlockedChange],
   );
   const startEdit = (provider?: ZCodeProvider) => {
-    if (!query.data || query.isError || inFlight.current) return;
+    if (!query.data || query.isError || inFlight.current || accountBusy) return;
     setError(null);
     setConflict(false);
     setLatest(null);
@@ -76,7 +79,7 @@ export function ZCodeProviderPanel({
     });
   };
   const write = async (operation: () => Promise<ZCodeConfig>) => {
-    if (inFlight.current) return;
+    if (inFlight.current || accountBusy) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -130,7 +133,7 @@ export function ZCodeProviderPanel({
     }
   };
   const readLatest = async () => {
-    if (inFlight.current) return;
+    if (inFlight.current || accountBusy) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -177,7 +180,7 @@ export function ZCodeProviderPanel({
           <p className="text-sm text-muted-foreground">
             {t("zcode.description", {
               defaultValue:
-                "Configure personal providers and models in ZCode. Manage accounts and the default model in ZCode.",
+                "Configure personal providers and models, and manage saved personal ZCode accounts. Choose the default model in ZCode.",
             })}
           </p>
         </div>
@@ -265,6 +268,10 @@ export function ZCodeProviderPanel({
           </CardContent>
         </Card>
       ))}
+      <ZCodeAccountPanel
+        disabled={providerBusy || !!draft || !!removing}
+        onBusyChange={setAccountBusy}
+      />
       <Dialog
         open={draft !== null}
         onOpenChange={(open) => {

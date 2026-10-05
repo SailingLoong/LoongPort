@@ -309,6 +309,7 @@ where
     let session = &db.secrets;
     let mut current = session.write()?;
     let root = session.root();
+    super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
         if regular_file(&root.join(name))? {
             return Err(AppError::Config("secret.recovery_required".into()));
@@ -1070,6 +1071,123 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn pending_zcode_transaction_blocks_generation_install_before_mutation() {
+        let fixture = Fixture::new();
+        let pending = fixture.root.join("zcode_account_transaction.json");
+        write_durable(&pending, b"pending transaction fixture").unwrap();
+        let original = fixture.db.secrets.read().unwrap().metadata().clone();
+        let key = fixture
+            .store
+            .load(&original.vault_id, &original.key_id)
+            .unwrap();
+        let metadata = std::fs::read(fixture.root.join("vault.json")).unwrap();
+        let database = fixture
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .serialize(rusqlite::MAIN_DB)
+            .unwrap()
+            .to_vec();
+        let auth = std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap();
+        let entries = || {
+            std::fs::read_dir(&fixture.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let names = entries();
+
+        let error = install_with_hook(
+            &fixture.db,
+            &fixture.store,
+            |_| panic!("pending transaction must block key generation"),
+            false,
+            |_, _, _| panic!("pending transaction must block database preparation"),
+            Replacements {
+                skills: None,
+                settings: None,
+            },
+            &mut |_| panic!("pending transaction must block publication"),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
+        );
+        assert_eq!(fixture.db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(
+            fixture
+                .store
+                .load(&original.vault_id, &original.key_id)
+                .unwrap(),
+            key
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join("vault.json")).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            fixture
+                .db
+                .conn
+                .lock()
+                .unwrap()
+                .serialize(rusqlite::MAIN_DB)
+                .unwrap()
+                .to_vec(),
+            database
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap(),
+            auth
+        );
+        assert_eq!(
+            std::fs::read(&pending).unwrap(),
+            b"pending transaction fixture"
+        );
+        assert_eq!(entries(), names);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pending_zcode_transaction_does_not_block_existing_vault_transition_recovery() {
+        let fixture = Fixture::new();
+        let original = fixture.db.secrets.read().unwrap().metadata().clone();
+        fixture.interrupt(Checkpoint::Intent);
+        let pending = fixture.root.join("zcode_account_transaction.json");
+        write_durable(&pending, b"pending transaction fixture").unwrap();
+
+        let recovered = SecretSession::open_existing(
+            &fixture.root,
+            &fixture.store,
+            Some("next recovery password"),
+        )
+        .unwrap();
+
+        let next = recovered.read().unwrap();
+        assert_ne!(next.metadata().key_id, original.key_id);
+        let connection = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        vault::check_identity(&connection, &next).unwrap();
+        inventory::validate_database(&connection, &next).unwrap();
+        assert_eq!(
+            &*CredentialFile::Codex
+                .decode(
+                    &next,
+                    &std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap(),
+                )
+                .unwrap(),
+            br#"{"token":"checkpoint-canary"}"#
+        );
+        assert_eq!(
+            std::fs::read(pending).unwrap(),
+            b"pending transaction fixture"
+        );
+        assert!(!fixture.root.join(INTENT).exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn interruptions_recover_with_only_the_new_password() {
         for point in [
             Checkpoint::Staged,
@@ -1410,6 +1528,9 @@ mod tests {
             .unwrap()
             .write(&session, br#"{"key":"rotation-canary"}"#)
             .unwrap();
+        let zcode_profile = OwnedFile::registered("zcode_account_profiles.json").unwrap();
+        let profile_plaintext = br#"{"localProfile":"fresh-profile-canary"}"#;
+        zcode_profile.write(&session, profile_plaintext).unwrap();
         let settings = crate::settings::encrypt_legacy_settings_with_vault(
             br#"{"webdavBackup":{"password":"rotation-canary"}}"#,
             &session.read().unwrap(),
@@ -1461,6 +1582,13 @@ mod tests {
                 &std::fs::read(root.join("codex_oauth_auth.json")).unwrap()
             )
             .is_err());
+        let profile_bytes = std::fs::read(root.join(zcode_profile.relative_path())).unwrap();
+        assert_eq!(
+            &*zcode_profile.decode(&next, &profile_bytes).unwrap(),
+            profile_plaintext
+        );
+        assert!(zcode_profile.decode(&old, &profile_bytes).is_err());
+        assert!(!String::from_utf8_lossy(&profile_bytes).contains("fresh-profile-canary"));
         let plans = super::super::files::stage_owned_files_with_vault(&root, &next, false).unwrap();
         assert!(!plans.is_empty());
         for name in [

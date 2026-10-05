@@ -281,6 +281,7 @@ fn reset_with_hook(
     password: &str,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<PathBuf, AppError> {
+    super::owned_file::ensure_zcode_reset_allowed(root)?;
     let journal = intent_path(root)?;
     if regular(&journal)? {
         return Err(AppError::Config("secret.recovery_required".into()));
@@ -397,6 +398,7 @@ fn finish(
     next: &VaultContext,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    super::owned_file::ensure_zcode_reset_allowed(root)?;
     let (stage, previous, archive_path) = locations(root, &intent.id)?;
     let archive_bytes = read_optional(&archive_path)?;
     if hash(&archive_bytes) != manifest.archive_hash {
@@ -411,6 +413,14 @@ fn finish(
         .map_err(inventory::secret_error)?;
     let mut zip =
         zip::ZipArchive::new(Cursor::new(original_archive.as_slice())).map_err(|_| invalid())?;
+    // Re-entry may see an already-installed empty stage. Only the authenticated
+    // original archive can establish whether the reset would discard this state.
+    if zip
+        .file_names()
+        .any(super::owned_file::is_zcode_reset_archive_member)
+    {
+        return Err(AppError::Config("secret.zcode_recovery_required".into()));
+    }
     let mut original_settings = zeroize::Zeroizing::new(Vec::new());
     zip.by_name("device-settings.json")
         .map_err(|_| invalid())?
@@ -604,6 +614,72 @@ mod tests {
     }
     #[test]
     #[serial]
+    fn zcode_records_block_reset_before_mutation() {
+        for filename in [
+            super::super::owned_file::JOURNAL_FILE,
+            super::super::owned_file::RECOVERY_FILE,
+        ] {
+            let fixture = Fixture::new();
+            let pending = fixture.root.join(filename);
+            session::write_durable(&pending, b"pending transaction fixture").unwrap();
+            let expected = preview(&fixture.root).unwrap().fingerprint;
+            let metadata = std::fs::read(fixture.root.join("vault.json")).unwrap();
+            let database = std::fs::read(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            let settings = read_optional(&crate::settings::settings_path()).unwrap();
+            let tree = tree_hash(&fixture.root).unwrap();
+            let entries = || {
+                std::fs::read_dir(parent(&fixture.root).unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            let names = entries();
+
+            let error = reset_with_hook(
+                &fixture.root,
+                &expected,
+                "new protection password",
+                &mut |_| panic!("pending transaction must block reset publication"),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
+            );
+            assert_eq!(
+                std::fs::read(fixture.root.join("vault.json")).unwrap(),
+                metadata
+            );
+            assert_eq!(
+                std::fs::read(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+                database
+            );
+            assert_eq!(
+                read_optional(&crate::settings::settings_path()).unwrap(),
+                settings
+            );
+            assert_eq!(tree_hash(&fixture.root).unwrap(), tree);
+            assert_eq!(
+                std::fs::read(&pending).unwrap(),
+                b"pending transaction fixture"
+            );
+            assert_eq!(entries(), names);
+            assert!(!intent_path(&fixture.root).unwrap().exists());
+            let reopened = SecretSession::open_existing(
+                &fixture.root,
+                &MemoryKeyStore::default(),
+                Some("old protection password"),
+            )
+            .unwrap();
+            assert_eq!(
+                reopened.read().unwrap().metadata(),
+                fixture.original_key.metadata()
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn reset_retains_plain_facts_and_archives_ciphertext_without_old_key() {
         let f = Fixture::new();
         let preview = preview(&f.root).unwrap();
@@ -767,6 +843,71 @@ mod tests {
             recover(&f.root, Some("new protection password")).unwrap();
             assert!(!pending(&f.root).unwrap());
             f.assert_reset();
+        }
+    }
+    #[test]
+    fn reset_reentry_preserves_authenticated_original_account_material() {
+        for marker in [
+            super::super::owned_file::JOURNAL_FILE,
+            super::super::owned_file::RECOVERY_FILE,
+        ] {
+            let parent = tempfile::tempdir().unwrap();
+            // Model a new, empty live root after a previous reset installed its stage.
+            let root = parent.path().join("synthetic-reset-root");
+            crate::config::ensure_private_directory(&root).unwrap();
+            let password = "synthetic reset archive password";
+            let next = VaultContext::generate()
+                .unwrap()
+                .with_password(password)
+                .unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            let (stage, previous, archive_path) = locations(&root, &id).unwrap();
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(0o600);
+            zip.start_file(format!("data/{marker}"), options).unwrap();
+            zip.write_all(b"only preserved account material").unwrap();
+            zip.start_file("device-settings.json", options).unwrap();
+            zip.write_all(b"{}").unwrap();
+            let archive = RecoveryArchive {
+                id: id.clone(),
+                metadata: next.metadata().clone(),
+                content: next
+                    .seal(
+                        &["local", "reset-archive", &id],
+                        &zip.finish().unwrap().into_inner(),
+                    )
+                    .unwrap(),
+            };
+            let archive_bytes = serde_json::to_vec(&archive).unwrap();
+            session::write_durable(&archive_path, &archive_bytes).unwrap();
+            let manifest = Manifest {
+                phase: ResetPhase::Prepared,
+                fingerprint: "synthetic prior source".into(),
+                archive_hash: hash(&archive_bytes),
+                database_hash: "not inspected before account gate".into(),
+                settings_hash: "not inspected before account gate".into(),
+            };
+            let intent = Intent {
+                id: id.clone(),
+                metadata: next.metadata().clone(),
+                body: next
+                    .seal(
+                        &["local", "reset-intent", &id],
+                        &serde_json::to_vec(&manifest).unwrap(),
+                    )
+                    .unwrap(),
+            };
+            let intent_bytes = serde_json::to_vec(&intent).unwrap();
+            let intent_file = intent_path(&root).unwrap();
+            session::write_durable(&intent_file, &intent_bytes).unwrap();
+            let result = recover(&root, Some(password));
+            assert!(
+                matches!(result, Err(AppError::Config(code)) if code == "secret.zcode_recovery_required")
+            );
+            assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+            assert_eq!(std::fs::read(&intent_file).unwrap(), intent_bytes);
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+            assert!(!stage.exists() && !previous.exists());
         }
     }
 }

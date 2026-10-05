@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -12,6 +13,13 @@ import { zcodeApi, type ZCodeConfig } from "@/lib/api/zcode";
 
 vi.mock("@/lib/api/zcode", () => ({
   zcodeApi: { read: vi.fn(), save: vi.fn(), remove: vi.fn() },
+}));
+const accountPanel = vi.hoisted(() => ({ render: vi.fn() }));
+vi.mock("@/components/zcode/ZCodeAccountPanel", () => ({
+  ZCodeAccountPanel: (props: { onBusyChange: (busy: boolean) => void }) => {
+    accountPanel.render(props);
+    return null;
+  },
 }));
 const fixture: ZCodeConfig = {
   revision: "revision-one",
@@ -36,13 +44,15 @@ const fixture: ZCodeConfig = {
     },
   ],
 };
-function mount() {
+function mount(onNavigationBlockedChange?: (blocked: boolean) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   render(
     <QueryClientProvider client={client}>
-      <ZCodeProviderPanel />
+      <ZCodeProviderPanel
+        onNavigationBlockedChange={onNavigationBlockedChange}
+      />
     </QueryClientProvider>,
   );
   return client;
@@ -59,6 +69,30 @@ beforeEach(() => {
   });
 });
 describe("ZCode native provider panel", () => {
+  it("keeps navigation blocked while either provider or account work is busy", async () => {
+    let finish!: (value: ZCodeConfig) => void;
+    vi.mocked(zcodeApi.save).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onBlocked = vi.fn();
+    mount(onBlocked);
+    await screen.findByText("Managed example");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onBlocked).toHaveBeenLastCalledWith(true));
+    const { onBusyChange } = accountPanel.render.mock.lastCall![0];
+    act(() => onBusyChange(true));
+    act(() => onBusyChange(false));
+    expect(onBlocked).toHaveBeenLastCalledWith(true);
+    act(() => onBusyChange(true));
+    await act(async () => finish(fixture));
+    expect(onBlocked).toHaveBeenLastCalledWith(true);
+    act(() => onBusyChange(false));
+    await waitFor(() => expect(onBlocked).toHaveBeenLastCalledWith(false));
+  });
   it("reloads a conflict in the editor, preserves input and requires explicit resolution and save", async () => {
     const client = mount();
     await screen.findByText("Managed example");

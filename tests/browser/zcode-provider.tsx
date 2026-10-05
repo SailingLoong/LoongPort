@@ -4,9 +4,16 @@ import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { zcodeApi, type ZCodeConfig } from "@/lib/api/zcode";
+import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
 import "@/index.css";
 
 // Only synthetic redacted API results enter this isolated component harness.
+zcodeAccountsApi.recoveryStatus = async () => ({
+  revision: "synthetic-recovery",
+  pending: false,
+  nativeUnconfirmed: false,
+  records: [],
+});
 const count = Number(new URLSearchParams(location.search).get("models") ?? 80);
 const config: ZCodeConfig = {
   revision: "initial",

@@ -5,28 +5,10 @@ use zeroize::Zeroizing;
 use super::{session::SecretSession, VaultContext};
 use crate::error::AppError;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialFile {
-    Copilot,
-    Codex,
-    Xai,
-}
-
-pub(crate) const AUTH_FILES: [CredentialFile; 3] = [
-    CredentialFile::Copilot,
-    CredentialFile::Codex,
-    CredentialFile::Xai,
-];
+use super::owned_file::BACKUP_PATTERNS;
+pub(crate) use super::owned_file::{CredentialFile, OwnedFile, AUTH_FILES};
 
 impl CredentialFile {
-    pub(crate) const fn filename(self) -> &'static str {
-        match self {
-            Self::Copilot => "copilot_auth.json",
-            Self::Codex => "codex_oauth_auth.json",
-            Self::Xai => "xai_oauth_auth.json",
-        }
-    }
-
     pub(crate) fn path(self, session: &SecretSession) -> PathBuf {
         session.root().join(self.filename())
     }
@@ -146,12 +128,6 @@ mod tests {
     }
 }
 
-/// A credential document created and owned by the application.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedFile {
-    relative: PathBuf,
-}
-
 pub(crate) struct OwnedFileMigration {
     pub file: OwnedFile,
     pub source: PathBuf,
@@ -159,45 +135,7 @@ pub(crate) struct OwnedFileMigration {
     pub ciphertext: Vec<u8>,
 }
 
-const LEGACY_CONFIG_FILES: [&str; 3] = ["config.json", "config.json.bak", "config.json.migrated"];
-const BACKUP_PATTERNS: [(&str, &str, &str); 6] = [
-    ("backups", "backup_", ".json"),
-    ("backups", "codex-auth-", ".json"),
-    ("backups", "env-backup-", ".json"),
-    ("backups/hermes", "hermes_", ".yaml"),
-    ("backups/hermes", "hermes_", ".yml"),
-    ("backups/openclaw", "openclaw_", ".json5"),
-];
-
 impl OwnedFile {
-    pub(crate) fn registered(relative: impl AsRef<std::path::Path>) -> Result<Self, AppError> {
-        let relative = relative.as_ref();
-        if relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        {
-            return Err(AppError::Config("secret.unregistered_file".into()));
-        }
-        let name = relative.file_name().and_then(|v| v.to_str()).unwrap_or("");
-        let parent = relative
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .to_string_lossy()
-            .replace('\\', "/");
-        let valid = (parent.is_empty()
-            && (LEGACY_CONFIG_FILES.contains(&name)
-                || AUTH_FILES.iter().any(|file| file.filename() == name)))
-            || BACKUP_PATTERNS.iter().any(|(directory, prefix, suffix)| {
-                parent == *directory && matches_backup_name(name, prefix, suffix)
-            });
-        if !valid {
-            return Err(AppError::Config("secret.unregistered_file".into()));
-        }
-        Ok(Self {
-            relative: relative.to_path_buf(),
-        })
-    }
-
     pub(crate) fn at_path(
         session: &SecretSession,
         path: &std::path::Path,
@@ -208,36 +146,8 @@ impl OwnedFile {
         )
     }
 
-    pub(crate) fn relative_path(&self) -> &std::path::Path {
-        &self.relative
-    }
     pub(crate) fn path(&self, session: &SecretSession) -> PathBuf {
         session.root().join(&self.relative)
-    }
-
-    pub(crate) fn encode(
-        &self,
-        vault: &VaultContext,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, AppError> {
-        let identity = self.relative.to_string_lossy().replace('\\', "/");
-        vault
-            .seal(&["file", &identity, "content"], plaintext)
-            .map(String::into_bytes)
-            .map_err(super::inventory::secret_error)
-    }
-
-    pub(crate) fn decode(
-        &self,
-        vault: &VaultContext,
-        bytes: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let identity = self.relative.to_string_lossy().replace('\\', "/");
-        let ciphertext = std::str::from_utf8(bytes)
-            .map_err(|_| AppError::Config("secret.invalid_envelope".into()))?;
-        vault
-            .open(&["file", &identity, "content"], ciphertext)
-            .map_err(super::inventory::secret_error)
     }
 
     pub(crate) fn read(&self, session: &SecretSession) -> Result<Zeroizing<Vec<u8>>, AppError> {
@@ -258,14 +168,6 @@ impl OwnedFile {
         )?;
         super::session::write_durable(&path, &bytes)
     }
-}
-
-fn matches_backup_name(name: &str, prefix: &str, suffix: &str) -> bool {
-    name.strip_prefix(prefix)
-        .and_then(|v| v.strip_suffix(suffix))
-        .is_some_and(|stamp| {
-            !stamp.is_empty() && stamp.bytes().all(|v| v.is_ascii_digit() || v == b'_')
-        })
 }
 
 pub(crate) fn stage_owned_files_with_vault(
@@ -316,7 +218,11 @@ pub(crate) fn stage_owned_files_with_vault(
     for (file, source) in paths {
         let bytes = Zeroizing::new(std::fs::read(&source).map_err(|e| AppError::io(&source, e))?);
         let recovery = source.starts_with(root.join("backups/vault-recovery"));
-        let ciphertext = if bytes.starts_with(b"lpenc") || !legacy_allowed || recovery {
+        let ciphertext = if bytes.starts_with(b"lpenc")
+            || !legacy_allowed
+            || recovery
+            || !file.allows_legacy_plaintext()
+        {
             file.decode(vault, &bytes)?;
             bytes.to_vec()
         } else {
@@ -363,6 +269,29 @@ fn validate_legacy_document(file: &OwnedFile, bytes: &[u8]) -> Result<(), AppErr
 #[cfg(test)]
 mod owned_tests {
     use super::*;
+    #[test]
+    fn account_files_never_take_the_legacy_plaintext_upgrade_path() {
+        for name in [
+            super::super::owned_file::PROFILE_FILE,
+            super::super::owned_file::JOURNAL_FILE,
+            super::super::owned_file::RECOVERY_FILE,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let vault = VaultContext::generate().unwrap();
+            std::fs::write(root.path().join(name), b"{}").unwrap();
+            assert!(stage_owned_files_with_vault(root.path(), &vault, true).is_err());
+            assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"{}");
+            let file = OwnedFile::registered(name).unwrap();
+            std::fs::write(root.path().join(name), file.encode(&vault, b"{}").unwrap()).unwrap();
+            assert_eq!(
+                stage_owned_files_with_vault(root.path(), &vault, true)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
     #[test]
     fn migration_stages_registered_credentials_and_rejects_plaintext_after_upgrade() {
         let root = tempfile::tempdir().unwrap();

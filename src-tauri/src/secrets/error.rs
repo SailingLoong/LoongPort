@@ -69,3 +69,7 @@ pub(crate) fn public_code(error: crate::error::AppError) -> String {
         _ => "secret.operation_failed".into(),
     }
 }
+
+pub(crate) fn secret_error(error: SecretError) -> crate::error::AppError {
+    crate::error::AppError::Config(error.code().to_owned())
+}

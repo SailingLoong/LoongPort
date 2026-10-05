@@ -1,0 +1,39 @@
+[package]
+name = "loongport-zcode-account-core-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Compile the product source itself; this harness contains no second implementation.
+[lib]
+path = "harness.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+base64 = "0.23"
+sha2 = "0.11"
+zeroize = "1.8"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+argon2 = { version = "0.6", features = ["zeroize"] }
+getrandom = "0.4"
+uuid = { version = "1.11", features = ["v4"] }
+thiserror = "2.0"
+toml = "1.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[workspace]
+
+# The product's GUI runtime owner is compiled/tested by the main crate, not this
+# dependency-minimal harness. Recognize that existing feature name without a bypass.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gui"))'] }
