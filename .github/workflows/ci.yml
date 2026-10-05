@@ -75,6 +75,10 @@ jobs:
               - "tests/**"
               - "index.html"
               - "package.json"
+              # Cargo updates can drift from frozen @tauri-apps counterparts.
+              - "src-tauri/Cargo.lock"
+              - "src-tauri/Cargo.toml"
+              - "scripts/check-tauri-*.mjs"
               - "pnpm-lock.yaml"
               - "pnpm-workspace.yaml"
               - "tsconfig.json"
@@ -136,6 +140,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust for Tauri diagnostics
+        # Match the release toolchain; info does not compile the Rust workspace.
+        run: rustup show
+
+      - name: Tauri package compatibility
+        run: pnpm check:tauri
+
+      - name: Tauri compatibility regressions
+        run: pnpm test:tauri-compatibility
 
       - name: TypeScript type check
         run: pnpm typecheck
