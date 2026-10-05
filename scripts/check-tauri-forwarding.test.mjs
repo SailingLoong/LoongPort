@@ -20,10 +20,12 @@ for (const mode of ["failed", "partial", "malformed", "missing"]) {
       if (mode !== "missing")
         writeFileSync(
           entry,
-          `const args=process.argv.slice(2);const versions=${JSON.stringify(Object.fromEntries(declared.map((name) => [name, name.endsWith("/api") ? "2.11.1" : { "@tauri-apps/plugin-dialog": "2.8.1", "@tauri-apps/plugin-log": "2.10.0", "@tauri-apps/plugin-process": "2.4.0" }[name]])))};if(args.includes('--json')){${mode === "failed" ? "process.exit(1)" : mode === "malformed" ? "console.log('bad json')" : "console.log(JSON.stringify([{dependencies:{'@tauri-apps/api':{version:'2.11.1'}}}]))"}}else if(args[0]==='list'){if(versions[args[1]])console.log(args[1]+'@'+versions[args[1]])}else if(args[0]==='-v')console.log('10.12.3');`,
+          `const args=process.argv.slice(2);const versions=${JSON.stringify(Object.fromEntries(declared.map((name) => [name, name.endsWith("/api") ? "2.11.1" : { "@tauri-apps/plugin-dialog": "2.8.1", "@tauri-apps/plugin-log": "2.10.0", "@tauri-apps/plugin-process": "2.4.0" }[name]])))};if(args.includes('--json')){${mode === "failed" ? "process.exit(1)" : mode === "malformed" ? "console.log('bad json')" : "console.log(JSON.stringify([{dependencies:{'@tauri-apps/api':{version:'2.12.1'}}}]))"}}else if(args[0]==='list'){if(versions[args[1]])console.log(args[1]+'@'+versions[args[1]])}else if(args[0]==='-v')console.log('10.12.3');`,
         );
       const result = runTauriDiagnostics({ root, declared, pnpmEntry: entry });
       assert.equal(result.ok, false, result.reason);
+      if (mode !== "missing")
+        assert.match(result.reason, /bulk package resolution/);
       if (mode !== "missing")
         assert.equal(
           result.report.status,
