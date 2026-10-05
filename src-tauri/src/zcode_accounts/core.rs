@@ -281,14 +281,7 @@ pub enum TransactionPhase {
 }
 
 // Rust's is_whitespace differs from ECMAScript trim (notably U+0085 and U+FEFF).
-pub(super) fn js_trim(value: &str) -> &str {
-    value.trim_matches(|c| {
-        matches!(c,
-            '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' |
-            '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
-            '\u{205f}' | '\u{3000}' | '\u{feff}')
-    })
-}
+pub(super) use super::desktop_text::js_trim;
 
 fn encode_uri_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";

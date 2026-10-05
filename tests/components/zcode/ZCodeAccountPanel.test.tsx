@@ -20,9 +20,15 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@/lib/api/zcodeAccounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/zcodeAccounts")>()),
   zcodeAccountsApi: {
+    queryLastOperation: vi.fn().mockResolvedValue(null),
+    openForLogin: vi.fn(),
+    latestVersion: vi.fn(),
+    discover: vi.fn(),
     inspect: vi.fn(),
     status: vi.fn(),
-    capture: vi.fn(),
+    previewCapture: vi.fn(),
+    commitCapture: vi.fn(),
+    cancelCapture: vi.fn(),
     switch: vi.fn(),
     recoveryStatus: vi.fn(),
     archive: vi.fn(),
@@ -47,8 +53,18 @@ const context = {
 const catalog: CatalogStatus = {
   revision: "catalog-one",
   profiles: [
-    { id: "opaque-zai", family: "zai", label: "Personal Z.ai" },
-    { id: "opaque-bigmodel", family: "bigmodel", label: null },
+    {
+      id: "opaque-zai",
+      family: "zai",
+      label: "Personal Z.ai",
+      sourceVerified: true,
+    },
+    {
+      id: "opaque-bigmodel",
+      family: "bigmodel",
+      label: null,
+      sourceVerified: true,
+    },
   ],
   current: null,
   pending: false,
@@ -91,13 +107,38 @@ function confirm(name: string) {
   );
 }
 beforeEach(() => {
+  vi.mocked(zcodeAccountsApi.queryLastOperation)
+    .mockReset()
+    .mockResolvedValue(null);
+  vi.mocked(zcodeAccountsApi.openForLogin)
+    .mockReset()
+    .mockResolvedValue(undefined);
+  localStorage.clear();
+  vi.mocked(zcodeAccountsApi.latestVersion)
+    .mockReset()
+    .mockResolvedValue({ version: "99.0.0", checkedAt: 1, error: null });
   vi.mocked(invoke).mockReset();
+  vi.mocked(zcodeAccountsApi.discover).mockReset().mockResolvedValue({
+    dataRoot: "",
+    sourceBasis: "osAccountHome",
+    candidates: [],
+    latestStatus: "notQueried",
+  });
   vi.mocked(zcodeAccountsApi.inspect).mockReset().mockResolvedValue(context);
   vi.mocked(zcodeAccountsApi.status).mockReset().mockResolvedValue(catalog);
   vi.mocked(zcodeAccountsApi.recoveryStatus)
     .mockReset()
     .mockResolvedValue(recovery);
-  vi.mocked(zcodeAccountsApi.capture).mockReset().mockResolvedValue("saved");
+  vi.mocked(zcodeAccountsApi.previewCapture).mockReset().mockResolvedValue({
+    id: "opaque-reviewed",
+    label: "a…",
+    family: "zai",
+    duplicate: false,
+    previewId: "review-one",
+  });
+  vi.mocked(zcodeAccountsApi.commitCapture)
+    .mockReset()
+    .mockResolvedValue("saved");
   vi.mocked(zcodeAccountsApi.switch).mockReset().mockResolvedValue("switched");
   vi.mocked(zcodeAccountsApi.archive).mockReset().mockResolvedValue("archived");
   vi.mocked(zcodeAccountsApi.confirmRecovery)
@@ -109,6 +150,224 @@ beforeEach(() => {
     .mockResolvedValue(undefined);
 });
 describe("ZCode saved accounts", () => {
+  it("queries the original request on inspect and refresh after reopening without a switch", async () => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue({
+      requestId: "original",
+      phase: "restartVerified",
+      target: "opaque-zai",
+      refreshed: false,
+      restartRequested: true,
+    });
+    mount();
+    await inspect();
+    expect(
+      await screen.findByText(
+        "The original local switch is confirmed. Online sign-in remains unverified.",
+      ),
+    ).toBeVisible();
+    expect(zcodeAccountsApi.queryLastOperation).toHaveBeenCalledWith(
+      source,
+      context.contextRevision,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.queryLastOperation).toHaveBeenCalledTimes(2),
+    );
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("opens the selected official source for login without capturing or claiming account validity", async () => {
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open official ZCode for login" }),
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.openForLogin).toHaveBeenCalledWith(source),
+    );
+    await screen.findByText(/Official ZCode opened with the selected source/);
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("shows actionable source verification and blocks an imported account switch", async () => {
+    vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
+      ...catalog,
+      profiles: [{ ...catalog.profiles[0], sourceVerified: false }],
+    });
+    mount();
+    await inspect();
+    await screen.findByText(/Source unverified\. Sign in/);
+    expect(
+      screen.getByRole("button", { name: "Switch saved account" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save current account" }),
+    ).toBeEnabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("discovers one verified installation and bootstrap root without inspecting credentials", async () => {
+    vi.mocked(zcodeAccountsApi.discover).mockResolvedValue({
+      dataRoot: source.dataRoot,
+      sourceBasis: "bootstrapDataBaseDir",
+      candidates: [
+        {
+          installPath: "/custom/ZCode.app",
+          version: "3.14.4",
+          build: "3.14.4.7912",
+          verifiedBuild: true,
+        },
+      ],
+      latestStatus: "notQueried",
+    });
+    mount();
+    await screen.findByText("Current: 3.14.4 · 3.14.4.7912");
+    await waitFor(() =>
+      expect(screen.getByLabelText("ZCode data directory")).toHaveValue(
+        source.dataRoot,
+      ),
+    );
+    expect(screen.getByLabelText("ZCode installation")).toHaveValue(
+      "/custom/ZCode.app",
+    );
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Inspect selected source" }),
+    ).toBeDisabled();
+  });
+  it("requires an explicit selection for conflicting detected installations", async () => {
+    vi.mocked(zcodeAccountsApi.discover).mockResolvedValue({
+      dataRoot: source.dataRoot,
+      sourceBasis: "osAccountHome",
+      candidates: ["/one/ZCode.app", "/two/ZCode.app"].map((installPath) => ({
+        installPath,
+        version: "3.14.4",
+        build: "3.14.4.7912",
+        verifiedBuild: true,
+      })),
+      latestStatus: "notQueried",
+    });
+    mount();
+    await screen.findAllByRole("button", { name: "Choose this installation" });
+    expect(screen.getByLabelText("ZCode installation")).toHaveValue("");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Choose this installation" })[1],
+    );
+    expect(screen.getByLabelText("ZCode installation")).toHaveValue(
+      "/two/ZCode.app",
+    );
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+  });
+  it("restores only untrusted source paths and never restores key or admission", async () => {
+    localStorage.setItem(
+      "loongport:zcode-source-v1",
+      JSON.stringify({
+        version: 1,
+        installPath: "/saved/ZCode.app",
+        dataRoot: "/saved/.zcode/v2",
+        keyMode: "standard",
+        verified: true,
+        token: "canary-secret",
+      }),
+    );
+    mount();
+    await screen.findByText(
+      "Saved paths restored as a preference. Installation, data source and key context must be checked again.",
+    );
+    expect(screen.getByLabelText("ZCode installation")).toHaveValue(
+      "/saved/ZCode.app",
+    );
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Use only the standard local key to verify the selected data",
+      }),
+    ).not.toBeChecked();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("canary-secret");
+  });
+  it("does not silently select a verified candidate when another detected installation conflicts", async () => {
+    vi.mocked(zcodeAccountsApi.discover).mockResolvedValue({
+      dataRoot: source.dataRoot,
+      sourceBasis: "osAccountHome",
+      latestStatus: "notQueried",
+      candidates: [
+        {
+          installPath: "/one/ZCode.app",
+          version: "3.14.4",
+          build: "3.14.4.7912",
+          verifiedBuild: true,
+        },
+        {
+          installPath: "/two/ZCode.app",
+          version: "99",
+          build: "99.1",
+          verifiedBuild: false,
+        },
+      ],
+    });
+    mount();
+    await screen.findAllByRole("button", { name: "Choose this installation" });
+    expect(screen.getByLabelText("ZCode installation")).toHaveValue("");
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+  });
+  it("shows the actual unique unverified installation without substituting another path", async () => {
+    vi.mocked(zcodeAccountsApi.discover).mockResolvedValue({
+      dataRoot: source.dataRoot,
+      sourceBasis: "osAccountHome",
+      latestStatus: "notQueried",
+      candidates: [
+        {
+          installPath: "/user/Applications/ZCode.app",
+          version: "99",
+          build: "99.1",
+          verifiedBuild: false,
+        },
+      ],
+    });
+    mount();
+    await screen.findByText(
+      "Installed build is unverified; account actions remain blocked.",
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("ZCode installation")).toHaveValue(
+        "/user/Applications/ZCode.app",
+      ),
+    );
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+  });
+  it("queries latest only explicitly, never uses it as installed compatibility, and clears old success on failure", async () => {
+    mount();
+    await waitFor(() =>
+      expect(zcodeAccountsApi.discover).toHaveBeenCalledTimes(1),
+    );
+    expect(zcodeAccountsApi.latestVersion).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query official latest version" }),
+    );
+    await screen.findByText(
+      "Official latest version: 99.0.0 · checked 1970-01-01T00:00:01.000Z",
+    );
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    vi.mocked(zcodeAccountsApi.latestVersion).mockResolvedValueOnce({
+      version: null,
+      checkedAt: 2,
+      error: "network",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query official latest version" }),
+    );
+    await screen.findByText(
+      "Official version query failed at 1970-01-01T00:00:02.000Z. No current result is available.",
+    );
+    expect(
+      screen.queryByText(/Official latest version: 99/),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+  });
   it("loads only local recovery on mount, requires reviewed source and never captures on inspect or cancel", async () => {
     mount();
     await waitFor(() =>
@@ -125,21 +384,127 @@ describe("ZCode saved accounts", () => {
       source,
       context.contextRevision,
     );
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
     fireEvent.click(
       screen.getByRole("button", { name: "Save current account" }),
     );
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent(source.dataRoot);
-    expect(dialog).toHaveTextContent("encrypted");
-    expect(dialog).toHaveTextContent("switch");
+    expect(dialog).toHaveTextContent("masked preview");
+    expect(dialog).toHaveTextContent("Canceling");
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
     confirm("Cancel account action");
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
   });
+  it("cancels a masked preview without saving and keeps duplicate update explicit", async () => {
+    vi.mocked(zcodeAccountsApi.previewCapture).mockResolvedValue({
+      id: "opaque-reviewed",
+      label: "a…",
+      family: "zai",
+      duplicate: true,
+      previewId: "review-one",
+    });
+    vi.mocked(zcodeAccountsApi.commitCapture).mockResolvedValue("kept");
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save current account" }),
+    );
+    confirm("Read masked preview");
+    await screen.findByText("Save reviewed ZCode account?");
+    expect(screen.getByRole("dialog")).toHaveTextContent("a…");
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Explicitly update this existing saved account",
+      }),
+    ).not.toBeChecked();
+    confirm("Cancel account action");
+    await waitFor(() =>
+      expect(zcodeAccountsApi.cancelCapture).toHaveBeenCalledWith("review-one"),
+    );
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save current account" }),
+    );
+    confirm("Read masked preview");
+    await screen.findByText("Save reviewed ZCode account?");
+    confirm("Confirm account choice");
+    await screen.findByText("Existing saved account kept unchanged.");
+    expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledWith(
+      source,
+      "context-revision",
+      "catalog-one",
+      "review-one",
+      false,
+    );
+    expect(zcodeAccountsApi.cancelCapture).toHaveBeenCalledWith("review-one");
+  });
+  it("updates a duplicate only after an explicit preview checkbox choice", async () => {
+    vi.mocked(zcodeAccountsApi.previewCapture).mockResolvedValue({
+      id: "opaque-reviewed",
+      label: "a…",
+      family: "zai",
+      duplicate: true,
+      previewId: "review-one",
+    });
+    vi.mocked(zcodeAccountsApi.commitCapture).mockResolvedValue("refreshed");
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save current account" }),
+    );
+    confirm("Read masked preview");
+    await screen.findByText("Save reviewed ZCode account?");
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Explicitly update this existing saved account",
+      }),
+    );
+    confirm("Confirm account choice");
+    await screen.findByText("Saved account refreshed locally.");
+    expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledWith(
+      source,
+      "context-revision",
+      "catalog-one",
+      "review-one",
+      true,
+    );
+  });
+  it.each(["catalog_changed", "native_changed"])(
+    "requires a new preview after second-step %s rejection and never replays on refresh",
+    async (code) => {
+      vi.mocked(zcodeAccountsApi.commitCapture).mockRejectedValueOnce({
+        code: `zcode.account.${code}`,
+        remedy: "refreshContext",
+        committed: false,
+      });
+      mount();
+      await inspect();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Save current account" }),
+      );
+      confirm("Read masked preview");
+      await screen.findByText("Save reviewed ZCode account?");
+      confirm("Confirm account choice");
+      await screen.findByRole("alert");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Save current account" }),
+      ).toBeDisabled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      );
+      await waitFor(() =>
+        expect(zcodeAccountsApi.status).toHaveBeenCalledTimes(2),
+      );
+      expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledTimes(1);
+      expect(zcodeAccountsApi.previewCapture).toHaveBeenCalledTimes(1);
+    },
+  );
   it("serializes repeat capture clicks, passes reviewed revisions, and keeps navigation blocked through status refresh", async () => {
     let finish!: (value: "saved") => void;
-    vi.mocked(zcodeAccountsApi.capture).mockImplementation(
+    vi.mocked(zcodeAccountsApi.commitCapture).mockImplementation(
       () =>
         new Promise((resolve) => {
           finish = resolve;
@@ -151,15 +516,20 @@ describe("ZCode saved accounts", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Save current account" }),
     );
-    confirm("Save encrypted account");
-    confirm("Save encrypted account");
+    confirm("Read masked preview");
+    await screen.findByText("Save reviewed ZCode account?");
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    confirm("Confirm account choice");
+    confirm("Confirm account choice");
     await waitFor(() =>
-      expect(zcodeAccountsApi.capture).toHaveBeenCalledTimes(1),
+      expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledTimes(1),
     );
-    expect(zcodeAccountsApi.capture).toHaveBeenCalledWith(
+    expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledWith(
       source,
       "context-revision",
       "catalog-one",
+      "review-one",
+      false,
     );
     expect(onBusy).toHaveBeenLastCalledWith(true);
     let refreshDone!: (value: CatalogStatus) => void;
@@ -213,7 +583,7 @@ describe("ZCode saved accounts", () => {
       screen.getByRole("button", { name: "Save current account" }),
     ).toBeDisabled();
     expect(screen.queryByText("Personal Z.ai")).not.toBeInTheDocument();
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
   });
   it.each(["key_context_unknown", "team_unsupported", "native_gate_pending"])(
     "shows safe actionable %s errors without raw canary content",
@@ -252,7 +622,7 @@ describe("ZCode saved accounts", () => {
     },
   );
   it("requires a new review after a stale revision and never replays a mutation on refresh", async () => {
-    vi.mocked(zcodeAccountsApi.capture).mockRejectedValueOnce({
+    vi.mocked(zcodeAccountsApi.previewCapture).mockRejectedValueOnce({
       code: "zcode.account.catalog_changed",
       remedy: "refreshContext",
       committed: false,
@@ -262,7 +632,7 @@ describe("ZCode saved accounts", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Save current account" }),
     );
-    confirm("Save encrypted account");
+    confirm("Read masked preview");
     await screen.findByRole("alert");
     expect(
       screen.getByRole("button", { name: "Save current account" }),
@@ -273,7 +643,7 @@ describe("ZCode saved accounts", () => {
     await waitFor(() =>
       expect(zcodeAccountsApi.status).toHaveBeenCalledTimes(2),
     );
-    expect(zcodeAccountsApi.capture).toHaveBeenCalledTimes(1);
+    expect(zcodeAccountsApi.previewCapture).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
   it("retains a committed-but-recovery-required warning without success or automatic retry", async () => {
@@ -396,7 +766,7 @@ describe("ZCode saved accounts", () => {
         "recovery-one",
       ),
     );
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.recapture).not.toHaveBeenCalled();
   });
   it("ignores an unrelated catalog revision change while confirming the reviewed recovery record", async () => {
@@ -652,7 +1022,7 @@ describe("ZCode saved accounts", () => {
     );
     expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
     expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
   });
   it("keeps completed permanent cleanup visible when local recovery refresh fails", async () => {
     vi.mocked(zcodeAccountsApi.recoveryStatus).mockResolvedValue({
@@ -685,7 +1055,7 @@ describe("ZCode saved accounts", () => {
       "Selected recovery record permanently deleted.",
     );
     expect(zcodeAccountsApi.deleteRecovery).toHaveBeenCalledTimes(1);
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
   });
   it("keeps a failed status refresh read-only and exposes only static error text", async () => {
     const client = mount();
@@ -702,7 +1072,7 @@ describe("ZCode saved accounts", () => {
     expect(
       screen.getByRole("button", { name: "Save current account" }),
     ).toBeDisabled();
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
     expect(
       JSON.stringify(
@@ -810,7 +1180,7 @@ describe("ZCode saved accounts", () => {
     ).toBeDisabled();
     expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.status).not.toHaveBeenCalled();
-    expect(zcodeAccountsApi.capture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.archive).not.toHaveBeenCalled();
   });
 });
@@ -824,8 +1194,17 @@ describe("ZCode account command bindings", () => {
     await api.inspect(source);
     vi.mocked(invoke).mockResolvedValueOnce(catalog);
     await api.status(source, "ctx");
-    vi.mocked(invoke).mockResolvedValueOnce("saved");
-    await api.capture(source, "ctx", "cat");
+    vi.mocked(invoke).mockResolvedValueOnce({
+      previewId: "review-one",
+      id: "opaque-reviewed",
+      label: "a…",
+      family: "zai",
+      duplicate: false,
+    });
+    await api.previewCapture(source, "ctx", "cat");
+    vi.mocked(invoke).mockResolvedValueOnce("kept");
+    await api.commitCapture(source, "ctx", "cat", "review-one", false);
+    await api.cancelCapture("review-one");
     vi.mocked(invoke).mockResolvedValueOnce("switched");
     await api.switch(source, "ctx", "opaque-id", "cat");
     vi.mocked(invoke).mockResolvedValueOnce(recovery);
@@ -840,9 +1219,20 @@ describe("ZCode account command bindings", () => {
       ["inspect_zcode_account_context", { source }],
       ["get_zcode_account_status", { source, contextRevision: "ctx" }],
       [
-        "capture_zcode_current_account",
+        "preview_zcode_current_account",
         { source, contextRevision: "ctx", catalogRevision: "cat" },
       ],
+      [
+        "save_zcode_account_preview",
+        {
+          source,
+          contextRevision: "ctx",
+          catalogRevision: "cat",
+          previewId: "review-one",
+          updateDuplicate: false,
+        },
+      ],
+      ["cancel_zcode_account_preview", { previewId: "review-one" }],
       [
         "switch_zcode_saved_account",
         {
@@ -850,6 +1240,7 @@ describe("ZCode account command bindings", () => {
           contextRevision: "ctx",
           id: "opaque-id",
           catalogRevision: "cat",
+          requestId: expect.any(String),
         },
       ],
       ["get_zcode_account_recovery", undefined],
@@ -896,7 +1287,7 @@ describe("ZCode account command bindings", () => {
       message: "canary-secret",
       token: "canary-secret",
     });
-    await expect(api.capture(source, "ctx", "cat")).rejects.toEqual({
+    await expect(api.previewCapture(source, "ctx", "cat")).rejects.toEqual({
       code: "zcode.account.catalog_changed",
       remedy: "refreshContext",
       committed: false,

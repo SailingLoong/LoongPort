@@ -582,3 +582,112 @@ fn selected_official_root_may_be_readable_without_permission_changes() {
         0o755
     );
 }
+
+#[test]
+fn metadata_discovery_reads_only_allowlisted_bootstrap_and_public_artifacts() {
+    let f = Fixture::new();
+    fs::create_dir(f.selection.data_root.join("credentials.json")).unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &f.manifest,
+    )
+    .unwrap();
+    assert_eq!(report.data_root, f.selection.data_root);
+    assert_eq!(report.source_basis, "bootstrapDataBaseDir");
+    let selected = report
+        .candidates
+        .iter()
+        .find(|c| c.install_path == f.selection.install_path)
+        .unwrap();
+    assert!(selected.verified_build);
+    assert_eq!(selected.version.as_deref(), Some("3.14.4"));
+    assert_eq!(selected.build.as_deref(), Some("3.14.4.7912"));
+    assert_eq!(report.latest_status, "notQueried");
+    let safe = serde_json::to_string(&report).unwrap();
+    assert!(
+        !safe.contains("synthetic-user") && !safe.contains("providerFamilyConnectionSelections")
+    );
+}
+#[test]
+fn metadata_discovery_defaults_only_when_bootstrap_is_absent_and_rejects_bad_base() {
+    let f = Fixture::new();
+    fs::remove_file(f.settings()).unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &f.manifest,
+    )
+    .unwrap();
+    assert_eq!(report.data_root, Path::new(&f.user.home).join(".zcode/v2"));
+    assert_eq!(report.source_basis, "osAccountHome");
+    for bytes in [
+        b"{\"dataBaseDir\":null}".as_slice(),
+        b"{\"dataBaseDir\":42}".as_slice(),
+        b"{\"dataBaseDir\":\"relative\"}".as_slice(),
+        b"{\"dataBaseDir\":\"/tmp/a\",\"dataBaseDir\":\"/tmp/b\"}".as_slice(),
+    ] {
+        fs::write(f.settings(), bytes).unwrap();
+        assert!(matches!(
+            discover_from_candidates(
+                &f.user,
+                std::slice::from_ref(&f.selection.install_path),
+                &f.manifest
+            ),
+            Err(BlockedReason::SettingsInvalid)
+        ));
+    }
+}
+#[test]
+fn metadata_discovery_rejects_symlink_or_unreadable_bootstrap_and_never_trusts_changed_artifact() {
+    let f = Fixture::new();
+    fs::remove_file(f.settings()).unwrap();
+    symlink(f.selection.data_root.join("missing"), f.settings()).unwrap();
+    assert!(matches!(
+        discover_from_candidates(
+            &f.user,
+            std::slice::from_ref(&f.selection.install_path),
+            &f.manifest
+        ),
+        Err(BlockedReason::SettingsInvalid)
+    ));
+    fs::remove_file(f.settings()).unwrap();
+    fs::write(
+        f.selection
+            .install_path
+            .join(f.manifest.artifacts[0].relative_path),
+        b"replacement",
+    )
+    .unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &f.manifest,
+    )
+    .unwrap();
+    let selected = report
+        .candidates
+        .iter()
+        .find(|c| c.install_path == f.selection.install_path)
+        .unwrap();
+    assert!(!selected.verified_build);
+}
+
+#[test]
+fn metadata_unknown_version_labels_do_not_admit_an_unknown_build() {
+    let f = Fixture::new();
+    fs::write(f.selection.install_path.join("Contents/Info.plist"), "<plist><dict><key>CFBundleShortVersionString</key><string>99.0</string><key>CFBundleVersion</key><string>99.0.1</string></dict></plist>").unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &f.manifest,
+    )
+    .unwrap();
+    assert_eq!(report.candidates[0].version.as_deref(), Some("99.0"));
+    assert_eq!(report.candidates[0].build.as_deref(), Some("99.0.1"));
+    assert!(!report.candidates[0].verified_build);
+    assert!(matches!(
+        NativeContextProbe::from_parts(f.selection.clone(), f.user.clone(), &f.manifest),
+        Err(BlockedReason::UnsupportedBuild)
+    ));
+}

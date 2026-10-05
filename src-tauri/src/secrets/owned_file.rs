@@ -36,7 +36,8 @@ pub(crate) struct OwnedFile {
 pub(crate) const PROFILE_FILE: &str = "zcode_account_profiles.json";
 pub(crate) const JOURNAL_FILE: &str = "zcode_account_transaction.json";
 pub(crate) const RECOVERY_FILE: &str = "zcode_account_recovery.json";
-const ZCODE_FILES: [&str; 3] = [PROFILE_FILE, JOURNAL_FILE, RECOVERY_FILE];
+pub(crate) const OPERATION_FILE: &str = "zcode_account_operations.json";
+const ZCODE_FILES: [&str; 4] = [PROFILE_FILE, JOURNAL_FILE, RECOVERY_FILE, OPERATION_FILE];
 
 const LEGACY_CONFIG_FILES: [&str; 3] = ["config.json", "config.json.bak", "config.json.migrated"];
 pub(super) const BACKUP_PATTERNS: [(&str, &str, &str); 6] = [
@@ -170,6 +171,7 @@ mod tests {
             "zcode_account_profiles.json",
             "zcode_account_transaction.json",
             "zcode_account_recovery.json",
+            "zcode_account_operations.json",
         ];
         for name in names {
             let file = OwnedFile::registered(name).expect("new account file must be protected");

@@ -3,10 +3,30 @@
 pub(crate) mod admission;
 #[cfg(feature = "gui")]
 pub(crate) mod api;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod bundle;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod bundle_import;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod bundle_limits;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod capture_reviews;
 pub(crate) mod checkpoint;
 pub mod core;
+pub(crate) mod desktop_text;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub(crate) mod discovery_paths;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod import_reviews;
+#[cfg(all(feature = "gui", target_os = "macos"))]
+pub(crate) mod latest_version;
 pub mod native;
 pub(crate) mod native_context;
+#[cfg(any(all(feature = "gui", target_os = "macos"), test))]
+pub(crate) mod native_lifecycle;
+#[cfg(all(feature = "gui", target_os = "macos"))]
+pub(crate) mod native_process_control;
+pub(crate) mod operation_log;
 pub(crate) mod recovery;
 #[cfg(feature = "gui")]
 pub(crate) mod runtime;

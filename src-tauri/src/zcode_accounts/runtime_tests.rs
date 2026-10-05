@@ -17,6 +17,216 @@ use std::sync::{
     Mutex,
 };
 
+// Test-only sealed export; uses synthetic credential documents and never a path.
+fn synthetic_bundle(f: &Fixture, count: usize) -> Zeroizing<Vec<u8>> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let credentials: serde_json::Value =
+        serde_json::from_slice(&f.fresh.to_bytes().unwrap()).unwrap();
+    let plaintext = Zeroizing::new(serde_json::to_vec(&serde_json::json!({
+        "format":"zcode-accounts-bundle", "version":2, "exportedAt":"synthetic",
+        "accounts": (0..count).map(|_| serde_json::json!({"name":"synthetic", "createdAt":"synthetic", "credentials":credentials, "config":{"device":"MUST_NOT_IMPORT"}})).collect::<Vec<_>>()
+    })).unwrap());
+    let mut key = Zeroizing::new([0u8; 32]);
+    let salt = [3u8; 16];
+    let nonce = [5u8; 12];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        std::num::NonZeroU32::new(100_000).unwrap(),
+        &salt,
+        b"synthetic-password",
+        &mut *key,
+    );
+    let encrypted = Aes256Gcm::new_from_slice(&*key)
+        .unwrap()
+        .encrypt(&Nonce::from(nonce), plaintext.as_slice())
+        .unwrap();
+    let (data, tag) = encrypted.split_at(encrypted.len() - 16);
+    Zeroizing::new(serde_json::to_vec(&serde_json::json!({"format":"zsw-accounts-bundle","version":1,"kdf":{"algo":"pbkdf2-hmac-sha256","iters":100000,"salt":STANDARD.encode(salt)},"cipher":{"algo":"aes-256-gcm","nonce":STANDARD.encode(nonce),"tag":STANDARD.encode(tag),"data":STANDARD.encode(data)}})).unwrap())
+}
+async fn import_preview(f: &Fixture, revision: String, count: usize) -> BundlePreview {
+    preview_bundle(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        BundlePreviewInput {
+            revision,
+            file: synthetic_bundle(f, count),
+            password: Zeroizing::new("synthetic-password".into()),
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_credentials() {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    std::fs::remove_file(f.native_root.join("credentials.json")).unwrap();
+    let before_files = std::fs::read_dir(&f.native_root)
+        .unwrap()
+        .map(|p| p.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let p = import_preview(&f, status.revision.clone(), 1).await;
+    let safe = serde_json::to_string(&p).unwrap();
+    for forbidden in [
+        "MUST_NOT_IMPORT",
+        "token",
+        "credentials",
+        "nativeRevision",
+        "enc:v1:",
+    ] {
+        assert!(!safe.contains(forbidden));
+    }
+    let before = std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap();
+    let input = || BundleCommitInput {
+        revision: status.revision.clone(),
+        preview_id: p.preview_id.clone(),
+        selected: vec![ImportChoice {
+            index: 0,
+            update_duplicate: false,
+        }],
+    };
+    assert_eq!(
+        commit_bundle(f.db.clone(), f.probe.clone(), f.contracts.clone(), input()).await,
+        Ok(vec![CaptureCommitOutcome::Kept])
+    );
+    assert_eq!(
+        commit_bundle(f.db.clone(), f.probe.clone(), f.contracts.clone(), input()).await,
+        Err(RuntimeError::Transaction(TransactionError::SourceChanged))
+    );
+    assert_eq!(
+        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
+        before
+    );
+    let p = import_preview(&f, status.revision.clone(), 1).await;
+    assert_eq!(
+        commit_bundle(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            BundleCommitInput {
+                revision: status.revision,
+                preview_id: p.preview_id,
+                selected: vec![ImportChoice {
+                    index: 0,
+                    update_duplicate: true
+                }]
+            }
+        )
+        .await,
+        Ok(vec![CaptureCommitOutcome::Refreshed])
+    );
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    assert!(
+        !status
+            .profiles
+            .iter()
+            .find(|p| p.id == f.a.opaque_id())
+            .unwrap()
+            .source_verified
+    );
+    assert_eq!(
+        std::fs::read_dir(&f.native_root)
+            .unwrap()
+            .map(|p| p.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        before_files
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_bundle_failed_admission_and_duplicate_selection_consume_preview() {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    let before = std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap();
+    let p = import_preview(&f, status.revision.clone(), 2).await;
+    assert!(p.rows.iter().all(|row| row.ambiguous));
+    let id = p.preview_id;
+    let input = |indices: &[usize]| BundleCommitInput {
+        revision: status.revision.clone(),
+        preview_id: id.clone(),
+        selected: indices
+            .iter()
+            .map(|index| ImportChoice {
+                index: *index,
+                update_duplicate: true,
+            })
+            .collect(),
+    };
+    assert!(commit_bundle(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        input(&[0, 1])
+    )
+    .await
+    .is_err());
+    assert!(commit_bundle(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        input(&[1])
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
+        before
+    );
+    let p = import_preview(&f, status.revision.clone(), 1).await;
+    f.probe.observation.lock().unwrap().writers = WriterState::Running;
+    assert_eq!(
+        commit_bundle(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            BundleCommitInput {
+                revision: status.revision.clone(),
+                preview_id: p.preview_id.clone(),
+                selected: vec![ImportChoice {
+                    index: 0,
+                    update_duplicate: true
+                }]
+            }
+        )
+        .await,
+        Err(RuntimeError::Blocked(BlockedReason::AppRunning))
+    );
+    f.probe.observation.lock().unwrap().writers = WriterState::Stopped;
+    assert!(commit_bundle(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        BundleCommitInput {
+            revision: status.revision,
+            preview_id: p.preview_id,
+            selected: vec![ImportChoice {
+                index: 0,
+                update_duplicate: true
+            }]
+        }
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
+        before
+    );
+}
+
 tokio::task_local! {
     pub(super) static OWNER_ENTERED: Arc<tokio::sync::Notify>;
 }
@@ -27,6 +237,157 @@ struct FakeProbe {
     pause: Mutex<Option<(usize, std::sync::mpsc::Receiver<()>)>>,
     fail_at: AtomicUsize,
     entered: tokio::sync::Notify,
+}
+struct CoordinatedProbe {
+    inner: Arc<FakeProbe>,
+    quits: AtomicUsize,
+    restarts: AtomicUsize,
+    remains_running: bool,
+    restart_fails: bool,
+}
+impl ContextProbe for CoordinatedProbe {
+    fn observe(&self) -> Result<ContextObservation, BlockedReason> {
+        self.inner.observe()
+    }
+    fn prepare_switch(&self) -> Result<bool, BlockedReason> {
+        assert!(crate::services::sync_protocol::sync_mutex()
+            .try_lock()
+            .is_err());
+        self.quits.fetch_add(1, Ordering::Relaxed);
+        if !self.remains_running {
+            self.inner.observation.lock().unwrap().writers = WriterState::Stopped;
+        }
+        Ok(true)
+    }
+    fn restart_after_switch(&self) -> Result<(), BlockedReason> {
+        assert!(crate::services::sync_protocol::sync_mutex()
+            .try_lock()
+            .is_err());
+        self.restarts.fetch_add(1, Ordering::Relaxed);
+        if self.restart_fails {
+            return Err(BlockedReason::WriterStateUnknown);
+        }
+        self.inner.observation.lock().unwrap().writers = WriterState::Running;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_coordinated_switch_checks_stopped_proof_and_preserves_commit_on_restart_failure() {
+    for (remains_running, restart_fails) in [(true, false), (false, true), (false, false)] {
+        let f = Fixture::new();
+        f.probe.observation.lock().unwrap().writers = WriterState::Running;
+        let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+            .await
+            .unwrap();
+        let before = f.current().to_bytes().unwrap();
+        let probe = Arc::new(CoordinatedProbe {
+            inner: f.probe.clone(),
+            quits: AtomicUsize::new(0),
+            restarts: AtomicUsize::new(0),
+            remains_running,
+            restart_fails,
+        });
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let result = switch_account_request(
+            f.db.clone(),
+            probe.clone(),
+            f.contracts.clone(),
+            f.b.opaque_id(),
+            status.revision.clone(),
+            request_id.clone(),
+        )
+        .await;
+        let original = operation_status(
+            f.db.clone(),
+            probe.clone(),
+            f.contracts.clone(),
+            request_id.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            original.phase,
+            if remains_running {
+                super::super::operation_log::Phase::Failed
+            } else if restart_fails {
+                super::super::operation_log::Phase::RestartFailed
+            } else {
+                super::super::operation_log::Phase::RestartVerified
+            }
+        );
+        // Discarded/lost first response and repeated confirmation query the same
+        // durable result; a repeated UUID never runs a second physical effect.
+        assert_eq!(
+            switch_account_request(
+                f.db.clone(),
+                probe.clone(),
+                f.contracts.clone(),
+                f.b.opaque_id(),
+                status.revision,
+                request_id
+            )
+            .await,
+            Err(RuntimeError::Transaction(
+                TransactionError::OperationAlreadyKnown
+            ))
+        );
+        assert_eq!(probe.quits.load(Ordering::Relaxed), 1);
+        if remains_running {
+            assert_eq!(
+                result,
+                Err(RuntimeError::Blocked(BlockedReason::AppRunning))
+            );
+            assert_eq!(f.current().to_bytes().unwrap(), before);
+            assert_eq!(probe.restarts.load(Ordering::Relaxed), 0);
+        } else {
+            assert_eq!(probe.restarts.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                result,
+                if restart_fails {
+                    Err(RuntimeError::CommittedRestartFailed)
+                } else {
+                    Ok(SwitchOutcome::Switched)
+                }
+            );
+            let observed = f.probe.observation.lock().unwrap().clone();
+            let native = ReadOnlyContext::assess(observed, &f.contracts)
+                .unwrap()
+                .vault_cipher()
+                .unwrap();
+            assert!(native.inspect(&f.current()).unwrap().identity() == &f.b);
+            assert!(!f.db.secret_session().root().join(JOURNAL_FILE).exists());
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_coordinated_switch_stale_catalog_refuses_before_quit() {
+    let f = Fixture::new();
+    f.probe.observation.lock().unwrap().writers = WriterState::Running;
+    let probe = Arc::new(CoordinatedProbe {
+        inner: f.probe.clone(),
+        quits: AtomicUsize::new(0),
+        restarts: AtomicUsize::new(0),
+        remains_running: false,
+        restart_fails: false,
+    });
+    assert_eq!(
+        switch_saved_account(
+            f.db.clone(),
+            probe.clone(),
+            f.contracts.clone(),
+            f.b.opaque_id(),
+            "stale".into()
+        )
+        .await,
+        Err(RuntimeError::Transaction(TransactionError::CatalogChanged))
+    );
+    assert_eq!(probe.quits.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.restarts.load(Ordering::Relaxed), 0);
 }
 impl ContextProbe for FakeProbe {
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
@@ -1054,4 +1415,277 @@ async fn runtime_vault_recovery_cancellation_retains_owner_while_session_is_lock
     .unwrap();
     assert_eq!(f.probe.calls.load(Ordering::Relaxed), 0);
     assert!(f.current() == f.fresh);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_capture_review_is_masked_cancelable_and_one_use_even_when_kept() {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    let root = f.db.secret_session().root();
+    let vault_before = std::fs::read(root.join(PROFILE_FILE)).unwrap();
+    let native_before = std::fs::read(f.native_root.join("credentials.json")).unwrap();
+    let preview = preview_capture_account(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        status.revision.clone(),
+    )
+    .await
+    .unwrap();
+    let safe = serde_json::to_string(&preview).unwrap();
+    assert!(
+        !safe.contains("nativeRevision") && !safe.contains("token") && !safe.contains("credential")
+    );
+    assert!(preview.duplicate);
+    assert_eq!(
+        capture_reviewed_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.revision.clone(),
+            preview.preview_id.clone(),
+            false
+        )
+        .await,
+        Ok(CaptureCommitOutcome::Kept)
+    );
+    assert_eq!(
+        capture_reviewed_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.revision.clone(),
+            preview.preview_id,
+            true
+        )
+        .await,
+        Err(RuntimeError::Transaction(TransactionError::SourceChanged))
+    );
+    let preview = preview_capture_account(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        status.revision.clone(),
+    )
+    .await
+    .unwrap();
+    cancel_capture_preview(f.db.clone(), preview.preview_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        capture_reviewed_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.revision,
+            preview.preview_id,
+            true
+        )
+        .await,
+        Err(RuntimeError::Transaction(TransactionError::SourceChanged))
+    );
+    assert_eq!(
+        std::fs::read(root.join(PROFILE_FILE)).unwrap(),
+        vault_before
+    );
+    assert_eq!(
+        std::fs::read(f.native_root.join("credentials.json")).unwrap(),
+        native_before
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_capture_review_failed_admission_consumes_before_replay() {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    let preview = preview_capture_account(
+        f.db.clone(),
+        f.probe.clone(),
+        f.contracts.clone(),
+        status.revision.clone(),
+    )
+    .await
+    .unwrap();
+    f.probe.observation.lock().unwrap().writers = WriterState::Running;
+    assert_eq!(
+        capture_reviewed_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.revision.clone(),
+            preview.preview_id.clone(),
+            false
+        )
+        .await,
+        Err(RuntimeError::Blocked(BlockedReason::AppRunning))
+    );
+    f.probe.observation.lock().unwrap().writers = WriterState::Stopped;
+    assert_eq!(
+        capture_reviewed_account(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            status.revision,
+            preview.preview_id,
+            false
+        )
+        .await,
+        Err(RuntimeError::Transaction(TransactionError::SourceChanged))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn runtime_coordinated_cancelled_caller_keeps_queryable_original_result() {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    f.probe.observation.lock().unwrap().writers = WriterState::Running;
+    let probe = Arc::new(CoordinatedProbe {
+        inner: f.probe.clone(),
+        quits: AtomicUsize::new(0),
+        restarts: AtomicUsize::new(0),
+        remains_running: false,
+        restart_fails: false,
+    });
+    let (release, receive) = std::sync::mpsc::channel();
+    let at = f.probe.calls.load(Ordering::Relaxed) + 1;
+    *f.probe.pause.lock().unwrap() = Some((at, receive));
+    let id = uuid::Uuid::new_v4().to_string();
+    let task = tokio::spawn(switch_account_request(
+        f.db.clone(),
+        probe.clone(),
+        f.contracts.clone(),
+        f.b.opaque_id(),
+        status.revision,
+        id.clone(),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.probe.entered.notified(),
+    )
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(crate::services::sync_protocol::sync_mutex()
+        .try_lock()
+        .is_err());
+    release.send(()).unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        operation_status(f.db.clone(), probe.clone(), f.contracts.clone(), id),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        result.phase,
+        super::super::operation_log::Phase::RestartVerified
+    );
+    assert_eq!(probe.quits.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.restarts.load(Ordering::Relaxed), 1);
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_coordinated_missing_source_does_not_exhaust_unknown_capacity_and_old_id_cannot_replay(
+) {
+    let f = Fixture::new();
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    let before = f.current().to_bytes().unwrap();
+    let observed = f.probe.observation.lock().unwrap().clone();
+    let context = VerifiedContext::assess(observed.clone(), &f.contracts).unwrap();
+    let secret = zeroize::Zeroizing::new(format!(
+        "zcode-credential-fallback:darwin:{}:synthetic-user",
+        observed.home
+    ));
+    let unknown = native_document_with_context(
+        context.context_id(),
+        &secret,
+        OAuthFamily::Zai,
+        "not-saved",
+        "synthetic",
+    );
+    write_durable(
+        &f.native_root.join("credentials.json"),
+        &unknown.to_bytes().unwrap(),
+    )
+    .unwrap();
+    let first = uuid::Uuid::new_v4().to_string();
+    for index in 0..17 {
+        let id = if index == 0 {
+            first.clone()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        assert_eq!(
+            switch_account_request(
+                f.db.clone(),
+                f.probe.clone(),
+                f.contracts.clone(),
+                f.b.opaque_id(),
+                status.revision.clone(),
+                id.clone()
+            )
+            .await,
+            Err(RuntimeError::Transaction(
+                TransactionError::MissingSavedSource
+            ))
+        );
+        assert_eq!(
+            operation_status(f.db.clone(), f.probe.clone(), f.contracts.clone(), id)
+                .await
+                .unwrap()
+                .unwrap()
+                .phase,
+            super::super::operation_log::Phase::Failed
+        );
+    }
+    write_durable(&f.native_root.join("credentials.json"), &before).unwrap();
+    let probe = Arc::new(CoordinatedProbe {
+        inner: f.probe.clone(),
+        quits: AtomicUsize::new(0),
+        restarts: AtomicUsize::new(0),
+        remains_running: false,
+        restart_fails: false,
+    });
+    assert_eq!(
+        switch_account_request(
+            f.db.clone(),
+            probe.clone(),
+            f.contracts.clone(),
+            f.b.opaque_id(),
+            status.revision.clone(),
+            first
+        )
+        .await,
+        Err(RuntimeError::Transaction(
+            TransactionError::OperationAlreadyKnown
+        ))
+    );
+    assert_eq!(probe.quits.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.restarts.load(Ordering::Relaxed), 0);
+    assert_eq!(f.current().to_bytes().unwrap(), before);
+    assert_eq!(
+        switch_account_request(
+            f.db.clone(),
+            f.probe.clone(),
+            f.contracts.clone(),
+            f.b.opaque_id(),
+            status.revision,
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await,
+        Ok(SwitchOutcome::Switched)
+    );
 }

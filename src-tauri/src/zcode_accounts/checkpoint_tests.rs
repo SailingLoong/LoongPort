@@ -7,6 +7,75 @@ fn native() -> NativeCipher {
 }
 
 #[test]
+fn checkpoint_imported_profile_remains_unverified_until_fresh_local_capture() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let imported = native
+        .inspect(&native_document(OAuthFamily::Zai, "a", "imported"))
+        .unwrap();
+    let id = imported.identity().clone();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert_unverified(imported);
+    assert!(!catalog.source_verified(&id));
+    let mut reopened =
+        ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native).unwrap();
+    assert!(!reopened.source_verified(&id));
+    reopened.upsert(
+        native
+            .inspect(&native_document(OAuthFamily::Zai, "a", "local"))
+            .unwrap(),
+    );
+    assert!(reopened.source_verified(&id));
+    let reopened =
+        ProfileCatalog::open(&reopened.seal(&vault, &native).unwrap(), &vault, &native).unwrap();
+    assert!(reopened.source_verified(&id));
+    assert!(native
+        .decrypt(
+            reopened
+                .get(&id)
+                .unwrap()
+                .scoped_document()
+                .get(&id.credential_keys()[1])
+                .unwrap()
+        )
+        .unwrap()
+        .contains("_local_"));
+}
+
+#[test]
+fn checkpoint_catalog_v1_is_readable_but_v2_requires_complete_provenance() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let mut catalog = ProfileCatalog::default();
+    let snapshot = native
+        .inspect(&native_document(OAuthFamily::Zai, "a", "local"))
+        .unwrap();
+    let id = snapshot.identity().clone();
+    catalog.upsert(snapshot);
+    let encoded = catalog.seal(&vault, &native).unwrap();
+    let old = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| {
+        p["version"] = 1.into();
+        p.as_object_mut().unwrap().remove("unverified");
+    });
+    assert!(ProfileCatalog::open(&old, &vault, &native)
+        .unwrap()
+        .source_verified(&id));
+    for values in [
+        serde_json::json!(["unknown"]),
+        serde_json::json!([id.opaque_id(), id.opaque_id()]),
+    ] {
+        let corrupt = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| p["unverified"] = values);
+        assert!(ProfileCatalog::open(&corrupt, &vault, &native).is_err());
+    }
+    let missing = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| {
+        p.as_object_mut().unwrap().remove("unverified");
+    });
+    assert!(ProfileCatalog::open(&missing, &vault, &native).is_err());
+    let downgrade = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| p["version"] = 1.into());
+    assert!(ProfileCatalog::open(&downgrade, &vault, &native).is_err());
+}
+
+#[test]
 fn profile_catalog_iterates_borrowed_unique_fresh_snapshots_without_schema_changes() {
     let native = native();
     let mut catalog = ProfileCatalog::default();
@@ -125,7 +194,7 @@ fn checkpoint_catalog_rejects_unknown_schema_duplicate_identity_and_extra_scope(
             .unwrap(),
     );
     let encoded = catalog.seal(&vault, &native).unwrap();
-    let schema = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| p["version"] = 2.into());
+    let schema = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| p["version"] = 99.into());
     assert!(ProfileCatalog::open(&schema, &vault, &native).is_err());
     let duplicate = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| {
         let first = p["profiles"][0].clone();

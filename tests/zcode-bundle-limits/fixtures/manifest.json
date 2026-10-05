@@ -1,0 +1,42 @@
+{
+  "valid-multiple.zsb": {
+    "bytes": 1660,
+    "sha256": "a589577039e29bbdb5e1f88c6cd87374630ae107c6dd53b805ff5dd0a3b0929e"
+  },
+  "duplicate-identity.zsb": {
+    "bytes": 1660,
+    "sha256": "5c11bb223c6b438b4eeca67db7b8a7841997372f55d073d75d6d5f405b3d55ac"
+  },
+  "foreign-inner-key.zsb": {
+    "bytes": 1024,
+    "sha256": "b6b54ea51bf6c9f448bcebfab6449206e6cb0f47948e16671d04758c58316a24"
+  },
+  "unknown-outer-version.zsb": {
+    "bytes": 1660,
+    "sha256": "7f3013a8d050e36f54a1b1a1177cdf998caf58cad55a4b19e19590585b205430"
+  },
+  "unknown-kdf.zsb": {
+    "bytes": 1649,
+    "sha256": "8e5952896ada034e3af85f737b7bb1dd2255bb4cbb62b7f324d87d567e0b6fc4"
+  },
+  "duplicate-outer-key.zsb": {
+    "bytes": 1673,
+    "sha256": "bd631a0d80927cd8d812502983b106affc9a437326ba7f77f1bf5174b0d2d8ea"
+  },
+  "unexpected-inner-field.zsb": {
+    "bytes": 1036,
+    "sha256": "06f52c7272a6071bff2513644c80a852bef62c442c955c80566d66dd3ad9ec04"
+  },
+  "over-account-limit.zsb": {
+    "bytes": 33244,
+    "sha256": "0a01a23831f35975308a94d17a4c0bd410c11d575b1fd42800ac4873538aa9c8"
+  },
+  "truncated.zsb": {
+    "bytes": 81,
+    "sha256": "d3cbf86700c27c555a41645460ecd269b2826cacbd84a31b836f377d9ef76c72"
+  },
+  "damaged-authentication-tag.zsb": {
+    "bytes": 1660,
+    "sha256": "0028f1df4b8c1b61f34cb30f7d8fcf5628c34d29cf34e4acac2ef77aeabb58f9"
+  }
+}
