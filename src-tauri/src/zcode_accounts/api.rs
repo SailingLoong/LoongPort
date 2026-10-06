@@ -1,16 +1,19 @@
 //! Thin command-facing account API. Only explicit actions enter native credential IO.
+#[cfg(test)]
+use super::admission::VerifiedContext;
 use super::{
-    admission::{
-        BlockedReason, ContextObservation, ContextProbe, ContractEntry, Remedy, VerifiedContext,
-    },
+    admission::{BlockedReason, ContextObservation, ContextProbe, ContractEntry, Remedy},
     checkpoint::CheckpointError,
     core::{CoreError, OAuthFamily},
-    native_context::{supported_contracts, ContextSelection, NativeContextProbe},
+    native_context::{
+        discover_metadata, supported_contracts, ContextSelection, MetadataDiscovery,
+        NativeContextProbe,
+    },
     recovery::RecoveryError,
-    runtime::{self, RuntimeError},
+    runtime::{self, CapturePreview, RuntimeError},
     transaction::{
-        ArchiveOutcome, CaptureOutcome, CatalogStatus, RecoveryStatus, SwitchOutcome,
-        TransactionError,
+        ArchiveOutcome, CaptureCommitOutcome, CaptureOutcome, CatalogStatus, RecoveryStatus,
+        SwitchOutcome, TransactionError,
     },
 };
 use crate::database::Database;
@@ -124,6 +127,9 @@ impl From<TransactionError> for PublicError {
             TransactionError::UnsupportedScope => {
                 Self::new("zcode.account.unsupported_scope", "openNativeSettings")
             }
+            TransactionError::UnverifiedSource => {
+                Self::new("zcode.account.source_unverified", "captureCurrent")
+            }
             TransactionError::UnsafePath => {
                 Self::new("zcode.account.unsafe_path", "reviewDataLocation")
             }
@@ -156,6 +162,9 @@ impl From<TransactionError> for PublicError {
             TransactionError::NativeUnconfirmed => {
                 Self::new("zcode.account.native_unconfirmed", "confirmOrRecapture")
             }
+            TransactionError::OperationAlreadyKnown => {
+                Self::new("zcode.account.operation_already_known", "queryOriginal")
+            }
             TransactionError::ArchiveNeedsCleanup => {
                 Self::new("zcode.account.recovery_cleanup_required", "reviewRecovery")
             }
@@ -173,6 +182,22 @@ impl From<RuntimeError> for PublicError {
             RuntimeError::TaskFailed => {
                 Self::new("zcode.account.operation_failed", "refreshContext")
             }
+            RuntimeError::BundleAuthentication => {
+                Self::new("zcode.account.bundle_authentication", "reviewSavedData")
+            }
+            RuntimeError::BundleInvalid => {
+                Self::new("zcode.account.bundle_invalid", "reviewSavedData")
+            }
+            RuntimeError::CommittedRestartFailed => Self {
+                code: "zcode.account.committed_restart_failed",
+                remedy: "openNativeSettings",
+                committed: true,
+            },
+            RuntimeError::CommittedResultUnknown => Self {
+                code: "zcode.account.committed_result_unknown",
+                remedy: "queryOriginal",
+                committed: true,
+            },
         }
     }
 }
@@ -185,7 +210,24 @@ struct DeferredNativeProbe {
     source: ContextSelection,
     opened: OnceLock<Result<NativeContextProbe, BlockedReason>>,
 }
+impl DeferredNativeProbe {
+    fn probe(&self) -> Result<&NativeContextProbe, BlockedReason> {
+        self.opened
+            .get_or_init(|| NativeContextProbe::new(self.source.clone()))
+            .as_ref()
+            .map_err(|error| *error)
+    }
+}
 impl ContextProbe for DeferredNativeProbe {
+    fn open_for_login(&self) -> Result<(), BlockedReason> {
+        self.probe()?.open_for_login()
+    }
+    fn prepare_switch(&self) -> Result<bool, BlockedReason> {
+        self.probe()?.prepare_switch()
+    }
+    fn restart_after_switch(&self) -> Result<(), BlockedReason> {
+        self.probe()?.restart_after_switch()
+    }
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
         match self
             .opened
@@ -202,10 +244,18 @@ struct ExpectedContextProbe {
     expected: String,
 }
 impl ContextProbe for ExpectedContextProbe {
+    fn prepare_switch(&self) -> Result<bool, BlockedReason> {
+        self.observe()?;
+        self.inner.prepare_switch()
+    }
+    fn restart_after_switch(&self) -> Result<(), BlockedReason> {
+        self.observe()?;
+        self.inner.restart_after_switch()
+    }
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
         let mut observed = self.inner.observe()?;
-        let checked =
-            VerifiedContext::assess(observed.clone(), &self.contracts).and_then(|context| {
+        let checked = super::admission::ReadOnlyContext::assess(observed.clone(), &self.contracts)
+            .and_then(|context| {
                 if context.context_revision() == self.expected {
                     Ok(())
                 } else {
@@ -252,7 +302,7 @@ fn summary(
 ) -> Result<SourceContext, BlockedReason> {
     let version = observed.install.version.clone();
     let build = observed.install.build.clone();
-    let context = VerifiedContext::assess(observed, contracts)?;
+    let context = super::admission::ReadOnlyContext::assess(observed, contracts)?;
     Ok(SourceContext {
         context_id: context.context_id().to_owned(),
         context_revision: context.context_revision(),
@@ -269,6 +319,93 @@ fn summary(
         build,
     })
 }
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LatestVersion {
+    version: Option<String>,
+    checked_at: u64,
+    error: Option<&'static str>,
+}
+pub(crate) async fn latest_version() -> LatestVersion {
+    let checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(not(target_os = "macos"))]
+    {
+        LatestVersion {
+            version: None,
+            checked_at,
+            error: Some("unsupportedPlatform"),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let result = async {
+            let url = super::latest_version::manifest_url(std::env::consts::ARCH)
+                .ok_or("unsupportedPlatform")?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(8))
+                .build()
+                .map_err(|_| "network")?;
+            let platform = if std::env::consts::ARCH == "aarch64" {
+                "darwin-aarch64"
+            } else {
+                "darwin-x86_64"
+            };
+            let mut response = client
+                .get(url)
+                .header("Accept", "application/x-yaml,text/yaml,text/plain")
+                .header("X-Platform", platform)
+                .header("X-Release-Channel", "1")
+                .send()
+                .await
+                .map_err(|_| "network")?
+                .error_for_status()
+                .map_err(|_| "network")?;
+            let limit = super::latest_version::MAX_MANIFEST_BYTES;
+            if response
+                .content_length()
+                .is_some_and(|size| size > limit as u64)
+            {
+                return Err("invalidManifest");
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| "network")? {
+                if chunk.len() > limit.saturating_sub(bytes.len()) {
+                    return Err("invalidManifest");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            super::latest_version::version(&bytes).ok_or("invalidManifest")
+        }
+        .await;
+        match result {
+            Ok(version) => LatestVersion {
+                version: Some(version),
+                checked_at,
+                error: None,
+            },
+            Err(error) => LatestVersion {
+                version: None,
+                checked_at,
+                error: Some(error),
+            },
+        }
+    }
+}
+pub(crate) async fn discover(
+    db: Arc<Database>,
+    selected: Option<std::path::PathBuf>,
+) -> Result<MetadataDiscovery, PublicError> {
+    runtime::run_owned(db, move |_| {
+        discover_metadata(selected.as_deref()).map_err(Into::into)
+    })
+    .await
+    .map_err(Into::into)
+}
 pub(crate) async fn inspect(
     db: Arc<Database>,
     source: ContextSelection,
@@ -277,6 +414,19 @@ pub(crate) async fn inspect(
         require_selection(&source)?;
         let probe = NativeContextProbe::new(source)?;
         summary(probe.observe()?, &supported_contracts()).map_err(Into::into)
+    })
+    .await
+    .map_err(Into::into)
+}
+pub(crate) async fn open_for_login(
+    db: Arc<Database>,
+    source: ContextSelection,
+) -> Result<(), PublicError> {
+    runtime::run_owned(db, move |_| {
+        require_selection(&source)?;
+        NativeContextProbe::new(source)?
+            .open_for_login()
+            .map_err(Into::into)
     })
     .await
     .map_err(Into::into)
@@ -291,14 +441,88 @@ pub(crate) async fn status(
         .await
         .map_err(Into::into)
 }
-pub(crate) async fn capture(
+pub(crate) async fn preview_capture(
     db: Arc<Database>,
     source: ContextSelection,
     context_revision: String,
     catalog_revision: String,
-) -> Result<CaptureOutcome, PublicError> {
+) -> Result<CapturePreview, PublicError> {
     let input = inputs(source, context_revision)?;
-    runtime::capture_account(db, input.probe, input.contracts, catalog_revision)
+    runtime::preview_capture_account(db, input.probe, input.contracts, catalog_revision)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn preview_bundle(
+    db: Arc<Database>,
+    source: ContextSelection,
+    context_revision: String,
+    input: runtime::BundlePreviewInput,
+) -> Result<runtime::BundlePreview, PublicError> {
+    let input_source = inputs(source, context_revision)?;
+    runtime::preview_bundle(db, input_source.probe, input_source.contracts, input)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn commit_bundle(
+    db: Arc<Database>,
+    source: ContextSelection,
+    context_revision: String,
+    input: runtime::BundleCommitInput,
+) -> Result<Vec<CaptureCommitOutcome>, PublicError> {
+    let input_source = match inputs(source, context_revision) {
+        Ok(value) => value,
+        Err(error) => {
+            runtime::cancel_bundle_preview(db, input.preview_id)
+                .await
+                .map_err(PublicError::from)?;
+            return Err(error);
+        }
+    };
+    runtime::commit_bundle(db, input_source.probe, input_source.contracts, input)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn cancel_bundle_preview(
+    db: Arc<Database>,
+    preview_id: String,
+) -> Result<(), PublicError> {
+    runtime::cancel_bundle_preview(db, preview_id)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn capture_reviewed(
+    db: Arc<Database>,
+    source: ContextSelection,
+    context_revision: String,
+    catalog_revision: String,
+    preview_id: String,
+    update_duplicate: bool,
+) -> Result<CaptureCommitOutcome, PublicError> {
+    let input = match inputs(source, context_revision) {
+        Ok(input) => input,
+        Err(error) => {
+            runtime::cancel_capture_preview(db, preview_id)
+                .await
+                .map_err(PublicError::from)?;
+            return Err(error);
+        }
+    };
+    runtime::capture_reviewed_account(
+        db,
+        input.probe,
+        input.contracts,
+        catalog_revision,
+        preview_id,
+        update_duplicate,
+    )
+    .await
+    .map_err(Into::into)
+}
+pub(crate) async fn cancel_capture_preview(
+    db: Arc<Database>,
+    preview_id: String,
+) -> Result<(), PublicError> {
+    runtime::cancel_capture_preview(db, preview_id)
         .await
         .map_err(Into::into)
 }
@@ -308,14 +532,33 @@ pub(crate) async fn switch_saved(
     context_revision: String,
     id: String,
     catalog_revision: String,
+    request_id: String,
 ) -> Result<&'static str, PublicError> {
     let input = inputs(source, context_revision)?;
-    runtime::switch_saved_account(db, input.probe, input.contracts, id, catalog_revision)
+    runtime::switch_account_request(
+        db,
+        input.probe,
+        input.contracts,
+        id,
+        catalog_revision,
+        request_id,
+    )
+    .await
+    .map(|result| match result {
+        SwitchOutcome::Switched => "switched",
+        SwitchOutcome::Refreshed => "refreshed",
+    })
+    .map_err(Into::into)
+}
+pub(crate) async fn operation_status(
+    db: Arc<Database>,
+    source: ContextSelection,
+    context_revision: String,
+    request_id: String,
+) -> Result<Option<runtime::OperationStatus>, PublicError> {
+    let input = inputs(source, context_revision)?;
+    runtime::operation_status(db, input.probe, input.contracts, request_id)
         .await
-        .map(|result| match result {
-            SwitchOutcome::Switched => "switched",
-            SwitchOutcome::Refreshed => "refreshed",
-        })
         .map_err(Into::into)
 }
 pub(crate) async fn recovery_status(db: Arc<Database>) -> Result<RecoveryStatus, PublicError> {

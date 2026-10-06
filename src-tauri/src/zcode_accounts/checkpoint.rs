@@ -9,7 +9,7 @@ use super::native::{NativeCipher, NativeError};
 pub(crate) use crate::secrets::owned_file::{JOURNAL_FILE, PROFILE_FILE};
 use crate::secrets::{owned_file::OwnedFile, VaultContext};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 
 pub(super) const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -36,6 +36,8 @@ struct CatalogPayload {
     version: u32,
     context: String,
     profiles: Vec<StrictRecord<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unverified: Option<Vec<String>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +65,7 @@ pub(super) struct JournalPayload {
 #[derive(Default)]
 pub(crate) struct ProfileCatalog {
     profiles: BTreeMap<AccountIdentity, AccountSnapshot>,
+    unverified: BTreeSet<AccountIdentity>,
 }
 
 impl ProfileCatalog {
@@ -71,7 +74,19 @@ impl ProfileCatalog {
     }
 
     pub(crate) fn upsert(&mut self, snapshot: AccountSnapshot) {
+        // Only the explicit native capture/transaction owners may call this.
+        // Replace imported credentials with the freshly inspected local image.
+        self.unverified.remove(snapshot.identity());
         self.profiles.insert(snapshot.identity().clone(), snapshot);
+    }
+
+    pub(crate) fn upsert_unverified(&mut self, snapshot: AccountSnapshot) {
+        self.unverified.insert(snapshot.identity().clone());
+        self.profiles.insert(snapshot.identity().clone(), snapshot);
+    }
+
+    pub(crate) fn source_verified(&self, identity: &AccountIdentity) -> bool {
+        self.profiles.contains_key(identity) && !self.unverified.contains(identity)
     }
 
     pub(crate) fn get(&self, identity: &AccountIdentity) -> Option<&AccountSnapshot> {
@@ -97,9 +112,15 @@ impl ProfileCatalog {
         }
         seal_payload(
             &CatalogPayload {
-                version: 1,
+                version: 2,
                 context: native.context().into(),
                 profiles,
+                unverified: Some(
+                    self.unverified
+                        .iter()
+                        .map(AccountIdentity::opaque_id)
+                        .collect(),
+                ),
             },
             PROFILE_FILE,
             vault,
@@ -112,7 +133,14 @@ impl ProfileCatalog {
         native: &NativeCipher,
     ) -> Result<Self, CheckpointError> {
         let payload: CatalogPayload = open_payload(encoded, PROFILE_FILE, vault)?;
-        validate_header(payload.version, &payload.context, native)?;
+        if payload.context != native.context() {
+            return Err(CheckpointError::WrongContext);
+        }
+        match (payload.version, &payload.unverified) {
+            // v1 predates bundle import; all records came from admitted capture.
+            (1, None) | (2, Some(_)) => (),
+            _ => return Err(CheckpointError::InvalidPayload),
+        }
         if payload.profiles.len() > MAX_PROFILES {
             return Err(CheckpointError::ResourceLimit);
         }
@@ -123,6 +151,17 @@ impl ProfileCatalog {
                 return Err(CheckpointError::DuplicateIdentity);
             }
             catalog.upsert(snapshot);
+        }
+        for id in payload.unverified.unwrap_or_default() {
+            let identity = catalog
+                .profiles
+                .keys()
+                .find(|identity| identity.opaque_id() == id)
+                .ok_or(CheckpointError::InvalidPayload)?
+                .clone();
+            if !catalog.unverified.insert(identity) {
+                return Err(CheckpointError::InvalidPayload);
+            }
         }
         Ok(catalog)
     }

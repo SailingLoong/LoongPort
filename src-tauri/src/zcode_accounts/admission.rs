@@ -65,6 +65,15 @@ pub(super) struct ContextObservation {
 pub(super) trait ContextProbe: Send + Sync {
     /// Read only installation/storage/process/settings evidence, never credentials.
     fn observe(&self) -> Result<ContextObservation, BlockedReason>;
+    fn open_for_login(&self) -> Result<(), BlockedReason> {
+        Err(BlockedReason::UnsupportedPlatform)
+    }
+    fn prepare_switch(&self) -> Result<bool, BlockedReason> {
+        Ok(false)
+    }
+    fn restart_after_switch(&self) -> Result<(), BlockedReason> {
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockedReason {
@@ -175,10 +184,57 @@ pub(super) struct VerifiedContext {
     context_id: String,
     settings_revision: [u8; 32],
 }
+/// Source and vault metadata validation while the official app runs. This type
+/// grants no native credential IO; a fresh stopped observation is mandatory.
+pub(super) struct ReadOnlyContext(VerifiedContext);
+impl ReadOnlyContext {
+    pub(super) fn root_identity(&self) -> [u64; 2] {
+        self.0.observation.root_identity
+    }
+    pub(super) fn assess(
+        observation: ContextObservation,
+        contracts: &[ContractEntry],
+    ) -> Result<Self, BlockedReason> {
+        VerifiedContext::assess_inner(observation, contracts, false).map(Self)
+    }
+    pub(super) fn context_revision(&self) -> String {
+        self.0.context_revision()
+    }
+    pub(super) fn context_id(&self) -> &str {
+        self.0.context_id()
+    }
+    pub(super) fn native_root(&self) -> &Path {
+        self.0.native_root()
+    }
+    pub(super) fn family(&self) -> OAuthFamily {
+        self.0.family()
+    }
+    pub(super) fn vault_cipher(&self) -> Result<NativeCipher, BlockedReason> {
+        self.0.cipher()
+    }
+    pub(super) fn stopped(
+        &self,
+        observation: ContextObservation,
+        contracts: &[ContractEntry],
+    ) -> Result<VerifiedContext, BlockedReason> {
+        let current = VerifiedContext::assess(observation, contracts)?;
+        if current.context_revision() != self.context_revision() {
+            return Err(BlockedReason::ContextChanged);
+        }
+        Ok(current)
+    }
+}
 impl VerifiedContext {
     pub(super) fn assess(
+        observation: ContextObservation,
+        contracts: &[ContractEntry],
+    ) -> Result<Self, BlockedReason> {
+        Self::assess_inner(observation, contracts, true)
+    }
+    fn assess_inner(
         mut observation: ContextObservation,
         contracts: &[ContractEntry],
+        require_stopped: bool,
     ) -> Result<Self, BlockedReason> {
         let settings_bytes = Zeroizing::new(std::mem::take(&mut observation.settings));
         if observation.install.platform != Platform::MacOs {
@@ -210,9 +266,9 @@ impl VerifiedContext {
             return Err(BlockedReason::KeyContextUnknown);
         }
         match observation.writers {
-            WriterState::Running => return Err(BlockedReason::AppRunning),
+            WriterState::Running if require_stopped => return Err(BlockedReason::AppRunning),
             WriterState::Unknown => return Err(BlockedReason::WriterStateUnknown),
-            WriterState::Stopped => {}
+            WriterState::Stopped | WriterState::Running => {}
         }
         if settings_bytes.len() > 1024 * 1024 {
             return Err(BlockedReason::SettingsInvalid);

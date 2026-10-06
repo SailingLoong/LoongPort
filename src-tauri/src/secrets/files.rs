@@ -275,6 +275,7 @@ mod owned_tests {
             super::super::owned_file::PROFILE_FILE,
             super::super::owned_file::JOURNAL_FILE,
             super::super::owned_file::RECOVERY_FILE,
+            super::super::owned_file::OPERATION_FILE,
         ] {
             let root = tempfile::tempdir().unwrap();
             let vault = VaultContext::generate().unwrap();

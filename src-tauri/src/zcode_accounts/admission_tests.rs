@@ -34,6 +34,34 @@ fn contracts() -> Vec<ContractEntry> {
         native_gate_passed: true,
     }]
 }
+#[test]
+fn running_readonly_context_requires_new_stopped_proof_without_scope_or_source_drift() {
+    let mut observed = observation();
+    observed.writers = WriterState::Running;
+    assert!(matches!(
+        VerifiedContext::assess(observed.clone(), &contracts()),
+        Err(BlockedReason::AppRunning)
+    ));
+    let readonly = ReadOnlyContext::assess(observed.clone(), &contracts()).unwrap();
+    assert!(matches!(
+        readonly.stopped(observed.clone(), &contracts()),
+        Err(BlockedReason::AppRunning)
+    ));
+    observed.writers = WriterState::Stopped;
+    assert!(readonly.stopped(observed.clone(), &contracts()).is_ok());
+    observed.settings_identity = [9, 9];
+    assert!(matches!(
+        readonly.stopped(observed, &contracts()),
+        Err(BlockedReason::ContextChanged)
+    ));
+    let mut team = observation();
+    team.writers = WriterState::Running;
+    team.settings = serde_json::to_vec(&serde_json::json!({"dataBaseDir":super::super::synthetic_test_path("data"),"providerFamilyDomain":"zai","providerFamilyConnectionSelections":{"zai":{"kind":"team-coding-plan"}}})).unwrap();
+    assert!(matches!(
+        ReadOnlyContext::assess(team, &contracts()),
+        Err(BlockedReason::TeamUnsupported)
+    ));
+}
 fn rejected(observation: ContextObservation, reason: BlockedReason) {
     assert!(
         matches!(VerifiedContext::assess(observation,&contracts()),Err(actual) if actual==reason)

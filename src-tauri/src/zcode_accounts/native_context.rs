@@ -115,6 +115,205 @@ pub(super) fn supported_contracts() -> Vec<ContractEntry> {
 }
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
+fn verified_artifacts(
+    install_path: &Path,
+    manifest: &InstalledContract,
+) -> Result<Vec<ObservedFile>, BlockedReason> {
+    require_canonical(install_path).map_err(|_| BlockedReason::UnsupportedBuild)?;
+    let mut artifacts = Vec::with_capacity(3);
+    for (index, expected) in manifest.artifacts.iter().enumerate() {
+        let max_size = [512 * 1024 * 1024, 128 * 1024 * 1024, 1024 * 1024][index];
+        let mut observed = ObservedFile::open(install_path.join(expected.relative_path), max_size)
+            .map_err(|_| BlockedReason::UnsupportedBuild)?;
+        if expected
+            .exact_size
+            .is_some_and(|size| size != observed.stamp.size)
+        {
+            return Err(BlockedReason::UnsupportedBuild);
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut read = 0u64;
+        loop {
+            let count = observed
+                .file
+                .read(&mut buffer)
+                .map_err(|_| BlockedReason::UnsupportedBuild)?;
+            if count == 0 {
+                break;
+            }
+            read += count as u64;
+            if read > observed.stamp.size {
+                return Err(BlockedReason::ContextChanged);
+            }
+            hash.update(&buffer[..count]);
+        }
+        observed
+            .recheck()
+            .map_err(|_| BlockedReason::ContextChanged)?;
+        let actual: [u8; 32] = hash.finalize().into();
+        if read != observed.stamp.size || actual != expected.sha256 {
+            return Err(BlockedReason::UnsupportedBuild);
+        }
+        artifacts.push(observed);
+    }
+    Ok(artifacts)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MetadataCandidate {
+    install_path: PathBuf,
+    version: Option<String>,
+    build: Option<String>,
+    verified_build: bool,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MetadataDiscovery {
+    data_root: PathBuf,
+    source_basis: &'static str,
+    candidates: Vec<MetadataCandidate>,
+    latest_status: &'static str,
+}
+#[cfg(target_os = "macos")]
+pub(super) fn discover_metadata(
+    selected: Option<&Path>,
+) -> Result<MetadataDiscovery, BlockedReason> {
+    let user = native_user()?;
+    let candidates =
+        super::discovery_paths::installation_candidates(Path::new(&user.home), selected)
+            .map_err(|_| BlockedReason::RootUnverified)?;
+    discover_from_candidates(&user, &candidates, &installed_contract())
+}
+#[cfg(not(target_os = "macos"))]
+pub(super) fn discover_metadata(
+    _selected: Option<&std::path::Path>,
+) -> Result<MetadataDiscovery, BlockedReason> {
+    Err(BlockedReason::UnsupportedPlatform)
+}
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn discover_from_candidates(
+    user: &OsUser,
+    candidates: &[PathBuf],
+    manifest: &InstalledContract,
+) -> Result<MetadataDiscovery, BlockedReason> {
+    require_canonical(Path::new(&user.home)).map_err(|_| BlockedReason::RootUnverified)?;
+    fn present_base<'de, D: serde::Deserializer<'de>>(
+        input: D,
+    ) -> Result<Option<String>, D::Error> {
+        String::deserialize(input).map(Some)
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Bootstrap {
+        #[serde(default, deserialize_with = "present_base")]
+        data_base_dir: Option<String>,
+    }
+    let path = Path::new(&user.home).join(".zcode/v2/setting.json");
+    let bootstrap = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(BlockedReason::SettingsInvalid),
+        Ok(_) => {
+            let mut opened = ObservedFile::open(path, 1024 * 1024)
+                .map_err(|_| BlockedReason::SettingsInvalid)?;
+            let mut bytes = Zeroizing::new(Vec::new());
+            (&mut opened.file)
+                .take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| BlockedReason::SettingsInvalid)?;
+            if bytes.len() as u64 != opened.stamp.size || bytes.len() > 1024 * 1024 {
+                return Err(BlockedReason::SettingsInvalid);
+            }
+            opened
+                .recheck()
+                .map_err(|_| BlockedReason::ContextChanged)?;
+            Some(
+                serde_json::from_slice::<Bootstrap>(&bytes)
+                    .map_err(|_| BlockedReason::SettingsInvalid)?,
+            )
+        }
+    };
+    let base = bootstrap
+        .as_ref()
+        .and_then(|value| value.data_base_dir.as_deref());
+    let data_root = super::discovery_paths::account_directory(Path::new(&user.home), base)
+        .map_err(|_| BlockedReason::SettingsInvalid)?;
+    let mut result = Vec::with_capacity(candidates.len());
+    for path in candidates {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(BlockedReason::UnsupportedBuild),
+            Ok(_) => {}
+        }
+        let verified_build = verified_artifacts(path, manifest).is_ok();
+        let fingerprint = manifest.fingerprint();
+        let (version, build) = if verified_build {
+            (Some(fingerprint.version), Some(fingerprint.build))
+        } else {
+            public_version_hint(path).unwrap_or_default()
+        };
+        result.push(MetadataCandidate {
+            install_path: path.clone(),
+            version,
+            build,
+            verified_build,
+        });
+    }
+    Ok(MetadataDiscovery {
+        data_root,
+        source_basis: if base.is_some() {
+            "bootstrapDataBaseDir"
+        } else {
+            "osAccountHome"
+        },
+        candidates: result,
+        latest_status: "notQueried",
+    })
+}
+
+// XML labels are informational only. They never select a compatible contract.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn public_version_hint(install: &Path) -> Option<(Option<String>, Option<String>)> {
+    let mut opened = ObservedFile::open(install.join("Contents/Info.plist"), 1024 * 1024).ok()?;
+    let mut bytes = Vec::new();
+    (&mut opened.file)
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 != opened.stamp.size {
+        return None;
+    }
+    opened.recheck().ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let scalar = |key: &str| -> Option<String> {
+        let marker = format!("<key>{key}</key>");
+        if text.matches(&marker).count() != 1 {
+            return None;
+        }
+        let (_, rest) = text.split_once(&marker)?;
+        let value = rest
+            .trim_start()
+            .strip_prefix("<string>")?
+            .split_once("</string>")?
+            .0;
+        if value.is_empty()
+            || value.len() > 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        {
+            return None;
+        }
+        Some(value.to_owned())
+    };
+    Some((
+        scalar("CFBundleShortVersionString"),
+        scalar("CFBundleVersion"),
+    ))
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
 #[derive(PartialEq, Eq)]
 struct FileStamp {
     identity: [u64; 2],
@@ -264,47 +463,7 @@ impl NativeContextProbe {
         }
         #[cfg(target_os = "macos")]
         native_local_root(&root)?;
-        require_canonical(&selection.install_path).map_err(|_| BlockedReason::UnsupportedBuild)?;
-        let mut artifacts = Vec::with_capacity(3);
-        for (index, expected) in manifest.artifacts.iter().enumerate() {
-            let max_size = [512 * 1024 * 1024, 128 * 1024 * 1024, 1024 * 1024][index];
-            let mut observed = ObservedFile::open(
-                selection.install_path.join(expected.relative_path),
-                max_size,
-            )
-            .map_err(|_| BlockedReason::UnsupportedBuild)?;
-            if expected
-                .exact_size
-                .is_some_and(|size| size != observed.stamp.size)
-            {
-                return Err(BlockedReason::UnsupportedBuild);
-            }
-            let mut hash = Sha256::new();
-            let mut buffer = [0u8; 64 * 1024];
-            let mut read = 0u64;
-            loop {
-                let count = observed
-                    .file
-                    .read(&mut buffer)
-                    .map_err(|_| BlockedReason::UnsupportedBuild)?;
-                if count == 0 {
-                    break;
-                }
-                read += count as u64;
-                if read > observed.stamp.size {
-                    return Err(BlockedReason::ContextChanged);
-                }
-                hash.update(&buffer[..count]);
-            }
-            observed
-                .recheck()
-                .map_err(|_| BlockedReason::ContextChanged)?;
-            let actual: [u8; 32] = hash.finalize().into();
-            if read != observed.stamp.size || actual != expected.sha256 {
-                return Err(BlockedReason::UnsupportedBuild);
-            }
-            artifacts.push(observed);
-        }
+        let artifacts = verified_artifacts(&selection.install_path, manifest)?;
         let probe = Self {
             selection,
             user,
@@ -359,6 +518,18 @@ impl NativeContextProbe {
 }
 #[cfg(any(target_os = "macos", all(test, unix)))]
 impl ContextProbe for NativeContextProbe {
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    fn open_for_login(&self) -> Result<(), BlockedReason> {
+        super::native_process_control::open(self, &self.selection)
+    }
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    fn prepare_switch(&self) -> Result<bool, BlockedReason> {
+        super::native_process_control::stop(self, &self.selection)
+    }
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    fn restart_after_switch(&self) -> Result<(), BlockedReason> {
+        super::native_process_control::restart(self, &self.selection)
+    }
     fn observe(&self) -> Result<ContextObservation, BlockedReason> {
         let facts = self.system_facts()?;
         if facts.user != self.user {
@@ -482,7 +653,7 @@ fn native_user() -> Result<OsUser, BlockedReason> {
 }
 
 #[cfg(target_os = "macos")]
-fn native_pids(uid: u32) -> Result<Vec<i32>, ()> {
+pub(super) fn native_pids(uid: u32) -> Result<Vec<i32>, ()> {
     // Apple xnu bsd/sys/proc_info.h: PROC_UID_ONLY = 4 (2 is PROC_PGRP_ONLY).
     // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h
     // A full buffer cannot prove completeness.
@@ -504,6 +675,10 @@ fn native_pids(uid: u32) -> Result<Vec<i32>, ()> {
 }
 #[cfg(target_os = "macos")]
 fn native_process_path(pid: i32, uid: u32) -> Result<PathBuf, ()> {
+    native_process_identity(pid, uid).map(|(path, _)| path)
+}
+#[cfg(target_os = "macos")]
+pub(super) fn native_process_identity(pid: i32, uid: u32) -> Result<(PathBuf, [u64; 2]), ()> {
     use std::os::unix::ffi::OsStrExt;
     fn identity(pid: i32, uid: u32) -> Result<(u64, u64), ()> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -533,7 +708,10 @@ fn native_process_path(pid: i32, uid: u32) -> Result<PathBuf, ()> {
     if end == 0 || before != identity(pid, uid)? {
         return Err(());
     }
-    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..end])))
+    Ok((
+        PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..end])),
+        [before.0, before.1],
+    ))
 }
 #[cfg(target_os = "macos")]
 fn native_writers(install: &Path, uid: u32) -> WriterState {

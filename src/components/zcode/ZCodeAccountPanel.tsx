@@ -1,4 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  readZCodeSourcePreference,
+  saveZCodeSourcePreference,
+} from "@/lib/zcodeSourcePreference";
+import { settingsApi } from "@/lib/api/settings";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -7,20 +12,30 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ZCodeBundleImport } from "./ZCodeBundleImport";
 import {
   accountErrorText,
   safeAccountError,
   zcodeAccountsApi,
   type AccountError,
   type ContextSelection,
+  type CapturePreview,
+  type LatestVersion,
   type SourceContext,
 } from "@/lib/api/zcodeAccounts";
 
 type ActionKind =
-  "capture" | "switch" | "archive" | "confirm" | "recapture" | "delete";
+  | "capture"
+  | "saveCapture"
+  | "switch"
+  | "archive"
+  | "confirm"
+  | "recapture"
+  | "delete";
 type ReviewedAction = {
   kind: ActionKind;
   id?: string;
+  preview?: CapturePreview;
   source: ContextSelection;
   contextRevision?: string;
   catalogRevision?: string;
@@ -54,14 +69,55 @@ export function ZCodeAccountPanel({
     defaultValue: string,
     values?: Record<string, string>,
   ) => t(`zcode.accounts.${key}`, { defaultValue, ...values });
-  const [source, setSource] = useState<ContextSelection>(initialSource);
+  const preferredSource = useRef(readZCodeSourcePreference());
+  const [source, setSource] = useState<ContextSelection>(() => ({
+    ...initialSource,
+    ...preferredSource.current,
+    keyMode: "unknown",
+  }));
   const [context, setContext] = useState<SourceContext | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bundleActive, setBundleActive] = useState(false);
   const inFlight = useRef(false);
   const [action, setAction] = useState<ReviewedAction | null>(null);
   const [error, setError] = useState<AccountError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [latestVersion, setLatestVersion] = useState<LatestVersion | null>(
+    null,
+  );
   const [needsReview, setNeedsReview] = useState(false);
+  const manuallySelected = useRef(preferredSource.current !== null);
+  const discoveryInstallation = useRef(preferredSource.current?.installPath);
+  const discovery = useQuery({
+    queryKey: ["zcodeMetadataDiscovery"],
+    queryFn: () =>
+      passive(() => zcodeAccountsApi.discover(discoveryInstallation.current)),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  useEffect(() => {
+    if (
+      !discovery.data ||
+      manuallySelected.current ||
+      inFlight.current ||
+      action
+    )
+      return;
+    // A single detected installation is shown without granting compatibility.
+    setSource({
+      installPath:
+        discovery.data.candidates.length === 1
+          ? discovery.data.candidates[0].installPath
+          : discovery.data.candidates.length > 1
+            ? ""
+            : initialSource.installPath,
+      dataRoot: discovery.data.dataRoot,
+      keyMode: "unknown",
+    });
+    setContext(null);
+    setNeedsReview(false);
+  }, [discovery.data, action]);
   const recovery = useQuery({
     queryKey: ["zcodeAccountRecovery"],
     queryFn: () => passive(zcodeAccountsApi.recoveryStatus),
@@ -85,10 +141,10 @@ export function ZCodeAccountPanel({
     refetchOnReconnect: false,
   });
   useEffect(() => {
-    onBusyChange?.(busy);
-  }, [busy, onBusyChange]);
+    onBusyChange?.(busy || bundleActive);
+  }, [busy, bundleActive, onBusyChange]);
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
-  const locked = busy || disabled;
+  const locked = busy || disabled || bundleActive;
   const loading =
     recovery.isFetching || (context !== null && catalog.isFetching);
   const localReady =
@@ -112,9 +168,14 @@ export function ZCodeAccountPanel({
     (recovery.isError ? safeAccountError(recovery.error) : null) ??
     (context && catalog.isError ? safeAccountError(catalog.error) : null);
   const errorText = (failure: AccountError) => {
-    const key = failure.committed
-      ? "committed_recovery_required"
-      : failure.code.slice("zcode.account.".length);
+    const key =
+      failure.committed &&
+      ![
+        "zcode.account.committed_restart_failed",
+        "zcode.account.committed_result_unknown",
+      ].includes(failure.code)
+        ? "committed_recovery_required"
+        : failure.code.slice("zcode.account.".length);
     const fallback =
       accountErrorText[key as keyof typeof accountErrorText] ??
       accountErrorText.operation_failed;
@@ -131,14 +192,67 @@ export function ZCodeAccountPanel({
     inFlight.current = false;
     setBusy(false);
   };
+  const queryLatest = async () => {
+    if (!begin()) return;
+    setLatestVersion(null);
+    try {
+      setLatestVersion(await zcodeAccountsApi.latestVersion());
+    } catch (cause) {
+      setError(safeAccountError(cause));
+    } finally {
+      finish();
+    }
+  };
   const selectSource = (next: ContextSelection) => {
-    if (inFlight.current || disabled) return;
+    if (inFlight.current || disabled || action) return;
+    manuallySelected.current = true;
     setSource(next);
     setContext(null);
     setAction(null);
     setError(null);
     setNotice(null);
     setNeedsReview(false);
+  };
+  const queryOriginal = async (revision: string) => {
+    const operation = await zcodeAccountsApi.queryLastOperation(
+      source,
+      revision,
+    );
+    if (!operation) return;
+    if (operation.phase === "restartFailed") {
+      setError({
+        code: "zcode.account.committed_restart_failed",
+        remedy: "openNativeSettings",
+        committed: true,
+      });
+    } else if (
+      operation.phase === "restartVerified" ||
+      (operation.phase === "committed" && !operation.restartRequested)
+    ) {
+      setNotice(
+        copy(
+          "originalConfirmed",
+          "The original local switch is confirmed. Online sign-in remains unverified.",
+        ),
+      );
+    } else if (operation.phase === "failed") {
+      setNotice(
+        copy(
+          "originalFailed",
+          "The original switch ended before a confirmed commit. Review the current source before a new confirmation.",
+        ),
+      );
+    } else {
+      setError({
+        code:
+          operation.phase === "committed"
+            ? "zcode.account.committed_result_unknown"
+            : "zcode.account.operation_already_known",
+        remedy: "queryOriginal",
+        committed: operation.phase === "committed",
+      });
+      setNeedsReview(true);
+    }
   };
   const inspect = async () => {
     if (!begin()) return;
@@ -147,8 +261,30 @@ export function ZCodeAccountPanel({
     setAction(null);
     try {
       const inspected = await zcodeAccountsApi.inspect(source);
+      saveZCodeSourcePreference(source);
       setContext(inspected);
       setNeedsReview(false);
+      await queryOriginal(inspected.contextRevision);
+    } catch (cause) {
+      setError(safeAccountError(cause));
+    } finally {
+      finish();
+    }
+  };
+  const openForLogin = async () => {
+    if (!begin()) return;
+    setError(null);
+    setNotice(null);
+    try {
+      await zcodeAccountsApi.openForLogin(source);
+      setContext(null);
+      setNeedsReview(false);
+      setNotice(
+        copy(
+          "openedForLogin",
+          "Official ZCode opened with the selected source. Sign in there, then inspect this source again. Online account status is not verified.",
+        ),
+      );
     } catch (cause) {
       setError(safeAccountError(cause));
     } finally {
@@ -164,6 +300,7 @@ export function ZCodeAccountPanel({
       const accounts = context ? await catalog.refetch() : null;
       if (local.error || accounts?.error) throw local.error ?? accounts?.error;
       setNeedsReview(false);
+      if (context) await queryOriginal(context.contextRevision);
     } catch (cause) {
       setError(safeAccountError(cause));
       setNeedsReview(true);
@@ -207,7 +344,20 @@ export function ZCodeAccountPanel({
       recoveryRevision: recovery.data.revision,
     });
   };
-  const perform = async () => {
+  const cancel = async () => {
+    if (!action || !begin()) return;
+    const selected = action;
+    setAction(null);
+    try {
+      if (selected.preview)
+        await zcodeAccountsApi.cancelCapture(selected.preview.previewId);
+    } catch (cause) {
+      setError(safeAccountError(cause));
+    } finally {
+      finish();
+    }
+  };
+  const perform = async (updateDuplicate = false) => {
     if (!action || !begin()) return;
     const selected = action;
     setError(null);
@@ -219,6 +369,7 @@ export function ZCodeAccountPanel({
           selected.kind !== "delete" &&
           selected.contextRevision !== context?.contextRevision) ||
         ((selected.kind === "capture" ||
+          selected.kind === "saveCapture" ||
           selected.kind === "switch" ||
           selected.kind === "recapture") &&
           selected.catalogRevision !== catalog.data?.revision)
@@ -232,10 +383,20 @@ export function ZCodeAccountPanel({
       let result: string | void = undefined;
       switch (selected.kind) {
         case "capture":
-          result = await zcodeAccountsApi.capture(
+          const preview = await zcodeAccountsApi.previewCapture(
             selected.source,
             selected.contextRevision!,
             selected.catalogRevision!,
+          );
+          setAction({ ...selected, kind: "saveCapture", preview });
+          return;
+        case "saveCapture":
+          result = await zcodeAccountsApi.commitCapture(
+            selected.source,
+            selected.contextRevision!,
+            selected.catalogRevision!,
+            selected.preview!.previewId,
+            updateDuplicate,
           );
           break;
         case "switch":
@@ -274,11 +435,13 @@ export function ZCodeAccountPanel({
           break;
       }
       setAction(null);
-      if (selected.kind === "capture" || selected.kind === "recapture") {
+      if (selected.kind === "saveCapture" || selected.kind === "recapture") {
         setNotice(
-          result === "refreshed"
-            ? copy("refreshed", "Saved account refreshed locally.")
-            : copy("saved", "Account saved locally."),
+          result === "kept"
+            ? copy("kept", "Existing saved account kept unchanged.")
+            : result === "refreshed"
+              ? copy("refreshed", "Saved account refreshed locally.")
+              : copy("saved", "Account saved locally."),
         );
       } else if (selected.kind === "switch") {
         setNotice(
@@ -325,13 +488,35 @@ export function ZCodeAccountPanel({
     switch (action?.kind) {
       case "capture":
         return {
-          title: copy("captureTitle", "Save current ZCode account?"),
+          title: copy(
+            "readPreviewTitle",
+            "Read current ZCode account for preview?",
+          ),
           message: copy(
-            "captureMessage",
-            "Read the current native session from {{root}} and persist an encrypted account in LoongPort's local vault for later account switching. This explicitly authorizes reading and saving the session; inspecting or refreshing does not save it.",
+            "readPreviewMessage",
+            "Read the current native session from {{root}} to show a masked preview. Review and confirm saving separately. Canceling the preview does not save an account.",
             { root },
           ),
-          confirm: copy("captureConfirm", "Save encrypted account"),
+          confirm: copy("readPreviewConfirm", "Read masked preview"),
+        };
+      case "saveCapture":
+        return {
+          title: copy("savePreviewTitle", "Save reviewed ZCode account?"),
+          message: copy(
+            "savePreviewMessage",
+            "Personal {{family}} account {{label}}. Save in LoongPort's encrypted local vault. Native ZCode files remain unchanged. {{duplicate}}",
+            {
+              family: action.preview!.family,
+              label: action.preview!.label ?? "…",
+              duplicate: action.preview!.duplicate
+                ? copy(
+                    "duplicateKeep",
+                    "This account already exists; keep the saved account by default.",
+                  )
+                : copy("newSavedAccount", "This is a new saved account."),
+            },
+          ),
+          confirm: copy("savePreviewConfirm", "Confirm account choice"),
         };
       case "switch":
         return {
@@ -417,6 +602,156 @@ export function ZCodeAccountPanel({
           {copy("refresh", "Refresh account status")}
         </Button>
       </div>
+      <section
+        aria-label={copy("installationStatus", "Installation and versions")}
+        className="space-y-2 rounded-md border p-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="font-medium">
+            {copy("installationStatus", "Installation and versions")}
+          </h4>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={locked || !!action || discovery.isFetching}
+            onClick={() => {
+              discoveryInstallation.current = source.installPath || undefined;
+              manuallySelected.current = false;
+              setContext(null);
+              setNeedsReview(true);
+              void discovery.refetch();
+            }}
+          >
+            {copy("recheckMetadata", "Recheck installation")}
+          </Button>
+        </div>
+        {discovery.isFetching && (
+          <p>{copy("discovering", "Checking public installation metadata…")}</p>
+        )}
+        {discovery.isError && (
+          <p role="status">{errorText(safeAccountError(discovery.error))}</p>
+        )}
+        {discovery.data?.candidates.length === 0 && (
+          <p>
+            {copy(
+              "notDetected",
+              "No installation detected. Use the official installation guide or select a source manually.",
+            )}
+          </p>
+        )}
+        {discovery.data?.candidates.map((candidate) => (
+          <div key={candidate.installPath} className="space-y-1 text-sm">
+            <p className="break-all">{candidate.installPath}</p>
+            <p>
+              {copy("currentBuild", "Current: {{version}} · {{build}}", {
+                version: candidate.version ?? copy("unknownVersion", "Unknown"),
+                build: candidate.build ?? copy("unknownVersion", "Unknown"),
+              })}
+            </p>
+            <p>
+              {candidate.verifiedBuild
+                ? copy(
+                    "verifiedBuild",
+                    "Exact installed build verified. Session actions still require a fresh source and account check.",
+                  )
+                : copy(
+                    "unverifiedBuild",
+                    "Installed build is unverified; account actions remain blocked.",
+                  )}
+            </p>
+            {discovery.data!.candidates.length > 1 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={locked || !!action}
+                onClick={() =>
+                  selectSource({
+                    installPath: candidate.installPath,
+                    dataRoot: discovery.data!.dataRoot,
+                    keyMode: "unknown",
+                  })
+                }
+              >
+                {copy("chooseInstallation", "Choose this installation")}
+              </Button>
+            )}
+          </div>
+        ))}
+        <p className="text-xs text-muted-foreground">
+          {!latestVersion
+            ? copy("latestNotQueried", "Official latest version: not queried")
+            : latestVersion.error
+              ? copy(
+                  "latestQueryFailed",
+                  "Official version query failed at {{time}}. No current result is available.",
+                  {
+                    time: new Date(
+                      latestVersion.checkedAt * 1000,
+                    ).toISOString(),
+                  },
+                )
+              : copy(
+                  "latestQueried",
+                  "Official latest version: {{version}} · checked {{time}}",
+                  {
+                    version:
+                      latestVersion.version ??
+                      copy("unknownVersion", "Unknown"),
+                    time: new Date(
+                      latestVersion.checkedAt * 1000,
+                    ).toISOString(),
+                  },
+                )}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={locked || !!action}
+          onClick={() => void queryLatest()}
+        >
+          {copy("queryLatest", "Query official latest version")}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          {copy(
+            "supportedBuilds",
+            "Verified operation range: macOS 3.14.4, build 3.14.4.7912, exact accepted artifacts only.",
+          )}
+        </p>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          onClick={() => {
+            void settingsApi
+              .openExternal("https://zcode.z.ai/cn")
+              .catch((cause) => setError(safeAccountError(cause)));
+          }}
+        >
+          {copy("officialGuide", "Official installation / update guide")}
+        </Button>
+      </section>
+      <p className="text-sm">
+        {discovery.data?.sourceBasis === "bootstrapDataBaseDir"
+          ? copy(
+              "bootstrapSource",
+              "Data source discovered from the official desktop bootstrap data base directory.",
+            )
+          : copy(
+              "homeSource",
+              "Default data source uses the OS account home. Advanced source selection remains available below.",
+            )}
+      </p>
+      {preferredSource.current && !context && (
+        <p className="text-xs text-muted-foreground">
+          {copy(
+            "preferenceUnverified",
+            "Saved paths restored as a preference. Installation, data source and key context must be checked again.",
+          )}
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <Label htmlFor="zcode-account-install">
@@ -485,12 +820,47 @@ export function ZCodeAccountPanel({
         </Button>
         <Button
           type="button"
+          variant="outline"
+          disabled={
+            locked ||
+            !!action ||
+            !source.installPath.startsWith("/") ||
+            !source.dataRoot.startsWith("/") ||
+            source.keyMode !== "standard"
+          }
+          onClick={() => void openForLogin()}
+        >
+          {copy("openForLogin", "Open official ZCode for login")}
+        </Button>
+        <Button
+          type="button"
           disabled={!ordinaryReady || !!action}
           onClick={() => review("capture")}
         >
           {copy("capture", "Save current account")}
         </Button>
       </div>
+      {context && catalog.data && (
+        <ZCodeBundleImport
+          key={context.contextRevision}
+          source={source}
+          contextRevision={context.contextRevision}
+          catalogRevision={catalog.data.revision}
+          enabled={ordinaryReady && !action}
+          onActiveChange={(active) => {
+            inFlight.current = active;
+            setBundleActive(active);
+          }}
+          onImported={async () => {
+            const result = await catalog.refetch();
+            if (result.error) {
+              setNeedsReview(true);
+              throw result.error;
+            }
+            setNeedsReview(false);
+          }}
+        />
+      )}
       {context && (
         <p className="break-all text-sm text-muted-foreground">
           {copy(
@@ -567,6 +937,14 @@ export function ZCodeAccountPanel({
                       <p className="break-all text-xs text-muted-foreground">
                         {profile.id}
                       </p>
+                      {profile.sourceVerified !== true && (
+                        <p className="text-xs text-muted-foreground">
+                          {copy(
+                            "unverifiedImport",
+                            "Source unverified. Sign in with this personal account in official ZCode, then save the current account and explicitly update the duplicate here.",
+                          )}
+                        </p>
+                      )}
                     </div>
                     <Button
                       type="button"
@@ -574,6 +952,7 @@ export function ZCodeAccountPanel({
                       size="sm"
                       disabled={
                         !ordinaryReady ||
+                        profile.sourceVerified !== true ||
                         full ||
                         family !== context.family ||
                         !!action
@@ -678,6 +1057,7 @@ export function ZCodeAccountPanel({
         )}
       </section>
       <ConfirmDialog
+        key={action?.kind ?? "closed"}
         isOpen={action !== null}
         pending={busy}
         title={confirmation.title}
@@ -685,10 +1065,17 @@ export function ZCodeAccountPanel({
         confirmText={confirmation.confirm}
         cancelText={copy("cancel", "Cancel account action")}
         variant={action?.kind === "delete" ? "destructive" : "info"}
-        onCancel={() => {
-          if (!inFlight.current) setAction(null);
-        }}
-        onConfirm={() => void perform()}
+        onCancel={() => void cancel()}
+        checkboxLabel={
+          action?.kind === "saveCapture" && action.preview?.duplicate
+            ? copy(
+                "updateDuplicate",
+                "Explicitly update this existing saved account",
+              )
+            : undefined
+        }
+        checkboxDefaultChecked={false}
+        onConfirm={(checked) => void perform(checked)}
       />
     </section>
   );

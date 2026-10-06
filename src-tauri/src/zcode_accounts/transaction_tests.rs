@@ -105,6 +105,168 @@ fn archive_and_confirm(f: &Fixture, store: &AccountStore<'_>) -> ArchiveOutcome 
     outcome
 }
 #[test]
+fn io_unverified_import_cannot_activate_or_change_native_journal_or_source() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let mut catalog = f.catalog();
+    catalog.upsert_unverified(
+        f.native
+            .inspect(&native_document(OAuthFamily::Zai, "b", "imported"))
+            .unwrap(),
+    );
+    write_durable(
+        &f.vault_root.path().join(PROFILE_FILE),
+        catalog.seal(&f.vault, &f.native).unwrap().as_bytes(),
+    )
+    .unwrap();
+    let before_native = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let before_catalog = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    assert_eq!(
+        f.store()
+            .switch_saved(&f.b.opaque_id(), &saved_revision(&f), OAuthFamily::Zai),
+        Err(TransactionError::UnverifiedSource)
+    );
+    assert_eq!(
+        f.store().switch(&f.b),
+        Err(TransactionError::UnverifiedSource)
+    );
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        before_native
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        before_catalog
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}
+
+#[test]
+fn io_bundle_vault_import_preserves_native_and_default_keep_then_downgrades_update() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let native_files_before = fs::read_dir(f.native_root.path())
+        .unwrap()
+        .map(|p| p.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let make = |id| {
+        f.native
+            .inspect(&native_document(OAuthFamily::Zai, id, "imported"))
+            .unwrap()
+    };
+    assert_eq!(
+        store.import_profiles(
+            &f.native,
+            &saved_revision(&f),
+            vec![(make("a"), false), (make("c"), false)]
+        ),
+        Ok(vec![
+            CaptureCommitOutcome::Kept,
+            CaptureCommitOutcome::Saved
+        ])
+    );
+    assert!(f.catalog().source_verified(&f.a));
+    let c = make("c").identity().clone();
+    assert!(!f.catalog().source_verified(&c));
+    assert_eq!(
+        store.import_profiles(&f.native, &saved_revision(&f), vec![(make("a"), true)]),
+        Ok(vec![CaptureCommitOutcome::Refreshed])
+    );
+    assert!(!f.catalog().source_verified(&f.a));
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        native_before
+    );
+    assert_eq!(
+        fs::read_dir(f.native_root.path())
+            .unwrap()
+            .map(|p| p.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        native_files_before
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}
+
+#[test]
+fn io_bundle_vault_import_checks_revision_duplicates_and_whole_batch_before_publication() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    // A vault-only import does not need to open the native credential file.
+    fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let make = || {
+        f.native
+            .inspect(&native_document(OAuthFamily::Zai, "c", "imported"))
+            .unwrap()
+    };
+    let before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    assert_eq!(
+        store.import_profiles(&f.native, "stale", vec![(make(), false)]),
+        Err(TransactionError::CatalogChanged)
+    );
+    assert!(store
+        .import_profiles(
+            &f.native,
+            &saved_revision(&f),
+            vec![(make(), false), (make(), true)]
+        )
+        .is_err());
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        before
+    );
+    assert_eq!(
+        store.import_profiles(&f.native, &saved_revision(&f), vec![(make(), false)]),
+        Ok(vec![CaptureCommitOutcome::Saved])
+    );
+    assert!(!f.native_root.path().join("credentials.json").exists());
+}
+
+#[test]
+fn io_unverified_duplicate_keep_remains_blocked_explicit_local_update_enables_it() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let mut catalog = f.catalog();
+    catalog.upsert_unverified(
+        f.native
+            .inspect(&native_document(OAuthFamily::Zai, "a", "imported"))
+            .unwrap(),
+    );
+    write_durable(
+        &f.vault_root.path().join(PROFILE_FILE),
+        catalog.seal(&f.vault, &f.native).unwrap().as_bytes(),
+    )
+    .unwrap();
+    let store = f.store();
+    let preview = store
+        .preview_capture(OAuthFamily::Zai, &saved_revision(&f))
+        .unwrap();
+    assert_eq!(
+        store.capture_reviewed(
+            OAuthFamily::Zai,
+            &saved_revision(&f),
+            &preview.native_revision,
+            &preview.id,
+            false
+        ),
+        Ok(CaptureCommitOutcome::Kept)
+    );
+    assert!(!f.catalog().source_verified(&f.a));
+    assert_eq!(
+        store.capture_reviewed(
+            OAuthFamily::Zai,
+            &saved_revision(&f),
+            &preview.native_revision,
+            &preview.id,
+            true
+        ),
+        Ok(CaptureCommitOutcome::Refreshed)
+    );
+    assert!(f.catalog().source_verified(&f.a));
+    assert!(
+        f.catalog().get(&f.a).unwrap().scoped_document()
+            == f.native.inspect(&f.fresh).unwrap().scoped_document()
+    );
+}
+#[test]
 fn io_switch_refreshes_outgoing_a_then_restores_fresh_a_for_each_family() {
     for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
         let f = Fixture::new(family);
@@ -754,6 +916,159 @@ fn saved_revision(f: &Fixture) -> String {
             &fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
         ))
     )
+}
+
+#[test]
+fn io_reviewed_capture_previews_without_saving_and_keep_does_not_overwrite() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let revision = saved_revision(&f);
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let saved_before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let preview = f
+        .store()
+        .preview_capture(OAuthFamily::Zai, &revision)
+        .unwrap();
+    assert!(preview.duplicate);
+    assert_eq!(preview.id, f.a.opaque_id());
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        saved_before
+    );
+    let encoded = serde_json::to_string(&preview).unwrap();
+    for forbidden in ["SYNTHETIC_CANARY", "enc:v1:", "access_token", "user_info"] {
+        assert!(!encoded.contains(forbidden));
+    }
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::Zai,
+            &revision,
+            &preview.native_revision,
+            &preview.id,
+            false
+        ),
+        Ok(CaptureCommitOutcome::Kept)
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        saved_before
+    );
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        native_before
+    );
+}
+
+#[test]
+fn io_reviewed_capture_rejects_wrong_identity_with_unchanged_native_bytes() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let revision = saved_revision(&f);
+    let preview = f
+        .store()
+        .preview_capture(OAuthFamily::Zai, &revision)
+        .unwrap();
+    let before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let native = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::Zai,
+            &revision,
+            &preview.native_revision,
+            "wrong-identity",
+            true
+        ),
+        Err(TransactionError::SourceChanged)
+    );
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        native
+    );
+}
+
+#[test]
+fn io_reviewed_capture_explicit_update_refreshes_one_identity_without_native_write() {
+    let f = Fixture::new(OAuthFamily::BigModel);
+    let revision = saved_revision(&f);
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let preview = f
+        .store()
+        .preview_capture(OAuthFamily::BigModel, &revision)
+        .unwrap();
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::BigModel,
+            &revision,
+            &preview.native_revision,
+            &preview.id,
+            true
+        ),
+        Ok(CaptureCommitOutcome::Refreshed)
+    );
+    assert_eq!(f.catalog().len(), 2);
+    assert!(
+        f.catalog().get(&f.a).unwrap().scoped_document()
+            == f.native.inspect(&f.fresh).unwrap().scoped_document()
+    );
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        native_before
+    );
+}
+
+#[test]
+fn io_reviewed_capture_rejects_drift_before_saving_and_new_identity_can_be_saved() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    fs::remove_file(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let preview = f
+        .store()
+        .preview_capture(OAuthFamily::Zai, "absent")
+        .unwrap();
+    assert!(!preview.duplicate);
+    let different = native_document(OAuthFamily::Zai, "different", "fresh");
+    write_durable(
+        &f.native_root.path().join("credentials.json"),
+        &different.to_bytes().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::Zai,
+            "absent",
+            &preview.native_revision,
+            &preview.id,
+            false
+        ),
+        Err(TransactionError::SourceChanged)
+    );
+    assert!(!f.vault_root.path().join(PROFILE_FILE).exists());
+    let current = f
+        .store()
+        .preview_capture(OAuthFamily::Zai, "absent")
+        .unwrap();
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::Zai,
+            "absent",
+            &current.native_revision,
+            &current.id,
+            false
+        ),
+        Ok(CaptureCommitOutcome::Saved)
+    );
+    assert_eq!(f.catalog().len(), 1);
+    assert_eq!(
+        f.store().capture_reviewed(
+            OAuthFamily::Zai,
+            "absent",
+            &current.native_revision,
+            &current.id,
+            false
+        ),
+        Err(TransactionError::CatalogChanged)
+    );
 }
 #[test]
 fn io_explicit_capture_creates_one_encrypted_profile_and_refreshes_same_identity() {
@@ -1786,5 +2101,63 @@ fn io_native_root_rejects_symlink_alias_and_foreign_ownership_metadata() {
         current_uid.wrapping_add(1),
         0o022
     ));
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}
+
+#[test]
+fn io_operation_recovers_authenticated_commit_without_native_read_or_replay() {
+    use super::super::operation_log::{Phase, Record};
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    local
+        .record_operation(Record {
+            request_id: id.clone(),
+            context_id: TEST_CONTEXT.into(),
+            native_root: root_identity(f.native_root.path()).unwrap(),
+            target: f.b.opaque_id(),
+            phase: Phase::TransactionUncertain,
+            refreshed: false,
+            restart_requested: true,
+        })
+        .unwrap();
+    let store = f.store();
+    let status = store.status().unwrap();
+    assert_eq!(
+        store.switch_saved_operation(&f.b.opaque_id(), &status.revision, OAuthFamily::Zai, &id),
+        Ok(SwitchOutcome::Switched)
+    );
+    fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+    assert_eq!(
+        local.recover_operation(&id).unwrap().unwrap().phase,
+        Phase::Committed
+    );
+    assert!(!f.native_root.path().join("credentials.json").exists());
+}
+#[test]
+fn io_operation_missing_saved_source_is_proven_before_first_publish() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let unknown = native_document(OAuthFamily::Zai, "not-saved", "fresh");
+    write_durable(
+        &f.native_root.path().join("credentials.json"),
+        &unknown.to_bytes().unwrap(),
+    )
+    .unwrap();
+    let store = f.store();
+    let status = store.status().unwrap();
+    let mut started = false;
+    assert_eq!(
+        store.switch_saved_operation_started(
+            &f.b.opaque_id(),
+            &status.revision,
+            OAuthFamily::Zai,
+            &uuid::Uuid::new_v4().to_string(),
+            &mut || {
+                started = true;
+            }
+        ),
+        Err(TransactionError::MissingSavedSource)
+    );
+    assert!(!started);
     assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
 }
