@@ -37,6 +37,9 @@ mod linux_fix;
 mod live;
 mod maintenance;
 mod mcp;
+// Pure mode models only; no startup/persistence/controller is registered.
+#[allow(dead_code)]
+mod mode;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
