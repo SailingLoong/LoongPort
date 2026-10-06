@@ -31,7 +31,9 @@
 
 ## V2 恢复实施与源码检查点
 
-范围为 `LOONG-ZCODE-ACCOUNTS-V2.0` Z1 / U1–U6，参见[产品契约](zcode-accounts-v2.md)和[实施计划](superpowers/plans/2026-10-06-zcode-v2-recovery.md)。恢复分支从已发布 beta.3 开始；当前为纯文档检查点，新增业务代码、测试、独审及精确 SHA CI 待完成。
+范围为 `LOONG-ZCODE-ACCOUNTS-V2.0` Z1 / U1–U6，参见[产品契约](zcode-accounts-v2.md)和[实施计划](superpowers/plans/2026-10-06-zcode-v2-recovery.md)。恢复分支从已发布 beta.3 开始。首个文档检查点为 `1c15b1a`；当前新源码切片为官方协议、HTTP 边界和登录工作所有权原语，尚未接入运行态/UI。
+
+新验证：修复既有核心 harness 缺失的 `serde_json/raw_value` 与 `ring` 依赖后，基线 235 项通过、3 项既定子进程夹具忽略。新增协议 14 项、仅 loopback 的 HTTP 6 项、登录工作所有权初版 7 项均有 RED→GREEN；独审再发现并复现“后来未发送覆盖旧创建不确定性”及“过期未清凭据”两项，已补正式失败用例并修复。最终定向协议过滤器实际运行 23 项（含 3 项名称匹配的既有测试），所有权过滤器运行 10 项（含明确计时器清理入口），全部通过。此处不表示完整 Rust GUI、Clippy 或原生端到端通过；等待运行态使用的类型仍有 dead_code 警告。切片独审与远端精确 SHA 结果另记 PR。
 
 每个实现切片在测试、独立审查和隐私检查后保存到同一远端恢复分支，记录远端 commit/tree 与本地已审树的一致性，并保留可恢复的源码包或 Git bundle。仅本地 commit、日志摘要、单个已上传 blob 或函数内临时状态均不算完整源码检查点。遇到环境重置先核持久对象；不能凭描述重写后沿用旧候选的测试或审查结论。
 

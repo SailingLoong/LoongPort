@@ -26,6 +26,12 @@ pub(crate) mod native_context;
 pub(crate) mod native_lifecycle;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 pub(crate) mod native_process_control;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod oauth;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod official;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod official_http;
 pub(crate) mod operation_log;
 pub(crate) mod recovery;
 #[cfg(feature = "gui")]
