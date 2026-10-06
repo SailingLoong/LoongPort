@@ -68,17 +68,32 @@ pub const UPDATE_BETA_MANIFEST_URL: &str = "https://loongport.dev/api/latest-bet
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
 pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    if let Some(home) = test_home_override() {
+        return home;
     }
 
     dirs::home_dir().unwrap_or_else(|| {
         log::warn!("无法获取用户主目录，回退到当前目录");
         PathBuf::from(".")
     })
+}
+
+/// `CC_SWITCH_TEST_HOME` 的覆盖值（测试/调试用的 home 覆盖）。
+///
+/// 返回 `Some` 即表示显式覆盖生效。用 `var_os` 而非 `var`：非 Unicode 的取值
+/// 只应让路径变 lossy，而不该让「覆盖是否存在」的判断失效、进而退回真实用户
+/// 目录（上游 cc-switch #7812 的增量；Windows v3.10.3 legacy 回退的禁用守卫
+/// 本仓 8370596b 已有，此处不重复）。
+fn test_home_override() -> Option<PathBuf> {
+    let raw = std::env::var_os("CC_SWITCH_TEST_HOME")?;
+    // to_string_lossy 的结果必须先绑住，否则 trim 借的是一个已释放的临时值。
+    let lossy = raw.to_string_lossy();
+    let trimmed = lossy.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
 }
 
 /// 获取 Claude Code 配置目录路径
