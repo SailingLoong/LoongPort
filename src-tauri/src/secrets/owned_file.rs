@@ -107,7 +107,7 @@ impl OwnedFile {
 
 pub(crate) const DEVICE_STATE_FILE: &str = "live-state.json";
 pub(crate) const DEVICE_BACKUP_DIR: &str = "backups/live-first-write";
-const DEVICE_FILES: [&str; 3] = [
+pub(super) const DEVICE_FILES: [&str; 3] = [
     DEVICE_STATE_FILE,
     "codex-login-stash.json",
     "codex-catalog-history.json",

@@ -5,7 +5,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::secrets::owned_file::{DeviceFile, DEVICE_BACKUP_DIR, DEVICE_STATE_FILE};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Path-only upstream device-store seam. It never resolves the configured/synced
 /// data root, creates directories, opens a vault, or performs a recovery action.
@@ -22,6 +22,10 @@ impl DeviceStore {
 
     pub(crate) fn at(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub(crate) fn state_path(&self) -> PathBuf {
@@ -77,6 +81,7 @@ mod device_path_tests {
         let root = fixture.path().join("not-created");
         let store = DeviceStore::at(&root);
         let state = DeviceFile::registered("live-state.json").unwrap();
+        assert_eq!(store.root(), root.as_path());
         assert_eq!(store.path_for(&state), root.join("live-state.json"));
         assert_eq!(store.state_path(), root.join("live-state.json"));
         assert_eq!(

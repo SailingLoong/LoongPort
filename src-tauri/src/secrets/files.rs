@@ -7,6 +7,7 @@ use crate::error::AppError;
 
 use super::owned_file::BACKUP_PATTERNS;
 pub(crate) use super::owned_file::{CredentialFile, OwnedFile, AUTH_FILES};
+use super::owned_file::{DeviceFile, DEVICE_BACKUP_DIR, DEVICE_FILES};
 
 impl CredentialFile {
     pub(crate) fn path(self, session: &SecretSession) -> PathBuf {
@@ -133,6 +134,108 @@ pub(crate) struct OwnedFileMigration {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub ciphertext: Vec<u8>,
+}
+
+pub(crate) struct DeviceFileMigration {
+    pub file: DeviceFile,
+    pub source: PathBuf,
+    pub ciphertext: Vec<u8>,
+}
+
+/// Read-only authenticated inventory of fixed-device files and first-write backups.
+/// These files are not part of ordinary credential exports or vault-recovery copies.
+pub(crate) fn stage_device_files_with_vault(
+    device_root: &std::path::Path,
+    vault: &VaultContext,
+) -> Result<Vec<DeviceFileMigration>, AppError> {
+    device_file_paths(device_root)?
+        .into_iter()
+        .map(|(file, source)| {
+            let ciphertext =
+                std::fs::read(&source).map_err(|error| AppError::io(&source, error))?;
+            file.decode(vault, &ciphertext)?;
+            Ok(DeviceFileMigration {
+                file,
+                source,
+                ciphertext,
+            })
+        })
+        .collect()
+}
+
+/// Guarded, deterministic membership only. This does not authenticate bytes;
+/// transition recovery must separately verify each captured source/target generation.
+pub(super) fn device_file_paths(
+    device_root: &std::path::Path,
+) -> Result<Vec<(DeviceFile, PathBuf)>, AppError> {
+    if !device_directory_exists(device_root)? {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for name in DEVICE_FILES {
+        let source = device_root.join(name);
+        match std::fs::symlink_metadata(&source) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::io(&source, error)),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()));
+            }
+            Ok(_) => paths.push((DeviceFile::registered(name)?, source)),
+        }
+    }
+    let backup = device_root.join(DEVICE_BACKUP_DIR);
+    if device_directory_exists(&backup)? {
+        for entry in std::fs::read_dir(&backup).map_err(|error| AppError::io(&backup, error))? {
+            let entry = entry.map_err(|error| AppError::io(&backup, error))?;
+            // This dedicated directory has no unrelated members to silently skip.
+            let file = device_backup_file(&entry.file_name())?;
+            if !entry
+                .file_type()
+                .map_err(|error| AppError::io(entry.path(), error))?
+                .is_file()
+            {
+                return Err(AppError::Config("secret.invalid_storage_path".into()));
+            }
+            paths.push((file, entry.path()));
+        }
+    }
+    paths.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(paths)
+}
+
+fn device_backup_file(name: &std::ffi::OsStr) -> Result<DeviceFile, AppError> {
+    let name = name
+        .to_str()
+        .ok_or_else(|| AppError::Config("secret.unregistered_file".into()))?;
+    // PathBuf::join would introduce an alternate separator on Windows. Device AAD
+    // always uses the exact portable registry spelling, not an OS path alias.
+    DeviceFile::registered(format!("{DEVICE_BACKUP_DIR}/{name}"))
+}
+
+/// Validate existing ancestors without creating directories, tightening permissions,
+/// or resolving a symlink into permission to read a different owned root.
+fn device_directory_exists(path: &std::path::Path) -> Result<bool, AppError> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(AppError::Config("secret.invalid_storage_path".into()));
+    }
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        match std::fs::symlink_metadata(ancestor) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::io(ancestor, error)),
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(true)
 }
 
 impl OwnedFile {
@@ -343,3 +446,7 @@ mod owned_tests {
         assert!(OwnedFile::registered("backups/unrelated.json").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "files/device_inventory_tests.rs"]
+mod device_inventory_tests;

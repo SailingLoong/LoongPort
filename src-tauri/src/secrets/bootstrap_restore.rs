@@ -536,7 +536,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
             Self { home, previous }

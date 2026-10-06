@@ -1520,7 +1520,8 @@ mod adoption_tests {
     }
     impl TestHome {
         fn new() -> Self {
-            let directory = tempfile::tempdir().unwrap();
+            let directory =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
             Self {
