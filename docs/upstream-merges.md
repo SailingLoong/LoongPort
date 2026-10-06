@@ -29,6 +29,8 @@
 | 2026-08-19 | #200 | 定点 cherry-pick（预收冲突） | 1（3d126f45） | 1（UsageTrendChart.tsx，取上游版整体替换本地 3c43cfca） | 无 | 上游 #6337 与本地 #144 同根修复的会合：主动吸收上游版使文件回到与上游一致，下次整并该文件不再冲突；上游 PR #6488 已被取代关闭 |
 | 2026-08-19 | #202 | 整并 upstream tag v3.20.0 | 30 | 49（11 纯上游文档保删、4 版本号保 6.2.0、4 语言保我方、30 接缝逐解） | 2（sha2 `LowerHex`、toml 1.0 `Value::from_str` 不收文档） | 接缝集中在 provider 服务/选路/表单三簇；**修根一处**：`has_explicit_codex_third_party_upstream` 的 TOML 解析自 toml 1.0 bump 起静默失效（上游测试照出），改 `toml::from_str::<Table>`；**语义合流一处**：preserve_codex_official_auth_on_switch 遇托管账号 live auth（marker 在）时不再保留 auth.json，交由上游托管事务替换+清理；聚合页形态保留（上游 AddProviderForm→Dialog 改名未采纳，AuthSettingsPanel 移植进页面） |
 
+| 2026-10-06 | V1 基础开发阶段 | 固定 v4.0.2 外壳、语义控件及配置基础按原路径复用 | bf2fe0d0（文件级复用，未整并） | 未执行 merge | toml_edit 0.25 的 set_position 参数适配；依赖与锁文件不变 | 保留七入口、蓝色、工作台与 ZCode；新增暂存 I/O、字段归属／格式补丁、设备路径与认证加密描述符。TOML 布局和 dotenv 多行值经回归修正；新 mode／schema／启动恢复尚未接入。本地受影响测试通过，完整原生测试及新样式浏览器结果单独记录；不代表完整 4.0.2 迁移完成。 |
+
 ## 关联
 
 - 合并纪律与验收三问：`CLAUDE.md` §一、§三

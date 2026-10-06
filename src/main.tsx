@@ -23,8 +23,10 @@ import {
   installGlobalErrorHandlers,
   reportFrontendError,
 } from "./lib/frontendLogger";
+import { initializeInputModality } from "@/lib/inputModality";
 import { initializeWindowActivity } from "@/lib/windowActivity";
 
+initializeInputModality();
 installConsoleLogBridge();
 installGlobalErrorHandlers();
 

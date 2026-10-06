@@ -3857,6 +3857,9 @@
     "hide": "從主頁面隱藏"
   },
   "client": {
+    "collapseSidebar": "收起側欄",
+    "expandSidebar": "展開側欄",
+    "skipToContent": "跳到內容",
     "navigation": "主導覽",
     "applications": "應用",
     "services": "服務與帳號",

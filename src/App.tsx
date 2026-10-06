@@ -68,6 +68,7 @@ import {
 import { PreservedView } from "@/components/ui/PreservedView";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
+import { PAGE_HEADER_HEIGHT } from "@/components/shell/layout";
 import { FeatureHub } from "@/components/shell/FeatureHub";
 import {
   CLIENT_VIEWS,
@@ -142,7 +143,6 @@ interface SyncStatusUpdatedPayload {
 }
 
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
-const HEADER_HEIGHT = 64; // px
 
 // 两个 localStorage key 的定义在 `@/config/constants` —— 别在这里重新写字面量。
 // 写入端在 `AppSwitcher.tsx`，那次分叉就是因为它们各写一份（见常量那边的文档）。
@@ -211,7 +211,7 @@ function App() {
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
-  const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
+  const contentTopOffset = dragBarHeight + PAGE_HEADER_HEIGHT;
   const visibleApps = useMemo<VisibleApps>(
     () => ({
       ...DEFAULT_VISIBLE_APPS,
@@ -1252,6 +1252,7 @@ function App() {
 
   return (
     <div
+      data-client-shell
       className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
       style={{
         overflowX: "hidden",
@@ -1368,7 +1369,7 @@ function App() {
           {
             ...DRAG_REGION_STYLE,
             top: dragBarHeight,
-            height: HEADER_HEIGHT,
+            height: PAGE_HEADER_HEIGHT,
           } as any
         }
       >
@@ -1640,7 +1641,11 @@ function App() {
         </div>
       </header>
 
-      <main className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in focus:outline-none"
+      >
         {isOpenClawView && openclawHealthWarnings.length > 0 && (
           <OpenClawHealthBanner warnings={openclawHealthWarnings} />
         )}
