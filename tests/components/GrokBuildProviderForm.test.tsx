@@ -45,6 +45,29 @@ describe("GrokBuildProviderForm", () => {
     expect(nameInput?.value).toBe("PatewayAI");
   });
 
+  it("points the get-API-key link at the preset's apiKeyUrl", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <GrokBuildProviderForm
+        submitLabel="Save"
+        onSubmit={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    // 适配：本仓无 88API 预设，改用 PackyCode（apiKeyUrl 为中性的 register 页）
+    await user.click(screen.getByRole("button", { name: /PackyCode/ }));
+
+    const websiteInput = container.querySelector<HTMLInputElement>(
+      'input[name="websiteUrl"]',
+    );
+    expect(websiteInput?.value).toBe("https://www.packyapi.ai");
+    expect(screen.getByRole("link", { name: /API Key/ })).toHaveAttribute(
+      "href",
+      "https://www.packyapi.ai/register",
+    );
+  });
+
   it("submits a complete config.toml payload with Grok defaults", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
