@@ -64,20 +64,7 @@ impl SecretSession {
         super::rewrap::recover_with_password(root, store, password)?;
         let path = root.join("vault.json");
         let mut vault = if path.exists() {
-            let saved = read_metadata(root)?;
-            if let Some(password) = password {
-                VaultContext::from_password(saved.metadata, password)
-                    .map_err(super::inventory::secret_error)?
-            } else if saved.automatic_unlock {
-                let key = store
-                    .load(&saved.metadata.vault_id, &saved.metadata.key_id)
-                    .map_err(|_| AppError::Config("secret.store_unavailable".into()))?
-                    .ok_or_else(|| AppError::Config("secret.key_missing".into()))?;
-                VaultContext::from_key(saved.metadata, key)
-                    .map_err(super::inventory::secret_error)?
-            } else {
-                return Err(AppError::Config("secret.locked".into()));
-            }
+            authenticate_existing(root, store, password)?
         } else {
             if !create {
                 return Err(AppError::Config("secret.migration_required".into()));
@@ -234,6 +221,28 @@ impl SecretSession {
     }
 }
 
+/// Authenticate the current vault without recovering, creating or publishing it.
+/// The startup owner must inspect storage and admit any subsequent mutation.
+pub(crate) fn authenticate_existing(
+    root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+) -> Result<VaultContext, AppError> {
+    let saved = read_metadata(root)?;
+    if let Some(password) = password {
+        VaultContext::from_password(saved.metadata, password)
+            .map_err(super::inventory::secret_error)
+    } else if saved.automatic_unlock {
+        let key = store
+            .load(&saved.metadata.vault_id, &saved.metadata.key_id)
+            .map_err(|_| AppError::Config("secret.store_unavailable".into()))?
+            .ok_or_else(|| AppError::Config("secret.key_missing".into()))?;
+        VaultContext::from_key(saved.metadata, key).map_err(super::inventory::secret_error)
+    } else {
+        Err(AppError::Config("secret.locked".into()))
+    }
+}
+
 pub(crate) fn completed_metadata(
     vault: &VaultContext,
     automatic_unlock: bool,
@@ -255,11 +264,15 @@ fn seal_migration_state(vault: &VaultContext, state: &MigrationState) -> Result<
 
 pub(crate) fn read_metadata(root: &Path) -> Result<LocalVault, AppError> {
     let path = root.join("vault.json");
-    let metadata = std::fs::symlink_metadata(&path).map_err(|e| AppError::io(&path, e))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
-        return Err(AppError::Config("secret.invalid_metadata".into()));
-    }
-    let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+    let bytes = crate::config_file_io::read_regular_file(&path, 64 * 1024)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                AppError::Config("secret.invalid_metadata".into())
+            } else {
+                AppError::io(&path, error)
+            }
+        })?
+        .ok_or_else(|| AppError::Config("secret.metadata_missing".into()))?;
     serde_json::from_slice(&bytes).map_err(|_| AppError::Config("secret.invalid_metadata".into()))
 }
 
@@ -320,6 +333,64 @@ mod tests {
             self.0.lock().unwrap().remove(&format!("{vault}/{key}"));
             Ok(())
         }
+    }
+
+    #[test]
+    fn inspection_unlock_authenticates_without_recovering_pending_operations() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let store = MemoryKeys::default();
+        let original = SecretSession::open(dir.path(), &store, None).unwrap();
+        let ciphertext = original
+            .read()
+            .unwrap()
+            .seal(&["fixture"], b"fixture-value")
+            .unwrap();
+        let path = dir.path().join(super::super::transition::INTENT);
+        std::fs::write(&path, b"pending-operation-fixture").unwrap();
+        let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();
+        let unlocked = authenticate_existing(dir.path(), &store, None).unwrap();
+        assert_eq!(
+            &**unlocked.open(&["fixture"], &ciphertext).unwrap(),
+            b"fixture-value"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"pending-operation-fixture");
+        assert_eq!(
+            std::fs::read(dir.path().join("vault.json")).unwrap(),
+            metadata
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn inspection_unlock_preserves_password_policy_and_never_creates_storage() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let root = dir.path().join("absent");
+        let store = MemoryKeys::default();
+        assert!(authenticate_existing(&root, &store, None).is_err());
+        assert!(!root.exists());
+        let vault = VaultContext::generate()
+            .unwrap()
+            .with_password("fixture-password")
+            .unwrap();
+        let cipher = vault.seal(&["fixture"], b"fixture-value").unwrap();
+        write_metadata(dir.path(), &completed_metadata(&vault, false).unwrap()).unwrap();
+        let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+        assert!(
+            matches!(authenticate_existing(dir.path(), &store, None), Err(AppError::Config(code)) if code == "secret.locked")
+        );
+        assert!(authenticate_existing(dir.path(), &store, Some("wrong-fixture-password")).is_err());
+        let authenticated =
+            authenticate_existing(dir.path(), &store, Some("fixture-password")).unwrap();
+        assert_eq!(
+            &**authenticated.open(&["fixture"], &cipher).unwrap(),
+            b"fixture-value"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("vault.json")).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(store.0.lock().unwrap().is_empty());
     }
 
     #[test]

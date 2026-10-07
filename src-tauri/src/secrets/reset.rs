@@ -507,12 +507,31 @@ fn finish(
 /// Resuming a reset always requires the new password; a planted reset intent
 /// cannot trigger deletion during automatic startup.
 pub(crate) fn recover(root: &Path, password: Option<&str>) -> Result<(), AppError> {
-    let path = intent_path(root)?;
-    let bytes = read_optional(&path)?;
-    if bytes.is_empty() {
-        return Ok(());
+    recover_record(root, password, None)
+}
+pub(crate) fn recover_inspected(
+    root: &Path,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    recover_record(root, password, Some(expected))
+}
+fn recover_record(
+    root: &Path,
+    password: Option<&str>,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
+    };
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
-    if bytes.len() > 128 * 1024 {
+    if bytes.is_empty() {
         return Err(invalid());
     }
     let password = password.ok_or_else(|| AppError::Config("secret.locked".into()))?;
@@ -524,6 +543,18 @@ pub(crate) fn recover(root: &Path, password: Option<&str>) -> Result<(), AppErro
         .map_err(inventory::secret_error)?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     finish(root, &intent, &manifest, &next, &mut |_| Ok(()))
+}
+
+/// Passive journal bytes; authentication and recovery remain with this owner.
+pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = intent_path(root)?;
+    crate::config_file_io::read_regular_file(&path, 128 * 1024).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            invalid()
+        } else {
+            AppError::io(&path, error)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -838,6 +869,14 @@ mod tests {
                 }
             )
             .is_err());
+            assert!(matches!(
+                super::super::upgrade::inspect(
+                    &f.root,
+                    &crate::live::engine::DeviceStore::at(f.root.join("fixture-device"))
+                )
+                .unwrap(),
+                super::super::upgrade::UpgradeInspection::RecoveryRequired(_)
+            ));
             assert!(recover(&f.root, None).is_err());
             assert!(recover(&f.root, Some("incorrect password")).is_err());
             recover(&f.root, Some("new protection password")).unwrap();

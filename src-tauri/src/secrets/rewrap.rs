@@ -15,6 +15,16 @@ use std::path::Path;
 
 const INTENT: &str = ".vault-rewrap";
 
+pub(crate) fn pending(root: &Path) -> Result<bool, AppError> {
+    let path = root.join(INTENT);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(AppError::Config("secret.invalid_metadata".into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasswordIntent {
@@ -189,14 +199,23 @@ pub(crate) fn recover(
     current: &mut VaultContext,
     store: &dyn KeyStore,
 ) -> Result<(), AppError> {
-    let path = root.join(INTENT);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(AppError::io(&path, e)),
+    recover_record(root, current, store, None)
+}
+fn recover_record(
+    root: &Path,
+    current: &mut VaultContext,
+    store: &dyn KeyStore,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
     };
-    if bytes.len() > 128 * 1024 {
-        return Err(AppError::Config("secret.invalid_metadata".into()));
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
     let intent: PasswordIntent = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
@@ -231,17 +250,34 @@ pub(crate) fn recover_with_password(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
+    recover_password_record(root, store, password, None)
+}
+pub(crate) fn recover_password_inspected(
+    root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    recover_password_record(root, store, password, Some(expected))
+}
+fn recover_password_record(
+    root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
     let Some(password) = password else {
         return Ok(());
     };
-    let path = root.join(INTENT);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(AppError::io(&path, e)),
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
     };
-    if bytes.len() > 128 * 1024 {
-        return Err(AppError::Config("secret.invalid_metadata".into()));
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
     let intent: PasswordIntent = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
@@ -252,7 +288,19 @@ pub(crate) fn recover_with_password(
     // an unrelated attacker-created wrapper cannot authorize replacement.
     let mut current = VaultContext::from_key(committed.metadata, next.export_key())
         .map_err(super::inventory::secret_error)?;
-    recover(root, &mut current, store)
+    recover_record(root, &mut current, store, Some(&bytes))
+}
+
+/// Passive journal bytes; authentication and recovery remain with this owner.
+pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = root.join(INTENT);
+    crate::config_file_io::read_regular_file(&path, 128 * 1024).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            AppError::Config("secret.invalid_metadata".into())
+        } else {
+            AppError::io(&path, error)
+        }
+    })
 }
 
 #[cfg(test)]

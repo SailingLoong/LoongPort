@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { LockKeyhole } from "lucide-react";
@@ -7,6 +7,13 @@ import { Input } from "@/components/ui/input";
 import { SecretRestore } from "@/components/SecretRestore";
 import { SecretReset } from "@/components/SecretReset";
 import { Label } from "@/components/ui/label";
+
+interface StartupRecovery {
+  token: string;
+  status: "pending" | "completed" | "verification_required";
+  canRecover: boolean;
+  restartRequired: boolean;
+}
 
 export function SecretUnlock({
   onUnlocked = () => window.location.reload(),
@@ -19,15 +26,57 @@ export function SecretUnlock({
 }) {
   const { t } = useTranslation();
   const settingUp = initialError === "secret.password_setup_required";
+  const recoveryRequired = initialError === "secret.recovery_required";
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(initialError ?? null);
   const [restartRequired, setRestartRequired] = useState(requiresRestart);
+  const [recovery, setRecovery] = useState<StartupRecovery | null>(null);
+
+  useEffect(() => {
+    if (!recoveryRequired) return;
+    let active = true;
+    void invoke<StartupRecovery>("get_startup_recovery").then(
+      (view) => {
+        if (!active) return;
+        setRecovery(view);
+        setRestartRequired(view.restartRequired);
+      },
+      () => active && setFailure("secret.operation_failed"),
+    );
+    return () => {
+      active = false;
+    };
+  }, [recoveryRequired]);
+
+  async function recheckRecovery() {
+    setRecovery(null);
+    try {
+      const view = await invoke<StartupRecovery>("get_startup_recovery");
+      setRecovery(view);
+      setRestartRequired(view.restartRequired);
+    } catch {
+      setFailure("secret.operation_failed");
+    }
+  }
 
   async function unlock(usePassword: boolean) {
     setBusy(true);
     setFailure(null);
     try {
+      if (recoveryRequired) {
+        if (!recovery?.canRecover) return;
+        const view = await invoke<StartupRecovery>(
+          "recover_startup_operation",
+          {
+            token: recovery.token,
+            password,
+          },
+        );
+        setRecovery(view);
+        setRestartRequired(view.restartRequired);
+        return;
+      }
       await invoke("unlock_secret_vault", {
         password: usePassword ? password : null,
       });
@@ -52,7 +101,9 @@ export function SecretUnlock({
       ) {
         setRestartRequired(true);
       }
+      if (recoveryRequired) await recheckRecovery();
     } finally {
+      if (recoveryRequired) setPassword("");
       setBusy(false);
     }
   }
@@ -69,15 +120,27 @@ export function SecretUnlock({
         <LockKeyhole className="h-7 w-7 text-muted-foreground" aria-hidden />
         <div className="space-y-2">
           <h1 className="text-xl font-semibold">
-            {t(settingUp ? "secrets.setupTitle" : "secrets.unlockTitle")}
+            {t(
+              recoveryRequired
+                ? "secrets.recoveryTitle"
+                : settingUp
+                  ? "secrets.setupTitle"
+                  : "secrets.unlockTitle",
+            )}
           </h1>
           <p className="text-sm text-muted-foreground">
             {t(
-              restartRequired
-                ? "secrets.restartDescription"
-                : settingUp
-                  ? "secrets.setupDescription"
-                  : "secrets.unlockDescription",
+              recovery?.status === "completed"
+                ? "secrets.recoveryCompleted"
+                : recovery?.status === "verification_required"
+                  ? "secrets.recoveryVerificationRequired"
+                  : restartRequired
+                    ? "secrets.restartDescription"
+                    : recoveryRequired
+                      ? "secrets.recoveryDescription"
+                      : settingUp
+                        ? "secrets.setupDescription"
+                        : "secrets.unlockDescription",
             )}
           </p>
         </div>
@@ -112,27 +175,49 @@ export function SecretUnlock({
             <Button
               className="w-full"
               type="submit"
-              disabled={busy || !password}
+              disabled={
+                busy || !password || (recoveryRequired && !recovery?.canRecover)
+              }
             >
-              {t(busy ? "secrets.unlocking" : "secrets.unlock")}
+              {t(
+                busy
+                  ? "secrets.unlocking"
+                  : recoveryRequired
+                    ? "secrets.resumeRecovery"
+                    : "secrets.unlock",
+              )}
             </Button>
-            <Button
-              className="w-full"
-              variant="outline"
-              type="button"
-              disabled={busy}
-              onClick={() => void unlock(false)}
-            >
-              {t("secrets.retrySystemUnlock")}
-            </Button>
-            <SecretRestore
-              onRestored={onUnlocked}
-              onNeedsRestart={() => setRestartRequired(true)}
-            />
-            <SecretReset
-              onReset={() => void invoke("restart_app")}
-              onNeedsRestart={() => setRestartRequired(true)}
-            />
+            {recoveryRequired ? (
+              <Button
+                className="w-full"
+                variant="outline"
+                type="button"
+                disabled={busy}
+                onClick={() => void recheckRecovery()}
+              >
+                {t("secrets.recheckOperation")}
+              </Button>
+            ) : (
+              <>
+                <Button
+                  className="w-full"
+                  variant="outline"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void unlock(false)}
+                >
+                  {t("secrets.retrySystemUnlock")}
+                </Button>
+                <SecretRestore
+                  onRestored={onUnlocked}
+                  onNeedsRestart={() => setRestartRequired(true)}
+                />
+                <SecretReset
+                  onReset={() => void invoke("restart_app")}
+                  onNeedsRestart={() => setRestartRequired(true)}
+                />
+              </>
+            )}
           </>
         )}
       </form>

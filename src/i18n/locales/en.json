@@ -4010,6 +4010,12 @@
     "noSwitchableTier": "No available tier supports the selected model"
   },
   "secrets": {
+    "recoveryTitle": "Resume recovery",
+    "recoveryDescription": "An interrupted data protection operation needs your recovery password.",
+    "resumeRecovery": "Resume recovery",
+    "recheckOperation": "Check operation",
+    "recoveryCompleted": "Recovery is verified. Restart the app to continue.",
+    "recoveryVerificationRequired": "The operation has changed. Restart the app to check it again.",
     "unlockTitle": "Unlock credentials",
     "unlockDescription": "Enter your protection password, or retry using the system credential store.",
     "password": "Protection password",

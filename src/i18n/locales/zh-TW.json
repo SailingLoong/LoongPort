@@ -4011,6 +4011,12 @@
     "noSwitchableTier": "沒有可用於所選模型的檔位"
   },
   "secrets": {
+    "recoveryTitle": "繼續復原",
+    "recoveryDescription": "資料保護操作尚未完成。請輸入復原密碼以繼續。",
+    "resumeRecovery": "繼續復原",
+    "recheckOperation": "檢查原操作",
+    "recoveryCompleted": "復原已驗證。請重新啟動應用程式以繼續。",
+    "recoveryVerificationRequired": "操作記錄已變更。請重新啟動應用程式重新檢查。",
     "unlockTitle": "解鎖憑證",
     "unlockDescription": "輸入保護密碼，或重試透過系統憑證庫解鎖。",
     "password": "保護密碼",

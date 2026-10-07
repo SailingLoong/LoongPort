@@ -4010,6 +4010,12 @@
     "noSwitchableTier": "没有可用于所选模型的档位"
   },
   "secrets": {
+    "recoveryTitle": "继续恢复",
+    "recoveryDescription": "数据保护操作尚未完成。请输入恢复密码以继续。",
+    "resumeRecovery": "继续恢复",
+    "recheckOperation": "检查原操作",
+    "recoveryCompleted": "恢复已验证。请重启应用以继续。",
+    "recoveryVerificationRequired": "操作记录已变化。请重启应用重新检查。",
     "unlockTitle": "解锁凭据",
     "unlockDescription": "输入保护口令，或重试通过系统凭据库解锁。",
     "password": "保护口令",

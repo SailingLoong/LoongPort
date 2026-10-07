@@ -67,6 +67,8 @@ use std::sync::Mutex;
 ///
 /// 合并上游时这个值跟着上游走（v17 = 上游的 Pi 会话用量统计迁移）。
 pub(crate) const SCHEMA_VERSION: i32 = 17;
+/// Fixed destination for the approved, explicitly staged upstream upgrade.
+pub(crate) const UPSTREAM4_SCHEMA_VERSION: i32 = 20;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {

@@ -4010,6 +4010,12 @@
     "noSwitchableTier": "選択したモデルを利用できるティアがありません"
   },
   "secrets": {
+    "recoveryTitle": "復元を続ける",
+    "recoveryDescription": "データ保護の操作が中断されています。復元用パスワードを入力してください。",
+    "resumeRecovery": "復元を続ける",
+    "recheckOperation": "操作を確認",
+    "recoveryCompleted": "復元を検証しました。アプリを再起動してください。",
+    "recoveryVerificationRequired": "操作の記録が変更されています。アプリを再起動して再確認してください。",
     "unlockTitle": "認証情報のロック解除",
     "unlockDescription": "保護パスワードを入力するか、システムの資格情報ストアで再試行してください。",
     "password": "保護パスワード",

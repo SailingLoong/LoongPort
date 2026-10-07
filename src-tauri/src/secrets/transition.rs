@@ -982,18 +982,37 @@ fn recover_with_device_root(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
-    let path = root.join(INTENT);
-    if !regular_file(&path)? {
-        return Ok(());
+    recover_record(root, device_root, store, password, None)
+}
+pub(crate) fn recover_inspected(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    recover_record(root, device_root, store, password, Some(expected))
+}
+fn recover_record(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
+    };
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
     if regular_file(&root.join(".vault-rewrap"))? {
         return Err(AppError::Config("secret.conflicting_transition".into()));
     }
-    let metadata = std::fs::metadata(&path).map_err(|e| AppError::io(&path, e))?;
-    if metadata.len() > 32 * 1024 * 1024 {
-        return Err(invalid());
-    }
-    let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
     let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     if ![LEGACY_FORMAT, FORMAT].contains(&intent.version) {
         return Err(invalid());
@@ -1169,6 +1188,18 @@ fn commit_skills(root: &Path, id: &str, skills: &SkillsTree) -> Result<(), AppEr
     sync_directory(destination.parent().ok_or_else(invalid)?)?;
     sync_directory(&staging)
 }
+/// Passive journal bytes; authentication and recovery remain with this owner.
+pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = root.join(INTENT);
+    crate::config_file_io::read_regular_file(&path, 32 * 1024 * 1024).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            invalid()
+        } else {
+            AppError::io(&path, error)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,12 +1421,29 @@ mod tests {
             }
             assert!(fixture.db.secrets.read().is_err());
             assert!(fixture.root.join(INTENT).exists());
-            assert!(SecretSession::open_existing(
+            let inspected = super::super::upgrade::inspect(
                 &fixture.root,
-                &fixture.store,
-                Some("wrong password")
+                &crate::live::engine::DeviceStore::for_device(),
             )
-            .is_err());
+            .unwrap();
+            let super::super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = inspected
+            else {
+                panic!("interrupted generation must defer to its owner");
+            };
+            let token = evidence.token();
+            assert!(evidence
+                .recover(&fixture.root, &token, &fixture.store, "wrong password")
+                .is_err());
+            evidence.verify_unchanged(&fixture.root, &token).unwrap();
+            let settled = evidence
+                .recover(
+                    &fixture.root,
+                    &token,
+                    &fixture.store,
+                    "next recovery password",
+                )
+                .unwrap();
+            assert!(!settled.is_recovery_required());
             let recovered = SecretSession::open_existing(
                 &fixture.root,
                 &fixture.store,

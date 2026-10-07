@@ -3,12 +3,68 @@
 
 use crate::error::AppError;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 #[path = "windows_private_file.rs"]
 mod windows_private_file;
+
+/// Read a caller-owned regular file without creating it or changing permissions.
+pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file is a symbolic link",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            // FILE_ATTRIBUTE_REPARSE_POINT
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file is a reparse point",
+            ));
+        }
+    }
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid regular file or read limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds read limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
 
 /// Create or tighten one application-owned directory without changing its parent.
 /// Callers create nested application directories one level at a time.
@@ -424,6 +480,37 @@ pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_file_read_is_bounded_and_never_creates_missing_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing/record");
+        assert_eq!(read_regular_file(&missing, 16).unwrap(), None);
+        assert!(!missing.parent().unwrap().exists());
+        let path = dir.path().join("record");
+        fs::write(&path, b"record").unwrap();
+        assert_eq!(read_regular_file(&path, 6).unwrap().unwrap(), b"record");
+        assert_eq!(
+            read_regular_file(&path, 5).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(read_regular_file(dir.path(), 16).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passive_file_read_refuses_leaf_alias_without_reading_or_tightening_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let alias = dir.path().join("alias");
+        fs::write(&target, b"outside record").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &alias).unwrap();
+        assert!(read_regular_file(&alias, 64).is_err());
+        assert_eq!(mode(&target), 0o644);
+        assert_eq!(fs::read(&target).unwrap(), b"outside record");
+    }
 
     fn names_in(directory: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = fs::read_dir(directory)

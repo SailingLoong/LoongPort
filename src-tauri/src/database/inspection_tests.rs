@@ -67,8 +67,8 @@ fn inspection_version_wrappers_create_no_source_sidecars() {
         None
     );
     assert_eq!(
-        loongport_schema::stored_version_exceeds_supported(&path).unwrap(),
-        None
+        loongport_schema::read_stored_version(&capture(&path).unwrap().unwrap().image).unwrap(),
+        24
     );
     assert!(
         tree(dir.path()) == before,
