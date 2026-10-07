@@ -635,6 +635,7 @@ impl<'a> VaultAccountStore<'a> {
         let catalog = self.import_catalog(native, &catalog_revision(bytes.as_deref()))?;
         Ok(catalog.login_receipt(request_id).cloned())
     }
+    #[cfg(all(test, unix))]
     pub(crate) fn save_login_profile(
         &self,
         native: &NativeCipher,
@@ -749,7 +750,7 @@ impl<'a> VaultAccountStore<'a> {
         self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
         Ok(outcome)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn import_profiles(
         &self,
         native: &NativeCipher,
@@ -1823,6 +1824,7 @@ fn publish_private(
 #[cfg(any(feature = "gui", test))]
 impl VaultAccountStore<'_> {
     /// The caller still holds the shared physical owner and vault session guard.
+    #[cfg(unix)]
     pub(super) fn bundle_export_root(&self) -> Result<&Path, TransactionError> {
         self.validate_root()?;
         Ok(self.root)
@@ -1844,6 +1846,7 @@ impl VaultAccountStore<'_> {
         }
     }
 
+    #[cfg(unix)]
     pub(super) fn record_bundle_export(
         &self,
         receipt: super::bundle_export::Receipt,

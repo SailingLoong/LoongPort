@@ -921,9 +921,8 @@ async fn review_rejected_native_connection_stays_rejected_after_timeout() {
             .set_evidence(snapshot.identity(), &native, report)
             .unwrap();
         for kind in [ConnectionKind::Start, ConnectionKind::Coding] {
-            assert_eq!(
-                catalog.can_activate(&snapshot, &native, Some((kind, "3.14.4"))),
-                false,
+            assert!(
+                !catalog.can_activate(&snapshot, &native, Some((kind, "3.14.4"))),
                 "A timeout must not restore admission after an official rejection"
             );
         }

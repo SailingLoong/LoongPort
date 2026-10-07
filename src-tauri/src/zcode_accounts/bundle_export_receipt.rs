@@ -6,6 +6,7 @@ use crate::secrets::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use zeroize::Zeroizing;
 
 const MAX_RECEIPTS: usize = 1024;
@@ -38,6 +39,7 @@ pub(crate) struct Receipt {
     pub failure: Option<ExportFailure>,
 }
 impl Receipt {
+    #[cfg(unix)]
     pub(super) fn prepared(request_id: &str) -> Self {
         Self {
             request_id: request_id.into(),
@@ -91,6 +93,7 @@ impl ReceiptLedger {
     pub(crate) fn get(&self, id: &str) -> Option<&Receipt> {
         self.records.iter().find(|record| record.request_id == id)
     }
+    #[cfg(unix)]
     pub(crate) fn put(&mut self, receipt: Receipt) -> Result<(), ExportFailure> {
         receipt.validate()?;
         if let Some(old) = self
@@ -122,6 +125,7 @@ impl ReceiptLedger {
         }
         Ok(())
     }
+    #[cfg(unix)]
     pub(crate) fn seal(&self, vault: &VaultContext) -> Result<Vec<u8>, ExportFailure> {
         let bytes =
             Zeroizing::new(serde_json::to_vec(self).map_err(|_| ExportFailure::SavedDataInvalid)?);

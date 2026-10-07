@@ -3,16 +3,23 @@
 use super::bundle_limits::{
     validate_inner, validate_outer, BundleError, EnvelopeParameters, MAX_BUNDLE_BYTES,
 };
-use super::core::{AccountSnapshot, StrictRecord, MAX_DOCUMENT_BYTES};
+#[cfg(any(unix, test))]
+use super::core::AccountSnapshot;
+use super::core::{StrictRecord, MAX_DOCUMENT_BYTES};
+#[cfg(any(unix, test))]
 use super::native::NativeCipher;
+#[cfg(any(unix, test))]
+use aes_gcm::aead::AeadInOut;
 use aes_gcm::{
-    aead::{Aead, AeadInOut, KeyInit},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use std::{borrow::Cow, collections::BTreeMap, io, num::NonZeroU32};
+use std::{borrow::Cow, num::NonZeroU32};
+#[cfg(any(unix, test))]
+use std::{collections::BTreeMap, io};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -22,7 +29,9 @@ pub(super) enum BundleFailure {
     Authentication,
     Inner,
     Password,
+    #[cfg(any(unix, test))]
     Account,
+    #[cfg(any(unix, test))]
     Encryption,
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -62,11 +71,13 @@ pub(super) struct ParsedAccount<'a> {
     pub credentials: &'a RawValue,
 }
 
+#[cfg(any(unix, test))]
 pub(super) struct BundleExportAccount<'a> {
     pub snapshot: &'a AccountSnapshot,
     pub created_at: &'a str,
 }
 
+#[cfg(any(unix, test))]
 #[derive(Serialize)]
 struct ExportInner<'a> {
     format: &'static str,
@@ -76,6 +87,7 @@ struct ExportInner<'a> {
     accounts: Vec<ExportAccount<'a>>,
 }
 
+#[cfg(any(unix, test))]
 #[derive(Serialize)]
 struct ExportAccount<'a> {
     name: &'a str,
@@ -89,6 +101,7 @@ struct ExportAccount<'a> {
 /// cipher authenticates their scope and supplies the official profile name;
 /// callers cannot substitute LoongPort labels or capability metadata. Inner
 /// enc:v1 values are retained byte-for-byte, so this is not portable migration.
+#[cfg(any(unix, test))]
 pub(super) fn encode_bundle(
     accounts: &[BundleExportAccount<'_>],
     native: &NativeCipher,
@@ -176,6 +189,7 @@ pub(super) fn encode_bundle(
 }
 
 /// Counts JSON bytes without storing any plaintext or allocating a large image.
+#[cfg(any(unix, test))]
 fn json_size(value: &impl Serialize, limit: usize) -> Result<usize, BundleFailure> {
     struct Counter {
         bytes: usize,

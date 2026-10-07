@@ -62,6 +62,7 @@ impl ExportFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ExportStatus {
+    #[cfg(unix)]
     Saved,
     Failed,
     Unknown,
@@ -109,6 +110,7 @@ fn unknown(request_id: &str, failure: ExportFailure) -> ExportResult {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportPoint {
     Prepared,
@@ -117,6 +119,7 @@ enum ExportPoint {
     ReceiptSaved,
 }
 
+#[cfg(unix)]
 pub(crate) fn export_bundle(
     store: &VaultAccountStore<'_>,
     native: &NativeCipher,
@@ -135,14 +138,22 @@ pub(crate) fn export_bundle(
 }
 
 #[cfg(not(unix))]
-fn export_with_hook(
+pub(crate) fn export_bundle(
     _store: &VaultAccountStore<'_>,
     _native: &NativeCipher,
     _native_root: &Path,
-    _request: ExportRequest,
+    ExportRequest {
+        request_id: _request_id,
+        catalog_revision: _catalog_revision,
+        profile_ids: _profile_ids,
+        destination: _destination,
+        password: _password,
+        password_confirmation: _password_confirmation,
+    }: ExportRequest,
     _exported_at: &str,
-    _hook: &mut dyn FnMut(ExportPoint) -> Result<(), ExportFailure>,
 ) -> Result<ExportResult, ExportFailure> {
+    // Consume the owned payload without reading the vault or destination.
+    // Passwords keep their normal Zeroizing drop behavior on this return.
     Err(ExportFailure::UnsupportedPlatform)
 }
 
@@ -308,6 +319,7 @@ fn prepare(
     Ok((ciphertext, target, destination))
 }
 
+#[cfg(unix)]
 fn transaction_failure(error: super::transaction::TransactionError) -> ExportFailure {
     use super::transaction::TransactionError;
     match error {
@@ -318,6 +330,7 @@ fn transaction_failure(error: super::transaction::TransactionError) -> ExportFai
     }
 }
 
+#[cfg(unix)]
 fn failed(
     store: &VaultAccountStore<'_>,
     mut receipt: Receipt,
