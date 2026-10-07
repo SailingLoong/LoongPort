@@ -172,6 +172,10 @@ export function GrokBuildProviderForm({
   });
   const { isSubmitting } = form.formState;
   const websiteUrl = form.watch("websiteUrl") ?? "";
+  // 「获取 API Key」优先用预设的 apiKeyUrl，与 useApiKeyLink 一致
+  const apiKeyLinkUrl =
+    grokPresetEntries.find((entry) => entry.id === selectedPresetId)?.preset
+      .apiKeyUrl || websiteUrl;
 
   useEffect(() => {
     onSubmittingChange?.(isSubmitting);
@@ -436,8 +440,8 @@ export function GrokBuildProviderForm({
                 syncStructuredConfig({ apiKey: value });
               }}
               category={category}
-              shouldShowApiKeyLink={Boolean(websiteUrl)}
-              websiteUrl={websiteUrl}
+              shouldShowApiKeyLink={Boolean(apiKeyLinkUrl)}
+              websiteUrl={apiKeyLinkUrl}
               shouldShowSpeedTest
               codexBaseUrl={baseUrl}
               onBaseUrlChange={(value) => {
