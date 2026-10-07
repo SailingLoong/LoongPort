@@ -3856,6 +3856,9 @@
     "hide": "从主页面隐藏"
   },
   "client": {
+    "collapseSidebar": "收起侧栏",
+    "expandSidebar": "展开侧栏",
+    "skipToContent": "跳到内容",
     "navigation": "主导航",
     "applications": "应用",
     "services": "服务与账号",

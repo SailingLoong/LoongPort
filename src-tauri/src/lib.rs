@@ -31,8 +31,15 @@ mod init_status;
 mod lightweight;
 #[cfg(all(target_os = "linux", feature = "gui"))]
 mod linux_fix;
+// Dormant upstream primitives: remove the scoped allowance when verified
+// live/mode integration supplies runtime consumers. Do not add writer calls here.
+#[allow(dead_code)]
+mod live;
 mod maintenance;
 mod mcp;
+// Pure mode models only; no startup/persistence/controller is registered.
+#[allow(dead_code)]
+mod mode;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;

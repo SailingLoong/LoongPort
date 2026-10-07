@@ -241,6 +241,14 @@ describe("App integration with MSW", () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
 
+  it("connects the compact page header and sidebar skip link to the main content", async () => {
+    renderApp();
+    await screen.findByRole("navigation", { name: "client.navigation" });
+    expect(screen.getByRole("banner")).toHaveStyle({ height: "52px" });
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
+  });
+
   it("opens ZCode without using provider-store or environment commands", async () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "zcode");
     const unsupported = vi.fn();

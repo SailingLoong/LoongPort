@@ -3856,6 +3856,9 @@
     "hide": "Hide from homepage"
   },
   "client": {
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "skipToContent": "Skip to content",
     "navigation": "Main navigation",
     "applications": "Applications",
     "services": "Services & accounts",

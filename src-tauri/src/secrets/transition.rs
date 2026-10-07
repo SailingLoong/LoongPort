@@ -3,6 +3,7 @@ use super::{
     files::{self, OwnedFile},
     inventory,
     key_store::{save_verified, KeyStore},
+    owned_file::DeviceFile,
     session::{read_metadata, write_durable, write_metadata, LocalVault},
     VaultContext,
 };
@@ -17,7 +18,11 @@ use std::path::{Component, Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const INTENT: &str = ".vault-transition";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+const LEGACY_FORMAT: u32 = 1;
+
+mod device;
+use device::{RootBindings, Roots};
 
 pub(crate) struct SkillsReplacement {
     pub source: PathBuf,
@@ -41,6 +46,8 @@ struct Manifest {
     next: LocalVault,
     artifacts: Vec<Artifact>,
     skills: Option<SkillsTree>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roots: Option<RootBindings>,
 }
 impl Drop for Manifest {
     fn drop(&mut self) {
@@ -59,10 +66,24 @@ struct Artifact {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Destination {
     Database,
-    DatabaseBackup { name: String },
-    Owned { relative: String, recovery: bool },
-    Settings { recovery: bool },
-    SkillFile { relative: String },
+    DatabaseBackup {
+        name: String,
+    },
+    Owned {
+        relative: String,
+        recovery: bool,
+    },
+    Device {
+        relative: String,
+        #[serde(rename = "sourceDigest")]
+        source_digest: String,
+    },
+    Settings {
+        recovery: bool,
+    },
+    SkillFile {
+        relative: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -158,11 +179,14 @@ fn directory_chain(boundary: &Path, path: &Path) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn validate_destination(root: &Path, target: &Destination) -> Result<(), AppError> {
-    if let Some(path) = destination(root, target)? {
+fn validate_destination(roots: Roots<'_>, target: &Destination) -> Result<(), AppError> {
+    let root = roots.data;
+    if let Some(path) = destination(roots, target)? {
         let home = crate::config::get_home_dir();
         let boundary = if matches!(target, Destination::Settings { recovery: false }) {
             home.as_path()
+        } else if matches!(target, Destination::Device { .. }) {
+            roots.device
         } else {
             root
         };
@@ -306,9 +330,42 @@ where
     N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
 {
+    let device = crate::live::engine::DeviceStore::for_device();
+    install_with_roots(
+        db,
+        store,
+        make_next,
+        automatic_unlock,
+        prepare_database,
+        replacements,
+        device.root(),
+        hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_with_roots<N, F>(
+    db: &Database,
+    store: &dyn KeyStore,
+    make_next: N,
+    automatic_unlock: bool,
+    prepare_database: F,
+    replacements: Replacements,
+    device_root: &Path,
+    hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+) -> Result<(), AppError>
+where
+    N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
+    F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
+{
     let session = &db.secrets;
     let mut current = session.write()?;
     let root = session.root();
+    let roots = Roots {
+        data: root,
+        device: device_root,
+    };
+    roots.validate()?;
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
         if regular_file(&root.join(name))? {
@@ -364,6 +421,7 @@ where
         next: next_local.clone(),
         artifacts: Vec::new(),
         skills: None,
+        roots: Some(roots.bindings()),
     };
     let capture = (|| {
         let memory = prepare_database(&conn, &current, &next)?;
@@ -434,6 +492,41 @@ where
                 &bytes,
             )?;
         }
+        let same_key = (
+            current.metadata().vault_id.as_str(),
+            current.metadata().key_id.as_str(),
+        ) == (
+            next.metadata().vault_id.as_str(),
+            next.metadata().key_id.as_str(),
+        );
+        for plan in files::stage_device_files_with_vault(roots.device, &current)? {
+            let source_digest = hash(&plan.ciphertext);
+            let bytes = if same_key {
+                plan.file.decode(&next, &plan.ciphertext)?;
+                plan.ciphertext
+            } else {
+                let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
+                plan.file.encode(&next, &plaintext)?
+            };
+            if roots.device.join(plan.file.relative_path()) != plan.source {
+                return Err(invalid());
+            }
+            stage_bytes(
+                root,
+                &id,
+                &mut manifest,
+                Destination::Device {
+                    relative: plan
+                        .file
+                        .relative_path()
+                        .to_str()
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                    source_digest,
+                },
+                &bytes,
+            )?;
+        }
         for recovery in [false, true] {
             let path = settings_destination(root, recovery);
             let staged_settings = (!recovery)
@@ -464,7 +557,8 @@ where
         if let Some(skills) = replacements.skills {
             capture_skills(root, &id, &next, &mut manifest, &skills)?;
         }
-        validate_stages(root, &id, &next, &manifest)?;
+        validate_stages(roots, &id, &next, &manifest)?;
+        device::validate_sources(roots, &manifest)?;
         hook(Checkpoint::Staged)?;
         Ok(())
     })();
@@ -487,7 +581,7 @@ where
     write_durable(&root.join(INTENT), &bytes)?;
     hook(Checkpoint::Intent)?;
     finish(
-        root,
+        roots,
         &intent,
         &manifest,
         &next,
@@ -563,7 +657,8 @@ fn settings_destination(root: &Path, recovery: bool) -> PathBuf {
         crate::settings::settings_path()
     }
 }
-fn destination(root: &Path, target: &Destination) -> Result<Option<PathBuf>, AppError> {
+fn destination(roots: Roots<'_>, target: &Destination) -> Result<Option<PathBuf>, AppError> {
+    let root = roots.data;
     Ok(Some(match target {
         Destination::Database => root.join(crate::config::DB_FILE_NAME),
         Destination::DatabaseBackup { name } => {
@@ -581,6 +676,10 @@ fn destination(root: &Path, target: &Destination) -> Result<Option<PathBuf>, App
             } else {
                 root.join(file.relative_path())
             }
+        }
+        Destination::Device { relative, .. } => {
+            let file = DeviceFile::registered(relative)?;
+            roots.device.join(file.relative_path())
         }
         Destination::Settings { recovery } => settings_destination(root, *recovery),
         Destination::SkillFile { relative } => {
@@ -626,11 +725,13 @@ fn read_stage(
     Ok(bytes)
 }
 fn validate_stages(
-    root: &Path,
+    roots: Roots<'_>,
     id: &str,
     next: &VaultContext,
     manifest: &Manifest,
 ) -> Result<(), AppError> {
+    let root = roots.data;
+    roots.validate()?;
     if manifest.artifacts.is_empty()
         || manifest
             .artifacts
@@ -642,12 +743,44 @@ fn validate_stages(
         return Err(invalid());
     }
     let mut destinations = std::collections::HashSet::new();
+    let mut paths = std::collections::HashSet::new();
+    #[cfg(unix)]
+    let mut file_identities = std::collections::HashSet::new();
     for (index, artifact) in manifest.artifacts.iter().enumerate() {
         let encoded = serde_json::to_string(&artifact.destination).map_err(|_| invalid())?;
         if !destinations.insert(encoded) {
             return Err(invalid());
         }
-        validate_destination(root, &artifact.destination)?;
+        validate_destination(roots, &artifact.destination)?;
+        let path = match &artifact.destination {
+            Destination::SkillFile { relative } => {
+                let skills = manifest.skills.as_ref().ok_or_else(invalid)?;
+                Some(skills_destination(root, skills).join(safe_relative(relative)?))
+            }
+            other => destination(roots, other)?,
+        };
+        if let Some(path) = path {
+            // Canonicalization is only an alias check after path guards. It
+            // cannot turn a rejected device/data symlink into write authority.
+            let resolved = if !matches!(artifact.destination, Destination::SkillFile { .. })
+                && regular_file(&path)?
+            {
+                std::fs::canonicalize(&path).map_err(|e| AppError::io(&path, e))?
+            } else {
+                path.clone()
+            };
+            if !paths.insert(resolved) {
+                return Err(invalid());
+            }
+            #[cfg(unix)]
+            if regular_file(&path)? {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&path).map_err(|e| AppError::io(&path, e))?;
+                if !file_identities.insert((metadata.dev(), metadata.ino())) {
+                    return Err(invalid());
+                }
+            }
+        }
         let bytes = read_stage(root, id, index, artifact)?;
         match &artifact.destination {
             Destination::Database | Destination::DatabaseBackup { .. } => {
@@ -655,6 +788,13 @@ fn validate_stages(
             }
             Destination::Owned { relative, .. } => {
                 OwnedFile::registered(relative)?.decode(next, &bytes)?;
+            }
+            Destination::Device {
+                relative,
+                source_digest,
+            } => {
+                device::validate_digest(source_digest)?;
+                DeviceFile::registered(relative)?.decode(next, &bytes)?;
             }
             Destination::Settings { .. } => {
                 crate::settings::decode_settings_with_vault(&bytes, next)?;
@@ -713,7 +853,7 @@ fn remove_key(store: &dyn KeyStore, vault_id: &str, key_id: &str) -> Result<(), 
     Ok(())
 }
 fn finish(
-    root: &Path,
+    roots: Roots<'_>,
     intent: &Intent,
     manifest: &Manifest,
     next: &VaultContext,
@@ -721,8 +861,11 @@ fn finish(
     active: Option<&mut Connection>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    let root = roots.data;
+    device::validate_bindings(roots, intent.version, manifest)?;
     validate_authorization(root, intent, manifest)?;
-    validate_stages(root, &intent.id, next, manifest)?;
+    validate_stages(roots, &intent.id, next, manifest)?;
+    device::validate_sources(roots, manifest)?;
     if manifest.next.automatic_unlock {
         save_verified(
             store,
@@ -773,8 +916,24 @@ fn finish(
                 hook(Checkpoint::Database)?;
             }
             Destination::SkillFile { .. } => {}
+            Destination::Device { source_digest, .. } => {
+                // Recheck after earlier publication hooks. Exact staged bytes are
+                // already installed during replay or a same-key content install.
+                device::validate_sources(roots, manifest)?;
+                let path = destination(roots, &artifact.destination)?.ok_or_else(invalid)?;
+                let current = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+                let digest = hash(&current);
+                if digest != artifact.digest {
+                    if digest != *source_digest {
+                        return Err(AppError::Config("secret.device_transition_conflict".into()));
+                    }
+                    validate_destination(roots, &artifact.destination)?;
+                    write_durable(&path, &bytes)?;
+                }
+                hook(Checkpoint::Artifact(index))?;
+            }
             other => {
-                write_durable(&destination(root, other)?.ok_or_else(invalid)?, &bytes)?;
+                write_durable(&destination(roots, other)?.ok_or_else(invalid)?, &bytes)?;
                 hook(Checkpoint::Artifact(index))?;
             }
         }
@@ -782,6 +941,7 @@ fn finish(
     if let Some(skills) = &manifest.skills {
         commit_skills(root, &intent.id, skills)?;
     }
+    device::validate_installed_device_files(roots, intent.version, manifest, next)?;
     write_metadata(root, &manifest.next)?;
     hook(Checkpoint::Metadata)?;
     let previous = &manifest.previous.metadata;
@@ -790,6 +950,7 @@ fn finish(
             next.metadata().vault_id.as_str(),
             next.metadata().key_id.as_str(),
         );
+    device::validate_installed_device_files(roots, intent.version, manifest, next)?;
     // The journal fixes both policies before any key-store write. Only the
     // previous automatic-unlock owner can owe revocation of an existing key.
     if manifest.previous.automatic_unlock && (key_changed || !manifest.next.automatic_unlock) {
@@ -811,6 +972,16 @@ pub(crate) fn recover(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
+    let device = crate::live::engine::DeviceStore::for_device();
+    recover_with_device_root(root, device.root(), store, password)
+}
+
+fn recover_with_device_root(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+) -> Result<(), AppError> {
     let path = root.join(INTENT);
     if !regular_file(&path)? {
         return Ok(());
@@ -824,7 +995,7 @@ pub(crate) fn recover(
     }
     let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
     let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if intent.version != FORMAT {
+    if ![LEGACY_FORMAT, FORMAT].contains(&intent.version) {
         return Err(invalid());
     }
     stage_root(root, &intent.id)?;
@@ -847,7 +1018,10 @@ pub(crate) fn recover(
         .map_err(inventory::secret_error)?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     finish(
-        root,
+        Roots {
+            data: root,
+            device: device_root,
+        },
         &intent,
         &manifest,
         &next,
@@ -1014,10 +1188,18 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temporary = tempfile::tempdir().unwrap();
+            Self::with_separate_data_root(false)
+        }
+        fn with_separate_data_root(separate: bool) -> Self {
+            let temporary =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temporary.path());
-            let root = temporary.path().join(crate::APP_DIR_NAME);
+            let root = temporary.path().join(if separate {
+                "shared-data"
+            } else {
+                crate::APP_DIR_NAME
+            });
             let store = MemoryKeyStore::default();
             let session = SecretSession::open(&root, &store, None).unwrap();
             let conn = vault::prepare(
@@ -1497,7 +1679,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn rotation_reencrypts_current_database_owned_files_settings_and_backups() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temporary.path());
         struct RestoreHome(Option<std::ffi::OsString>);
@@ -1625,4 +1807,5 @@ mod tests {
         SecretSession::open_existing(&root, &store, Some("new generation protection password"))
             .unwrap();
     }
+    include!("transition/device_tests.rs");
 }

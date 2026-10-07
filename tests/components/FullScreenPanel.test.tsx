@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 
@@ -14,6 +14,14 @@ const Panels = ({ innerOpen }: { innerOpen: boolean }) => (
 );
 
 describe("FullScreenPanel body scroll locking", () => {
+  it("uses the approved 52px page header without changing panel ownership", () => {
+    render(<Panels innerOpen={false} />);
+    const heading = screen.getByRole("heading", { name: "Outer" });
+    expect(heading.parentElement?.parentElement).toHaveStyle({
+      height: "52px",
+    });
+  });
+
   afterEach(() => {
     document.body.style.overflow = "";
   });

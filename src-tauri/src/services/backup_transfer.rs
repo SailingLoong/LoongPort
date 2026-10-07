@@ -50,7 +50,8 @@ mod tests {
     }
     impl Home {
         fn new() -> Self {
-            let temporary = tempfile::tempdir().unwrap();
+            let temporary =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temporary.path());
             Self {

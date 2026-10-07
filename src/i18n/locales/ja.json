@@ -3856,6 +3856,9 @@
     "hide": "ホームページから隠す"
   },
   "client": {
+    "collapseSidebar": "サイドバーを折りたたむ",
+    "expandSidebar": "サイドバーを展開する",
+    "skipToContent": "コンテンツへ移動",
     "navigation": "メインナビゲーション",
     "applications": "アプリ",
     "services": "サービスとアカウント",

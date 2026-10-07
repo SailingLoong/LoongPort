@@ -102,11 +102,7 @@ impl OwnedFile {
         vault: &VaultContext,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, AppError> {
-        let identity = self.relative.to_string_lossy().replace('\\', "/");
-        vault
-            .seal(&["file", &identity, "content"], plaintext)
-            .map(String::into_bytes)
-            .map_err(crate::secrets::error::secret_error)
+        encode_file("file", &self.relative, vault, plaintext)
     }
 
     pub(crate) fn decode(
@@ -114,13 +110,103 @@ impl OwnedFile {
         vault: &VaultContext,
         bytes: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let identity = self.relative.to_string_lossy().replace('\\', "/");
-        let ciphertext = std::str::from_utf8(bytes)
-            .map_err(|_| AppError::Config("secret.invalid_envelope".into()))?;
-        vault
-            .open(&["file", &identity, "content"], ciphertext)
-            .map_err(crate::secrets::error::secret_error)
+        decode_file("file", &self.relative, vault, bytes)
     }
+}
+
+pub(crate) const DEVICE_STATE_FILE: &str = "live-state.json";
+pub(crate) const DEVICE_BACKUP_DIR: &str = "backups/live-first-write";
+pub(super) const DEVICE_FILES: [&str; 3] = [
+    DEVICE_STATE_FILE,
+    "codex-login-stash.json",
+    "codex-catalog-history.json",
+];
+
+/// Authenticated identity for fixed-device storage, never a shared-root OwnedFile.
+/// This descriptor has no session/path/read/write methods: lifecycle inventories
+/// must explicitly handle both roots before any persistence consumer is enabled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceFile {
+    relative: PathBuf,
+}
+
+// Remove this scoped allowance when dual-root lifecycle integration supplies consumers.
+#[allow(dead_code)]
+impl DeviceFile {
+    pub(crate) fn registered(relative: impl AsRef<std::path::Path>) -> Result<Self, AppError> {
+        let relative = relative.as_ref();
+        let text = relative
+            .to_str()
+            .ok_or_else(|| AppError::Config("secret.unregistered_file".into()))?;
+        let backup = text
+            .strip_prefix(DEVICE_BACKUP_DIR)
+            .and_then(|name| name.strip_prefix('/'))
+            .and_then(|name| {
+                name.strip_suffix(".backup")
+                    .or_else(|| name.strip_suffix(".source"))
+            })
+            .is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+        // Exact portable spellings reject traversal, alternate separators, drive/ADS
+        // syntax and aliases such as doubled separators, ./ and trailing slashes.
+        if !DEVICE_FILES.contains(&text) && !backup {
+            return Err(AppError::Config("secret.unregistered_file".into()));
+        }
+        Ok(Self {
+            relative: relative.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn relative_path(&self) -> &std::path::Path {
+        &self.relative
+    }
+
+    pub(crate) fn encode(
+        &self,
+        vault: &VaultContext,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        encode_file("device-file", &self.relative, vault, plaintext)
+    }
+
+    pub(crate) fn decode(
+        &self,
+        vault: &VaultContext,
+        bytes: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        decode_file("device-file", &self.relative, vault, bytes)
+    }
+}
+
+fn encode_file(
+    namespace: &str,
+    relative: &std::path::Path,
+    vault: &VaultContext,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let identity = relative.to_string_lossy().replace('\\', "/");
+    vault
+        .seal(&[namespace, &identity, "content"], plaintext)
+        .map(String::into_bytes)
+        .map_err(crate::secrets::error::secret_error)
+}
+
+fn decode_file(
+    namespace: &str,
+    relative: &std::path::Path,
+    vault: &VaultContext,
+    bytes: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    let identity = relative.to_string_lossy().replace('\\', "/");
+    let ciphertext = std::str::from_utf8(bytes)
+        .map_err(|_| AppError::Config("secret.invalid_envelope".into()))?;
+    vault
+        .open(&[namespace, &identity, "content"], ciphertext)
+        .map_err(crate::secrets::error::secret_error)
 }
 
 fn matches_backup_name(name: &str, prefix: &str, suffix: &str) -> bool {
@@ -322,5 +408,140 @@ mod admission_tests {
         let root = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("missing", root.path().join(JOURNAL_FILE)).unwrap();
         assert!(ensure_no_pending_zcode_transaction(root.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    fn identities() -> Vec<String> {
+        vec![
+            "live-state.json".into(),
+            "codex-login-stash.json".into(),
+            "codex-catalog-history.json".into(),
+            format!("backups/live-first-write/{}.backup", "a".repeat(64)),
+            format!("backups/live-first-write/{}.source", "a".repeat(64)),
+        ]
+    }
+
+    #[test]
+    fn device_identities_are_encrypted_and_bound_to_their_namespace() {
+        let vault = VaultContext::generate().unwrap();
+        let wrong = VaultContext::generate().unwrap();
+        let canary = b"device-secret-canary\0\xff";
+        for name in identities() {
+            let device = DeviceFile::registered(&name).unwrap();
+            let sealed = device.encode(&vault, canary).unwrap();
+            assert!(!String::from_utf8_lossy(&sealed).contains("device-secret-canary"));
+            assert_eq!(&*device.decode(&vault, &sealed).unwrap(), canary);
+            assert!(device.decode(&wrong, &sealed).is_err());
+            assert!(device.decode(&vault, canary).is_err());
+            assert!(device.decode(&vault, b"{}").is_err());
+            assert!(vault
+                .open(
+                    &["file", &name, "content"],
+                    std::str::from_utf8(&sealed).unwrap()
+                )
+                .is_err());
+            for other in identities().into_iter().filter(|other| other != &name) {
+                assert!(DeviceFile::registered(other)
+                    .unwrap()
+                    .decode(&vault, &sealed)
+                    .is_err());
+            }
+            assert!(OwnedFile::registered(&name).is_err());
+        }
+    }
+
+    #[test]
+    fn device_registry_rejects_unowned_paths_and_portable_path_aliases() {
+        for name in [
+            "",
+            "settings.json",
+            "config.json",
+            "zcode_account_profiles.json",
+            "../live-state.json",
+            "/live-state.json",
+            "./live-state.json",
+            "live-state.json/",
+            "folder/../live-state.json",
+            "C:/live-state.json",
+            "C:\\live-state.json",
+            "backups\\live-first-write\\file.source",
+            "live-state.json:stream",
+            "backups/live-first-write/file.source",
+            "backups/live-first-write/abc.backup",
+        ] {
+            assert!(DeviceFile::registered(name).is_err(), "accepted {name}");
+        }
+        for name in [
+            format!("backups/live-first-write/{}.backup", "A".repeat(64)),
+            format!("backups/live-first-write/{}.backup", "0".repeat(63)),
+            format!("backups/live-first-write/{}.backup", "g".repeat(64)),
+            format!("backups//live-first-write/{}.source", "a".repeat(64)),
+        ] {
+            assert!(DeviceFile::registered(name).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_owned_file_aad_and_export_membership_are_unchanged() {
+        let vault = VaultContext::generate().unwrap();
+        let old = vault
+            .seal(
+                &["file", "codex_oauth_auth.json", "content"],
+                b"legacy-canary",
+            )
+            .unwrap();
+        let file = OwnedFile::registered("codex_oauth_auth.json").unwrap();
+        assert_eq!(
+            &*file.decode(&vault, old.as_bytes()).unwrap(),
+            b"legacy-canary"
+        );
+        let encoded = file.encode(&vault, b"new-canary").unwrap();
+        assert_eq!(
+            &*vault
+                .open(
+                    &["file", "codex_oauth_auth.json", "content"],
+                    std::str::from_utf8(&encoded).unwrap()
+                )
+                .unwrap(),
+            b"new-canary"
+        );
+        assert_eq!(
+            AUTH_FILES.map(CredentialFile::filename),
+            [
+                "copilot_auth.json",
+                "codex_oauth_auth.json",
+                "xai_oauth_auth.json"
+            ]
+        );
+        assert!(DeviceFile::registered("codex_oauth_auth.json").is_err());
+    }
+
+    #[test]
+    fn device_envelopes_reject_authenticated_content_tampering() {
+        let vault = VaultContext::generate().unwrap();
+        let file = DeviceFile::registered("live-state.json").unwrap();
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let encoded = String::from_utf8(file.encode(&vault, b"canary").unwrap()).unwrap();
+        let body = URL_SAFE_NO_PAD
+            .decode(encoded.strip_prefix("lpenc1.").unwrap())
+            .unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut ciphertext = URL_SAFE_NO_PAD
+            .decode(envelope["payload"]["ciphertext"].as_str().unwrap())
+            .unwrap();
+        ciphertext[0] ^= 1;
+        envelope["payload"]["ciphertext"] =
+            serde_json::Value::String(URL_SAFE_NO_PAD.encode(ciphertext));
+        let encoded = format!(
+            "lpenc1.{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&envelope).unwrap())
+        );
+        assert!(
+            matches!(file.decode(&vault, encoded.as_bytes()), Err(AppError::Config(code)) if code == "secret.authentication_failed")
+        );
     }
 }

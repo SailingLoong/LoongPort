@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PAGE_HEADER_HEIGHT } from "@/components/shell/layout";
 import {
   isWindows,
   isLinux,
@@ -28,7 +29,6 @@ interface FullScreenPanelProps {
 }
 
 const DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px - match App.tsx
-const HEADER_HEIGHT = 64; // px - match App.tsx
 
 let bodyScrollLockCount = 0;
 let bodyOverflowBeforeFirstLock: string | null = null;
@@ -150,7 +150,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
               {
                 ...DRAG_REGION_STYLE,
                 backgroundColor: "hsl(var(--background))",
-                height: HEADER_HEIGHT,
+                height: PAGE_HEADER_HEIGHT,
               } as React.CSSProperties
             }
           >
