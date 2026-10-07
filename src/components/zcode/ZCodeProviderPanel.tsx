@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ZCodeAccountPanel } from "@/components/zcode/ZCodeAccountPanel";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const queryKey = ["zcodeConfig"];
 type Draft = Omit<ZCodeProviderInput, "models"> & { modelText: string };
@@ -43,7 +44,13 @@ export function ZCodeProviderPanel({
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const query = useQuery({ queryKey, queryFn: zcodeApi.read, retry: false });
+  const [tab, setTab] = useState("accounts");
+  const query = useQuery({
+    queryKey,
+    queryFn: zcodeApi.read,
+    retry: false,
+    enabled: tab === "api",
+  });
   const [draft, setDraft] = useState<Draft | null>(null);
   const [removing, setRemoving] = useState<{
     provider: ZCodeProvider;
@@ -184,94 +191,127 @@ export function ZCodeProviderPanel({
             })}
           </p>
         </div>
-        <div className="flex shrink-0 gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy || query.isFetching || !!draft || !!removing}
-            onClick={() => {
-              setError(null);
-              void query.refetch();
-            }}
-          >
-            <RefreshCw className="mr-2 h-4 w-4" />
-            {t("zcode.refresh", { defaultValue: "Refresh" })}
-          </Button>
-          <Button
-            size="sm"
-            disabled={busy || !query.data || query.isError}
-            onClick={() => startEdit()}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            {t("zcode.add", { defaultValue: "Add provider" })}
-          </Button>
-        </div>
       </div>
-      {query.isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {extractErrorMessage(query.error)}
-        </p>
-      )}
-      {error && !draft && !removing && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
-      {query.isPending && (
-        <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
-      )}
-      {!query.isError && query.data?.providers.length === 0 && (
-        <p className="text-sm text-muted-foreground">
-          {t("zcode.empty", { defaultValue: "No personal providers yet" })}
-        </p>
-      )}
-      {query.data?.providers.map((provider) => (
-        <Card key={provider.id}>
-          <CardContent className="flex items-start justify-between gap-4 p-4">
-            <div className="min-w-0 space-y-1">
-              <h3 className="font-medium">{provider.name}</h3>
-              <p className="break-all text-sm text-muted-foreground">
-                {provider.apiType} · {provider.baseUrl}
-              </p>
-              <p className="break-all text-sm text-muted-foreground">
-                {provider.models.join(", ")}
-              </p>
-              {!provider.managed && (
-                <p className="text-xs text-muted-foreground">
-                  {t("zcode.native", { defaultValue: "Managed in ZCode" })}
-                </p>
-              )}
-            </div>
-            {provider.managed && (
-              <div className="flex shrink-0 gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || query.isError}
-                  onClick={() => startEdit(provider)}
-                >
-                  {t("zcode.edit", { defaultValue: "Edit" })}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy || query.isError}
-                  onClick={() => {
-                    setError(null);
-                    setRemoving({ provider, revision: query.data!.revision });
-                  }}
-                >
-                  {t("zcode.remove", { defaultValue: "Remove" })}
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ))}
-      <ZCodeAccountPanel
-        disabled={providerBusy || !!draft || !!removing}
-        onBusyChange={setAccountBusy}
-      />
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (!busy && !draft && !removing) setTab(value);
+        }}
+      >
+        <TabsList
+          aria-label={t("zcode.accounts.viewTabs", {
+            defaultValue: "ZCode account and API views",
+          })}
+        >
+          <TabsTrigger
+            value="accounts"
+            disabled={busy || !!draft || !!removing}
+          >
+            {t("zcode.accounts.signInTab", {
+              defaultValue: "Sign-in accounts",
+            })}
+          </TabsTrigger>
+          <TabsTrigger value="api" disabled={busy || !!draft || !!removing}>
+            {t("zcode.accounts.apiTab", { defaultValue: "API configuration" })}
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="accounts">
+          <ZCodeAccountPanel
+            disabled={providerBusy || !!draft || !!removing}
+            onBusyChange={setAccountBusy}
+          />
+        </TabsContent>
+        <TabsContent value="api" className="space-y-4">
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || query.isFetching || !!draft || !!removing}
+              onClick={() => {
+                setError(null);
+                void query.refetch();
+              }}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              {t("zcode.refresh", { defaultValue: "Refresh" })}
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy || !query.data || query.isError}
+              onClick={() => startEdit()}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              {t("zcode.add", { defaultValue: "Add provider" })}
+            </Button>
+          </div>
+          {query.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              {extractErrorMessage(query.error)}
+            </p>
+          )}
+          {error && !draft && !removing && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          {query.isPending && (
+            <p className="text-sm text-muted-foreground">
+              {t("common.loading")}
+            </p>
+          )}
+          {!query.isError && query.data?.providers.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              {t("zcode.empty", { defaultValue: "No personal providers yet" })}
+            </p>
+          )}
+          {query.data?.providers.map((provider) => (
+            <Card key={provider.id}>
+              <CardContent className="flex items-start justify-between gap-4 p-4">
+                <div className="min-w-0 space-y-1">
+                  <h3 className="font-medium">{provider.name}</h3>
+                  <p className="break-all text-sm text-muted-foreground">
+                    {provider.apiType} · {provider.baseUrl}
+                  </p>
+                  <p className="break-all text-sm text-muted-foreground">
+                    {provider.models.join(", ")}
+                  </p>
+                  {!provider.managed && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("zcode.native", { defaultValue: "Managed in ZCode" })}
+                    </p>
+                  )}
+                </div>
+                {provider.managed && (
+                  <div className="flex shrink-0 gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || query.isError}
+                      onClick={() => startEdit(provider)}
+                    >
+                      {t("zcode.edit", { defaultValue: "Edit" })}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || query.isError}
+                      onClick={() => {
+                        setError(null);
+                        setRemoving({
+                          provider,
+                          revision: query.data!.revision,
+                        });
+                      }}
+                    >
+                      {t("zcode.remove", { defaultValue: "Remove" })}
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </TabsContent>
+      </Tabs>
       <Dialog
         open={draft !== null}
         onOpenChange={(open) => {

@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   readZCodeSourcePreference,
   saveZCodeSourcePreference,
 } from "@/lib/zcodeSourcePreference";
 import { settingsApi } from "@/lib/api/settings";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,17 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ZCodeBundleImport } from "./ZCodeBundleImport";
+import { ZCodeAccountEvidence } from "./ZCodeAccountEvidence";
+import { ZCodeOAuthAdd } from "./ZCodeOAuthAdd";
+import { ZCodeBackupDialog } from "./ZCodeBackupDialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   accountErrorText,
   safeAccountError,
@@ -22,6 +33,8 @@ import {
   type CapturePreview,
   type LatestVersion,
   type SourceContext,
+  type CurrentNativeIdentity,
+  type CatalogStatus,
 } from "@/lib/api/zcodeAccounts";
 
 type ActionKind =
@@ -64,6 +77,7 @@ export function ZCodeAccountPanel({
   onBusyChange?: (busy: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const copy = (
     key: string,
     defaultValue: string,
@@ -77,7 +91,36 @@ export function ZCodeAccountPanel({
   }));
   const [context, setContext] = useState<SourceContext | null>(null);
   const [busy, setBusy] = useState(false);
-  const [bundleActive, setBundleActive] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [codingAccount, setCodingAccount] = useState<
+    { id: string; catalogRevision: string } | undefined
+  >(undefined);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [labelEditor, setLabelEditor] = useState<{
+    id: string;
+    value: string;
+    revision: string;
+    root: string | undefined;
+  } | null>(null);
+  const [currentIdentity, setCurrentIdentity] =
+    useState<CurrentNativeIdentity | null>(null);
+  const [identityReading, setIdentityReading] = useState(false);
+  const identityEpoch = useRef(0);
+  const identityInFlight = useRef(false);
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [connectionViews, setConnectionViews] = useState<
+    Record<string, "checking" | "current" | "unknown">
+  >({});
+  const connectionEpoch = useRef(0);
+  const connectionRequest = useRef<{
+    requestId: string;
+    id: string;
+    root: string | undefined;
+    revision: string;
+    epoch: number;
+    unconfirmed: boolean;
+  } | null>(null);
   const inFlight = useRef(false);
   const [action, setAction] = useState<ReviewedAction | null>(null);
   const [error, setError] = useState<AccountError | null>(null);
@@ -101,7 +144,11 @@ export function ZCodeAccountPanel({
       !discovery.data ||
       manuallySelected.current ||
       inFlight.current ||
-      action
+      action ||
+      loginOpen ||
+      backupOpen ||
+      importOpen ||
+      labelEditor
     )
       return;
     // A single detected installation is shown without granting compatibility.
@@ -117,7 +164,16 @@ export function ZCodeAccountPanel({
     });
     setContext(null);
     setNeedsReview(false);
-  }, [discovery.data, action]);
+  }, [discovery.data, action, loginOpen, backupOpen, importOpen, labelEditor]);
+  const libraryRoot = source.dataRoot || undefined;
+  const libraryKey = ["zcodeAccountLibrary", libraryRoot ?? null];
+  const library = useQuery({
+    queryKey: libraryKey,
+    queryFn: () => passive(() => zcodeAccountsApi.library(libraryRoot)),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
   const recovery = useQuery({
     queryKey: ["zcodeAccountRecovery"],
     queryFn: () => passive(zcodeAccountsApi.recoveryStatus),
@@ -125,14 +181,15 @@ export function ZCodeAccountPanel({
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  const nativeCatalogKey = [
+    "zcodeAccountCatalog",
+    source.installPath,
+    source.dataRoot,
+    source.keyMode,
+    context?.contextRevision,
+  ];
   const catalog = useQuery({
-    queryKey: [
-      "zcodeAccountCatalog",
-      source.installPath,
-      source.dataRoot,
-      source.keyMode,
-      context?.contextRevision,
-    ],
+    queryKey: nativeCatalogKey,
     queryFn: () =>
       passive(() => zcodeAccountsApi.status(source, context!.contextRevision)),
     enabled: context !== null,
@@ -141,14 +198,39 @@ export function ZCodeAccountPanel({
     refetchOnReconnect: false,
   });
   useEffect(() => {
-    onBusyChange?.(busy || bundleActive);
-  }, [busy, bundleActive, onBusyChange]);
+    onBusyChange?.(
+      busy || loginOpen || backupOpen || importOpen || !!labelEditor,
+    );
+  }, [busy, loginOpen, backupOpen, importOpen, labelEditor, onBusyChange]);
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
-  const locked = busy || disabled || bundleActive;
+  const locked =
+    busy || disabled || loginOpen || backupOpen || importOpen || !!labelEditor;
   const loading =
-    recovery.isFetching || (context !== null && catalog.isFetching);
+    recovery.isFetching ||
+    library.isFetching ||
+    (context !== null && catalog.isFetching);
+  const shownCatalog =
+    context && catalog.data && !catalog.isError ? catalog.data : library.data;
+  const connectionBinding = useRef({
+    root: libraryRoot,
+    revision: shownCatalog?.revision,
+  });
+  connectionBinding.current = {
+    root: libraryRoot,
+    revision: shownCatalog?.revision,
+  };
+  const libraryReady =
+    !!library.data &&
+    !library.isError &&
+    !library.isFetching &&
+    !locked &&
+    !checkingId;
   const localReady =
-    !!recovery.data && !recovery.isError && !recovery.isFetching && !locked;
+    !!recovery.data &&
+    !recovery.isError &&
+    !recovery.isFetching &&
+    !locked &&
+    !checkingId;
   const reviewedSourceReady = localReady && !!context;
   const catalogReady =
     reviewedSourceReady &&
@@ -166,7 +248,8 @@ export function ZCodeAccountPanel({
   const displayedError =
     error ??
     (recovery.isError ? safeAccountError(recovery.error) : null) ??
-    (context && catalog.isError ? safeAccountError(catalog.error) : null);
+    (context && catalog.isError ? safeAccountError(catalog.error) : null) ??
+    (library.isError ? safeAccountError(library.error) : null);
   const errorText = (failure: AccountError) => {
     const key =
       failure.committed &&
@@ -192,6 +275,167 @@ export function ZCodeAccountPanel({
     inFlight.current = false;
     setBusy(false);
   };
+  const retireConnectionCheck = (render: boolean, explicit = false) => {
+    const request = connectionRequest.current;
+    connectionRequest.current = null;
+    const cancelledEpoch = ++connectionEpoch.current;
+    if (!request) return;
+    if (render) {
+      setCheckingId(null);
+      setConnectionViews((previous) => {
+        const next = { ...previous };
+        if (explicit) next[request.id] = "unknown";
+        else delete next[request.id];
+        return next;
+      });
+    }
+    void zcodeAccountsApi
+      .cancelConnectionCheck(request.requestId)
+      .then((outcome) => {
+        if (
+          render &&
+          explicit &&
+          connectionEpoch.current === cancelledEpoch &&
+          connectionBinding.current.root === request.root
+        ) {
+          setNotice(
+            outcome === "tooLate"
+              ? copy(
+                  "connectionCheckTooLate",
+                  "The check may already have been saved. Refresh local account status to see its result.",
+                )
+              : copy(
+                  "connectionCheckCancelled",
+                  "Connection check cancelled before saving its result.",
+                ),
+          );
+        }
+      })
+      .catch(() => {
+        if (render && explicit && connectionEpoch.current === cancelledEpoch)
+          setNotice(
+            copy(
+              "connectionCheckCancelUnknown",
+              "The cancellation response is unknown. Refresh local account status before checking again.",
+            ),
+          );
+      });
+  };
+  useLayoutEffect(() => {
+    setCheckingId(null);
+    setConnectionViews({});
+    return () => retireConnectionCheck(false);
+  }, [libraryRoot]);
+  useLayoutEffect(() => {
+    const request = connectionRequest.current;
+    if (
+      request &&
+      (request.root !== libraryRoot ||
+        request.revision !== shownCatalog?.revision)
+    )
+      retireConnectionCheck(true);
+  }, [libraryRoot, shownCatalog?.revision]);
+  const checkConnections = async (id: string) => {
+    const profile = shownCatalog?.profiles.find((item) => item.id === id);
+    if (
+      !libraryReady ||
+      loading ||
+      locked ||
+      action ||
+      !shownCatalog ||
+      profile?.canCheckConnections !== true ||
+      inFlight.current
+    )
+      return;
+    if (connectionRequest.current) {
+      if (!connectionRequest.current.unconfirmed) return;
+      retireConnectionCheck(false);
+    }
+    const request = {
+      requestId: crypto.randomUUID(),
+      id,
+      root: libraryRoot,
+      revision: shownCatalog.revision,
+      epoch: ++connectionEpoch.current,
+      unconfirmed: false,
+    };
+    const observedLibraryRevision =
+      queryClient.getQueryData<CatalogStatus>(libraryKey)?.revision;
+    const observedNativeRevision = context
+      ? queryClient.getQueryData<CatalogStatus>(nativeCatalogKey)?.revision
+      : undefined;
+    const current = () =>
+      connectionEpoch.current === request.epoch &&
+      connectionBinding.current.root === request.root;
+    const recordUnchanged = () =>
+      connectionBinding.current.revision === request.revision &&
+      queryClient.getQueryData<CatalogStatus>(libraryKey)?.revision ===
+        observedLibraryRevision &&
+      (!context ||
+        queryClient.getQueryData<CatalogStatus>(nativeCatalogKey)?.revision ===
+          observedNativeRevision);
+    connectionRequest.current = request;
+    setCheckingId(id);
+    setConnectionViews((previous) => ({ ...previous, [id]: "checking" }));
+    setError(null);
+    setNotice(null);
+    try {
+      await queryClient.cancelQueries({ queryKey: libraryKey, exact: true });
+      if (context)
+        await queryClient.cancelQueries({
+          queryKey: nativeCatalogKey,
+          exact: true,
+        });
+      if (!current() || connectionRequest.current !== request) return;
+      if (!recordUnchanged()) {
+        retireConnectionCheck(true);
+        return;
+      }
+      const result = await zcodeAccountsApi.checkConnections({
+        requestId: request.requestId,
+        ...(request.root === undefined ? {} : { dataRoot: request.root }),
+        catalogRevision: request.revision,
+        id,
+        allowOfficialCheck: true,
+      });
+      if (!current()) return;
+      if (!recordUnchanged()) {
+        retireConnectionCheck(true);
+        return;
+      }
+      connectionRequest.current = null;
+      setCheckingId(null);
+      setConnectionViews((previous) => ({ ...previous, [id]: "current" }));
+      queryClient.setQueryData(libraryKey, result);
+      // The returned library facts are authoritative. Native action eligibility
+      // is re-read separately, without repeating the official account check.
+      if (context) queryClient.setQueryData(nativeCatalogKey, result);
+      setNotice(
+        copy(
+          "connectionCheckCompleted",
+          "Connection and quota check completed for this account.",
+        ),
+      );
+      if (context) {
+        const native = await catalog.refetch();
+        if (current() && native.error) {
+          setError(safeAccountError(native.error));
+          setNeedsReview(true);
+        }
+      }
+    } catch (cause) {
+      if (current()) {
+        request.unconfirmed = true;
+        setConnectionViews((previous) => ({ ...previous, [id]: "unknown" }));
+        setError(safeAccountError(cause));
+      }
+    } finally {
+      if (current() && connectionRequest.current === request) {
+        if (!request.unconfirmed) connectionRequest.current = null;
+        setCheckingId(null);
+      }
+    }
+  };
   const queryLatest = async () => {
     if (!begin()) return;
     setLatestVersion(null);
@@ -204,7 +448,7 @@ export function ZCodeAccountPanel({
     }
   };
   const selectSource = (next: ContextSelection) => {
-    if (inFlight.current || disabled || action) return;
+    if (inFlight.current || locked || action) return;
     manuallySelected.current = true;
     setSource(next);
     setContext(null);
@@ -212,6 +456,99 @@ export function ZCodeAccountPanel({
     setError(null);
     setNotice(null);
     setNeedsReview(false);
+  };
+  useLayoutEffect(() => {
+    identityEpoch.current += 1;
+    identityInFlight.current = false;
+    setCurrentIdentity(null);
+    setIdentityReading(false);
+    return () => {
+      identityEpoch.current += 1;
+      identityInFlight.current = false;
+    };
+  }, [
+    source.installPath,
+    source.dataRoot,
+    source.keyMode,
+    context?.contextRevision,
+  ]);
+  useEffect(() => {
+    const invalidate = () => {
+      identityEpoch.current += 1;
+      identityInFlight.current = false;
+      setCurrentIdentity(null);
+      setIdentityReading(false);
+    };
+    const visibility = () => {
+      if (document.visibilityState !== "visible") invalidate();
+    };
+    window.addEventListener("blur", invalidate);
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      window.removeEventListener("blur", invalidate);
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, []);
+  const readCurrentIdentity = async () => {
+    if (!context || locked || identityInFlight.current) return;
+    const epoch = ++identityEpoch.current;
+    const revision = context.contextRevision;
+    identityInFlight.current = true;
+    setIdentityReading(true);
+    setCurrentIdentity(null);
+    setError(null);
+    try {
+      const result = await zcodeAccountsApi.readCurrentIdentity(
+        source,
+        revision,
+      );
+      if (
+        identityEpoch.current === epoch &&
+        result.contextRevision === revision
+      )
+        setCurrentIdentity(result);
+    } catch (cause) {
+      if (identityEpoch.current === epoch) setError(safeAccountError(cause));
+    } finally {
+      if (identityEpoch.current === epoch) {
+        identityInFlight.current = false;
+        setIdentityReading(false);
+      }
+    }
+  };
+  const refreshLibrary = async () => {
+    const result = await library.refetch();
+    if (result.error) throw result.error;
+    if (context) {
+      const nativeResult = await catalog.refetch();
+      if (nativeResult.error) {
+        setNeedsReview(true);
+        throw nativeResult.error;
+      }
+    }
+  };
+  const saveLabel = async () => {
+    if (!labelEditor || !begin()) return;
+    const selected = labelEditor;
+    setError(null);
+    try {
+      const result = await zcodeAccountsApi.setLabel(
+        selected.root,
+        selected.revision,
+        selected.id,
+        selected.value.trim() ? selected.value : null,
+      );
+      queryClient.setQueryData(
+        ["zcodeAccountLibrary", selected.root ?? null],
+        result,
+      );
+      setLabelEditor(null);
+      if (context) await catalog.refetch();
+    } catch (cause) {
+      setError(safeAccountError(cause));
+    } finally {
+      finish();
+    }
   };
   const queryOriginal = async (revision: string) => {
     const operation = await zcodeAccountsApi.queryLastOperation(
@@ -297,8 +634,10 @@ export function ZCodeAccountPanel({
     setError(null);
     try {
       const local = await recovery.refetch();
+      const savedLibrary = await library.refetch();
       const accounts = context ? await catalog.refetch() : null;
-      if (local.error || accounts?.error) throw local.error ?? accounts?.error;
+      if (local.error || accounts?.error || savedLibrary.error)
+        throw local.error ?? accounts?.error ?? savedLibrary.error;
       setNeedsReview(false);
       if (context) await queryOriginal(context.contextRevision);
     } catch (cause) {
@@ -321,7 +660,7 @@ export function ZCodeAccountPanel({
       kind === "switch" &&
       (full ||
         !catalog.data?.profiles.some(
-          (profile) => profile.id === id && profile.family === context?.family,
+          (profile) => profile.id === id && profile.canActivate === true,
         ))
     )
       return;
@@ -467,6 +806,7 @@ export function ZCodeAccountPanel({
         );
       }
       const local = await recovery.refetch();
+      await library.refetch();
       const accounts = context ? await catalog.refetch() : null;
       if (local.error || accounts?.error) {
         setError(safeAccountError(local.error ?? accounts?.error));
@@ -587,8 +927,8 @@ export function ZCodeAccountPanel({
           </h3>
           <p className="text-sm text-muted-foreground">
             {copy(
-              "description",
-              "Save and switch personal Z.ai or BigModel sessions in the encrypted local LoongPort vault. Select and inspect the source for each visit.",
+              "libraryDescription",
+              "Manage personal BigModel and z.ai accounts in the encrypted local vault. Native capture and switching have separate source requirements.",
             )}
           </p>
         </div>
@@ -602,6 +942,61 @@ export function ZCodeAccountPanel({
           {copy("refresh", "Refresh account status")}
         </Button>
       </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          disabled={
+            !libraryReady || library.data?.actions.canAdd !== true || !!action
+          }
+          onClick={() => {
+            setCodingAccount(undefined);
+            setLoginOpen(true);
+          }}
+        >
+          {copy("addAccount", "Add account")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={!ordinaryReady || !!action}
+          onClick={() => review("capture")}
+        >
+          {copy("capture", "Save current account")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={
+            !libraryReady ||
+            library.data?.actions.canImport !== true ||
+            !!action
+          }
+          onClick={() => setImportOpen(true)}
+        >
+          {copy("importAccounts", "Import .zsb")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={
+            !libraryReady ||
+            library.data?.actions.canBackup !== true ||
+            !!action
+          }
+          onClick={() => setBackupOpen(true)}
+        >
+          {copy("backupAccounts", "Encrypted backup")}
+        </Button>
+      </div>
+      {library.data?.actions.blockedReason && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {errorText(library.data.actions.blockedReason)}
+        </p>
+      )}
+      {!context && (
+        <p className="text-xs text-muted-foreground">
+          {copy(
+            "nativeAdmissionRequired",
+            "Inspect a supported native source before saving its current login or switching accounts. Account library management remains separate.",
+          )}
+        </p>
+      )}
       <section
         aria-label={copy("installationStatus", "Installation and versions")}
         className="space-y-2 rounded-md border p-3"
@@ -656,8 +1051,8 @@ export function ZCodeAccountPanel({
                     "Exact installed build verified. Session actions still require a fresh source and account check.",
                   )
                 : copy(
-                    "unverifiedBuild",
-                    "Installed build is unverified; account actions remain blocked.",
+                    "unverifiedNativeBuild",
+                    "Installed build is unverified; native capture and switching remain blocked.",
                   )}
             </p>
             {discovery.data!.candidates.length > 1 && (
@@ -783,8 +1178,8 @@ export function ZCodeAccountPanel({
       </div>
       <p className="text-xs text-muted-foreground">
         {copy(
-          "sourceHelp",
-          "Enter the exact absolute path to the .zcode/v2 directory inside the data base directory configured in official ZCode. Enter this nested directory, not the data base directory itself. Custom key contexts and team accounts are unsupported. Quit ZCode normally before account actions.",
+          "nativeSourceHelp",
+          "Use the exact .zcode/v2 directory inside the data base directory configured in official ZCode. Standard local verification applies to native capture and switching. Custom key contexts and team accounts are unsupported; managing the encrypted account library does not require closing ZCode.",
         )}
       </p>
       <label className="flex items-start gap-2 text-sm">
@@ -832,33 +1227,33 @@ export function ZCodeAccountPanel({
         >
           {copy("openForLogin", "Open official ZCode for login")}
         </Button>
-        <Button
-          type="button"
-          disabled={!ordinaryReady || !!action}
-          onClick={() => review("capture")}
-        >
-          {copy("capture", "Save current account")}
-        </Button>
       </div>
-      {context && catalog.data && (
+      {library.data && (
         <ZCodeBundleImport
-          key={context.contextRevision}
-          source={source}
-          contextRevision={context.contextRevision}
-          catalogRevision={catalog.data.revision}
-          enabled={ordinaryReady && !action}
-          onActiveChange={(active) => {
-            inFlight.current = active;
-            setBundleActive(active);
-          }}
-          onImported={async () => {
-            const result = await catalog.refetch();
-            if (result.error) {
-              setNeedsReview(true);
-              throw result.error;
-            }
-            setNeedsReview(false);
-          }}
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          libraryDataRoot={libraryRoot}
+          catalogRevision={library.data.revision}
+          onImported={refreshLibrary}
+        />
+      )}
+      <ZCodeOAuthAdd
+        open={loginOpen}
+        onClose={() => {
+          setLoginOpen(false);
+          setCodingAccount(undefined);
+        }}
+        onSaved={refreshLibrary}
+        libraryDataRoot={libraryRoot}
+        savedAccount={codingAccount}
+      />
+      {library.data && (
+        <ZCodeBackupDialog
+          open={backupOpen}
+          onClose={() => setBackupOpen(false)}
+          libraryDataRoot={libraryRoot}
+          catalogRevision={library.data.revision}
+          profiles={library.data.profiles}
         />
       )}
       {context && (
@@ -875,9 +1270,37 @@ export function ZCodeAccountPanel({
           )}
         </p>
       )}
-      <p className="text-sm text-muted-foreground">
-        {copy("currentUnknown", "Current account: unknown")}
-      </p>
+      <div className="space-y-2">
+        <p className="text-sm text-muted-foreground">
+          {currentIdentity?.id
+            ? copy(
+                "currentNativeIdentity",
+                "Current native account: {{account}} · {{family}}",
+                {
+                  account: currentIdentity.label ?? currentIdentity.id,
+                  family: currentIdentity.family ?? "",
+                },
+              )
+            : copy("currentUnknown", "Current account: unknown")}
+        </p>
+        {currentIdentity && (
+          <p className="text-xs text-muted-foreground">
+            {copy(
+              "currentReadAt",
+              "Read at {{time}}. This is a local observation, not an online status check.",
+              { time: new Date(currentIdentity.readAt).toISOString() },
+            )}
+          </p>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!context || locked || identityReading || !!action}
+          onClick={() => void readCurrentIdentity()}
+        >
+          {copy("readCurrentIdentity", "Read current native identity")}
+        </Button>
+      </div>
       {displayedError && (
         <p role="alert" className="text-sm text-destructive">
           {notice
@@ -910,8 +1333,7 @@ export function ZCodeAccountPanel({
           )}
         </p>
       )}
-      {context &&
-        catalog.data &&
+      {shownCatalog &&
         (["zai", "bigmodel"] as const).map((family) => (
           <section
             key={family}
@@ -925,7 +1347,7 @@ export function ZCodeAccountPanel({
             <h4 className="text-sm font-medium">
               {family === "zai" ? "Z.ai" : "BigModel"}
             </h4>
-            {catalog.data.profiles
+            {shownCatalog.profiles
               .filter((profile) => profile.family === family)
               .map((profile) => (
                 <Card key={profile.id}>
@@ -937,34 +1359,169 @@ export function ZCodeAccountPanel({
                       <p className="break-all text-xs text-muted-foreground">
                         {profile.id}
                       </p>
-                      {profile.sourceVerified !== true && (
+                      {profile.officialLabel &&
+                        profile.officialLabel !== profile.label && (
+                          <p className="text-xs text-muted-foreground">
+                            {profile.officialLabel}
+                          </p>
+                        )}
+                      {profile.identitySource && (
                         <p className="text-xs text-muted-foreground">
+                          {profile.identitySource === "officialLogin"
+                            ? copy("identityOfficialLogin", "Official sign-in")
+                            : profile.identitySource === "nativeCapture"
+                              ? copy(
+                                  "identityNativeCapture",
+                                  "Captured native session",
+                                )
+                              : copy(
+                                  "identityPackageDeclared",
+                                  "Declared by account bundle",
+                                )}
+                        </p>
+                      )}
+                      {currentIdentity?.id === profile.id && (
+                        <p className="text-xs text-blue-600">
                           {copy(
-                            "unverifiedImport",
-                            "Source unverified. Sign in with this personal account in official ZCode, then save the current account and explicitly update the duplicate here.",
+                            "currentNativeMarker",
+                            "Current native identity at last explicit read",
                           )}
                         </p>
                       )}
+                      {profile.capabilities ? (
+                        <ZCodeAccountEvidence
+                          value={profile.capabilities}
+                          quotaPresentation={
+                            connectionViews[profile.id] ?? "previous"
+                          }
+                        />
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          {copy(
+                            "capabilitiesNotQueried",
+                            "Connection and quota checks have not been queried.",
+                          )}
+                        </p>
+                      )}
+                      {profile.activationBlockedReason && (
+                        <p className="text-xs text-muted-foreground">
+                          {errorText(profile.activationBlockedReason)}
+                        </p>
+                      )}
+                      {profile.needsKey && (
+                        <p className="text-xs text-muted-foreground">
+                          {copy(
+                            "savedCodingPending",
+                            "Coding connection needs a Key; other capabilities are shown independently.",
+                          )}
+                        </p>
+                      )}
+                      {profile.completeCodingBlockedReason && (
+                        <p className="text-xs text-muted-foreground">
+                          {errorText(profile.completeCodingBlockedReason)}
+                        </p>
+                      )}
+                      {profile.checkConnectionsBlockedReason && (
+                        <p className="text-xs text-muted-foreground">
+                          {errorText(profile.checkConnectionsBlockedReason)}
+                        </p>
+                      )}
                     </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        !ordinaryReady ||
-                        profile.sourceVerified !== true ||
-                        full ||
-                        family !== context.family ||
-                        !!action
-                      }
-                      onClick={() => review("switch", profile.id)}
-                    >
-                      {copy("switch", "Switch saved account")}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          !libraryReady ||
+                          loading ||
+                          profile.canCheckConnections !== true ||
+                          !!action
+                        }
+                        onClick={() => void checkConnections(profile.id)}
+                      >
+                        {checkingId === profile.id
+                          ? copy("checkingConnections", "Checking connections…")
+                          : copy(
+                              "checkConnections",
+                              "Check connections and quota",
+                            )}
+                      </Button>
+                      {checkingId === profile.id && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => retireConnectionCheck(true, true)}
+                        >
+                          {copy("cancelConnectionCheck", "Cancel check")}
+                        </Button>
+                      )}
+                      {profile.needsKey && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={
+                            !libraryReady ||
+                            profile.canCompleteCoding !== true ||
+                            !!action
+                          }
+                          onClick={() => {
+                            setCodingAccount({
+                              id: profile.id,
+                              catalogRevision: shownCatalog.revision,
+                            });
+                            setLoginOpen(true);
+                          }}
+                        >
+                          {copy(
+                            "completeSavedCoding",
+                            "Complete Coding connection",
+                          )}
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          !libraryReady ||
+                          library.data?.actions.canEditLabels !== true ||
+                          !!action
+                        }
+                        onClick={() =>
+                          setLabelEditor({
+                            id: profile.id,
+                            value: profile.label ?? "",
+                            revision: shownCatalog.revision,
+                            root: libraryRoot,
+                          })
+                        }
+                      >
+                        {copy("editDisplayName", "Edit display name")}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          !ordinaryReady ||
+                          profile.canActivate !== true ||
+                          full ||
+                          !!action
+                        }
+                        onClick={() => review("switch", profile.id)}
+                      >
+                        {copy("switch", "Switch saved account")}
+                      </Button>
+                    </div>
+                    <p className="w-full text-xs text-muted-foreground">
+                      {copy(
+                        "connectionCheckDisclosure",
+                        "Only this account's related session credentials are sent to its official platform to read connections, plans and quota. No model calls, Key creation, account switching or automatic sign-in.",
+                      )}
+                    </p>
                   </CardContent>
                 </Card>
               ))}
-            {catalog.data.profiles.every(
+            {shownCatalog.profiles.every(
               (profile) => profile.family !== family,
             ) && (
               <p className="text-sm text-muted-foreground">
@@ -1056,6 +1613,60 @@ export function ZCodeAccountPanel({
           </p>
         )}
       </section>
+      <Dialog
+        open={labelEditor !== null}
+        onOpenChange={(open) => {
+          if (!open) setLabelEditor(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {copy("editDisplayName", "Edit display name")}
+            </DialogTitle>
+            <DialogDescription>
+              {copy(
+                "localLabelOnly",
+                "This label is stored locally. It does not change the official identity or account deduplication.",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 px-6 py-5">
+            <Label htmlFor="zcode-local-label">
+              {copy("displayName", "Display name")}
+            </Label>
+            <Input
+              id="zcode-local-label"
+              value={labelEditor?.value ?? ""}
+              disabled={busy}
+              onChange={(event) =>
+                setLabelEditor((previous) =>
+                  previous ? { ...previous, value: event.target.value } : null,
+                )
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              {copy(
+                "localLabelReset",
+                "Leave empty to use the account's official display label.",
+              )}
+            </p>
+            {error && (
+              <p role="alert" className="text-sm text-destructive">
+                {errorText(error)}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLabelEditor(null)}>
+              {copy("cancel", "Cancel account action")}
+            </Button>
+            <Button disabled={busy} onClick={() => void saveLabel()}>
+              {copy("saveDisplayName", "Save display name")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         key={action?.kind ?? "closed"}
         isOpen={action !== null}

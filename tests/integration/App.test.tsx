@@ -264,6 +264,12 @@ describe("App integration with MSW", () => {
     );
     renderApp();
     expect(
+      await screen.findByRole("tab", { name: "Sign-in accounts" }),
+    ).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
+      key: "Enter",
+    });
+    expect(
       await screen.findByText("No personal providers yet"),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
@@ -312,6 +318,10 @@ describe("App integration with MSW", () => {
         ),
       );
       renderApp();
+      fireEvent.keyDown(
+        await screen.findByRole("tab", { name: "API configuration" }),
+        { key: "Enter" },
+      );
       await screen.findByText("Native fixture");
       fireEvent.click(
         screen.getByRole("button", {

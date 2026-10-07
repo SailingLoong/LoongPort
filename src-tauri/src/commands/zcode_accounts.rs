@@ -18,16 +18,14 @@ pub(crate) async fn open_zcode_for_account_login(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn preview_zcode_account_bundle(
     state: State<'_, AppState>,
-    source: ContextSelection,
-    context_revision: String,
+    data_root: Option<std::path::PathBuf>,
     catalog_revision: String,
     file: Vec<u8>,
     password: String,
 ) -> Result<BundlePreview, PublicError> {
     api::preview_bundle(
         state.db.clone(),
-        source,
-        context_revision,
+        data_root,
         BundlePreviewInput {
             revision: catalog_revision,
             file: zeroize::Zeroizing::new(file),
@@ -39,16 +37,14 @@ pub(crate) async fn preview_zcode_account_bundle(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn import_zcode_account_bundle(
     state: State<'_, AppState>,
-    source: ContextSelection,
-    context_revision: String,
+    data_root: Option<std::path::PathBuf>,
     catalog_revision: String,
     preview_id: String,
     selected: Vec<ImportChoice>,
 ) -> Result<Vec<CaptureCommitOutcome>, PublicError> {
     api::commit_bundle(
         state.db.clone(),
-        source,
-        context_revision,
+        data_root,
         BundleCommitInput {
             revision: catalog_revision,
             preview_id,
@@ -56,6 +52,22 @@ pub(crate) async fn import_zcode_account_bundle(
         },
     )
     .await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn check_zcode_account_bundle(
+    state: State<'_, AppState>,
+    preview_id: String,
+    selected: Vec<ImportChoice>,
+    allow_official_check: bool,
+) -> Result<crate::zcode_accounts::import_reviews::CheckProgress, PublicError> {
+    api::check_bundle(state.db.clone(), preview_id, selected, allow_official_check).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_bundle_check_progress(
+    state: State<'_, AppState>,
+    preview_id: String,
+) -> Result<crate::zcode_accounts::import_reviews::CheckProgress, PublicError> {
+    api::bundle_check_progress(state.db.clone(), preview_id).await
 }
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn cancel_zcode_bundle_preview(
@@ -210,4 +222,176 @@ pub(crate) async fn delete_zcode_account_recovery(
     revision: String,
 ) -> Result<(), PublicError> {
     api::delete(state.db.clone(), id, revision).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn begin_zcode_official_login(
+    state: State<'_, AppState>,
+    family: String,
+    data_root: Option<std::path::PathBuf>,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::begin(state.db.clone(), &family, data_root).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn begin_saved_zcode_coding(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+    catalog_revision: String,
+    id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::begin_saved(
+        state.db.clone(),
+        data_root,
+        catalog_revision,
+        id,
+    )
+    .await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_login_progress(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::query(state.db.clone(), flow_id).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn confirm_zcode_login_key(
+    state: State<'_, AppState>,
+    flow_id: String,
+    organization_id: String,
+    project_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::confirm(
+        state.db.clone(),
+        flow_id,
+        organization_id,
+        project_id,
+    )
+    .await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn decline_zcode_login_key(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::decline(state.db.clone(), flow_id).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn save_zcode_login_account(
+    state: State<'_, AppState>,
+    flow_id: String,
+    update_duplicate: bool,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::save(state.db.clone(), flow_id, update_duplicate).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn cancel_zcode_official_login(
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::cancel(flow_id)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_account_library(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+) -> Result<CatalogStatus, PublicError> {
+    crate::zcode_accounts::oauth_runtime::catalog(state.db.clone(), data_root).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_last_login_progress(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+) -> Result<Option<crate::zcode_accounts::oauth::LoginProgress>, PublicError> {
+    crate::zcode_accounts::oauth_runtime::last_progress(state.db.clone(), data_root).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn set_zcode_account_label(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+    catalog_revision: String,
+    id: String,
+    label: Option<String>,
+) -> Result<CatalogStatus, PublicError> {
+    crate::zcode_accounts::oauth_runtime::set_label(
+        state.db.clone(),
+        data_root,
+        catalog_revision,
+        id,
+        label,
+    )
+    .await
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BundleExportInput {
+    request_id: String,
+    data_root: Option<std::path::PathBuf>,
+    catalog_revision: String,
+    profile_ids: Vec<String>,
+    destination: std::path::PathBuf,
+    password: String,
+    password_confirmation: String,
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn export_zcode_account_bundle(
+    state: State<'_, AppState>,
+    input: BundleExportInput,
+) -> Result<crate::zcode_accounts::bundle_export::ExportResult, PublicError> {
+    crate::zcode_accounts::oauth_runtime::export_bundle(
+        state.db.clone(),
+        input.data_root,
+        crate::zcode_accounts::bundle_export::ExportRequest {
+            request_id: input.request_id,
+            catalog_revision: input.catalog_revision,
+            profile_ids: input.profile_ids,
+            destination: input.destination,
+            password: zeroize::Zeroizing::new(input.password),
+            password_confirmation: zeroize::Zeroizing::new(input.password_confirmation),
+        },
+    )
+    .await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_bundle_export_result(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<crate::zcode_accounts::bundle_export::ExportResult, PublicError> {
+    crate::zcode_accounts::oauth_runtime::export_result(state.db.clone(), request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn read_zcode_current_identity(
+    state: State<'_, AppState>,
+    source: ContextSelection,
+    context_revision: String,
+) -> Result<crate::zcode_accounts::runtime::CurrentIdentity, PublicError> {
+    api::read_current_identity(state.db.clone(), source, context_revision).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn check_zcode_account_connections(
+    state: State<'_, AppState>,
+    request_id: String,
+    data_root: Option<std::path::PathBuf>,
+    catalog_revision: String,
+    id: String,
+    allow_official_check: bool,
+) -> Result<CatalogStatus, PublicError> {
+    api::check_saved_connections(
+        state.db.clone(),
+        request_id,
+        data_root,
+        catalog_revision,
+        id,
+        allow_official_check,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) fn cancel_zcode_connection_check(
+    request_id: String,
+) -> Result<&'static str, PublicError> {
+    api::cancel_connection_check(&request_id)
 }

@@ -181,6 +181,7 @@ fn absolute_path(path: &Path) -> bool {
 pub(super) struct VerifiedContext {
     observation: ContextObservation,
     family: OAuthFamily,
+    connection_kind: super::checkpoint::ConnectionKind,
     context_id: String,
     settings_revision: [u8; 32],
 }
@@ -208,6 +209,12 @@ impl ReadOnlyContext {
     }
     pub(super) fn family(&self) -> OAuthFamily {
         self.0.family()
+    }
+    pub(super) fn connection_kind(&self) -> super::checkpoint::ConnectionKind {
+        self.0.connection_kind()
+    }
+    pub(super) fn app_version(&self) -> &str {
+        self.0.app_version()
     }
     pub(super) fn vault_cipher(&self) -> Result<NativeCipher, BlockedReason> {
         self.0.cipher()
@@ -304,26 +311,27 @@ impl VerifiedContext {
             .0
             .get(name)
             .ok_or(BlockedReason::SelectionMissing)?;
-        match selected.0.get("kind").and_then(serde_json::Value::as_str) {
+        let connection_kind = match selected.0.get("kind").and_then(serde_json::Value::as_str) {
             Some("team-coding-plan") => return Err(BlockedReason::TeamUnsupported),
-            Some("start-plan" | "individual-coding-plan") if selected.0.len() == 1 => {}
+            Some("start-plan") if selected.0.len() == 1 => super::checkpoint::ConnectionKind::Start,
+            Some("individual-coding-plan") if selected.0.len() == 1 => {
+                super::checkpoint::ConnectionKind::Coding
+            }
             _ => return Err(BlockedReason::SelectionMissing),
-        }
-        // Length-framed JSON avoids ambiguous delimiters. Persistent context excludes
-        // current family and settings revision, so both saved families retain identity.
-        let identity = serde_json::to_vec(&(
-            "zcode-credential-v1",
-            "darwin",
+        };
+        // The vault-only library and admitted native writer use the same stable scope.
+        let context_id = super::library_context::LibraryContext::from_os_identity(
             &observation.home,
             &observation.username,
             &observation.credential_root,
-        ))
-        .map_err(|_| BlockedReason::RootUnverified)?;
-        let context_id = URL_SAFE_NO_PAD.encode(Sha256::digest(identity));
+        )?
+        .context_id()
+        .to_owned();
         let settings_revision = Sha256::digest(&*settings_bytes).into();
         Ok(Self {
             observation,
             family,
+            connection_kind,
             context_id,
             settings_revision,
         })
@@ -359,6 +367,12 @@ impl VerifiedContext {
     pub(super) fn native_root(&self) -> &Path {
         &self.observation.credential_root
     }
+    pub(super) fn app_version(&self) -> &str {
+        &self.observation.install.version
+    }
+    pub(super) fn connection_kind(&self) -> super::checkpoint::ConnectionKind {
+        self.connection_kind
+    }
     pub(super) fn family(&self) -> OAuthFamily {
         self.family
     }
@@ -384,13 +398,12 @@ impl VerifiedContext {
         URL_SAFE_NO_PAD.encode(Sha256::digest(binding))
     }
     pub(super) fn cipher(&self) -> Result<NativeCipher, BlockedReason> {
-        // Never read an environment variable or try another source after a failure.
-        // Keep exact Node homedir/username text; macOS is "darwin" in Node's contract.
-        let secret = Zeroizing::new(format!(
-            "zcode-credential-fallback:darwin:{}:{}",
-            self.observation.home, self.observation.username
-        ));
-        NativeCipher::new(&self.context_id, &secret).map_err(|_| BlockedReason::KeyContextUnknown)
+        super::library_context::LibraryContext::from_os_identity(
+            &self.observation.home,
+            &self.observation.username,
+            &self.observation.credential_root,
+        )?
+        .cipher()
     }
 }
 #[cfg(test)]

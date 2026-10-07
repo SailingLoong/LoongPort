@@ -37,7 +37,16 @@ pub(crate) const PROFILE_FILE: &str = "zcode_account_profiles.json";
 pub(crate) const JOURNAL_FILE: &str = "zcode_account_transaction.json";
 pub(crate) const RECOVERY_FILE: &str = "zcode_account_recovery.json";
 pub(crate) const OPERATION_FILE: &str = "zcode_account_operations.json";
-const ZCODE_FILES: [&str; 4] = [PROFILE_FILE, JOURNAL_FILE, RECOVERY_FILE, OPERATION_FILE];
+pub(crate) const KEY_INTENT_FILE: &str = "zcode_oauth_key_intents.json";
+pub(crate) const BUNDLE_EXPORT_FILE: &str = "zcode_bundle_exports.json";
+const ZCODE_FILES: [&str; 6] = [
+    PROFILE_FILE,
+    JOURNAL_FILE,
+    RECOVERY_FILE,
+    OPERATION_FILE,
+    KEY_INTENT_FILE,
+    BUNDLE_EXPORT_FILE,
+];
 
 const LEGACY_CONFIG_FILES: [&str; 3] = ["config.json", "config.json.bak", "config.json.migrated"];
 pub(super) const BACKUP_PATTERNS: [(&str, &str, &str); 6] = [
@@ -172,6 +181,8 @@ mod tests {
             "zcode_account_transaction.json",
             "zcode_account_recovery.json",
             "zcode_account_operations.json",
+            KEY_INTENT_FILE,
+            BUNDLE_EXPORT_FILE,
         ];
         for name in names {
             let file = OwnedFile::registered(name).expect("new account file must be protected");
@@ -195,12 +206,12 @@ mod tests {
 /// Caller holds the existing sync owner and, when available, the vault write guard.
 /// This admission check never prevents unlocking the vault for account recovery.
 pub(crate) fn ensure_no_pending_zcode_transaction(root: &std::path::Path) -> Result<(), AppError> {
-    ensure_absent_zcode_markers(root, &[JOURNAL_FILE])
+    ensure_absent_zcode_markers(root, &[JOURNAL_FILE, KEY_INTENT_FILE])
 }
 
 /// A key-loss reset cannot inspect an encrypted account disposition.
 pub(crate) fn ensure_zcode_reset_allowed(root: &std::path::Path) -> Result<(), AppError> {
-    ensure_absent_zcode_markers(root, &[JOURNAL_FILE, RECOVERY_FILE])
+    ensure_absent_zcode_markers(root, &[JOURNAL_FILE, RECOVERY_FILE, KEY_INTENT_FILE])
 }
 
 fn ensure_absent_zcode_markers(root: &std::path::Path, names: &[&str]) -> Result<(), AppError> {
@@ -216,7 +227,7 @@ fn ensure_absent_zcode_markers(root: &std::path::Path, names: &[&str]) -> Result
 }
 
 pub(crate) fn is_zcode_reset_archive_member(name: &str) -> bool {
-    [JOURNAL_FILE, RECOVERY_FILE]
+    [JOURNAL_FILE, RECOVERY_FILE, KEY_INTENT_FILE]
         .iter()
         .any(|file| name.strip_prefix("data/") == Some(*file))
 }

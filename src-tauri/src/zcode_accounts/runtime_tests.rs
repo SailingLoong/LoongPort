@@ -122,13 +122,19 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
             }
         )
         .await,
-        Ok(vec![CaptureCommitOutcome::Refreshed])
+        Ok(vec![CaptureCommitOutcome::Kept])
     );
     let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
         .await
         .unwrap();
+    // The legacy fixture has no capability evidence. An explicit update must
+    // not replace a previously verified account with an unchecked candidate.
+    assert_eq!(
+        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
+        before
+    );
     assert!(
-        !status
+        status
             .profiles
             .iter()
             .find(|p| p.id == f.a.opaque_id())

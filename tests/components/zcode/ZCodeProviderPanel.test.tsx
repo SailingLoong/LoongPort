@@ -18,7 +18,7 @@ const accountPanel = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock("@/components/zcode/ZCodeAccountPanel", () => ({
   ZCodeAccountPanel: (props: { onBusyChange: (busy: boolean) => void }) => {
     accountPanel.render(props);
-    return null;
+    return <p>Account library fixture</p>;
   },
 }));
 const fixture: ZCodeConfig = {
@@ -44,7 +44,10 @@ const fixture: ZCodeConfig = {
     },
   ],
 };
-function mount(onNavigationBlockedChange?: (blocked: boolean) => void) {
+function mount(
+  onNavigationBlockedChange?: (blocked: boolean) => void,
+  openApi = true,
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -55,6 +58,10 @@ function mount(onNavigationBlockedChange?: (blocked: boolean) => void) {
       />
     </QueryClientProvider>,
   );
+  if (openApi)
+    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
+      key: "Enter",
+    });
   return client;
 }
 beforeEach(() => {
@@ -69,6 +76,62 @@ beforeEach(() => {
   });
 });
 describe("ZCode native provider panel", () => {
+  it("defaults to sign-in accounts and exposes API actions only after selecting that tab", async () => {
+    mount(undefined, false);
+    expect(
+      screen.getByRole("tab", { name: "Sign-in accounts" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Account library fixture")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add provider" }),
+    ).not.toBeInTheDocument();
+    expect(zcodeApi.read).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
+      key: "Enter",
+    });
+    await screen.findByText("Managed example");
+    expect(
+      screen.queryByText("Account library fixture"),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Sign-in accounts" }), {
+      key: "Enter",
+    });
+    expect(screen.queryByText("Managed example")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh" }),
+    ).not.toBeInTheDocument();
+    expect(zcodeApi.save).not.toHaveBeenCalled();
+  });
+  it("keeps tab navigation locked while an account operation owns the view", () => {
+    mount(undefined, false);
+    act(() => accountPanel.render.mock.lastCall![0].onBusyChange(true));
+    expect(
+      screen.getByRole("tab", { name: "API configuration" }),
+    ).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
+      key: "Enter",
+    });
+    expect(screen.getByText("Account library fixture")).toBeInTheDocument();
+    expect(zcodeApi.read).not.toHaveBeenCalled();
+  });
+  it("keeps the API editor and removal confirmation attached to their original tab", async () => {
+    mount();
+    await screen.findByText("Managed example");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(
+      screen.getByRole("tab", { name: "Sign-in accounts", hidden: true }),
+    ).toBeDisabled();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(
+      screen.getByRole("tab", { name: "Sign-in accounts", hidden: true }),
+    ).toBeDisabled();
+    expect(zcodeApi.remove).not.toHaveBeenCalled();
+  });
   it("keeps navigation blocked while either provider or account work is busy", async () => {
     let finish!: (value: ZCodeConfig) => void;
     vi.mocked(zcodeApi.save).mockImplementationOnce(

@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
   within,
+  cleanup,
 } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -14,12 +15,18 @@ import {
   zcodeAccountsApi,
   type CatalogStatus,
   type RecoveryStatus,
+  type SessionCheckDisplay,
 } from "@/lib/api/zcodeAccounts";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@/lib/api/zcodeAccounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/zcodeAccounts")>()),
   zcodeAccountsApi: {
+    library: vi.fn(),
+    setLabel: vi.fn(),
+    readCurrentIdentity: vi.fn(),
+    checkConnections: vi.fn(),
+    cancelConnectionCheck: vi.fn(),
     queryLastOperation: vi.fn().mockResolvedValue(null),
     openForLogin: vi.fn(),
     latestVersion: vi.fn(),
@@ -58,17 +65,48 @@ const catalog: CatalogStatus = {
       family: "zai",
       label: "Personal Z.ai",
       sourceVerified: true,
+      identitySource: "officialLogin",
+      officialLabel: "p…",
+      capabilities: null,
+      canActivate: true,
+      activationBlockedReason: null,
+      needsKey: false,
+      canCompleteCoding: false,
+      completeCodingBlockedReason: null,
+      canCheckConnections: true,
+      checkConnectionsBlockedReason: null,
     },
     {
       id: "opaque-bigmodel",
       family: "bigmodel",
       label: null,
       sourceVerified: true,
+      identitySource: "nativeCapture",
+      officialLabel: null,
+      capabilities: null,
+      canActivate: false,
+      needsKey: false,
+      canCompleteCoding: false,
+      completeCodingBlockedReason: null,
+      canCheckConnections: true,
+      checkConnectionsBlockedReason: null,
+      activationBlockedReason: {
+        code: "zcode.account.target_scope_mismatch",
+        remedy: "chooseSavedAccount",
+        committed: false,
+      },
     },
   ],
   current: null,
   pending: false,
   nativeUnconfirmed: false,
+  actions: {
+    canAdd: true,
+    canImport: true,
+    canBackup: true,
+    canEditLabels: true,
+    blockedReason: null,
+  },
 };
 const recovery: RecoveryStatus = {
   revision: "recovery-one",
@@ -76,6 +114,55 @@ const recovery: RecoveryStatus = {
   nativeUnconfirmed: false,
   records: [],
 };
+function priorEvidence(): SessionCheckDisplay {
+  const accepted = {
+    state: "accepted" as const,
+    reason: null,
+    checkedAt: 100,
+    source: "accountStartJwt" as const,
+    latestFailure: null,
+  };
+  return {
+    selectedProfileId: "opaque-zai",
+    business: { check: accepted, officialOwnerId: null, displayName: null },
+    start: {
+      check: accepted,
+      entitlement: "available",
+      effectiveAtSeconds: null,
+      quota: accepted,
+      serverTimeSeconds: 100,
+      plans: [],
+      buckets: [
+        {
+          bucketId: "bucket",
+          userPlanId: "instance",
+          planId: "plan",
+          entitlementId: "tokens",
+          showName: "Prior allowance",
+          meter: "tokens",
+          unitType: "tokens",
+          capabilities: [],
+          totalUnits: 10,
+          usedUnits: 4,
+          reservedUnits: 0,
+          remainingUnits: 6,
+          availableUnits: 6,
+          periodStartSeconds: 10,
+          periodEndSeconds: 1000,
+          expiresAtSeconds: 1000,
+        },
+      ],
+    },
+    coding: {
+      check: accepted,
+      subscription: accepted,
+      entitlement: "available",
+      quota: accepted,
+      subscriptions: [],
+      limits: [],
+    },
+  };
+}
 function mount(onBusyChange = vi.fn()) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -99,7 +186,13 @@ async function inspect() {
   fireEvent.click(
     screen.getByRole("button", { name: "Inspect selected source" }),
   );
-  await screen.findByText("Personal Z.ai");
+  await screen.findByText(/Inspected:/);
+  await waitFor(() => expect(zcodeAccountsApi.status).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    ).toBeEnabled(),
+  );
 }
 function confirm(name: string) {
   fireEvent.click(
@@ -107,6 +200,12 @@ function confirm(name: string) {
   );
 }
 beforeEach(() => {
+  vi.mocked(zcodeAccountsApi.checkConnections)
+    .mockReset()
+    .mockResolvedValue({ ...catalog, revision: "checked-revision" });
+  vi.mocked(zcodeAccountsApi.cancelConnectionCheck)
+    .mockReset()
+    .mockResolvedValue("cancelled");
   vi.mocked(zcodeAccountsApi.queryLastOperation)
     .mockReset()
     .mockResolvedValue(null);
@@ -126,6 +225,22 @@ beforeEach(() => {
   });
   vi.mocked(zcodeAccountsApi.inspect).mockReset().mockResolvedValue(context);
   vi.mocked(zcodeAccountsApi.status).mockReset().mockResolvedValue(catalog);
+  vi.mocked(zcodeAccountsApi.library)
+    .mockReset()
+    .mockResolvedValue({
+      ...catalog,
+      profiles: catalog.profiles.map((p) => ({ ...p, canActivate: false })),
+    });
+  vi.mocked(zcodeAccountsApi.setLabel).mockReset().mockResolvedValue(catalog);
+  vi.mocked(zcodeAccountsApi.readCurrentIdentity)
+    .mockReset()
+    .mockResolvedValue({
+      contextRevision: context.contextRevision,
+      id: "opaque-zai",
+      label: "p…",
+      family: "zai",
+      readAt: 1_800_000_000_000,
+    });
   vi.mocked(zcodeAccountsApi.recoveryStatus)
     .mockReset()
     .mockResolvedValue(recovery);
@@ -150,6 +265,611 @@ beforeEach(() => {
     .mockResolvedValue(undefined);
 });
 describe("ZCode saved accounts", () => {
+  it("keeps prior verified facts and marks retained amounts as historical after a query failure", async () => {
+    const prior = {
+      ...catalog,
+      profiles: [{ ...catalog.profiles[0], capabilities: priorEvidence() }],
+    };
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue(prior);
+    vi.mocked(zcodeAccountsApi.checkConnections).mockRejectedValue(
+      new Error("private query transport"),
+    );
+    mount();
+    await screen.findByText("Remaining: 6 tokens");
+    expect(screen.getByText("Last known quota values")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Check connections and quota" }),
+    );
+    await screen.findByText("Previous quota values · not current");
+    expect(
+      screen.getByText("Current Start quota is unknown."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Start Plan: Accepted")).toBeInTheDocument();
+    expect(screen.getByText("Remaining: 6 tokens")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Checked: 1970-01-01T00:01:40.000Z").length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByText(/private query transport/),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1);
+  });
+  it("retains a returned saved check result when refreshing native action status fails", async () => {
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.status).mockRejectedValueOnce(
+      new Error("private local refresh failure"),
+    );
+    vi.mocked(zcodeAccountsApi.checkConnections).mockResolvedValue({
+      ...catalog,
+      revision: "checked",
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          label: "Checked account",
+          capabilities: priorEvidence(),
+        },
+      ],
+    });
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Check connections and quota" },
+      ),
+    );
+    await screen.findByText("Checked account");
+    await screen.findByText(
+      /local action completed, but refreshing its status failed/,
+    );
+    expect(
+      screen.getByText(
+        "Connection and quota check completed for this account.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Quota returned by this check"),
+    ).toBeInTheDocument();
+    expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1);
+  });
+  it("does not claim that cancelling after commit revoked the saved result", async () => {
+    let resolve!: (value: CatalogStatus) => void;
+    vi.mocked(zcodeAccountsApi.checkConnections).mockReturnValue(
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+    );
+    vi.mocked(zcodeAccountsApi.cancelConnectionCheck).mockResolvedValue(
+      "tooLate",
+    );
+    mount();
+    await screen.findByText("Personal Z.ai");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Check connections and quota" })[0],
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel check" }));
+    await screen.findByText(
+      "The check may already have been saved. Refresh local account status to see its result.",
+    );
+    await act(async () =>
+      resolve({
+        ...catalog,
+        profiles: [{ ...catalog.profiles[0], label: "Ignored late result" }],
+      }),
+    );
+    expect(screen.queryByText("Ignored late result")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Connection check cancelled before saving its result.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+  it("checks only after the single-account action and never from local list refresh", async () => {
+    let resolve!: (value: CatalogStatus) => void;
+    vi.mocked(zcodeAccountsApi.checkConnections).mockReturnValue(
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+    );
+    const onBusy = vi.fn();
+    mount(onBusy);
+    await screen.findByText("Personal Z.ai");
+    expect(zcodeAccountsApi.checkConnections).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(zcodeAccountsApi.checkConnections).not.toHaveBeenCalled();
+    const button = within(
+      screen.getByRole("region", { name: "Z.ai accounts" }),
+    ).getByRole("button", { name: "Check connections and quota" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: expect.any(String),
+          catalogRevision: "catalog-one",
+          id: "opaque-zai",
+          allowOfficialCheck: true,
+        },
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Checking connections…" }),
+    ).toBeDisabled();
+    expect(onBusy).toHaveBeenLastCalledWith(false);
+    await act(async () =>
+      resolve({ ...catalog, revision: "checked-revision" }),
+    );
+    expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1);
+  });
+  it("uses the backend reason when a saved account cannot be checked", async () => {
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          canCheckConnections: false,
+          checkConnectionsBlockedReason: {
+            code: "zcode.account.vault_unavailable",
+            remedy: "unlockVault",
+            committed: false,
+          },
+        },
+      ],
+    });
+    mount();
+    expect(
+      await screen.findByRole("button", {
+        name: "Check connections and quota",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/Unlock the local LoongPort vault/),
+    ).toBeInTheDocument();
+  });
+  it("cancels on source change and discards the old query reply", async () => {
+    let resolve!: (value: CatalogStatus) => void;
+    vi.mocked(zcodeAccountsApi.checkConnections).mockReturnValue(
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+    );
+    mount();
+    await screen.findByText("Personal Z.ai");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Check connections and quota" })[0],
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1),
+    );
+    const request = vi.mocked(zcodeAccountsApi.checkConnections).mock
+      .calls[0][0];
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: "/new/library" },
+    });
+    await waitFor(() =>
+      expect(
+        zcodeAccountsApi.cancelConnectionCheck,
+      ).toHaveBeenCalledExactlyOnceWith(request.requestId),
+    );
+    await act(async () =>
+      resolve({
+        ...catalog,
+        profiles: [{ ...catalog.profiles[0], label: "stale query result" }],
+      }),
+    );
+    expect(screen.queryByText("stale query result")).not.toBeInTheDocument();
+  });
+  it("cancels on unmount and does not publish a late checked catalog into the cache", async () => {
+    let resolve!: (value: CatalogStatus) => void;
+    vi.mocked(zcodeAccountsApi.checkConnections).mockReturnValue(
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+    );
+    const client = mount();
+    await screen.findByText("Personal Z.ai");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Check connections and quota" })[0],
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1),
+    );
+    const before = client.getQueryData(["zcodeAccountLibrary", null]);
+    cleanup();
+    await act(async () => resolve({ ...catalog, revision: "late-check" }));
+    expect(client.getQueryData(["zcodeAccountLibrary", null])).toEqual(before);
+    expect(zcodeAccountsApi.cancelConnectionCheck).toHaveBeenCalledTimes(1);
+  });
+  it("does not let a late check replace a newer account record", async () => {
+    let resolve!: (value: CatalogStatus) => void;
+    vi.mocked(zcodeAccountsApi.checkConnections).mockReturnValue(
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+    );
+    const client = mount();
+    await screen.findByText("Personal Z.ai");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Check connections and quota" })[0],
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.checkConnections).toHaveBeenCalledTimes(1),
+    );
+    await act(async () =>
+      client.setQueryData(["zcodeAccountLibrary", null], {
+        ...catalog,
+        revision: "newer",
+        profiles: [{ ...catalog.profiles[0], label: "Newer record" }],
+      }),
+    );
+    await act(async () => resolve({ ...catalog, revision: "old-result" }));
+    expect(screen.getByText("Newer record")).toBeInTheDocument();
+    expect(zcodeAccountsApi.cancelConnectionCheck).toHaveBeenCalledTimes(1);
+  });
+  it("opens saved Coding completion only with backend eligibility and keeps the chosen identity", async () => {
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        { ...catalog.profiles[0], needsKey: true, canCompleteCoding: true },
+      ],
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "get_zcode_last_login_progress") return null;
+      if (command === "begin_saved_zcode_coding")
+        return {
+          flowId: "saved-flow",
+          purpose: "completeCoding",
+          phase: "keyRequired",
+          family: "zai",
+          authorization: null,
+          account: {
+            id: "opaque-zai",
+            label: "p…",
+            duplicate: true,
+            identitySource: "nativeCapture",
+          },
+          connections: {
+            start: "ready",
+            coding: "unavailable",
+            needsKey: true,
+          },
+          project: {
+            organizationId: "org",
+            organizationName: "Personal",
+            projectId: "project",
+            projectName: "Personal",
+          },
+          keyCreated: false,
+          keyMayExist: false,
+          keyManagementUrl: "https://example.test/keys",
+          error: null,
+          saved: null,
+        };
+      return null;
+    });
+    mount();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Complete Coding connection" }),
+    );
+    await screen.findByRole("button", {
+      name: "Authorize creating and saving this Key",
+    });
+    expect(invoke).toHaveBeenCalledWith("begin_saved_zcode_coding", {
+      id: "opaque-zai",
+      catalogRevision: "catalog-one",
+    });
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(
+          ([command]) => command === "begin_zcode_official_login",
+        ),
+    ).toBe(false);
+  });
+  it("shows a blocked saved Coding entry without inferring eligibility from a missing Key", async () => {
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          needsKey: true,
+          canCompleteCoding: false,
+          completeCodingBlockedReason: {
+            code: "zcode.account.official_unavailable",
+            remedy: "queryOriginal",
+            committed: false,
+          },
+        },
+      ],
+    });
+    mount();
+    expect(
+      await screen.findByRole("button", { name: "Complete Coding connection" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/official service could not complete this step/),
+    ).toBeInTheDocument();
+  });
+  it("keeps account management visible without an admitted native installation", async () => {
+    mount();
+    await screen.findByText("Personal Z.ai");
+    expect(screen.getByRole("button", { name: "Add account" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Import .zsb" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Encrypted backup" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Save current account" }),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.readCurrentIdentity).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Encrypted backup" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Personal Z.ai",
+    );
+  });
+  it("disables new library writes when backend action eligibility is absent", async () => {
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      actions: {
+        canAdd: false,
+        canImport: false,
+        canBackup: false,
+        canEditLabels: false,
+        blockedReason: {
+          code: "zcode.account.vault_unavailable",
+          remedy: "unlockVault",
+          committed: false,
+        },
+      },
+    });
+    mount();
+    await screen.findByText("Personal Z.ai");
+    expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Encrypted backup" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/Unlock the local LoongPort vault/),
+    ).toBeInTheDocument();
+  });
+  it("edits only a local display label using the reviewed library revision", async () => {
+    vi.mocked(zcodeAccountsApi.setLabel).mockResolvedValue({
+      ...catalog,
+      revision: "label-updated",
+      profiles: [{ ...catalog.profiles[0], label: "My work account" }],
+    });
+    mount();
+    await screen.findByText("Personal Z.ai");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Edit display name" })[0],
+    );
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "My work account" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save display name" }));
+    await waitFor(() =>
+      expect(zcodeAccountsApi.setLabel).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        "catalog-one",
+        "opaque-zai",
+        "My work account",
+      ),
+    );
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("reads native identity only on request and invalidates the observation when focus leaves", async () => {
+    mount();
+    await inspect();
+    expect(zcodeAccountsApi.readCurrentIdentity).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read current native identity" }),
+    );
+    await screen.findByText(/Current native account: p…/);
+    expect(
+      zcodeAccountsApi.readCurrentIdentity,
+    ).toHaveBeenCalledExactlyOnceWith(source, context.contextRevision);
+    fireEvent(window, new Event("blur"));
+    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Current native account:/),
+    ).not.toBeInTheDocument();
+  });
+  it("ignores a native identity read that finishes after the observation is invalidated", async () => {
+    let finish!: (
+      value: Awaited<ReturnType<typeof zcodeAccountsApi.readCurrentIdentity>>,
+    ) => void;
+    vi.mocked(zcodeAccountsApi.readCurrentIdentity).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    mount();
+    await inspect();
+    const button = screen.getByRole("button", {
+      name: "Read current native identity",
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent(window, new Event("blur"));
+    await act(async () =>
+      finish({
+        contextRevision: context.contextRevision,
+        id: "opaque-zai",
+        label: "stale-native",
+        family: "zai",
+        readAt: 1234,
+      }),
+    );
+    expect(screen.queryByText(/stale-native/)).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
+  });
+  it("allows an imported row only when the backend grants activation", async () => {
+    vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          sourceVerified: false,
+          identitySource: "packageDeclared",
+          canActivate: true,
+        },
+      ],
+    });
+    mount();
+    await inspect();
+    expect(
+      screen.getByRole("button", { name: "Switch saved account" }),
+    ).toBeEnabled();
+  });
+  it("shows independent credential checks and separate quota instances with authoritative units and times", async () => {
+    const accepted = {
+      state: "accepted" as const,
+      reason: null,
+      checkedAt: 1_800_000_000,
+      source: "accountStartJwt" as const,
+      latestFailure: null,
+    };
+    const bucket = {
+      bucketId: "monthly-bucket",
+      userPlanId: "monthly-instance",
+      planId: "plan-one",
+      entitlementId: "tokens",
+      showName: "Monthly quota",
+      meter: "tokens",
+      unitType: "tokens",
+      capabilities: [],
+      totalUnits: 100,
+      usedUnits: 100,
+      reservedUnits: 0,
+      remainingUnits: 0,
+      availableUnits: 0,
+      periodStartSeconds: 1_800_000_000,
+      periodEndSeconds: 1_800_086_400,
+      expiresAtSeconds: 1_800_172_800,
+    };
+    const capabilities: SessionCheckDisplay = {
+      selectedProfileId: "opaque-zai",
+      business: {
+        check: {
+          ...accepted,
+          state: "unavailable",
+          reason: "businessRejected",
+          source: "businessToken",
+        },
+        officialOwnerId: null,
+        displayName: null,
+      },
+      start: {
+        check: accepted,
+        entitlement: "available",
+        effectiveAtSeconds: null,
+        quota: accepted,
+        serverTimeSeconds: 1_800_000_000,
+        plans: [
+          {
+            userPlanId: "monthly-instance",
+            planId: "plan-one",
+            name: "Start subscription",
+            status: "active",
+            startsAtSeconds: 1_800_000_000,
+            endsAtSeconds: 1_800_086_400,
+            entitlements: [],
+          },
+        ],
+        buckets: [
+          bucket,
+          {
+            ...bucket,
+            bucketId: "bonus-bucket",
+            userPlanId: "bonus-instance",
+            showName: "Bonus quota",
+            totalUnits: 200,
+            usedUnits: 40,
+            remainingUnits: null,
+            availableUnits: null,
+          },
+        ],
+      },
+      coding: {
+        check: { ...accepted, source: "codingKey" },
+        subscription: accepted,
+        entitlement: "available",
+        quota: {
+          ...accepted,
+          state: "unknown",
+          reason: "network",
+          latestFailure: { reason: "network", checkedAt: 1_800_000_010 },
+        },
+        subscriptions: [],
+        limits: [
+          {
+            limitType: "TIME_LIMIT",
+            unit: 999,
+            number: 7,
+            displayUnit: null,
+            windowLabel: null,
+            usage: 0,
+            currentValue: 0,
+            remaining: null,
+            percentage: null,
+            nextResetTimeMs: 1_800_000_000_123,
+            usageDetails: [],
+          },
+        ],
+      },
+    };
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      profiles: [{ ...catalog.profiles[0], capabilities }],
+    });
+    mount();
+    await screen.findByText("Start Plan: Accepted");
+    expect(
+      screen.getByText(
+        "Business session: Unavailable · Business session rejected",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Coding Plan: Accepted")).toBeInTheDocument();
+    const monthly = screen.getByRole("group", { name: "Quota bucket 1" });
+    const bonus = screen.getByRole("group", { name: "Quota bucket 2" });
+    expect(monthly).toHaveTextContent("Remaining: 0 tokens");
+    expect(monthly).toHaveTextContent("Plan instance: monthly-instance");
+    expect(bonus).toHaveTextContent("Remaining: Unknown");
+    expect(bonus).toHaveTextContent("Plan instance: bonus-instance");
+    expect(monthly).toHaveTextContent(
+      `Window ends: ${new Date(1_800_086_400_000).toISOString()}`,
+    );
+    const coding = screen.getByRole("group", { name: "Coding limit 1" });
+    expect(coding).toHaveTextContent("Unit: Not provided");
+    expect(coding).toHaveTextContent("Window: Not provided");
+    expect(coding).toHaveTextContent(
+      `Next reset: ${new Date(1_800_000_000_123).toISOString()}`,
+    );
+    expect(coding).not.toHaveTextContent("999");
+    expect(
+      screen.getByText(/Latest query: Network query failed/),
+    ).toHaveTextContent(new Date(1_800_000_010_000).toISOString());
+    expect(zcodeAccountsApi.readCurrentIdentity).not.toHaveBeenCalled();
+  });
   it("queries the original request on inspect and refresh after reopening without a switch", async () => {
     vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue({
       requestId: "original",
@@ -190,14 +910,29 @@ describe("ZCode saved accounts", () => {
     expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
   });
-  it("shows actionable source verification and blocks an imported account switch", async () => {
+  it("shows the backend activation reason for an imported account without requiring every import to reauthenticate", async () => {
     vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
       ...catalog,
-      profiles: [{ ...catalog.profiles[0], sourceVerified: false }],
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          sourceVerified: false,
+          identitySource: "packageDeclared",
+          canActivate: false,
+          activationBlockedReason: {
+            code: "zcode.account.target_scope_mismatch",
+            remedy: "chooseSavedAccount",
+            committed: false,
+          },
+        },
+      ],
     });
     mount();
     await inspect();
-    await screen.findByText(/Source unverified\. Sign in/);
+    await screen.findByText(/Declared by account bundle/);
+    expect(
+      screen.queryByText(/Source unverified\. Sign in/),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Switch saved account" }),
     ).toBeDisabled();
@@ -329,7 +1064,7 @@ describe("ZCode saved accounts", () => {
     });
     mount();
     await screen.findByText(
-      "Installed build is unverified; account actions remain blocked.",
+      "Installed build is unverified; native capture and switching remain blocked.",
     );
     await waitFor(() =>
       expect(screen.getByLabelText("ZCode installation")).toHaveValue(
@@ -368,13 +1103,14 @@ describe("ZCode saved accounts", () => {
     ).not.toBeInTheDocument();
     expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
   });
-  it("loads only local recovery on mount, requires reviewed source and never captures on inspect or cancel", async () => {
+  it("loads the independent library and local recovery on mount but never captures without review", async () => {
     mount();
     await waitFor(() =>
       expect(zcodeAccountsApi.recoveryStatus).toHaveBeenCalledTimes(1),
     );
     expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
     expect(zcodeAccountsApi.status).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.library).toHaveBeenCalled();
     expect(
       screen.getByRole("button", { name: "Inspect selected source" }),
     ).toBeDisabled();

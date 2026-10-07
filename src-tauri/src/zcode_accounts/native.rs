@@ -32,6 +32,30 @@ pub struct NativeCipher {
 }
 
 impl NativeCipher {
+    /// Produces the same per-value enc:v1 image consumed by the native adapter.
+    pub(super) fn encrypt(&self, plaintext: &str) -> Result<String, NativeError> {
+        if plaintext.is_empty() || plaintext.len() > MAX_DOCUMENT_BYTES {
+            return Err(NativeError::InvalidEnvelope);
+        }
+        let mut nonce = [0u8; 12];
+        getrandom::fill(&mut nonce).map_err(|_| NativeError::InvalidEnvelope)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&self.key).map_err(|_| NativeError::InvalidEnvelope)?;
+        let mut encrypted = cipher
+            .encrypt(&Nonce::from(nonce), plaintext.as_bytes())
+            .map_err(|_| NativeError::InvalidEnvelope)?;
+        let tag = encrypted.split_off(encrypted.len() - 16);
+        let encoded = format!(
+            "enc:v1:{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(nonce),
+            URL_SAFE_NO_PAD.encode(tag),
+            URL_SAFE_NO_PAD.encode(encrypted)
+        );
+        if encoded.len() > MAX_DOCUMENT_BYTES {
+            return Err(NativeError::InvalidEnvelope);
+        }
+        Ok(encoded)
+    }
     pub fn profile_label(&self, snapshot: &AccountSnapshot) -> Result<Option<String>, NativeError> {
         let (checked, label) = self.inspect_profile(&snapshot.scoped_document())?;
         if checked.identity() != snapshot.identity() {

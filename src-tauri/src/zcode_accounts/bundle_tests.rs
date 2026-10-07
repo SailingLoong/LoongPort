@@ -10,6 +10,301 @@ const VALID: &[u8] =
     include_bytes!("../../../tests/zcode-bundle-limits/fixtures/valid-multiple.zsb");
 
 #[test]
+fn export_selected_snapshot_roundtrips_complete_credentials_and_official_name_only() {
+    use super::super::native::tests::{native_document, TEST_CONTEXT, TEST_SECRET};
+
+    let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+    let first = native
+        .inspect(&native_document(
+            OAuthFamily::BigModel,
+            "synthetic-one",
+            "one",
+        ))
+        .unwrap();
+    let selected = native
+        .inspect(&native_document(OAuthFamily::Zai, "synthetic-two", "two"))
+        .unwrap();
+    let file = encode_bundle(
+        &[BundleExportAccount {
+            snapshot: &selected,
+            created_at: "2026-10-05T00:00:00Z",
+        }],
+        &native,
+        PASSWORD,
+        "2026-10-06T00:00:00Z",
+    )
+    .unwrap();
+    let opened = open_bundle(&file, PASSWORD).unwrap();
+    let entries = opened.entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    let document =
+        CredentialDocument::parse(entries[0].as_ref().unwrap().credentials.get().as_bytes())
+            .unwrap();
+    assert!(document == selected.scoped_document());
+    assert!(native.inspect(&document).unwrap().identity() == selected.identity());
+    assert!(native.inspect(&document).unwrap().identity() != first.identity());
+    let inner: serde_json::Value = serde_json::from_slice(&opened.plaintext).unwrap();
+    assert_eq!(inner["format"], "zcode-accounts-bundle");
+    assert_eq!(inner["version"], 2);
+    assert_eq!(inner["exportedAt"], "2026-10-06T00:00:00Z");
+    let account = &inner["accounts"][0];
+    assert_eq!(account["name"], "synthetic-two");
+    assert_eq!(account["createdAt"], "2026-10-05T00:00:00Z");
+    assert!(account["config"].is_null());
+    assert_eq!(
+        account
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["config", "createdAt", "credentials", "name"])
+    );
+    assert_eq!(account["credentials"].as_object().unwrap().len(), 7);
+    assert!(account["credentials"].get("ssh:unrelated").is_none());
+    let ciphertext = String::from_utf8(file).unwrap();
+    for excluded in [
+        "synthetic-one",
+        "synthetic-two",
+        "SYNTHETIC_CANARY",
+        PASSWORD,
+        "enc:v1:",
+    ] {
+        assert!(!ciphertext.contains(excluded));
+    }
+}
+
+fn export_fixture() -> (NativeCipher, AccountSnapshot) {
+    let native = NativeCipher::new("synthetic-target-context", LOCAL_SECRET).unwrap();
+    let opened = open_bundle(VALID, PASSWORD).unwrap();
+    let entries = opened.entries().unwrap();
+    let document =
+        CredentialDocument::parse(entries[0].as_ref().unwrap().credentials.get().as_bytes())
+            .unwrap();
+    let snapshot = native.inspect(&document).unwrap();
+    (native, snapshot)
+}
+
+fn export_one(native: &NativeCipher, snapshot: &AccountSnapshot, password: &str) -> Vec<u8> {
+    encode_bundle(
+        &[BundleExportAccount {
+            snapshot,
+            created_at: "2026-10-05T00:00:00Z",
+        }],
+        native,
+        password,
+        "2026-10-06T00:00:00Z",
+    )
+    .unwrap()
+}
+
+#[test]
+fn export_password_bytes_are_preserved_and_random_salt_and_nonce_change_each_time() {
+    let (native, snapshot) = export_fixture();
+    let password = " \t synthetic-口令-🔑 \n";
+    let first = export_one(&native, &snapshot, password);
+    let second = export_one(&native, &snapshot, password);
+    assert!(open_bundle(&first, password).is_ok());
+    assert_eq!(
+        open_bundle(&first, password.trim()).err(),
+        Some(BundleFailure::Authentication)
+    );
+    assert_eq!(
+        open_bundle(&first, "wrong-synthetic-password").err(),
+        Some(BundleFailure::Authentication)
+    );
+    let a: Envelope = serde_json::from_slice(&first).unwrap();
+    let b: Envelope = serde_json::from_slice(&second).unwrap();
+    assert_ne!(a.kdf.salt, b.kdf.salt);
+    assert_ne!(a.cipher.nonce, b.cipher.nonce);
+    assert_ne!(a.cipher.data, b.cipher.data);
+    assert_eq!(STANDARD.decode(a.kdf.salt).unwrap().len(), 16);
+    assert_eq!(STANDARD.decode(a.cipher.nonce).unwrap().len(), 12);
+    assert_eq!(STANDARD.decode(a.cipher.tag).unwrap().len(), 16);
+}
+
+#[test]
+fn export_rejects_empty_or_oversized_passwords_with_static_errors() {
+    let (native, snapshot) = export_fixture();
+    for password in [String::new(), " \r\n\t".into(), "a".repeat(4097)] {
+        let error = encode_bundle(
+            &[BundleExportAccount {
+                snapshot: &snapshot,
+                created_at: "synthetic",
+            }],
+            &native,
+            &password,
+            "synthetic",
+        )
+        .unwrap_err();
+        assert_eq!(error, BundleFailure::Password);
+        assert_eq!(format!("{error:?}"), "Password");
+    }
+    let maximum = "x".repeat(4096);
+    assert!(open_bundle(&export_one(&native, &snapshot, &maximum), &maximum).is_ok());
+}
+
+#[test]
+fn export_requires_every_selected_snapshot_to_authenticate_in_the_same_native_context() {
+    let (native, snapshot) = export_fixture();
+    let foreign_context = NativeCipher::new("other-synthetic-context", LOCAL_SECRET).unwrap();
+    let foreign_key =
+        NativeCipher::new("synthetic-target-context", "foreign-synthetic-secret").unwrap();
+    for cipher in [&foreign_context, &foreign_key] {
+        let error = encode_bundle(
+            &[BundleExportAccount {
+                snapshot: &snapshot,
+                created_at: "synthetic",
+            }],
+            cipher,
+            PASSWORD,
+            "synthetic",
+        )
+        .unwrap_err();
+        assert_eq!(error, BundleFailure::Account);
+        assert_eq!(format!("{error:?}"), "Account");
+    }
+    let forged = AccountSnapshot::capture(
+        AccountIdentity::new(
+            "synthetic-target-context",
+            OAuthFamily::BigModel,
+            "forged-synthetic-id",
+        )
+        .unwrap(),
+        &snapshot.scoped_document(),
+    )
+    .unwrap();
+    assert_eq!(
+        encode_bundle(
+            &[
+                BundleExportAccount {
+                    snapshot: &snapshot,
+                    created_at: "synthetic"
+                },
+                BundleExportAccount {
+                    snapshot: &forged,
+                    created_at: "synthetic"
+                },
+            ],
+            &native,
+            PASSWORD,
+            "synthetic",
+        )
+        .err(),
+        Some(BundleFailure::Account)
+    );
+}
+
+#[test]
+fn export_enforces_account_limit_and_accepts_fifty_complete_snapshots() {
+    use super::super::bundle_limits::MAX_BUNDLE_ACCOUNTS;
+    let (native, snapshot) = export_fixture();
+    for count in [0, MAX_BUNDLE_ACCOUNTS + 1] {
+        let accounts = (0..count)
+            .map(|_| BundleExportAccount {
+                snapshot: &snapshot,
+                created_at: "synthetic",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encode_bundle(&accounts, &native, PASSWORD, "synthetic").err(),
+            Some(BundleFailure::Limits(BundleError::ResourceLimit))
+        );
+    }
+    let accounts = (0..MAX_BUNDLE_ACCOUNTS)
+        .map(|_| BundleExportAccount {
+            snapshot: &snapshot,
+            created_at: "synthetic",
+        })
+        .collect::<Vec<_>>();
+    let file = encode_bundle(&accounts, &native, PASSWORD, "synthetic").unwrap();
+    assert_eq!(
+        open_bundle(&file, PASSWORD)
+            .unwrap()
+            .entries()
+            .unwrap()
+            .len(),
+        MAX_BUNDLE_ACCOUNTS
+    );
+}
+
+#[test]
+fn export_enforces_inner_and_encoded_file_size_limits_including_json_escaping() {
+    let (native, snapshot) = export_fixture();
+    let accounts = [BundleExportAccount {
+        snapshot: &snapshot,
+        created_at: "synthetic",
+    }];
+    // The first inner JSON fits 10 MiB, but its base64 envelope cannot fit.
+    for timestamp in [
+        "x".repeat(8 * 1024 * 1024),
+        "x".repeat(MAX_BUNDLE_BYTES),
+        "\"".repeat(6 * 1024 * 1024),
+    ] {
+        assert_eq!(
+            encode_bundle(&accounts, &native, PASSWORD, &timestamp).err(),
+            Some(BundleFailure::Limits(BundleError::ResourceLimit))
+        );
+    }
+}
+
+#[test]
+fn export_ciphertext_is_decryptable_by_independent_ring_aead_and_detects_tampering() {
+    let (native, snapshot) = export_fixture();
+    let file = export_one(&native, &snapshot, PASSWORD);
+    let mut envelope: serde_json::Value = serde_json::from_slice(&file).unwrap();
+    assert_eq!(envelope["format"], "zsw-accounts-bundle");
+    assert_eq!(envelope["version"], 1);
+    assert_eq!(envelope["kdf"]["algo"], "pbkdf2-hmac-sha256");
+    assert_eq!(envelope["kdf"]["iters"], 100_000);
+    assert_eq!(envelope["cipher"]["algo"], "aes-256-gcm");
+    let salt = STANDARD
+        .decode(envelope["kdf"]["salt"].as_str().unwrap())
+        .unwrap();
+    let nonce: [u8; 12] = STANDARD
+        .decode(envelope["cipher"]["nonce"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let tag = STANDARD
+        .decode(envelope["cipher"]["tag"].as_str().unwrap())
+        .unwrap();
+    let mut encrypted = STANDARD
+        .decode(envelope["cipher"]["data"].as_str().unwrap())
+        .unwrap();
+    encrypted.extend_from_slice(&tag);
+    let mut key = Zeroizing::new([0u8; 32]);
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(100_000).unwrap(),
+        &salt,
+        PASSWORD.as_bytes(),
+        &mut *key,
+    );
+    let cipher = ring::aead::LessSafeKey::new(
+        ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &*key).unwrap(),
+    );
+    let mut clear = Zeroizing::new(encrypted);
+    let plaintext = cipher
+        .open_in_place(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut clear,
+        )
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(plaintext).unwrap();
+    assert_eq!(payload["accounts"][0]["name"], "Synthetic account");
+    assert!(payload["accounts"][0]["config"].is_null());
+    let mut corrupted = tag;
+    corrupted[0] ^= 1;
+    envelope["cipher"]["tag"] = STANDARD.encode(corrupted).into();
+    assert_eq!(
+        open_bundle(&serde_json::to_vec(&envelope).unwrap(), PASSWORD).err(),
+        Some(BundleFailure::Authentication)
+    );
+}
+
+#[test]
 fn fixed_multi_account_vector_authenticates_and_preserves_native_identities() {
     let payload = open_bundle(VALID, PASSWORD).unwrap();
     let entries = payload.entries().unwrap();

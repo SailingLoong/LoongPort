@@ -37,7 +37,7 @@ pub(crate) struct PublicError {
     committed: bool,
 }
 impl PublicError {
-    fn new(code: &'static str, remedy: &'static str) -> Self {
+    pub(super) fn new(code: &'static str, remedy: &'static str) -> Self {
         Self {
             code,
             remedy,
@@ -454,31 +454,37 @@ pub(crate) async fn preview_capture(
 }
 pub(crate) async fn preview_bundle(
     db: Arc<Database>,
-    source: ContextSelection,
-    context_revision: String,
+    data_root: Option<std::path::PathBuf>,
     input: runtime::BundlePreviewInput,
 ) -> Result<runtime::BundlePreview, PublicError> {
-    let input_source = inputs(source, context_revision)?;
-    runtime::preview_bundle(db, input_source.probe, input_source.contracts, input)
+    runtime::preview_library_bundle(db, data_root, input)
         .await
         .map_err(Into::into)
 }
 pub(crate) async fn commit_bundle(
     db: Arc<Database>,
-    source: ContextSelection,
-    context_revision: String,
+    data_root: Option<std::path::PathBuf>,
     input: runtime::BundleCommitInput,
 ) -> Result<Vec<CaptureCommitOutcome>, PublicError> {
-    let input_source = match inputs(source, context_revision) {
-        Ok(value) => value,
-        Err(error) => {
-            runtime::cancel_bundle_preview(db, input.preview_id)
-                .await
-                .map_err(PublicError::from)?;
-            return Err(error);
-        }
-    };
-    runtime::commit_bundle(db, input_source.probe, input_source.contracts, input)
+    runtime::commit_library_bundle(db, data_root, input)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn check_bundle(
+    db: Arc<Database>,
+    preview_id: String,
+    selected: Vec<runtime::ImportChoice>,
+    allow: bool,
+) -> Result<super::import_reviews::CheckProgress, PublicError> {
+    runtime::check_library_bundle(db, preview_id, selected, allow)
+        .await
+        .map_err(Into::into)
+}
+pub(crate) async fn bundle_check_progress(
+    db: Arc<Database>,
+    preview_id: String,
+) -> Result<super::import_reviews::CheckProgress, PublicError> {
+    runtime::bundle_check_progress(db, preview_id)
         .await
         .map_err(Into::into)
 }
@@ -622,3 +628,38 @@ pub(crate) async fn delete(
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
+
+pub(crate) async fn read_current_identity(
+    db: Arc<Database>,
+    source: ContextSelection,
+    revision: String,
+) -> Result<runtime::CurrentIdentity, PublicError> {
+    let input = inputs(source, revision)?;
+    runtime::read_current_identity(db, input.probe, input.contracts)
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn check_saved_connections(
+    db: Arc<Database>,
+    request_id: String,
+    data_root: Option<std::path::PathBuf>,
+    revision: String,
+    id: String,
+    allow_official_check: bool,
+) -> Result<CatalogStatus, PublicError> {
+    runtime::check_saved_connections(
+        db,
+        request_id,
+        data_root,
+        revision,
+        id,
+        allow_official_check,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+pub(crate) fn cancel_connection_check(request_id: &str) -> Result<&'static str, PublicError> {
+    runtime::cancel_connection_check(request_id).map_err(Into::into)
+}

@@ -1,5 +1,34 @@
 use super::super::core::{AccountIdentity, OAuthFamily};
 use super::*;
+
+#[test]
+fn native_encoder_uses_existing_format_with_fresh_nonce_and_authenticated_text() {
+    let cipher = NativeCipher::new("synthetic-context", "synthetic-secret").unwrap();
+    let first = cipher.encrypt("synthetic-凭据-value").unwrap();
+    let second = cipher.encrypt("synthetic-凭据-value").unwrap();
+    assert_ne!(first, second);
+    assert!(first.starts_with("enc:v1:"));
+    assert_eq!(
+        cipher.decrypt(&first).unwrap().as_str(),
+        "synthetic-凭据-value"
+    );
+    assert_eq!(
+        cipher.decrypt(&second).unwrap().as_str(),
+        "synthetic-凭据-value"
+    );
+    assert!(NativeCipher::new("synthetic-context", "other-secret")
+        .unwrap()
+        .decrypt(&first)
+        .is_err());
+    assert!(!first.contains("synthetic-"));
+}
+
+#[test]
+fn native_encoder_enforces_the_existing_encoded_document_bound() {
+    let cipher = NativeCipher::new("synthetic-context", "synthetic-secret").unwrap();
+    assert!(cipher.encrypt(&"a".repeat(MAX_DOCUMENT_BYTES)).is_err());
+    assert!(cipher.encrypt("").is_err());
+}
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,

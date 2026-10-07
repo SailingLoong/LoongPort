@@ -1,17 +1,25 @@
-//! Fixed .zsb authentication and bounded, strict structure inspection.
+//! Fixed .zsb encoding/authentication and bounded, strict structure inspection.
 //! This module never accesses a path, imports config, or grants account scope.
 use super::bundle_limits::{
     validate_inner, validate_outer, BundleError, EnvelopeParameters, MAX_BUNDLE_BYTES,
 };
+#[cfg(any(unix, test))]
+use super::core::AccountSnapshot;
 use super::core::{StrictRecord, MAX_DOCUMENT_BYTES};
+#[cfg(any(unix, test))]
+use super::native::NativeCipher;
+#[cfg(any(unix, test))]
+use aes_gcm::aead::AeadInOut;
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{borrow::Cow, num::NonZeroU32};
+#[cfg(any(unix, test))]
+use std::{collections::BTreeMap, io};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +29,10 @@ pub(super) enum BundleFailure {
     Authentication,
     Inner,
     Password,
+    #[cfg(any(unix, test))]
+    Account,
+    #[cfg(any(unix, test))]
+    Encryption,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EntryFailure {
@@ -28,7 +40,7 @@ pub(super) enum EntryFailure {
     ResourceLimit,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Envelope {
     format: String,
@@ -36,14 +48,14 @@ struct Envelope {
     kdf: Kdf,
     cipher: Cipher,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Kdf {
     algo: String,
     iters: u32,
     salt: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Cipher {
     algo: String,
@@ -57,6 +69,167 @@ pub(super) struct OpenedBundle {
 }
 pub(super) struct ParsedAccount<'a> {
     pub credentials: &'a RawValue,
+}
+
+#[cfg(any(unix, test))]
+pub(super) struct BundleExportAccount<'a> {
+    pub snapshot: &'a AccountSnapshot,
+    pub created_at: &'a str,
+}
+
+#[cfg(any(unix, test))]
+#[derive(Serialize)]
+struct ExportInner<'a> {
+    format: &'static str,
+    version: u32,
+    #[serde(rename = "exportedAt")]
+    exported_at: &'a str,
+    accounts: Vec<ExportAccount<'a>>,
+}
+
+#[cfg(any(unix, test))]
+#[derive(Serialize)]
+struct ExportAccount<'a> {
+    name: &'a str,
+    #[serde(rename = "createdAt")]
+    created_at: &'a str,
+    credentials: &'a BTreeMap<String, String>,
+    config: Option<()>,
+}
+
+/// Same-environment backup of exactly the supplied saved snapshots. The native
+/// cipher authenticates their scope and supplies the official profile name;
+/// callers cannot substitute LoongPort labels or capability metadata. Inner
+/// enc:v1 values are retained byte-for-byte, so this is not portable migration.
+#[cfg(any(unix, test))]
+pub(super) fn encode_bundle(
+    accounts: &[BundleExportAccount<'_>],
+    native: &NativeCipher,
+    password: &str,
+    exported_at: &str,
+) -> Result<Vec<u8>, BundleFailure> {
+    validate_password(password)?;
+    validate_inner("zcode-accounts-bundle", 2, accounts.len(), 1).map_err(BundleFailure::Limits)?;
+    let mut envelope = Envelope {
+        format: "zsw-accounts-bundle".into(),
+        version: 1,
+        kdf: Kdf {
+            algo: "pbkdf2-hmac-sha256".into(),
+            iters: 100_000,
+            salt: STANDARD.encode([0u8; 16]),
+        },
+        cipher: Cipher {
+            algo: "aes-256-gcm".into(),
+            nonce: STANDARD.encode([0u8; 12]),
+            tag: STANDARD.encode([0u8; 16]),
+            data: String::new(),
+        },
+    };
+    // Standard base64 expands every three ciphertext bytes to four. All other
+    // outer fields have fixed serialized sizes; reject before allocating the
+    // plaintext, requesting randomness, or running the password KDF.
+    let overhead = json_size(&envelope, MAX_BUNDLE_BYTES)?;
+    let max_plaintext = (MAX_BUNDLE_BYTES - overhead) / 4 * 3;
+    let mut documents = Vec::with_capacity(accounts.len());
+    let mut names = Vec::with_capacity(accounts.len());
+    let mut credential_bytes = 0;
+    for account in accounts {
+        let document = account.snapshot.scoped_document();
+        credential_bytes += json_size(document.entries(), MAX_DOCUMENT_BYTES)?;
+        if credential_bytes > max_plaintext {
+            return Err(BundleFailure::Limits(BundleError::ResourceLimit));
+        }
+        let name = native
+            .profile_label(account.snapshot)
+            .map_err(|_| BundleFailure::Account)?
+            .unwrap_or_default();
+        documents.push(document);
+        names.push(Zeroizing::new(name));
+    }
+    let inner = ExportInner {
+        format: "zcode-accounts-bundle",
+        version: 2,
+        exported_at,
+        accounts: accounts
+            .iter()
+            .zip(&documents)
+            .zip(&names)
+            .map(|((account, document), name)| ExportAccount {
+                name,
+                created_at: account.created_at,
+                credentials: document.entries(),
+                config: None,
+            })
+            .collect(),
+    };
+    let plaintext_bytes = json_size(&inner, max_plaintext)?;
+    // Exact capacity includes the GCM tag, avoiding reallocations that could
+    // leave former plaintext allocations behind. Encryption happens in place.
+    let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext_bytes + 16));
+    serde_json::to_writer(&mut *buffer, &inner).map_err(|_| BundleFailure::Inner)?;
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut salt).map_err(|_| BundleFailure::Encryption)?;
+    getrandom::fill(&mut nonce).map_err(|_| BundleFailure::Encryption)?;
+    let key = derive_key(password, &salt);
+    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| BundleFailure::Encryption)?;
+    cipher
+        .encrypt_in_place(&Nonce::from(nonce), b"", &mut *buffer)
+        .map_err(|_| BundleFailure::Encryption)?;
+    let (data, tag) = buffer.split_at(plaintext_bytes);
+    envelope.kdf.salt = STANDARD.encode(salt);
+    envelope.cipher.nonce = STANDARD.encode(nonce);
+    envelope.cipher.tag = STANDARD.encode(tag);
+    envelope.cipher.data = STANDARD.encode(data);
+    let file = serde_json::to_vec(&envelope).map_err(|_| BundleFailure::Envelope)?;
+    if file.len() > MAX_BUNDLE_BYTES {
+        return Err(BundleFailure::Limits(BundleError::ResourceLimit));
+    }
+    Ok(file)
+}
+
+/// Counts JSON bytes without storing any plaintext or allocating a large image.
+#[cfg(any(unix, test))]
+fn json_size(value: &impl Serialize, limit: usize) -> Result<usize, BundleFailure> {
+    struct Counter {
+        bytes: usize,
+        limit: usize,
+    }
+    impl io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() > self.limit - self.bytes {
+                return Err(io::Error::other("bundle size limit"));
+            }
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { bytes: 0, limit };
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| BundleFailure::Limits(BundleError::ResourceLimit))?;
+    Ok(counter.bytes)
+}
+
+fn validate_password(password: &str) -> Result<(), BundleFailure> {
+    if password.trim().is_empty() || password.len() > 4096 {
+        return Err(BundleFailure::Password);
+    }
+    Ok(())
+}
+
+fn derive_key(password: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(100_000).expect("fixed positive iteration count"),
+        salt,
+        password.as_bytes(),
+        &mut *key,
+    );
+    key
 }
 
 #[derive(Deserialize)]
@@ -94,9 +267,7 @@ pub(super) fn open_bundle(file: &[u8], password: &str) -> Result<OpenedBundle, B
     if file.is_empty() || file.len() > MAX_BUNDLE_BYTES {
         return Err(BundleFailure::Limits(BundleError::ResourceLimit));
     }
-    if password.trim().is_empty() || password.len() > 4096 {
-        return Err(BundleFailure::Password);
-    }
+    validate_password(password)?;
     let envelope: Envelope = serde_json::from_slice(file).map_err(|_| BundleFailure::Envelope)?;
     let decode = |text: &str| STANDARD.decode(text).map_err(|_| BundleFailure::Envelope);
     let salt = decode(&envelope.kdf.salt)?;
@@ -118,14 +289,7 @@ pub(super) fn open_bundle(file: &[u8], password: &str) -> Result<OpenedBundle, B
         },
     )
     .map_err(BundleFailure::Limits)?;
-    let mut key = Zeroizing::new([0u8; 32]);
-    ring::pbkdf2::derive(
-        ring::pbkdf2::PBKDF2_HMAC_SHA256,
-        NonZeroU32::new(100_000).expect("fixed positive iteration count"),
-        &salt,
-        password.as_bytes(),
-        &mut *key,
-    );
+    let key = derive_key(password, &salt);
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| BundleFailure::Envelope)?;
     let iv: [u8; 12] = nonce.try_into().map_err(|_| BundleFailure::Envelope)?;
     data.extend_from_slice(&tag);

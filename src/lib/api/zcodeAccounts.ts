@@ -29,17 +29,141 @@ export interface SourceContext {
   version: string;
   build: string;
 }
+export type CheckReason =
+  | "unverified"
+  | "missingCredential"
+  | "invalidCredential"
+  | "appVersionUnknown"
+  | "authRejected"
+  | "businessRejected"
+  | "malformedResponse"
+  | "timeout"
+  | "network";
+export interface AccountCheck {
+  state: "accepted" | "unavailable" | "unknown";
+  reason: CheckReason | null;
+  checkedAt: number | null;
+  source:
+    "businessToken" | "globalStartJwt" | "accountStartJwt" | "codingKey" | null;
+  latestFailure: { reason: CheckReason; checkedAt: number } | null;
+}
+type EntitlementState = "available" | "unavailable" | "pending" | "unknown";
+export interface SessionCheckDisplay {
+  selectedProfileId: string;
+  business: {
+    check: AccountCheck;
+    officialOwnerId: string | null;
+    displayName: string | null;
+  };
+  start: {
+    check: AccountCheck;
+    entitlement: EntitlementState;
+    effectiveAtSeconds: number | null;
+    quota: AccountCheck;
+    serverTimeSeconds: number | null;
+    plans: {
+      userPlanId: string | null;
+      planId: string | null;
+      name: string | null;
+      status: string | null;
+      startsAtSeconds: number | null;
+      endsAtSeconds: number | null;
+      entitlements: {
+        entitlementId: string | null;
+        showName: string | null;
+        period: string | null;
+        effectiveAtSeconds: number | null;
+      }[];
+    }[];
+    buckets: {
+      bucketId: string | null;
+      userPlanId: string | null;
+      planId: string | null;
+      entitlementId: string | null;
+      showName: string | null;
+      meter: string | null;
+      unitType: string | null;
+      capabilities: string[];
+      totalUnits: number | null;
+      usedUnits: number | null;
+      reservedUnits: number | null;
+      remainingUnits: number | null;
+      availableUnits: number | null;
+      periodStartSeconds: number | null;
+      periodEndSeconds: number | null;
+      expiresAtSeconds: number | null;
+    }[];
+  };
+  coding: {
+    check: AccountCheck;
+    subscription: AccountCheck;
+    entitlement: EntitlementState;
+    quota: AccountCheck;
+    subscriptions: {
+      productId: string | null;
+      productName: string | null;
+      status: string;
+      inCurrentPeriod: boolean;
+      billingCycle: string | null;
+      nextRenewTime: string | null;
+      valid: string | null;
+      autoRenew: boolean | null;
+    }[];
+    limits: {
+      limitType: string;
+      unit: number | null;
+      number: number | null;
+      displayUnit?: string | null;
+      windowLabel?: string | null;
+      usage: number | null;
+      currentValue: number | null;
+      remaining: number | null;
+      percentage: number | null;
+      nextResetTimeMs: number | null;
+      usageDetails: {
+        modelCode: string | null;
+        displayName: string | null;
+        usage: number | null;
+      }[];
+    }[];
+  };
+}
+export interface SavedAccount {
+  id: string;
+  family: "zai" | "bigmodel";
+  label: string | null;
+  sourceVerified: boolean;
+  identitySource: "nativeCapture" | "officialLogin" | "packageDeclared" | null;
+  officialLabel: string | null;
+  capabilities: SessionCheckDisplay | null;
+  canActivate: boolean;
+  activationBlockedReason: AccountError | null;
+  needsKey: boolean;
+  canCompleteCoding: boolean;
+  completeCodingBlockedReason: AccountError | null;
+  canCheckConnections: boolean;
+  checkConnectionsBlockedReason: AccountError | null;
+}
 export interface CatalogStatus {
   revision: string;
-  profiles: {
-    id: string;
-    family: "zai" | "bigmodel";
-    label: string | null;
-    sourceVerified: boolean;
-  }[];
+  profiles: SavedAccount[];
   current: string | null;
   pending: boolean;
   nativeUnconfirmed: boolean;
+  actions: {
+    canAdd: boolean;
+    canImport: boolean;
+    canBackup: boolean;
+    canEditLabels: boolean;
+    blockedReason: AccountError | null;
+  };
+}
+export interface CurrentNativeIdentity {
+  contextRevision: string;
+  id: string | null;
+  label: string | null;
+  family: "zai" | "bigmodel" | null;
+  readAt: number;
 }
 export interface CapturePreview {
   id: string;
@@ -59,6 +183,19 @@ export interface BundlePreview {
     ambiguous: boolean;
     error: "invalidEntry" | "incompatibleCredentials" | null;
   }[];
+}
+export interface BundleCheckProgress {
+  previewId: string;
+  selected: { index: number; updateDuplicate: boolean }[];
+  status: "preview" | "checking" | "ready" | "failed";
+  rows: {
+    index: number;
+    capabilities: SessionCheckDisplay | null;
+    error: AccountError | null;
+  }[];
+  completed: number;
+  total: number;
+  error: AccountError | null;
 }
 export interface RecoveryStatus {
   revision: string;
@@ -198,6 +335,18 @@ export const accountErrorText = {
     "Choose a saved personal account in the inspected source's account family.",
   vault_unavailable:
     "Unlock the local LoongPort vault, then refresh account status.",
+  official_unavailable:
+    "The official service could not complete this step. Check the current login status before continuing.",
+  key_result_unknown:
+    "The official Key may already exist. Query the original project result before creating another.",
+  key_cleanup_pending:
+    "The local Key operation record needs attention. Query its original result before creating a Key.",
+  request_not_sent:
+    "The write was not sent. Review the current account and project before confirming again.",
+  login_changed:
+    "This login operation changed or expired. Query its original result before starting again.",
+  save_result_unknown:
+    "Saving may already have completed. Query the original result; closing this dialog does not undo a submitted save.",
   operation_failed:
     "The account operation could not be verified. Inspect the selected source again and refresh status.",
   committed_recovery_required:
@@ -272,6 +421,8 @@ const remedies = new Set([
   "checkLocalStorage",
   "reviewSavedData",
   "queryOriginal",
+  "retryKeyConsent",
+  "retrySave",
 ]);
 export function safeAccountError(cause: unknown): AccountError {
   const value =
@@ -304,7 +455,223 @@ async function call<T>(
   }
 }
 type CaptureOutcome = "saved" | "refreshed";
+function fields<T, K extends keyof T>(value: T, keys: K[]): Pick<T, K> {
+  return Object.fromEntries(keys.map((key) => [key, value[key]])) as Pick<T, K>;
+}
+function publicCheck(value: AccountCheck): AccountCheck {
+  return {
+    ...fields(value, ["state", "reason", "checkedAt", "source"]),
+    latestFailure: value.latestFailure
+      ? fields(value.latestFailure, ["reason", "checkedAt"])
+      : null,
+  };
+}
+function publicCapabilities(value: SessionCheckDisplay): SessionCheckDisplay {
+  return {
+    selectedProfileId: value.selectedProfileId,
+    business: {
+      ...fields(value.business, ["officialOwnerId", "displayName"]),
+      check: publicCheck(value.business.check),
+    },
+    start: {
+      ...fields(value.start, [
+        "entitlement",
+        "effectiveAtSeconds",
+        "serverTimeSeconds",
+      ]),
+      check: publicCheck(value.start.check),
+      quota: publicCheck(value.start.quota),
+      plans: value.start.plans.map((plan) => ({
+        ...fields(plan, [
+          "userPlanId",
+          "planId",
+          "name",
+          "status",
+          "startsAtSeconds",
+          "endsAtSeconds",
+        ]),
+        entitlements: plan.entitlements.map((entry) =>
+          fields(entry, [
+            "entitlementId",
+            "showName",
+            "period",
+            "effectiveAtSeconds",
+          ]),
+        ),
+      })),
+      buckets: value.start.buckets.map((bucket) => ({
+        ...fields(bucket, [
+          "bucketId",
+          "userPlanId",
+          "planId",
+          "entitlementId",
+          "showName",
+          "meter",
+          "unitType",
+          "totalUnits",
+          "usedUnits",
+          "reservedUnits",
+          "remainingUnits",
+          "availableUnits",
+          "periodStartSeconds",
+          "periodEndSeconds",
+          "expiresAtSeconds",
+        ]),
+        capabilities: [...bucket.capabilities],
+      })),
+    },
+    coding: {
+      entitlement: value.coding.entitlement,
+      check: publicCheck(value.coding.check),
+      subscription: publicCheck(value.coding.subscription),
+      quota: publicCheck(value.coding.quota),
+      subscriptions: value.coding.subscriptions.map((entry) =>
+        fields(entry, [
+          "productId",
+          "productName",
+          "status",
+          "inCurrentPeriod",
+          "billingCycle",
+          "nextRenewTime",
+          "valid",
+          "autoRenew",
+        ]),
+      ),
+      limits: value.coding.limits.map((limit) => ({
+        ...fields(limit, [
+          "limitType",
+          "unit",
+          "number",
+          "displayUnit",
+          "windowLabel",
+          "usage",
+          "currentValue",
+          "remaining",
+          "percentage",
+          "nextResetTimeMs",
+        ]),
+        usageDetails: limit.usageDetails.map((entry) =>
+          fields(entry, ["modelCode", "displayName", "usage"]),
+        ),
+      })),
+    },
+  };
+}
+function publicCatalog(result: CatalogStatus): CatalogStatus {
+  return {
+    revision: result.revision,
+    profiles: result.profiles.map((profile) => ({
+      ...fields(profile, ["id", "family", "label"]),
+      sourceVerified: profile.sourceVerified === true,
+      identitySource: profile.identitySource ?? null,
+      officialLabel: profile.officialLabel ?? null,
+      capabilities: profile.capabilities
+        ? publicCapabilities(profile.capabilities)
+        : null,
+      canActivate: profile.canActivate === true,
+      needsKey: profile.needsKey === true,
+      canCompleteCoding: profile.canCompleteCoding === true,
+      canCheckConnections: profile.canCheckConnections === true,
+      checkConnectionsBlockedReason: profile.checkConnectionsBlockedReason
+        ? safeAccountError(profile.checkConnectionsBlockedReason)
+        : null,
+      completeCodingBlockedReason: profile.completeCodingBlockedReason
+        ? safeAccountError(profile.completeCodingBlockedReason)
+        : null,
+      activationBlockedReason: profile.activationBlockedReason
+        ? safeAccountError(profile.activationBlockedReason)
+        : null,
+    })),
+    current: result.current,
+    pending: result.pending,
+    nativeUnconfirmed: result.nativeUnconfirmed,
+    actions: {
+      canAdd: result.actions?.canAdd === true,
+      canImport: result.actions?.canImport === true,
+      canBackup: result.actions?.canBackup === true,
+      canEditLabels: result.actions?.canEditLabels === true,
+      blockedReason: result.actions?.blockedReason
+        ? safeAccountError(result.actions.blockedReason)
+        : null,
+    },
+  };
+}
+function publicBundleCheck(result: BundleCheckProgress): BundleCheckProgress {
+  return {
+    ...fields(result, ["previewId", "status", "completed", "total"]),
+    selected: (result.selected ?? []).map((choice) =>
+      fields(choice, ["index", "updateDuplicate"]),
+    ),
+    rows: result.rows.map((row) => ({
+      index: row.index,
+      capabilities: row.capabilities
+        ? publicCapabilities(row.capabilities)
+        : null,
+      error: row.error ? safeAccountError(row.error) : null,
+    })),
+    error: result.error ? safeAccountError(result.error) : null,
+  };
+}
 export const zcodeAccountsApi = {
+  checkConnections: async (request: {
+    requestId: string;
+    dataRoot?: string;
+    catalogRevision: string;
+    id: string;
+    allowOfficialCheck: true;
+  }): Promise<CatalogStatus> =>
+    publicCatalog(
+      await call<CatalogStatus>("check_zcode_account_connections", {
+        requestId: request.requestId,
+        ...(request.dataRoot === undefined
+          ? {}
+          : { dataRoot: request.dataRoot }),
+        catalogRevision: request.catalogRevision,
+        id: request.id,
+        allowOfficialCheck: request.allowOfficialCheck,
+      }),
+    ),
+  cancelConnectionCheck: (
+    requestId: string,
+  ): Promise<"cancelled" | "tooLate"> =>
+    call("cancel_zcode_connection_check", { requestId }),
+  library: async (dataRoot?: string): Promise<CatalogStatus> =>
+    publicCatalog(
+      await call<CatalogStatus>(
+        "get_zcode_account_library",
+        dataRoot === undefined ? {} : { dataRoot },
+      ),
+    ),
+  setLabel: async (
+    dataRoot: string | undefined,
+    catalogRevision: string,
+    id: string,
+    label: string | null,
+  ): Promise<CatalogStatus> =>
+    publicCatalog(
+      await call<CatalogStatus>("set_zcode_account_label", {
+        ...(dataRoot === undefined ? {} : { dataRoot }),
+        catalogRevision,
+        id,
+        label,
+      }),
+    ),
+  readCurrentIdentity: async (
+    source: ContextSelection,
+    contextRevision: string,
+  ): Promise<CurrentNativeIdentity> => {
+    const result = await call<CurrentNativeIdentity>(
+      "read_zcode_current_identity",
+      { source, contextRevision },
+    );
+    return fields(result, [
+      "contextRevision",
+      "id",
+      "label",
+      "family",
+      "readAt",
+    ]);
+  },
   operationStatus: (
     source: ContextSelection,
     contextRevision: string,
@@ -326,15 +693,13 @@ export const zcodeAccountsApi = {
   openForLogin: (source: ContextSelection): Promise<void> =>
     call("open_zcode_for_account_login", { source }),
   previewBundle: async (
-    source: ContextSelection,
-    contextRevision: string,
+    dataRoot: string | undefined,
     catalogRevision: string,
     file: number[],
     password: string,
   ): Promise<BundlePreview> => {
     const result = await call<BundlePreview>("preview_zcode_account_bundle", {
-      source,
-      contextRevision,
+      ...(dataRoot === undefined ? {} : { dataRoot }),
       catalogRevision,
       file,
       password,
@@ -355,19 +720,35 @@ export const zcodeAccountsApi = {
     };
   },
   importBundle: (
-    source: ContextSelection,
-    contextRevision: string,
+    dataRoot: string | undefined,
     catalogRevision: string,
     previewId: string,
     selected: { index: number; updateDuplicate: boolean }[],
   ): Promise<("saved" | "refreshed" | "kept")[]> =>
     call("import_zcode_account_bundle", {
-      source,
-      contextRevision,
+      ...(dataRoot === undefined ? {} : { dataRoot }),
       catalogRevision,
       previewId,
       selected,
     }),
+  checkBundle: async (
+    previewId: string,
+    selected: { index: number; updateDuplicate: boolean }[],
+    allowOfficialCheck: true,
+  ): Promise<BundleCheckProgress> =>
+    publicBundleCheck(
+      await call<BundleCheckProgress>("check_zcode_account_bundle", {
+        previewId,
+        selected,
+        allowOfficialCheck,
+      }),
+    ),
+  bundleCheck: async (previewId: string): Promise<BundleCheckProgress> =>
+    publicBundleCheck(
+      await call<BundleCheckProgress>("get_zcode_bundle_check_progress", {
+        previewId,
+      }),
+    ),
   cancelBundle: (previewId: string): Promise<void> =>
     call("cancel_zcode_bundle_preview", { previewId }),
   latestVersion: async (): Promise<LatestVersion> => {
@@ -410,20 +791,7 @@ export const zcodeAccountsApi = {
       source,
       contextRevision,
     });
-    return {
-      revision: result.revision,
-      profiles: result.profiles.map(
-        ({ id, family, label, sourceVerified }) => ({
-          id,
-          family,
-          label,
-          sourceVerified: sourceVerified === true,
-        }),
-      ),
-      current: result.current,
-      pending: result.pending,
-      nativeUnconfirmed: result.nativeUnconfirmed,
-    };
+    return publicCatalog(result);
   },
   previewCapture: async (
     source: ContextSelection,

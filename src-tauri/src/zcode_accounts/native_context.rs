@@ -176,6 +176,46 @@ pub(crate) struct MetadataDiscovery {
     candidates: Vec<MetadataCandidate>,
     latest_status: &'static str,
 }
+/// Informational version of one actually observed matching installation. An
+/// absent/ambiguous observation never substitutes a fabricated API version.
+pub(super) fn library_app_version(data_root: &std::path::Path) -> Option<String> {
+    let metadata = discover_metadata(None).ok()?;
+    if metadata.data_root != data_root || metadata.candidates.len() != 1 {
+        return None;
+    }
+    let candidate = metadata.candidates.into_iter().next()?;
+    if candidate.verified_build {
+        candidate.version
+    } else {
+        None
+    }
+}
+/// OS identity and a directory label only; no installation, process, native
+/// credentials or current provider is inspected for vault-only account work.
+#[cfg(target_os = "macos")]
+pub(super) fn library_context(
+    selected: Option<&Path>,
+) -> Result<super::library_context::LibraryContext, BlockedReason> {
+    library_from_user(&native_user()?, selected)
+}
+#[cfg(not(target_os = "macos"))]
+pub(super) fn library_context(
+    _selected: Option<&std::path::Path>,
+) -> Result<super::library_context::LibraryContext, BlockedReason> {
+    Err(BlockedReason::UnsupportedPlatform)
+}
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn library_from_user(
+    user: &OsUser,
+    selected: Option<&Path>,
+) -> Result<super::library_context::LibraryContext, BlockedReason> {
+    let data_root = match selected {
+        Some(path) => path.to_owned(),
+        None => discover_from_candidates(user, &[], &installed_contract())?.data_root,
+    };
+    super::library_context::LibraryContext::from_os_identity(&user.home, &user.username, &data_root)
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn discover_metadata(
     selected: Option<&Path>,
