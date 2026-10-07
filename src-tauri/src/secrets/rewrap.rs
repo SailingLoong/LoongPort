@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn pending_zcode_transaction_blocks_password_change_before_mutation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let pending = dir.path().join("zcode_account_transaction.json");
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn password_only_mode_removes_auto_unlock_key_without_changing_ciphertext() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = raw_secret(&db);
@@ -403,7 +403,7 @@ mod tests {
                 Err(KeyStoreError::Unavailable)
             }
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         change_password(&db, &store, "original protection password", false).unwrap();
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn interrupted_key_removal_blocks_old_session_and_recovers_with_password() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = FailingStore::default();
         let db = fixture(dir.path(), &store);
         store.fail_remove.store(true, Ordering::SeqCst);
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn new_password_recovers_before_active_metadata_was_replaced() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         change_password(&db, &store, "original protection password", true).unwrap();
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn invalid_password_does_not_start_a_transition() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();

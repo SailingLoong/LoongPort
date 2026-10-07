@@ -25,6 +25,7 @@
 
 pub(crate) mod backup;
 mod dao;
+pub(crate) mod inspection;
 /// LoongPort 自己的迁移，与上游 cc-switch 的完全分离（各记各的版本号）。
 pub(crate) mod loongport_schema;
 mod migration;
@@ -234,12 +235,11 @@ impl Database {
     pub fn stored_user_version_exceeds_supported(
         db_path: &std::path::Path,
     ) -> Result<Option<i32>, AppError> {
-        if !db_path.exists() {
+        let Some(inspected) = inspection::capture(db_path)? else {
             return Ok(None);
-        }
-        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let version = Self::get_user_version(&conn)?;
+        };
+        let version = Self::get_user_version(&inspected.image)?;
+        inspection::verify_unchanged(db_path, &inspected.revision)?;
         Ok((version > SCHEMA_VERSION).then_some(version))
     }
 

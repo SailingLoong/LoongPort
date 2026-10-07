@@ -33,5 +33,7 @@
 
 ## 关联
 
+2026-10-07：继续复用固定 v4.0.2 的 `live/project/{claude,codex,gemini,grok}` 与 `mode/contract` 原模块及测试。适配现有 `toml_edit` 位置参数、模式扩展字段和 Codex 模型目录文件名 owner；当前与历史生成目录名称统一由 `codex_config` 判断。保留 beta.4 版本及 ZCode V2 安全存储、命令入口。此段为投影和契约基础，尚未启用新的运行时写入；完整升级、恢复及原生验收继续按实际候选记录。
+
 - 合并纪律与验收三问：`CLAUDE.md` §一、§三
 - 回传路线（减少 diff 面积的另一半）：design 档案仓「可回传上游的修复盘点」

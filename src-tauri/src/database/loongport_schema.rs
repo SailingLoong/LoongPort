@@ -103,16 +103,15 @@ pub(crate) fn read_stored_version(conn: &Connection) -> Result<i32, AppError> {
 /// `create_tables` 的 DDL 已经落盘，错过了「先于任何 schema 写入」的预检窗口；
 /// 撞上时用户看到的是原生 Retry/Exit 对话框，而不是应用内升级恢复界面。
 ///
-/// **只读不写**：以只读模式打开库文件，版本表不存在就当版本 0。
+/// **只读不写**：只在私有副本读取版本，版本表不存在就当版本 0。
 pub(crate) fn stored_version_exceeds_supported(
     db_path: &std::path::Path,
 ) -> Result<Option<i32>, AppError> {
-    if !db_path.exists() {
+    let Some(inspected) = super::inspection::capture(db_path)? else {
         return Ok(None);
-    }
-    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| AppError::Database(format!("只读打开数据库失败: {e}")))?;
-    let version = read_stored_version(&conn)?;
+    };
+    let version = read_stored_version(&inspected.image)?;
+    super::inspection::verify_unchanged(db_path, &inspected.revision)?;
     Ok((version > LOONGPORT_SCHEMA_VERSION).then_some(version))
 }
 
@@ -2267,8 +2266,10 @@ mod tests {
     // 启动预检（stored_version_exceeds_supported）
     // ============================================================
 
-    fn temp_db_file() -> tempfile::NamedTempFile {
-        tempfile::NamedTempFile::new().expect("临时库文件")
+    fn temp_db_file() -> (tempfile::TempDir, tempfile::NamedTempFile) {
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let file = tempfile::NamedTempFile::new_in(root.path()).expect("临时库文件");
+        (root, file)
     }
 
     /// ⭐ 预检必须抓到「磁盘上的版本比代码新」—— 这是它存在的全部理由。
@@ -2278,7 +2279,7 @@ mod tests {
     /// 对话框而不是应用内升级恢复界面。
     #[test]
     fn the_precheck_flags_a_database_from_a_newer_build() {
-        let file = temp_db_file();
+        let (_root, file) = temp_db_file();
         {
             let conn = Connection::open(file.path()).expect("打开临时库");
             ensure_version_table(&conn).expect("建版本表");
@@ -2293,7 +2294,7 @@ mod tests {
 
     #[test]
     fn the_precheck_rejects_a_malformed_version_table() {
-        let file = temp_db_file();
+        let (_root, file) = temp_db_file();
         let conn = Connection::open(file.path()).unwrap();
         conn.execute_batch("CREATE TABLE loongport_schema_version (id INTEGER, version TEXT); INSERT INTO loongport_schema_version VALUES (1, 'broken');").unwrap();
         drop(conn);
@@ -2302,7 +2303,7 @@ mod tests {
 
     #[test]
     fn the_precheck_leaves_current_databases_alone() {
-        let file = temp_db_file();
+        let (_root, file) = temp_db_file();
         {
             let conn = Connection::open(file.path()).expect("打开临时库");
             apply(&conn).expect("迁移到最新");
@@ -2316,7 +2317,7 @@ mod tests {
     /// 预检的约束是「先于任何 schema 写入」—— 建表本身也是写入。
     #[test]
     fn the_precheck_never_creates_the_version_table() {
-        let file = temp_db_file();
+        let (_root, file) = temp_db_file();
         {
             let conn = Connection::open(file.path()).expect("打开临时库");
             conn.execute("CREATE TABLE unrelated (id INTEGER)", [])

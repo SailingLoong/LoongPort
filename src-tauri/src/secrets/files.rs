@@ -214,7 +214,7 @@ fn device_backup_file(name: &std::ffi::OsStr) -> Result<DeviceFile, AppError> {
 
 /// Validate existing ancestors without creating directories, tightening permissions,
 /// or resolving a symlink into permission to read a different owned root.
-fn device_directory_exists(path: &std::path::Path) -> Result<bool, AppError> {
+pub(crate) fn device_directory_exists(path: &std::path::Path) -> Result<bool, AppError> {
     if path.as_os_str().is_empty()
         || path
             .components()
