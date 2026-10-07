@@ -19,9 +19,9 @@ pub(crate) mod discovery_paths;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod import_reviews;
 pub(crate) mod key_intent;
-pub(crate) mod library_context;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 pub(crate) mod latest_version;
+pub(crate) mod library_context;
 pub mod native;
 pub(crate) mod native_context;
 #[cfg(any(all(feature = "gui", target_os = "macos"), test))]
@@ -32,20 +32,20 @@ pub(crate) mod native_process_control;
 pub(crate) mod oauth;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod oauth_account;
-#[cfg(any(feature = "gui", test))]
-pub(crate) mod oauth_service;
 #[cfg(feature = "gui")]
 pub(crate) mod oauth_runtime;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod oauth_service;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod official;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod official_http;
 pub(crate) mod operation_log;
 pub(crate) mod recovery;
-#[cfg(any(feature = "gui", test))]
-pub(crate) mod session_checks;
 #[cfg(feature = "gui")]
 pub(crate) mod runtime;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod session_checks;
 pub(crate) mod transaction;
 
 #[cfg(test)]
