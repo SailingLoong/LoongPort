@@ -124,7 +124,8 @@ pub enum OAuthPoll {
     Ready(PollReady),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersonalProject {
     pub organization_id: String,
     pub project_id: String,
@@ -237,7 +238,7 @@ pub trait OfficialTransport: Send + Sync {
 }
 
 pub struct OfficialClient<T> {
-    transport: T,
+    pub(super) transport: T,
 }
 impl<T: OfficialTransport> OfficialClient<T> {
     pub fn new(transport: T) -> Self {

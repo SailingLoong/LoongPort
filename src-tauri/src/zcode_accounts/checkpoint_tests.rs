@@ -618,3 +618,63 @@ fn checkpoint_journal_authentication_rejects_wrong_keys_context_and_legacy_recov
     assert!(RecoveryLedger::open(&old_recovery, &vault).is_err());
     assert!(RecoveryLedger::open(&encoded, &vault).is_err());
 }
+
+#[test]
+fn login_receipts_are_not_evicted_by_later_successful_saves() {
+    let mut catalog = ProfileCatalog::default();
+    let first = uuid::Uuid::new_v4().to_string();
+    catalog
+        .record_login(LoginReceipt {
+            request_id: first.clone(),
+            account_id: "a".repeat(64),
+            candidate_revision: "b".repeat(64),
+            outcome: super::super::transaction::CaptureCommitOutcome::Saved,
+        })
+        .unwrap();
+    for _ in 0..16 {
+        catalog
+            .record_login(LoginReceipt {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                account_id: "a".repeat(64),
+                candidate_revision: "b".repeat(64),
+                outcome: super::super::transaction::CaptureCommitOutcome::Refreshed,
+            })
+            .unwrap();
+    }
+    assert!(catalog.login_receipt(&first).is_some());
+}
+
+#[test]
+fn login_receipt_capacity_rejects_new_work_without_forgetting_old_results() {
+    let mut catalog = ProfileCatalog::default();
+    let first = uuid::Uuid::new_v4().to_string();
+    for index in 0..MAX_LOGIN_RECEIPTS {
+        catalog
+            .record_login(LoginReceipt {
+                request_id: if index == 0 {
+                    first.clone()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                },
+                account_id: "a".repeat(64),
+                candidate_revision: "b".repeat(64),
+                outcome: super::super::transaction::CaptureCommitOutcome::Saved,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        catalog.record_login(LoginReceipt {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            account_id: "a".repeat(64),
+            candidate_revision: "b".repeat(64),
+            outcome: super::super::transaction::CaptureCommitOutcome::Saved
+        }),
+        Err(CheckpointError::ResourceLimit)
+    );
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let opened =
+        ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native).unwrap();
+    assert!(opened.login_receipt(&first).is_some());
+    assert_eq!(opened.login_receipts.len(), MAX_LOGIN_RECEIPTS);
+}

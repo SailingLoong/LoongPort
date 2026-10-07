@@ -225,3 +225,29 @@ fn timer_expiry_clears_secrets_without_another_user_action() {
         .unwrap();
     assert!(!store.0.lock().unwrap().contains_key(&id));
 }
+
+#[test]
+fn runtime_error_receipt_cannot_fail_newer_work_or_a_committed_save() {
+    let store = LoginFlowStore::default();
+    let now = Instant::now();
+    let id = waiting(&store, now);
+    let old = store.acquire(&id, WorkKind::Poll, now).unwrap();
+    let ticket = old.ticket();
+    drop(old);
+    let newer = store.acquire(&id, WorkKind::Poll, now).unwrap();
+    store.fail_abandoned(&ticket).unwrap();
+    assert!(newer.check().is_ok());
+    newer.finish(FlowStage::Review, |_| {}).unwrap();
+    let save = store.acquire(&id, WorkKind::Save, now).unwrap();
+    let ticket = save.ticket();
+    save.saved("saved-profile".into(), now).unwrap();
+    drop(save);
+    store.fail_abandoned(&ticket).unwrap();
+    assert_eq!(store.progress(&id, now).unwrap().phase, "saved");
+    let id = waiting(&store, now);
+    let abandoned = store.acquire(&id, WorkKind::Poll, now).unwrap();
+    let ticket = abandoned.ticket();
+    drop(abandoned);
+    store.fail_abandoned(&ticket).unwrap();
+    assert_eq!(store.progress(&id, now).unwrap().phase, "failed");
+}

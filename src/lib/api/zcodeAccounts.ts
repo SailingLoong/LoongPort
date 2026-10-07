@@ -198,6 +198,18 @@ export const accountErrorText = {
     "Choose a saved personal account in the inspected source's account family.",
   vault_unavailable:
     "Unlock the local LoongPort vault, then refresh account status.",
+  official_unavailable:
+    "The official service could not complete this step. Check the current login status before continuing.",
+  key_result_unknown:
+    "The official Key may already exist. Query the original project result before creating another.",
+  key_cleanup_pending:
+    "The local Key operation record needs attention. Query its original result before creating a Key.",
+  request_not_sent:
+    "The write was not sent. Review the current account and project before confirming again.",
+  login_changed:
+    "This login operation changed or expired. Query its original result before starting again.",
+  save_result_unknown:
+    "Saving may already have completed. Query the original result; closing this dialog does not undo a submitted save.",
   operation_failed:
     "The account operation could not be verified. Inspect the selected source again and refresh status.",
   committed_recovery_required:
@@ -272,6 +284,8 @@ const remedies = new Set([
   "checkLocalStorage",
   "reviewSavedData",
   "queryOriginal",
+  "retryKeyConsent",
+  "retrySave",
 ]);
 export function safeAccountError(cause: unknown): AccountError {
   const value =

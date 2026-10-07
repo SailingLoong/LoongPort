@@ -104,6 +104,98 @@ fn archive_and_confirm(f: &Fixture, store: &AccountStore<'_>) -> ArchiveOutcome 
     assert!(!local.status().unwrap().native_unconfirmed);
     outcome
 }
+
+#[test]
+fn io_key_intent_is_persisted_before_grant_and_restart_is_recover_only() {
+    let f = Fixture::new(OAuthFamily::BigModel);
+    let before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let scope = KeyScope::new(
+        OAuthFamily::BigModel,
+        "synthetic-account",
+        "synthetic-org",
+        "synthetic-project",
+    )
+    .unwrap();
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let Reservation::Fresh(grant) = store.reserve_key_intent(scope.clone()).unwrap() else {
+        panic!("first reservation")
+    };
+    let path = f
+        .vault_root
+        .path()
+        .join(crate::secrets::owned_file::KEY_INTENT_FILE);
+    let sealed = fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&sealed).contains("synthetic-account"));
+    let reopened = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    assert!(matches!(
+        reopened.reserve_key_intent(scope.clone()).unwrap(),
+        Reservation::Existing(_)
+    ));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        sealed,
+        "recovery lookup must not rewrite intent"
+    );
+    reopened.mark_key_created(&grant).unwrap();
+    assert!(reopened.clear_unsubmitted_key(&grant).is_err());
+    let record = reopened.key_intent(&scope).unwrap().unwrap();
+    reopened.clear_resolved_key(&record).unwrap();
+    assert!(!path.exists());
+    assert_eq!(
+        fs::read(f.native_root.path().join("credentials.json")).unwrap(),
+        before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn io_key_intent_refuses_existing_symlink_without_grant_or_target_change() {
+    let f = Fixture::new(OAuthFamily::BigModel);
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    let scope = KeyScope::new(
+        OAuthFamily::BigModel,
+        "synthetic-account",
+        "synthetic-org",
+        "synthetic-project",
+    )
+    .unwrap();
+    let mut ledger = KeyIntentLedger::default();
+    ledger.reserve(scope.clone()).unwrap();
+    let sealed = ledger.seal(&f.vault).unwrap();
+    fs::write(outside.path(), &sealed).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        f.vault_root
+            .path()
+            .join(crate::secrets::owned_file::KEY_INTENT_FILE),
+    )
+    .unwrap();
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    assert!(store.reserve_key_intent(scope).is_err());
+    assert_eq!(fs::read(outside.path()).unwrap(), sealed);
+}
+
+#[test]
+fn io_key_intent_no_post_cleanup_removes_marker_and_allows_maintenance() {
+    let f = Fixture::new(OAuthFamily::BigModel);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let scope = KeyScope::new(
+        OAuthFamily::BigModel,
+        "synthetic-account",
+        "synthetic-org",
+        "synthetic-project",
+    )
+    .unwrap();
+    let Reservation::Fresh(grant) = store.reserve_key_intent(scope).unwrap() else {
+        panic!("first reservation")
+    };
+    assert!(
+        crate::secrets::owned_file::ensure_no_pending_zcode_transaction(f.vault_root.path())
+            .is_err()
+    );
+    store.clear_unsubmitted_key(&grant).unwrap();
+    crate::secrets::owned_file::ensure_no_pending_zcode_transaction(f.vault_root.path()).unwrap();
+}
 #[test]
 fn io_unverified_import_cannot_activate_or_change_native_journal_or_source() {
     let f = Fixture::new(OAuthFamily::Zai);
@@ -141,7 +233,7 @@ fn io_unverified_import_cannot_activate_or_change_native_journal_or_source() {
 }
 
 #[test]
-fn io_bundle_vault_import_preserves_native_and_default_keep_then_downgrades_update() {
+fn io_bundle_vault_import_preserves_native_and_keeps_unchecked_updates_to_valid_records() {
     let f = Fixture::new(OAuthFamily::Zai);
     let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
     let native_files_before = fs::read_dir(f.native_root.path())
@@ -170,9 +262,9 @@ fn io_bundle_vault_import_preserves_native_and_default_keep_then_downgrades_upda
     assert!(!f.catalog().source_verified(&c));
     assert_eq!(
         store.import_profiles(&f.native, &saved_revision(&f), vec![(make("a"), true)]),
-        Ok(vec![CaptureCommitOutcome::Refreshed])
+        Ok(vec![CaptureCommitOutcome::Kept])
     );
-    assert!(!f.catalog().source_verified(&f.a));
+    assert!(f.catalog().source_verified(&f.a));
     assert_eq!(
         fs::read(f.native_root.path().join("credentials.json")).unwrap(),
         native_before
@@ -2160,4 +2252,452 @@ fn io_operation_missing_saved_source_is_proven_before_first_publish() {
     );
     assert!(!started);
     assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}
+
+#[test]
+fn login_save_receipt_is_atomic_idempotent_and_survives_lost_reply() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    let snapshot = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "new-login", "synthetic"))
+        .unwrap();
+    let id = snapshot.identity().opaque_id();
+    let request = uuid::Uuid::new_v4().to_string();
+    let native_before = fs::read(fixture.native_root.path().join("credentials.json")).unwrap();
+    assert_eq!(
+        local
+            .save_login_profile(
+                &fixture.native,
+                &status.revision,
+                &request,
+                snapshot.clone(),
+                None,
+                false
+            )
+            .unwrap(),
+        CaptureCommitOutcome::Saved
+    );
+    let bytes = fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let receipt = local
+        .login_receipt(&fixture.native, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.account_id, id);
+    assert_eq!(receipt.outcome, CaptureCommitOutcome::Saved);
+    assert_eq!(
+        local
+            .save_login_profile(
+                &fixture.native,
+                &status.revision,
+                &request,
+                snapshot,
+                None,
+                false
+            )
+            .unwrap(),
+        CaptureCommitOutcome::Saved
+    );
+    assert_eq!(
+        bytes,
+        fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(
+        native_before,
+        fs::read(fixture.native_root.path().join("credentials.json")).unwrap()
+    );
+    let other = fixture
+        .native
+        .inspect(&native_document(
+            OAuthFamily::Zai,
+            "other-login",
+            "synthetic",
+        ))
+        .unwrap();
+    assert!(local
+        .save_login_profile(
+            &fixture.native,
+            &status.revision,
+            &request,
+            other,
+            None,
+            false
+        )
+        .is_err());
+}
+#[test]
+fn login_duplicate_default_keep_also_has_a_durable_receipt_without_changing_old_session() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let before = local.catalog_status(&fixture.native).unwrap();
+    let request = uuid::Uuid::new_v4().to_string();
+    let candidate = fixture.native.inspect(&fixture.fresh).unwrap();
+    let original = fixture
+        .catalog()
+        .get(&fixture.a)
+        .unwrap()
+        .scoped_document()
+        .to_bytes()
+        .unwrap();
+    assert_eq!(
+        local
+            .save_login_profile(
+                &fixture.native,
+                &before.revision,
+                &request,
+                candidate,
+                None,
+                false
+            )
+            .unwrap(),
+        CaptureCommitOutcome::Kept
+    );
+    assert_eq!(
+        fixture
+            .catalog()
+            .get(&fixture.a)
+            .unwrap()
+            .scoped_document()
+            .to_bytes()
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        local
+            .login_receipt(&fixture.native, &request)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        CaptureCommitOutcome::Kept
+    );
+}
+
+async fn checked_report(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+    available: bool,
+) -> super::super::session_checks::SessionCheckReport {
+    use super::super::official::*;
+    struct Synthetic(bool);
+    impl OfficialTransport for Synthetic {
+        fn send(&self, request: OfficialRequest) -> TransportFuture<'_> {
+            let (status, data) = if !self.0 {
+                (503, serde_json::json!({}))
+            } else if request.url.contains("getCustomerInfo") {
+                (401, serde_json::json!({}))
+            } else if request.url.contains("billing/balance") {
+                (
+                    200,
+                    serde_json::json!({"plans":[{"status":"active","plan_id":"zcode-v3-start-plan"}],"balances":[]}),
+                )
+            } else if request.url.contains("subscription/list") {
+                (
+                    200,
+                    serde_json::json!([{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]),
+                )
+            } else {
+                (200, serde_json::json!({"limits":[]}))
+            };
+            Box::pin(async move {
+                Ok(OfficialResponse {
+                    status,
+                    body: zeroize::Zeroizing::new(
+                        serde_json::to_vec(&serde_json::json!({"code":0,"data":data})).unwrap(),
+                    ),
+                })
+            })
+        }
+    }
+    super::super::session_checks::check_session(
+        &OfficialClient::new(Synthetic(available)),
+        native,
+        snapshot,
+        Some("3.14.4"),
+        100,
+        &|| Ok(()),
+    )
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn checked_complete_import_switches_selected_capability_without_business_identity_gate() {
+    use super::super::checkpoint::{ConnectionKind, IdentitySource};
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let snapshot = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "external"))
+        .unwrap();
+    let report = checked_report(&fixture.native, &snapshot, true).await;
+    assert_eq!(
+        report.display().business.check.state,
+        super::super::session_checks::CheckState::Unavailable
+    );
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    assert_eq!(
+        local
+            .import_checked_profiles(
+                &fixture.native,
+                &status.revision,
+                vec![IncomingProfile {
+                    snapshot,
+                    update_duplicate: true,
+                    evidence: Some(report),
+                    origin: IdentitySource::PackageDeclared
+                }]
+            )
+            .unwrap(),
+        vec![CaptureCommitOutcome::Refreshed]
+    );
+    assert!(!fixture.catalog().source_verified(&fixture.b));
+    assert_eq!(
+        fixture
+            .store()
+            .for_connection(ConnectionKind::Start, "3.0.0")
+            .switch(&fixture.b),
+        Err(TransactionError::UnverifiedSource)
+    );
+    assert!(!fixture.vault_root.path().join(JOURNAL_FILE).exists());
+    assert_eq!(
+        fixture
+            .store()
+            .for_connection(ConnectionKind::Coding, "3.14.4")
+            .switch(&fixture.b)
+            .unwrap(),
+        SwitchOutcome::Switched
+    );
+}
+#[tokio::test]
+async fn failed_incoming_check_cannot_erase_existing_ready_complete_session() {
+    use super::super::checkpoint::IdentitySource;
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let first = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "ready-import"))
+        .unwrap();
+    let report = checked_report(&fixture.native, &first, true).await;
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    local
+        .import_checked_profiles(
+            &fixture.native,
+            &status.revision,
+            vec![IncomingProfile {
+                snapshot: first,
+                update_duplicate: true,
+                evidence: Some(report),
+                origin: IdentitySource::PackageDeclared,
+            }],
+        )
+        .unwrap();
+    let before = fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let incoming = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "failed-import"))
+        .unwrap();
+    let failed = checked_report(&fixture.native, &incoming, false).await;
+    let status = local.catalog_status(&fixture.native).unwrap();
+    assert_eq!(
+        local
+            .import_checked_profiles(
+                &fixture.native,
+                &status.revision,
+                vec![IncomingProfile {
+                    snapshot: incoming,
+                    update_duplicate: true,
+                    evidence: Some(failed),
+                    origin: IdentitySource::PackageDeclared
+                }]
+            )
+            .unwrap(),
+        vec![CaptureCommitOutcome::Kept]
+    );
+    assert_eq!(
+        before,
+        fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+}
+#[tokio::test]
+async fn native_recapture_preserves_nonce_stable_evidence_and_withdraws_only_changed_key() {
+    use super::super::checkpoint::{ConnectionKind, IdentitySource};
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let document = native_document(OAuthFamily::Zai, "b", "ready-import");
+    let snapshot = fixture.native.inspect(&document).unwrap();
+    let report = checked_report(&fixture.native, &snapshot, true).await;
+    let mut catalog = ProfileCatalog::default();
+    assert!(catalog.upsert_checked(
+        snapshot.clone(),
+        &fixture.native,
+        Some(report),
+        IdentitySource::PackageDeclared
+    ));
+    catalog
+        .set_label(
+            snapshot.identity(),
+            &fixture.native,
+            Some("My local label".into()),
+        )
+        .unwrap();
+    let mut values = std::collections::BTreeMap::new();
+    for (name, value) in snapshot.scoped_document().entries() {
+        values.insert(
+            name.clone(),
+            fixture
+                .native
+                .encrypt(&fixture.native.decrypt(value).unwrap())
+                .unwrap(),
+        );
+    }
+    let next = CredentialDocument::parse(&serde_json::to_vec(&values).unwrap()).unwrap();
+    let recaptured = fixture.native.inspect(&next).unwrap();
+    catalog.upsert(recaptured.clone());
+    assert!(catalog.connection_ready(&recaptured, &fixture.native, ConnectionKind::Start));
+    assert!(catalog.connection_ready(&recaptured, &fixture.native, ConnectionKind::Coding));
+    let key = recaptured.identity().credential_keys()[5].clone();
+    values.insert(
+        key,
+        fixture.native.encrypt("synthetic-changed-coding").unwrap(),
+    );
+    let changed = fixture
+        .native
+        .inspect(&CredentialDocument::parse(&serde_json::to_vec(&values).unwrap()).unwrap())
+        .unwrap();
+    catalog.upsert(changed.clone());
+    let catalog = ProfileCatalog::open(
+        &catalog.seal(&fixture.vault, &fixture.native).unwrap(),
+        &fixture.vault,
+        &fixture.native,
+    )
+    .unwrap();
+    assert!(catalog.connection_ready(&changed, &fixture.native, ConnectionKind::Start));
+    assert!(!catalog.connection_ready(&changed, &fixture.native, ConnectionKind::Coding));
+    assert_eq!(
+        catalog.details(&changed, &fixture.native).label.as_deref(),
+        Some("My local label")
+    );
+}
+
+#[tokio::test]
+async fn review_native_recapture_does_not_bypass_v2_selected_capability_admission() {
+    use super::super::checkpoint::{ConnectionKind, IdentitySource};
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let snapshot = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "verified"))
+        .unwrap();
+    let good = checked_report(&fixture.native, &snapshot, true).await;
+    let mut catalog = fixture.catalog();
+    assert!(catalog.upsert_checked(
+        snapshot.clone(),
+        &fixture.native,
+        Some(good),
+        IdentitySource::PackageDeclared
+    ));
+    let mut values = snapshot.scoped_document().entries().clone();
+    values.remove(&snapshot.identity().credential_keys()[5]);
+    let captured = fixture
+        .native
+        .inspect(&CredentialDocument::parse(&serde_json::to_vec(&values).unwrap()).unwrap())
+        .unwrap();
+    catalog.upsert(captured.clone());
+    assert!(catalog.source_verified(captured.identity()));
+    write_durable(
+        &fixture.vault_root.path().join(PROFILE_FILE),
+        catalog
+            .seal(&fixture.vault, &fixture.native)
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .store()
+            .for_connection(ConnectionKind::Coding, "3.14.4")
+            .switch(&fixture.b),
+        Err(TransactionError::UnverifiedSource)
+    );
+    assert!(!fixture.vault_root.path().join(JOURNAL_FILE).exists());
+}
+
+#[test]
+fn review_legacy_native_record_label_edit_keeps_existing_activation_contract() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let mut catalog = fixture.catalog();
+    catalog
+        .set_label(&fixture.b, &fixture.native, Some("Local name".into()))
+        .unwrap();
+    write_durable(
+        &fixture.vault_root.path().join(PROFILE_FILE),
+        catalog
+            .seal(&fixture.vault, &fixture.native)
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.store().switch(&fixture.b).unwrap(),
+        SwitchOutcome::Switched
+    );
+}
+
+#[test]
+fn io_key_cleanup_retry_is_noop_when_exact_unsubmitted_request_is_already_absent() {
+    let root = tempfile::tempdir().unwrap();
+    crate::config_file_io::ensure_private_directory(root.path()).unwrap();
+    let vault = VaultContext::generate().unwrap();
+    let store = VaultAccountStore::new(root.path(), &vault).unwrap();
+    let a = KeyScope::new(OAuthFamily::BigModel, "cache-a", "org", "project-a").unwrap();
+    let b = KeyScope::new(OAuthFamily::BigModel, "cache-b", "org", "project-b").unwrap();
+    let Reservation::Fresh(old_a) = store.reserve_key_intent(a.clone()).unwrap() else {
+        panic!()
+    };
+    let Reservation::Fresh(_b) = store.reserve_key_intent(b.clone()).unwrap() else {
+        panic!()
+    };
+    store.clear_unsubmitted_key(&old_a).unwrap();
+    let path = root
+        .path()
+        .join(crate::secrets::owned_file::KEY_INTENT_FILE);
+    let only_b = fs::read(&path).unwrap();
+    assert!(store.clear_unsubmitted_key(&old_a).is_ok());
+    assert_eq!(fs::read(&path).unwrap(), only_b);
+    let Reservation::Fresh(new_a) = store.reserve_key_intent(a.clone()).unwrap() else {
+        panic!()
+    };
+    store.mark_key_created(&new_a).unwrap();
+    let with_new_a = fs::read(&path).unwrap();
+    assert!(store.clear_unsubmitted_key(&old_a).is_ok());
+    assert_eq!(fs::read(&path).unwrap(), with_new_a);
+    assert!(store.clear_unsubmitted_key(&new_a).is_err());
+    assert_eq!(fs::read(&path).unwrap(), with_new_a);
+    assert!(store.key_intent(&b).unwrap().is_some());
+}
+#[test]
+fn io_key_cleanup_retry_is_noop_when_exact_copied_request_is_already_absent() {
+    let root = tempfile::tempdir().unwrap();
+    crate::config_file_io::ensure_private_directory(root.path()).unwrap();
+    let vault = VaultContext::generate().unwrap();
+    let store = VaultAccountStore::new(root.path(), &vault).unwrap();
+    let a = KeyScope::new(OAuthFamily::BigModel, "cache-a", "org", "project-a").unwrap();
+    let b = KeyScope::new(OAuthFamily::BigModel, "cache-b", "org", "project-b").unwrap();
+    let Reservation::Fresh(old_a) = store.reserve_key_intent(a.clone()).unwrap() else {
+        panic!()
+    };
+    store.reserve_key_intent(b.clone()).unwrap();
+    store.mark_key_created(&old_a).unwrap();
+    let receipt = store.key_intent(&a).unwrap().unwrap();
+    store.clear_resolved_key(&receipt).unwrap();
+    let path = root
+        .path()
+        .join(crate::secrets::owned_file::KEY_INTENT_FILE);
+    let only_b = fs::read(&path).unwrap();
+    assert!(store.clear_resolved_key(&receipt).is_ok());
+    assert_eq!(fs::read(&path).unwrap(), only_b);
+    store.reserve_key_intent(a.clone()).unwrap();
+    let with_new_a = fs::read(&path).unwrap();
+    assert!(store.clear_resolved_key(&receipt).is_ok());
+    assert_eq!(fs::read(&path).unwrap(), with_new_a);
+    assert!(store.key_intent(&a).unwrap().is_some());
+    assert!(store.key_intent(&b).unwrap().is_some());
 }

@@ -77,6 +77,36 @@ impl Fixture {
 }
 
 #[test]
+fn vault_library_needs_no_installation_or_current_native_session() {
+    let fixture = Fixture::new();
+    let native =
+        VerifiedContext::assess(fixture.probe().observe().unwrap(), &fixture.contracts()).unwrap();
+    let library = library_from_user(&fixture.user, None).unwrap();
+    assert_eq!(library.context_id(), native.context_id());
+    assert_eq!(library.data_root(), native.native_root());
+    let ciphertext = native
+        .cipher()
+        .unwrap()
+        .encrypt("synthetic credential")
+        .unwrap();
+    assert_eq!(
+        library
+            .cipher()
+            .unwrap()
+            .decrypt(&ciphertext)
+            .unwrap()
+            .as_str(),
+        "synthetic credential"
+    );
+    fs::remove_dir_all(&fixture.selection.install_path).unwrap();
+    fs::remove_dir_all(&fixture.selection.data_root).unwrap();
+    assert_eq!(
+        library_from_user(&fixture.user, None).unwrap().context_id(),
+        library.context_id()
+    );
+}
+
+#[test]
 fn renderer_selection_contains_only_untrusted_paths_and_key_mode() {
     let good = r#"{"installPath":"/Applications/ZCode.app","dataRoot":"/synthetic/.zcode/v2","keyMode":"standard"}"#;
     assert!(serde_json::from_str::<ContextSelection>(good).is_ok());

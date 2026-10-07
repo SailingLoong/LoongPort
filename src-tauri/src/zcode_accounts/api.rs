@@ -37,7 +37,7 @@ pub(crate) struct PublicError {
     committed: bool,
 }
 impl PublicError {
-    fn new(code: &'static str, remedy: &'static str) -> Self {
+    pub(super) fn new(code: &'static str, remedy: &'static str) -> Self {
         Self {
             code,
             remedy,

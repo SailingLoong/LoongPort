@@ -6,6 +6,9 @@ use super::core::{
     TransactionPhase,
 };
 use super::native::{NativeCipher, NativeError};
+use super::session_checks::{
+    CheckState, EntitlementState, SessionCheckDisplay, SessionCheckReport,
+};
 pub(crate) use crate::secrets::owned_file::{JOURNAL_FILE, PROFILE_FILE};
 use crate::secrets::{owned_file::OwnedFile, VaultContext};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -15,6 +18,7 @@ use zeroize::Zeroizing;
 pub(super) const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROFILES: usize = 64;
+const MAX_LOGIN_RECEIPTS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckpointError {
@@ -38,6 +42,74 @@ struct CatalogPayload {
     profiles: Vec<StrictRecord<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unverified: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_receipts: Option<Vec<LoginReceipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    details: Option<BTreeMap<String, ProfileDetails>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum IdentitySource {
+    NativeCapture,
+    OfficialLogin,
+    PackageDeclared,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProfileDetails {
+    pub label: Option<String>,
+    pub identity_source: IdentitySource,
+    pub evidence: Option<SessionCheckReport>,
+    #[serde(default = "require_capability_default")]
+    pub requires_capability_check: bool,
+}
+fn require_capability_default() -> bool {
+    true
+}
+impl Default for ProfileDetails {
+    fn default() -> Self {
+        Self {
+            label: None,
+            identity_source: IdentitySource::PackageDeclared,
+            evidence: None,
+            requires_capability_check: false,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionKind {
+    Start,
+    Coding,
+}
+fn ready(display: &SessionCheckDisplay, kind: ConnectionKind) -> bool {
+    match kind {
+        ConnectionKind::Start => {
+            display.start.check.state == CheckState::Accepted
+                && display.start.entitlement == EntitlementState::Available
+        }
+        ConnectionKind::Coding => {
+            display.coding.check.state == CheckState::Accepted
+                && display.coding.entitlement == EntitlementState::Available
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LoginReceipt {
+    pub request_id: String,
+    pub account_id: String,
+    pub candidate_revision: String,
+    pub outcome: super::transaction::CaptureCommitOutcome,
+}
+impl LoginReceipt {
+    fn validate(&self) -> bool {
+        uuid::Uuid::parse_str(&self.request_id).is_ok()
+            && [&self.account_id, &self.candidate_revision]
+                .iter()
+                .all(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,9 +138,162 @@ pub(super) struct JournalPayload {
 pub(crate) struct ProfileCatalog {
     profiles: BTreeMap<AccountIdentity, AccountSnapshot>,
     unverified: BTreeSet<AccountIdentity>,
+    login_receipts: Vec<LoginReceipt>,
+    details: BTreeMap<AccountIdentity, ProfileDetails>,
 }
 
 impl ProfileCatalog {
+    pub(crate) fn login_receipt(&self, request_id: &str) -> Option<&LoginReceipt> {
+        self.login_receipts
+            .iter()
+            .find(|receipt| receipt.request_id == request_id)
+    }
+    pub(crate) fn record_login(&mut self, receipt: LoginReceipt) -> Result<(), CheckpointError> {
+        if !receipt.validate() || self.login_receipt(&receipt.request_id).is_some() {
+            return Err(CheckpointError::InvalidPayload);
+        }
+        // Absence is used to prove that an uncertain save never committed.
+        // Never evict an old receipt and accidentally manufacture that proof.
+        if self.login_receipts.len() >= MAX_LOGIN_RECEIPTS {
+            return Err(CheckpointError::ResourceLimit);
+        }
+        self.login_receipts.push(receipt);
+        Ok(())
+    }
+    pub(crate) fn details(
+        &self,
+        snapshot: &AccountSnapshot,
+        native: &NativeCipher,
+    ) -> ProfileDetails {
+        let mut details = self
+            .details
+            .get(snapshot.identity())
+            .cloned()
+            .unwrap_or_else(|| ProfileDetails {
+                identity_source: if self.source_verified(snapshot.identity()) {
+                    IdentitySource::NativeCapture
+                } else {
+                    IdentitySource::PackageDeclared
+                },
+                ..ProfileDetails::default()
+            });
+        details.evidence = details
+            .evidence
+            .map(|report| report.retain_matching(native, snapshot));
+        details
+    }
+    pub(crate) fn connection_ready(
+        &self,
+        snapshot: &AccountSnapshot,
+        native: &NativeCipher,
+        kind: ConnectionKind,
+    ) -> bool {
+        self.details(snapshot, native)
+            .evidence
+            .is_some_and(|evidence| ready(&evidence.display(), kind))
+    }
+    pub(crate) fn can_activate(
+        &self,
+        snapshot: &AccountSnapshot,
+        native: &NativeCipher,
+        selection: Option<(ConnectionKind, &str)>,
+    ) -> bool {
+        let details = self.details(snapshot, native);
+        if self.source_verified(snapshot.identity()) && !details.requires_capability_check {
+            return true;
+        }
+        let Some((kind, version)) = selection else {
+            return false;
+        };
+        details.evidence.is_some_and(|report| {
+            ready(&report.display(), kind)
+                && (kind != ConnectionKind::Start || report.start_checked_for(version))
+        })
+    }
+    pub(crate) fn set_evidence(
+        &mut self,
+        identity: &AccountIdentity,
+        native: &NativeCipher,
+        evidence: SessionCheckReport,
+    ) -> Result<(), CheckpointError> {
+        let snapshot = self.get(identity).ok_or(CheckpointError::InvalidPayload)?;
+        let mut details = self.details(snapshot, native);
+        details.requires_capability_check = true;
+        let evidence = evidence.retain_matching(native, snapshot);
+        details.evidence = Some(match details.evidence.as_ref() {
+            Some(previous) => evidence.preserve_previous_acceptance(previous, native, snapshot),
+            None => evidence,
+        });
+        self.details.insert(identity.clone(), details);
+        Ok(())
+    }
+    pub(crate) fn set_label(
+        &mut self,
+        identity: &AccountIdentity,
+        native: &NativeCipher,
+        label: Option<String>,
+    ) -> Result<(), CheckpointError> {
+        if label.as_ref().is_some_and(|value| {
+            value.trim().is_empty()
+                || value.chars().count() > 80
+                || value.chars().any(char::is_control)
+        }) {
+            return Err(CheckpointError::InvalidPayload);
+        }
+        let snapshot = self.get(identity).ok_or(CheckpointError::InvalidPayload)?;
+        let mut details = self.details(snapshot, native);
+        details.label = label;
+        self.details.insert(identity.clone(), details);
+        Ok(())
+    }
+    /// Replaces a whole selected session. Failed incoming checks cannot erase
+    /// existing working capabilities; no fields are copied between accounts.
+    pub(crate) fn upsert_checked(
+        &mut self,
+        snapshot: AccountSnapshot,
+        native: &NativeCipher,
+        evidence: Option<SessionCheckReport>,
+        origin: IdentitySource,
+    ) -> bool {
+        let incoming = evidence.map(|report| report.retain_matching(native, &snapshot));
+        if let Some(old) = self.get(snapshot.identity()) {
+            let old_details = self.details(old, native);
+            let incoming_display = incoming.as_ref().map(SessionCheckReport::display);
+            let any_ready = incoming_display.as_ref().is_some_and(|display| {
+                ready(display, ConnectionKind::Start) || ready(display, ConnectionKind::Coding)
+            });
+            if self.source_verified(old.identity()) && !any_ready {
+                return false;
+            }
+            if let Some(previous) = old_details.evidence {
+                let previous = previous.display();
+                for kind in [ConnectionKind::Start, ConnectionKind::Coding] {
+                    if ready(&previous, kind)
+                        && !incoming_display
+                            .as_ref()
+                            .is_some_and(|display| ready(display, kind))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        let label = self
+            .details
+            .get(snapshot.identity())
+            .and_then(|details| details.label.clone());
+        self.details.insert(
+            snapshot.identity().clone(),
+            ProfileDetails {
+                label,
+                identity_source: origin,
+                evidence: incoming,
+                requires_capability_check: true,
+            },
+        );
+        self.upsert_unverified(snapshot);
+        true
+    }
     pub(crate) fn profiles(&self) -> impl Iterator<Item = &AccountSnapshot> {
         self.profiles.values()
     }
@@ -77,6 +302,9 @@ impl ProfileCatalog {
         // Only the explicit native capture/transaction owners may call this.
         // Replace imported credentials with the freshly inspected local image.
         self.unverified.remove(snapshot.identity());
+        if let Some(details) = self.details.get_mut(snapshot.identity()) {
+            details.identity_source = IdentitySource::NativeCapture;
+        }
         self.profiles.insert(snapshot.identity().clone(), snapshot);
     }
 
@@ -112,7 +340,25 @@ impl ProfileCatalog {
         }
         seal_payload(
             &CatalogPayload {
-                version: 2,
+                version: if self.login_receipts.is_empty() && self.details.is_empty() {
+                    2
+                } else {
+                    3
+                },
+                details: (!self.details.is_empty()).then(|| {
+                    self.profiles
+                        .values()
+                        .filter(|snapshot| self.details.contains_key(snapshot.identity()))
+                        .map(|snapshot| {
+                            (
+                                snapshot.identity().opaque_id(),
+                                self.details(snapshot, native),
+                            )
+                        })
+                        .collect()
+                }),
+                login_receipts: (!self.login_receipts.is_empty())
+                    .then(|| self.login_receipts.clone()),
                 context: native.context().into(),
                 profiles,
                 unverified: Some(
@@ -136,9 +382,14 @@ impl ProfileCatalog {
         if payload.context != native.context() {
             return Err(CheckpointError::WrongContext);
         }
-        match (payload.version, &payload.unverified) {
+        match (
+            payload.version,
+            &payload.unverified,
+            &payload.login_receipts,
+            &payload.details,
+        ) {
             // v1 predates bundle import; all records came from admitted capture.
-            (1, None) | (2, Some(_)) => (),
+            (1, None, None, None) | (2, Some(_), None, None) | (3, Some(_), _, _) => (),
             _ => return Err(CheckpointError::InvalidPayload),
         }
         if payload.profiles.len() > MAX_PROFILES {
@@ -162,6 +413,38 @@ impl ProfileCatalog {
             if !catalog.unverified.insert(identity) {
                 return Err(CheckpointError::InvalidPayload);
             }
+        }
+        for (id, details) in payload.details.unwrap_or_default() {
+            let snapshot = catalog
+                .profiles
+                .values()
+                .find(|snapshot| snapshot.identity().opaque_id() == id)
+                .ok_or(CheckpointError::InvalidPayload)?;
+            if details.label.as_ref().is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.chars().count() > 80
+                    || value.chars().any(char::is_control)
+            }) {
+                return Err(CheckpointError::InvalidPayload);
+            }
+            let identity = snapshot.identity().clone();
+            let evidence = details
+                .evidence
+                .map(|report| report.retain_matching(native, snapshot));
+            catalog.details.insert(
+                identity,
+                ProfileDetails {
+                    evidence,
+                    ..details
+                },
+            );
+        }
+        let receipts = payload.login_receipts.unwrap_or_default();
+        if receipts.len() > MAX_LOGIN_RECEIPTS {
+            return Err(CheckpointError::ResourceLimit);
+        }
+        for receipt in receipts {
+            catalog.record_login(receipt)?;
         }
         Ok(catalog)
     }

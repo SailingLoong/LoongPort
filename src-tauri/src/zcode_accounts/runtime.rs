@@ -277,7 +277,11 @@ fn coordinated_request(
     {
         return Err(TransactionError::UnsupportedScope.into());
     }
-    if !catalog.source_verified(target.identity()) {
+    if !catalog.can_activate(
+        target,
+        &native,
+        Some((context.connection_kind(), context.app_version())),
+    ) {
         return Err(TransactionError::UnverifiedSource.into());
     }
     let recovery = local.status()?;
@@ -318,7 +322,8 @@ fn coordinated_request(
                 individual_scope_verified: true,
             },
             &gate,
-        )?;
+        )?
+        .for_connection(stopped.connection_kind(), stopped.app_version());
         stopped.confirm_root(store.native_root_identity())?;
         record.phase = Phase::TransactionUncertain;
         local.record_operation(record.clone())?;
@@ -681,7 +686,8 @@ async fn run(
                 individual_scope_verified: true,
             },
             &gate,
-        )?;
+        )?
+        .for_connection(context.connection_kind(), context.app_version());
         context.confirm_root(store.native_root_identity())?;
         match operation {
             #[cfg(all(test, unix))]

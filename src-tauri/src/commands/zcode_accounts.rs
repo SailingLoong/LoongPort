@@ -211,3 +211,62 @@ pub(crate) async fn delete_zcode_account_recovery(
 ) -> Result<(), PublicError> {
     api::delete(state.db.clone(), id, revision).await
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn begin_zcode_official_login(
+    state: State<'_, AppState>,
+    family: String,
+    data_root: Option<std::path::PathBuf>,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::begin(state.db.clone(), &family, data_root).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_login_progress(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::query(state.db.clone(), flow_id).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn confirm_zcode_login_key(
+    state: State<'_, AppState>,
+    flow_id: String,
+    organization_id: String,
+    project_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::confirm(
+        state.db.clone(),
+        flow_id,
+        organization_id,
+        project_id,
+    )
+    .await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn decline_zcode_login_key(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::decline(state.db.clone(), flow_id).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn save_zcode_login_account(
+    state: State<'_, AppState>,
+    flow_id: String,
+    update_duplicate: bool,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::save(state.db.clone(), flow_id, update_duplicate).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn cancel_zcode_official_login(
+    flow_id: String,
+) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
+    crate::zcode_accounts::oauth_runtime::cancel(flow_id)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_account_library(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+) -> Result<CatalogStatus, PublicError> {
+    crate::zcode_accounts::oauth_runtime::catalog(state.db.clone(), data_root).await
+}

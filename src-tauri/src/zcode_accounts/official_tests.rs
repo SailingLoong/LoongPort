@@ -281,7 +281,7 @@ fn cancellation_at_each_boundary_prevents_later_credentials_in_same_row() {
         ));
         assert_eq!(
             client.transport.requests.lock().unwrap().len(),
-            (cancel_at + 1) / 2
+            cancel_at.div_ceil(2)
         );
     }
 }
