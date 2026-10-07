@@ -192,6 +192,20 @@ impl SessionCheckReport {
     pub(crate) fn display(&self) -> SessionCheckDisplay {
         self.display.clone()
     }
+    /// Completing Coding does not refresh, revoke or relabel facts for unchanged
+    /// business/Start credentials. A changed credential still loses its old fact.
+    pub(crate) fn with_coding_from(
+        &self,
+        current: &Self,
+        native: &NativeCipher,
+        snapshot: &AccountSnapshot,
+    ) -> Self {
+        let mut merged = self.retain_matching(native, snapshot);
+        let checked = current.retain_matching(native, snapshot);
+        merged.display.coding = checked.display.coding;
+        merged.bindings.coding = checked.bindings.coding;
+        merged
+    }
     /// Start balance acceptance is specific to the actual native client's policy version.
     pub(crate) fn start_checked_for(&self, app_version: &str) -> bool {
         self.bindings.start_app_version.as_deref() == Some(app_version)
@@ -228,8 +242,9 @@ impl SessionCheckReport {
             }
         }
         if matches(self.bindings.start, previous.bindings.start, current.start)
-            && self.bindings.start_app_version.is_some()
-            && self.bindings.start_app_version == previous.bindings.start_app_version
+            && (previous.display.start.check.state == CheckState::Unavailable
+                || (self.bindings.start_app_version.is_some()
+                    && self.bindings.start_app_version == previous.bindings.start_app_version))
         {
             let was_entitled = matches!(
                 previous.display.start.entitlement,
@@ -287,6 +302,7 @@ impl SessionCheckReport {
         }
         merged
     }
+    #[cfg(test)]
     pub(crate) fn matches_business(
         &self,
         native: &NativeCipher,
@@ -295,10 +311,12 @@ impl SessionCheckReport {
         let current = Credentials::load(native, snapshot).bindings(snapshot);
         self.bindings.family == current.family && self.bindings.business == current.business
     }
+    #[cfg(test)]
     pub(crate) fn matches_start(&self, native: &NativeCipher, snapshot: &AccountSnapshot) -> bool {
         let current = Credentials::load(native, snapshot).bindings(snapshot);
         self.bindings.family == current.family && self.bindings.start == current.start
     }
+    #[cfg(test)]
     pub(crate) fn matches_coding(&self, native: &NativeCipher, snapshot: &AccountSnapshot) -> bool {
         let current = Credentials::load(native, snapshot).bindings(snapshot);
         self.bindings.family == current.family && self.bindings.coding == current.coding
@@ -362,6 +380,14 @@ impl SessionCheckReport {
             },
         }
     }
+}
+/// Internal continuity fact for an unchanged, previously captured native Start
+/// credential. It is never an upstream acceptance proof or a renderer field.
+pub(crate) fn consumed_start_fingerprint(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+) -> Option<[u8; 32]> {
+    Credentials::load(native, snapshot).bindings(snapshot).start
 }
 pub(crate) async fn check_session<T: OfficialTransport>(
     client: &OfficialClient<T>,
@@ -580,10 +606,23 @@ fn accepted(source: Option<CredentialSource>, checked_at: u64) -> CheckResult {
 }
 fn preserve_check(current: &CheckResult, previous: &CheckResult) -> Option<CheckResult> {
     if current.state != CheckState::Unknown
-        || previous.state != CheckState::Accepted
+        || !matches!(
+            previous.state,
+            CheckState::Accepted | CheckState::Unavailable
+        )
         || previous.checked_at.is_none()
     {
         return None;
+    }
+    if previous.state == CheckState::Unavailable {
+        // No Unknown observation establishes renewed acceptance. Preserve the
+        // original rejection and time, even if no new request could be made.
+        let mut retained = previous.clone();
+        retained.source = current.source.or(previous.source);
+        if let (Some(reason), Some(checked_at)) = (current.reason, current.checked_at) {
+            retained.latest_failure = Some(CheckFailure { reason, checked_at });
+        }
+        return Some(retained);
     }
     let reason = current.reason?;
     if !matches!(reason, CheckReason::Timeout | CheckReason::Network) {

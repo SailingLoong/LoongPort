@@ -106,6 +106,61 @@ pub(crate) struct SavedAccount {
     pub identity_source: super::checkpoint::IdentitySource,
     pub official_label: Option<String>,
     pub capabilities: Option<super::session_checks::SessionCheckDisplay>,
+    pub can_activate: bool,
+    pub activation_blocked_reason: Option<AccountActionError>,
+    pub can_check_connections: bool,
+    pub check_connections_blocked_reason: Option<AccountActionError>,
+    pub needs_key: bool,
+    pub can_complete_coding: bool,
+    pub complete_coding_blocked_reason: Option<AccountActionError>,
+}
+
+pub(crate) struct LoginProfileSave<'a> {
+    pub revision: &'a str,
+    pub request_id: &'a str,
+    pub snapshot: AccountSnapshot,
+    pub evidence: Option<super::session_checks::SessionCheckReport>,
+    pub update_duplicate: bool,
+    pub completion: Option<&'a super::oauth::SavedCodingTarget>,
+}
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountActionError {
+    pub code: &'static str,
+    pub remedy: &'static str,
+    pub committed: bool,
+}
+impl AccountActionError {
+    fn new(code: &'static str, remedy: &'static str) -> Self {
+        Self {
+            code,
+            remedy,
+            committed: false,
+        }
+    }
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogActions {
+    pub can_add: bool,
+    pub can_import: bool,
+    pub can_backup: bool,
+    pub can_edit_labels: bool,
+    pub blocked_reason: Option<AccountActionError>,
+}
+impl CatalogActions {
+    fn new(recovery: &RecoveryStatus, has_profiles: bool) -> Self {
+        let can_change = !recovery.pending && !recovery.native_unconfirmed;
+        Self {
+            can_add: can_change,
+            can_import: can_change,
+            can_backup: has_profiles,
+            can_edit_labels: can_change,
+            blocked_reason: (!can_change).then(|| {
+                AccountActionError::new("zcode.account.recovery_required", "reviewRecovery")
+            }),
+        }
+    }
 }
 pub(crate) struct IncomingProfile {
     pub snapshot: AccountSnapshot,
@@ -122,6 +177,8 @@ fn saved_account(
     let official_label = native
         .profile_label(snapshot)
         .map_err(|error| TransactionError::Checkpoint(CheckpointError::Native(error)))?;
+    let needs_key = super::oauth_account::saved_coding_key(native, snapshot).is_none();
+    let business_available = super::oauth_account::saved_business_token(native, snapshot).is_ok();
     Ok(SavedAccount {
         id: snapshot.identity().opaque_id(),
         family: match snapshot.identity().family() {
@@ -133,6 +190,17 @@ fn saved_account(
         source_verified: catalog.source_verified(snapshot.identity()),
         identity_source: details.identity_source,
         capabilities: details.evidence.map(|report| report.display()),
+        can_activate: false,
+        activation_blocked_reason: Some(AccountActionError::new(
+            "zcode.account.native_context_required",
+            "chooseContext",
+        )),
+        can_check_connections: true,
+        check_connections_blocked_reason: None,
+        needs_key,
+        can_complete_coding: needs_key && business_available,
+        complete_coding_blocked_reason: (needs_key && !business_available)
+            .then(|| AccountActionError::new("zcode.account.official_unavailable", "addAccount")),
     })
 }
 #[derive(serde::Serialize)]
@@ -144,6 +212,7 @@ pub(crate) struct CatalogStatus {
     pub current: Option<String>,
     pub pending: bool,
     pub native_unconfirmed: bool,
+    pub actions: CatalogActions,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArchiveOutcome {
@@ -197,6 +266,8 @@ enum Role {
     Recovery,
     Operations,
     KeyIntents,
+    #[cfg(any(feature = "gui", test))]
+    BundleExports,
 }
 impl Role {
     fn name(self) -> &'static str {
@@ -207,6 +278,8 @@ impl Role {
             Self::Recovery => RECOVERY_FILE,
             Self::Operations => crate::secrets::owned_file::OPERATION_FILE,
             Self::KeyIntents => crate::secrets::owned_file::KEY_INTENT_FILE,
+            #[cfg(any(feature = "gui", test))]
+            Self::BundleExports => crate::secrets::owned_file::BUNDLE_EXPORT_FILE,
         }
     }
 }
@@ -434,18 +507,124 @@ impl<'a> VaultAccountStore<'a> {
         let bytes = self.read(Role::Profiles)?;
         let revision = catalog_revision(bytes.as_deref());
         let catalog = self.import_catalog(native, &revision)?;
-        let profiles = catalog
+        let mut profiles = catalog
             .profiles()
             .map(|snapshot| saved_account(native, &catalog, snapshot))
             .collect::<Result<Vec<_>, TransactionError>>()?;
         let recovery = self.status()?;
+        if recovery.pending || recovery.native_unconfirmed {
+            for profile in &mut profiles {
+                profile.can_complete_coding = false;
+                profile.complete_coding_blocked_reason = Some(AccountActionError::new(
+                    "zcode.account.recovery_required",
+                    "reviewRecovery",
+                ));
+            }
+        }
         Ok(CatalogStatus {
             revision,
+            actions: CatalogActions::new(&recovery, !profiles.is_empty()),
             profiles,
             current: None,
             pending: recovery.pending,
             native_unconfirmed: recovery.native_unconfirmed,
         })
+    }
+    /// Caller has admitted this exact native provider and version. This grants
+    /// only UI eligibility; the physical switch still performs its own preflight.
+    pub(crate) fn catalog_status_for_connection(
+        &self,
+        native: &NativeCipher,
+        family: OAuthFamily,
+        kind: super::checkpoint::ConnectionKind,
+        version: &str,
+    ) -> Result<CatalogStatus, TransactionError> {
+        let mut status = self.catalog_status(native)?;
+        let catalog = self.import_catalog(native, &status.revision)?;
+        for row in &mut status.profiles {
+            let snapshot = catalog
+                .profiles()
+                .find(|item| item.identity().opaque_id() == row.id)
+                .ok_or(CheckpointError::InvalidPayload)?;
+            let reason = if status.pending || status.native_unconfirmed {
+                Some(AccountActionError::new(
+                    "zcode.account.recovery_required",
+                    "reviewRecovery",
+                ))
+            } else if snapshot.identity().family() != family {
+                Some(AccountActionError::new(
+                    "zcode.account.unsupported_scope",
+                    "chooseContext",
+                ))
+            } else if !catalog.can_activate(snapshot, native, Some((kind, version))) {
+                Some(AccountActionError::new(
+                    "zcode.account.connection_not_ready",
+                    "checkConnection",
+                ))
+            } else {
+                None
+            };
+            row.can_activate = reason.is_none();
+            row.activation_blocked_reason = reason;
+        }
+        Ok(status)
+    }
+    pub(crate) fn set_profile_label(
+        &self,
+        native: &NativeCipher,
+        revision: &str,
+        id: &str,
+        label: Option<String>,
+    ) -> Result<(), TransactionError> {
+        let before = self.read(Role::Profiles)?;
+        let mut catalog = self.import_catalog(native, revision)?;
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        if journal.is_some() || self.open_ledger(recovery.as_deref())?.needs_confirmation() {
+            return Err(TransactionError::RecoveryRequired);
+        }
+        let identity = catalog
+            .profiles()
+            .find(|item| item.identity().opaque_id() == id)
+            .ok_or(CheckpointError::InvalidPayload)?
+            .identity()
+            .clone();
+        catalog.set_label(&identity, native, label)?;
+        let encoded = catalog.seal(self.vault, native)?;
+        self.expect(Role::Journal, journal.as_ref())?;
+        self.expect(Role::Recovery, recovery.as_ref())?;
+        self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
+        Ok(())
+    }
+    pub(crate) fn update_profile_evidence(
+        &self,
+        native: &NativeCipher,
+        revision: &str,
+        id: &str,
+        evidence: super::session_checks::SessionCheckReport,
+    ) -> Result<CatalogStatus, TransactionError> {
+        let before = self.read(Role::Profiles)?;
+        let mut catalog = self.import_catalog(native, revision)?;
+        let journal = self.read(Role::Journal)?;
+        let recovery = self.read(Role::Recovery)?;
+        if journal.is_some() || self.open_ledger(recovery.as_deref())?.needs_confirmation() {
+            return Err(TransactionError::RecoveryRequired);
+        }
+        let identity = catalog
+            .profiles()
+            .find(|snapshot| snapshot.identity().opaque_id() == id)
+            .ok_or(CheckpointError::InvalidPayload)?
+            .identity()
+            .clone();
+        if evidence.display().selected_profile_id != id {
+            return Err(TransactionError::SourceChanged);
+        }
+        catalog.set_evidence(&identity, native, evidence)?;
+        let encoded = catalog.seal(self.vault, native)?;
+        self.expect(Role::Journal, journal.as_ref())?;
+        self.expect(Role::Recovery, recovery.as_ref())?;
+        self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
+        self.catalog_status(native)
     }
     pub(crate) fn login_receipt(
         &self,
@@ -465,6 +644,41 @@ impl<'a> VaultAccountStore<'a> {
         evidence: Option<super::session_checks::SessionCheckReport>,
         update_duplicate: bool,
     ) -> Result<CaptureCommitOutcome, TransactionError> {
+        self.save_login_profile_for(
+            native,
+            LoginProfileSave {
+                revision,
+                request_id,
+                snapshot,
+                evidence,
+                update_duplicate,
+                completion: None,
+            },
+        )
+    }
+    pub(crate) fn save_login_profile_for(
+        &self,
+        native: &NativeCipher,
+        request: LoginProfileSave<'_>,
+    ) -> Result<CaptureCommitOutcome, TransactionError> {
+        let LoginProfileSave {
+            revision,
+            request_id,
+            snapshot,
+            evidence,
+            update_duplicate,
+            completion,
+        } = request;
+        if let Some(target) = completion {
+            if revision != target.revision {
+                return Err(TransactionError::CatalogChanged);
+            }
+            if !update_duplicate
+                || !super::oauth_account::coding_only_change(&target.snapshot, &snapshot)
+            {
+                return Err(TransactionError::SourceChanged);
+            }
+        }
         let before = self.read(Role::Profiles)?;
         let current_revision = catalog_revision(before.as_deref());
         let mut catalog = self.import_catalog(native, &current_revision)?;
@@ -472,7 +686,7 @@ impl<'a> VaultAccountStore<'a> {
             snapshot
                 .scoped_document()
                 .to_bytes()
-                .map_err(|error| CheckpointError::Core(error))?,
+                .map_err(CheckpointError::Core)?,
         )
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -494,7 +708,16 @@ impl<'a> VaultAccountStore<'a> {
             return Err(TransactionError::RecoveryRequired);
         }
         let duplicate = catalog.get(snapshot.identity()).is_some();
-        let outcome = if duplicate && !update_duplicate {
+        let outcome = if let Some(target) = completion {
+            if !duplicate {
+                return Err(TransactionError::MissingTarget);
+            }
+            if catalog.replace_coding_profile(&target.snapshot, snapshot, native, evidence)? {
+                CaptureCommitOutcome::Refreshed
+            } else {
+                CaptureCommitOutcome::Kept
+            }
+        } else if duplicate && !update_duplicate {
             CaptureCommitOutcome::Kept
         } else {
             if catalog.upsert_checked(
@@ -526,6 +749,7 @@ impl<'a> VaultAccountStore<'a> {
         self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
         Ok(outcome)
     }
+    #[cfg(test)]
     pub(crate) fn import_profiles(
         &self,
         native: &NativeCipher,
@@ -992,6 +1216,7 @@ impl<'a> AccountStore<'a> {
         let recovery = VaultAccountStore::new(self.vault_root, self.vault)?.status()?;
         Ok(CatalogStatus {
             revision: catalog_revision(bytes.as_deref()),
+            actions: CatalogActions::new(&recovery, !profiles.is_empty()),
             profiles,
             current: None,
             pending: recovery.pending,
@@ -1549,6 +1774,39 @@ fn expect_image(
         _ => Err(TransactionError::SourceChanged),
     }
 }
+/// Explicit read action only. This does not grant native write admission, capture
+/// the session, or change the catalog. The caller checks selected source metadata
+/// around this stable, private-file read.
+pub(super) fn read_current_profile(
+    root: &Path,
+    expected_root: [u64; 2],
+    native: &NativeCipher,
+    family: OAuthFamily,
+    gate: &dyn Fn() -> Result<(), TransactionError>,
+) -> Result<Option<AccountSnapshot>, TransactionError> {
+    if native_root_identity(root)? != expected_root {
+        return Err(TransactionError::SourceChanged);
+    }
+    let path = root.join("credentials.json");
+    let before = read_private(&path)?;
+    let snapshot = before
+        .as_ref()
+        .map(|image| {
+            let document = CredentialDocument::parse(image).map_err(CheckpointError::Core)?;
+            let snapshot = native.inspect(&document).map_err(CheckpointError::Native)?;
+            if snapshot.identity().family() != family {
+                return Err(TransactionError::SourceChanged);
+            }
+            Ok(snapshot)
+        })
+        .transpose()?;
+    gate()?;
+    if native_root_identity(root)? != expected_root {
+        return Err(TransactionError::SourceChanged);
+    }
+    expect_image(read_private(&path)?, before.as_ref())?;
+    Ok(snapshot)
+}
 fn publish_private(
     path: &Path,
     bytes: &[u8],
@@ -1560,6 +1818,55 @@ fn publish_private(
         return Err(TransactionError::SourceChanged);
     }
     Ok(current)
+}
+
+#[cfg(any(feature = "gui", test))]
+impl VaultAccountStore<'_> {
+    /// The caller still holds the shared physical owner and vault session guard.
+    pub(super) fn bundle_export_root(&self) -> Result<&Path, TransactionError> {
+        self.validate_root()?;
+        Ok(self.root)
+    }
+
+    pub(super) fn bundle_export_receipt(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<super::bundle_export::Receipt>, super::bundle_export::ExportFailure> {
+        use super::bundle_export::{ExportFailure, ReceiptLedger};
+        match self
+            .read(Role::BundleExports)
+            .map_err(|_| ExportFailure::Storage)?
+        {
+            None => Ok(None),
+            Some(bytes) => Ok(ReceiptLedger::open(&bytes, self.vault)?
+                .get(request_id)
+                .cloned()),
+        }
+    }
+
+    pub(super) fn record_bundle_export(
+        &self,
+        receipt: super::bundle_export::Receipt,
+    ) -> Result<(), super::bundle_export::ExportFailure> {
+        use super::bundle_export::{ExportFailure, ReceiptLedger};
+        let before = self
+            .read(Role::BundleExports)
+            .map_err(|_| ExportFailure::Storage)?;
+        let mut ledger = match before.as_ref() {
+            Some(bytes) => ReceiptLedger::open(bytes, self.vault)?,
+            None => ReceiptLedger::default(),
+        };
+        ledger.put(receipt.clone())?;
+        let encoded = ledger.seal(self.vault)?;
+        let published = self
+            .publish(Role::BundleExports, before.as_ref(), &encoded)
+            .map_err(|_| ExportFailure::Storage)?;
+        let verified = ReceiptLedger::open(&published, self.vault)?;
+        if verified.get(&receipt.request_id) != Some(&receipt) {
+            return Err(ExportFailure::SavedDataInvalid);
+        }
+        Ok(())
+    }
 }
 fn recovery_revision(journal: Option<&[u8]>, recovery: Option<&[u8]>) -> String {
     let mut digest = Sha256::new();

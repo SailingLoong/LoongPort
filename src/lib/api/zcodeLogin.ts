@@ -4,6 +4,8 @@ import { safeAccountError, type AccountError } from "./zcodeAccounts";
 export type LoginFamily = "bigmodel" | "zai";
 export interface LoginProgress {
   flowId: string;
+  purpose?: "addAccount" | "completeCoding";
+  sourceCatalogRevision?: string;
   phase:
     | "waiting"
     | "preparing"
@@ -24,7 +26,7 @@ export interface LoginProgress {
     id: string;
     label: string | null;
     duplicate: boolean;
-    identitySource: "officialLogin";
+    identitySource: "officialLogin" | "nativeCapture" | "packageDeclared";
   } | null;
   connections: {
     start: "ready" | "unknown" | "unavailable";
@@ -56,6 +58,10 @@ function publicProgress(value: LoginProgress): LoginProgress {
     error.remedy = "queryOriginal";
   return {
     flowId: value.flowId,
+    ...(value.purpose === undefined ? {} : { purpose: value.purpose }),
+    ...(value.sourceCatalogRevision === undefined
+      ? {}
+      : { sourceCatalogRevision: value.sourceCatalogRevision }),
     phase: value.phase,
     family: value.family,
     authorization: authorization && {
@@ -100,6 +106,23 @@ async function call(
 }
 
 export const zcodeLoginApi = {
+  beginSavedCoding: (id: string, catalogRevision: string, dataRoot?: string) =>
+    call("begin_saved_zcode_coding", {
+      id,
+      catalogRevision,
+      ...(dataRoot === undefined ? {} : { dataRoot }),
+    }),
+  lastProgress: async (dataRoot?: string): Promise<LoginProgress | null> => {
+    try {
+      const result = await invoke<LoginProgress | null>(
+        "get_zcode_last_login_progress",
+        dataRoot === undefined ? {} : { dataRoot },
+      );
+      return result ? publicProgress(result) : null;
+    } catch (cause) {
+      throw { ...safeAccountError(cause), remedy: "queryOriginal" };
+    }
+  },
   begin: (family: LoginFamily, dataRoot?: string) =>
     call("begin_zcode_official_login", {
       family,

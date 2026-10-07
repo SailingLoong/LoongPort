@@ -833,3 +833,267 @@ async fn session_checks_start_acceptance_is_not_reused_under_a_different_app_ver
     assert_eq!(merged.business.check.state, CheckState::Accepted);
     assert_eq!(merged.coding.check.state, CheckState::Accepted);
 }
+
+#[test]
+fn saved_coding_update_retains_unchanged_start_facts_when_new_start_check_is_unknown() {
+    let (native, old) = fixture(
+        OAuthFamily::Zai,
+        Some("unchanged-jwt"),
+        None,
+        Some("old-key"),
+    );
+    let (_, updated) = fixture(
+        OAuthFamily::Zai,
+        Some("unchanged-jwt"),
+        None,
+        Some("new-key"),
+    );
+    let mut previous = SessionCheckReport::unverified(&old, &Credentials::load(&native, &old));
+    previous.display.business.check.state = CheckState::Accepted;
+    previous.display.business.check.checked_at = Some(10);
+    previous.display.start.check.state = CheckState::Accepted;
+    previous.display.start.check.checked_at = Some(20);
+    previous.display.start.entitlement = EntitlementState::Available;
+    previous.bindings.start_app_version = Some("3.14.4".into());
+    let mut current =
+        SessionCheckReport::unverified(&updated, &Credentials::load(&native, &updated));
+    current.display.coding.check.state = CheckState::Accepted;
+    current.display.coding.check.checked_at = Some(30);
+    current.display.coding.entitlement = EntitlementState::Available;
+    let merged = previous.with_coding_from(&current, &native, &updated);
+    assert_eq!(merged.display.business, previous.display.business);
+    assert_eq!(merged.display.start, previous.display.start);
+    assert_eq!(merged.display.coding, current.display.coding);
+    assert!(merged.start_checked_for("3.14.4"));
+    assert!(merged.matches_coding(&native, &updated));
+    assert!(!previous.matches_coding(&native, &updated));
+}
+
+#[tokio::test]
+async fn rejection_survives_transient_checks_and_catalog_reopen_per_connection_until_acceptance() {
+    use super::super::checkpoint::{ConnectionKind, ProfileCatalog};
+    let (native, snapshot) = fixture(
+        OAuthFamily::Zai,
+        Some("jwt-secret-canary"),
+        None,
+        Some("coding-secret-canary"),
+    );
+    let good = || {
+        let mut values = successful_responses();
+        values[1] = response(
+            200,
+            serde_json::json!({"plans":[{"status":"active"}],"balances":[]}),
+        );
+        values[2] = response(
+            200,
+            serde_json::json!([{"productId":"coding-plan","status":"VALID","inCurrentPeriod":true}]),
+        );
+        values
+    };
+    for rejected in [ConnectionKind::Start, ConnectionKind::Coding] {
+        let mut values = good();
+        values[if rejected == ConnectionKind::Start {
+            1
+        } else {
+            2
+        }] = response(401, serde_json::json!({}));
+        if rejected == ConnectionKind::Coding {
+            values[3] = response(401, serde_json::json!({}));
+        }
+        let mut catalog = ProfileCatalog::default();
+        catalog.upsert(snapshot.clone());
+        let report = check_session(
+            &OfficialClient::new(Fixture::new(values)),
+            &native,
+            &snapshot,
+            Some("3.14.4"),
+            100,
+            &check,
+        )
+        .await
+        .unwrap();
+        catalog
+            .set_evidence(snapshot.identity(), &native, report)
+            .unwrap();
+        for transient in [OfficialError::Timeout, OfficialError::Transport] {
+            let report = check_session(
+                &OfficialClient::new(Fixture::new((0..4).map(|_| Err(transient)).collect())),
+                &native,
+                &snapshot,
+                Some("3.14.4"),
+                200,
+                &check,
+            )
+            .await
+            .unwrap();
+            catalog
+                .set_evidence(snapshot.identity(), &native, report)
+                .unwrap();
+            let vault = crate::secrets::VaultContext::generate().unwrap();
+            catalog =
+                ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native)
+                    .unwrap();
+            for kind in [ConnectionKind::Start, ConnectionKind::Coding] {
+                assert_eq!(
+                    catalog.can_activate(&snapshot, &native, Some((kind, "3.14.4"))),
+                    kind != rejected
+                );
+            }
+        }
+        let report = check_session(
+            &OfficialClient::new(Fixture::new(good())),
+            &native,
+            &snapshot,
+            Some("3.14.4"),
+            300,
+            &check,
+        )
+        .await
+        .unwrap();
+        catalog
+            .set_evidence(snapshot.identity(), &native, report)
+            .unwrap();
+        assert!(catalog.can_activate(&snapshot, &native, Some((rejected, "3.14.4"))));
+    }
+}
+
+#[test]
+fn unavailable_observation_survives_every_unknown_reason_without_expanding_acceptance() {
+    let rejected = failed(
+        OfficialError::Unauthorized,
+        Some(CredentialSource::GlobalStartJwt),
+        100,
+    )
+    .unwrap();
+    let accepted = accepted(Some(CredentialSource::GlobalStartJwt), 100);
+    for reason in [
+        None,
+        Some(CheckReason::Unverified),
+        Some(CheckReason::MissingCredential),
+        Some(CheckReason::InvalidCredential),
+        Some(CheckReason::AppVersionUnknown),
+        Some(CheckReason::AuthRejected),
+        Some(CheckReason::BusinessRejected),
+        Some(CheckReason::MalformedResponse),
+        Some(CheckReason::Timeout),
+        Some(CheckReason::Network),
+    ] {
+        for checked_at in [None, Some(200)] {
+            let current = CheckResult {
+                state: CheckState::Unknown,
+                reason,
+                checked_at,
+                source: Some(CredentialSource::GlobalStartJwt),
+                latest_failure: None,
+            };
+            let kept = preserve_check(&current, &rejected)
+                .expect("Unknown cannot establish renewed acceptance");
+            assert_eq!(kept.state, CheckState::Unavailable);
+            assert_eq!(kept.reason, Some(CheckReason::AuthRejected));
+            assert_eq!(kept.checked_at, Some(100));
+            assert_eq!(
+                preserve_check(&current, &accepted).is_some(),
+                checked_at.is_some()
+                    && matches!(reason, Some(CheckReason::Timeout | CheckReason::Network))
+            );
+        }
+    }
+    assert!(preserve_check(&accepted, &rejected).is_none());
+}
+
+#[tokio::test]
+async fn rejected_credentials_survive_all_unknown_transport_outcomes_and_missing_version() {
+    let (native, snapshot) = fixture(
+        OAuthFamily::Zai,
+        Some("jwt-secret-canary"),
+        None,
+        Some("coding-secret-canary"),
+    );
+    let previous = check_session(
+        &OfficialClient::new(Fixture::new(
+            (0..4).map(|_| Err(OfficialError::Unauthorized)).collect(),
+        )),
+        &native,
+        &snapshot,
+        Some("3.14.4"),
+        100,
+        &check,
+    )
+    .await
+    .unwrap();
+    for error in [
+        OfficialError::InvalidInput,
+        OfficialError::InvalidResponse,
+        OfficialError::ResponseTooLarge,
+        OfficialError::Http(503),
+        OfficialError::Transport,
+        OfficialError::Timeout,
+        OfficialError::ConsentMismatch,
+    ] {
+        for version in [Some("3.14.4"), None] {
+            let current = check_session(
+                &OfficialClient::new(Fixture::new((0..4).map(|_| Err(error)).collect())),
+                &native,
+                &snapshot,
+                version,
+                200,
+                &check,
+            )
+            .await
+            .unwrap();
+            let kept = current
+                .preserve_previous_acceptance(&previous, &native, &snapshot)
+                .display();
+            assert_eq!(
+                kept.start.check.state,
+                CheckState::Unavailable,
+                "{error:?}, version={version:?}"
+            );
+            assert_eq!(
+                kept.coding.check.state,
+                CheckState::Unavailable,
+                "{error:?}"
+            );
+        }
+    }
+    let (_, changed) = fixture(
+        OAuthFamily::Zai,
+        Some("changed-jwt"),
+        None,
+        Some("changed-coding"),
+    );
+    let current = check_session(
+        &OfficialClient::new(Fixture::new(
+            (0..4)
+                .map(|_| Err(OfficialError::InvalidResponse))
+                .collect(),
+        )),
+        &native,
+        &changed,
+        Some("3.14.4"),
+        200,
+        &check,
+    )
+    .await
+    .unwrap();
+    let kept = current
+        .preserve_previous_acceptance(&previous, &native, &changed)
+        .display();
+    assert_eq!(kept.start.check.state, CheckState::Unknown);
+    assert_eq!(kept.coding.check.state, CheckState::Unknown);
+    let accepted = check_session(
+        &OfficialClient::new(Fixture::new(successful_responses())),
+        &native,
+        &snapshot,
+        Some("3.14.4"),
+        300,
+        &check,
+    )
+    .await
+    .unwrap();
+    let kept = accepted
+        .preserve_previous_acceptance(&previous, &native, &snapshot)
+        .display();
+    assert_eq!(kept.start.check.state, CheckState::Accepted);
+    assert_eq!(kept.coding.check.state, CheckState::Accepted);
+}

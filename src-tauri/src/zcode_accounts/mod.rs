@@ -6,12 +6,16 @@ pub(crate) mod api;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod bundle;
 #[cfg(any(feature = "gui", test))]
+pub(crate) mod bundle_export;
+#[cfg(any(feature = "gui", test))]
 pub(crate) mod bundle_import;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod bundle_limits;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod capture_reviews;
 pub(crate) mod checkpoint;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod connection_check;
 pub mod core;
 pub(crate) mod desktop_text;
 #[cfg(any(target_os = "macos", all(test, unix)))]

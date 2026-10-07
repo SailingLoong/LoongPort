@@ -24,6 +24,38 @@ const progress: LoginProgress = {
 };
 
 describe("ZCode official login IPC", () => {
+  it("prepares the selected saved Coding account without invoking OAuth", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ...progress,
+      purpose: "completeCoding",
+    });
+    expect(
+      (
+        await zcodeLoginApi.beginSavedCoding(
+          "opaque",
+          "catalog",
+          "/synthetic/library",
+        )
+      ).purpose,
+    ).toBe("completeCoding");
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("begin_saved_zcode_coding", {
+      id: "opaque",
+      catalogRevision: "catalog",
+      dataRoot: "/synthetic/library",
+    });
+  });
+  it("finds the original login result from the same library without beginning or saving", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(null);
+    expect(await zcodeLoginApi.lastProgress()).toBeNull();
+    vi.mocked(invoke).mockResolvedValueOnce(progress);
+    expect(await zcodeLoginApi.lastProgress("/synthetic/library")).toEqual(
+      progress,
+    );
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["get_zcode_last_login_progress", {}],
+      ["get_zcode_last_login_progress", { dataRoot: "/synthetic/library" }],
+    ]);
+  });
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
   });

@@ -7,7 +7,9 @@ use super::{
     oauth::{
         FlowError, FlowStage, LoginFlowStore, LoginProgress, VaultBinding, WorkKind, WorkLease,
     },
-    oauth_service::{CatalogView, LoginPersistence, LoginService, StoreFailure, StoreFuture},
+    oauth_service::{
+        CatalogView, LoginPersistence, LoginService, SaveInput, StoreFailure, StoreFuture,
+    },
     official::PollToken,
     official_http::ReqwestOfficialTransport,
     runtime::{run_owned, RuntimeError},
@@ -168,30 +170,35 @@ impl LoginPersistence for Persistence {
             .await
         })
     }
-    fn save<'a>(
-        &'a self,
-        binding: &'a VaultBinding,
-        context: &'a LibraryContext,
-        revision: &'a str,
-        request_id: &'a str,
-        snapshot: &'a AccountSnapshot,
-        evidence: Option<&'a super::session_checks::SessionCheckReport>,
-        update_duplicate: bool,
-    ) -> StoreFuture<'a, CaptureCommitOutcome> {
+    fn save<'a>(&'a self, input: SaveInput<'a>) -> StoreFuture<'a, CaptureCommitOutcome> {
+        let SaveInput {
+            binding,
+            context,
+            revision,
+            request_id,
+            snapshot,
+            evidence,
+            update_duplicate,
+            completion,
+        } = input;
         let context = context.clone();
         let revision = revision.to_owned();
         let request_id = request_id.to_owned();
         let snapshot = snapshot.clone();
         let evidence = evidence.cloned();
+        let completion = completion.cloned();
         Box::pin(async move {
             self.access(binding.clone(), move |store| {
-                store.save_login_profile(
+                store.save_login_profile_for(
                     &context.cipher().map_err(TransactionError::Admission)?,
-                    &revision,
-                    &request_id,
-                    snapshot,
-                    evidence,
-                    update_duplicate,
+                    super::transaction::LoginProfileSave {
+                        revision: &revision,
+                        request_id: &request_id,
+                        snapshot,
+                        evidence,
+                        update_duplicate,
+                        completion: completion.as_ref(),
+                    },
                 )
             })
             .await
@@ -325,6 +332,10 @@ pub(crate) async fn begin(
         .flows
         .begin(bound, family, token, Instant::now())
         .map_err(flow_error)?;
+    service
+        .flows
+        .bind_context(&id, context.context_id())
+        .map_err(flow_error)?;
     // Acquire synchronously before handing any work to a task.
     let lease = service
         .flows
@@ -372,6 +383,123 @@ pub(crate) async fn query(db: Arc<Database>, id: String) -> Result<LoginProgress
             .map_err(|_| flow_error(FlowError::Poisoned))?;
         }
     }
+    progress(&id)
+}
+
+pub(crate) async fn begin_saved(
+    db: Arc<Database>,
+    data_root: Option<PathBuf>,
+    catalog_revision: String,
+    target_id: String,
+) -> Result<LoginProgress, PublicError> {
+    enum Selection {
+        Existing(String),
+        Selected(VaultBinding, Box<super::oauth::SavedCodingInput>),
+    }
+    let selected = run_owned(Arc::clone(&db), move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let bound = binding(db)?;
+        if let Some(id) = flows()
+            .saved_entry(
+                &bound,
+                context.context_id(),
+                &target_id,
+                &catalog_revision,
+                Instant::now(),
+            )
+            .map_err(|_| RuntimeError::TaskFailed)?
+        {
+            let old = flows()
+                .progress(&id, Instant::now())
+                .map_err(|_| RuntimeError::TaskFailed)?;
+            let reopen = matches!(old.phase, "cancelled" | "expired")
+                && old.key_may_exist
+                && flows()
+                    .recovery_kind(&id)
+                    .map_err(|_| RuntimeError::TaskFailed)?
+                    .is_none();
+            if !reopen {
+                return Ok(Selection::Existing(id));
+            }
+        }
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        let native = context.cipher()?;
+        let status = store.catalog_status(&native)?;
+        if status.revision != catalog_revision {
+            return Err(TransactionError::CatalogChanged.into());
+        }
+        if status.pending || status.native_unconfirmed {
+            return Err(TransactionError::RecoveryRequired.into());
+        }
+        let row = status
+            .profiles
+            .iter()
+            .find(|row| row.id == target_id)
+            .ok_or(TransactionError::MissingTarget)?;
+        if !row.can_complete_coding {
+            return Err(TransactionError::SourceChanged.into());
+        }
+        let catalog = store.import_catalog(&native, &catalog_revision)?;
+        let snapshot = catalog
+            .profiles()
+            .find(|snapshot| snapshot.identity().opaque_id() == target_id)
+            .ok_or(TransactionError::MissingTarget)?
+            .clone();
+        let details = catalog.details(&snapshot, &native);
+        let app_version = super::native_context::library_app_version(context.data_root());
+        Ok(Selection::Selected(
+            bound,
+            Box::new(super::oauth::SavedCodingInput {
+                target: super::oauth::SavedCodingTarget {
+                    snapshot,
+                    revision: catalog_revision,
+                    details,
+                },
+                context,
+                app_version,
+            }),
+        ))
+    })
+    .await
+    .map_err(PublicError::from)?;
+    let (bound, input) = match selected {
+        Selection::Existing(id) => return query(db, id).await,
+        Selection::Selected(bound, input) => (bound, *input),
+    };
+    let service = service(db)?;
+    let begin = service
+        .flows
+        .begin_saved(bound, input, Instant::now())
+        .map_err(flow_error)?;
+    let id = begin.flow_id;
+    if !begin.needs_prepare {
+        return progress(&id);
+    }
+    // This lease exists before the IPC waiter can be dropped. It owns the exact
+    // saved target and never starts an OAuth init/poll or token exchange.
+    let lease = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .map_err(flow_error)?;
+    {
+        let expiry = service.flows.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let _ = expiry.expire_due(Instant::now());
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let _ = expiry.expire_due(Instant::now());
+        });
+    }
+    tokio::spawn(async move {
+        let ticket = lease.ticket();
+        if service.prepare(lease).await.is_err() {
+            let _ = service.flows.fail_abandoned(&ticket);
+        }
+    })
+    .await
+    .map_err(|_| flow_error(FlowError::Poisoned))?;
     progress(&id)
 }
 pub(crate) async fn confirm(
@@ -457,4 +585,79 @@ pub(crate) async fn catalog(
     })
     .await
     .map_err(Into::into)
+}
+
+pub(crate) async fn last_progress(
+    db: Arc<Database>,
+    data_root: Option<PathBuf>,
+) -> Result<Option<LoginProgress>, PublicError> {
+    let (bound, context_id) = run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        Ok((binding(db)?, context.context_id().to_owned()))
+    })
+    .await
+    .map_err(PublicError::from)?;
+    flows()
+        .latest(&bound, &context_id, Instant::now())
+        .map_err(flow_error)?
+        .map(|id| progress(&id))
+        .transpose()
+}
+
+pub(crate) async fn set_label(
+    db: Arc<Database>,
+    data_root: Option<PathBuf>,
+    revision: String,
+    id: String,
+    label: Option<String>,
+) -> Result<CatalogStatus, PublicError> {
+    run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let native = context.cipher()?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        store.set_profile_label(&native, &revision, &id, label)?;
+        store.catalog_status(&native).map_err(Into::into)
+    })
+    .await
+    .map_err(Into::into)
+}
+
+pub(crate) async fn export_bundle(
+    db: Arc<Database>,
+    data_root: Option<PathBuf>,
+    request: super::bundle_export::ExportRequest,
+) -> Result<super::bundle_export::ExportResult, PublicError> {
+    run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        Ok(super::bundle_export::export_bundle(
+            &store,
+            &context.cipher()?,
+            context.data_root(),
+            request,
+            &chrono::Utc::now().to_rfc3339(),
+        ))
+    })
+    .await
+    .map_err(PublicError::from)?
+    .map_err(|failure| PublicError::new(failure.code(), "queryOriginal"))
+}
+
+pub(crate) async fn export_result(
+    db: Arc<Database>,
+    request_id: String,
+) -> Result<super::bundle_export::ExportResult, PublicError> {
+    run_owned(db, move |db| {
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        Ok(super::bundle_export::export_result(&store, &request_id))
+    })
+    .await
+    .map_err(PublicError::from)?
+    .map_err(|failure| PublicError::new(failure.code(), "queryOriginal"))
 }

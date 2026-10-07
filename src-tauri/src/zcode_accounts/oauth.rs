@@ -63,6 +63,9 @@ pub(crate) struct LoginDisplay {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LoginProgress {
     pub flow_id: String,
+    pub purpose: LoginPurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_catalog_revision: Option<String>,
     pub phase: &'static str,
     pub family: &'static str,
     pub authorization: Option<Authorization>,
@@ -74,6 +77,38 @@ pub(crate) struct LoginProgress {
     pub key_management_url: &'static str,
     pub error: Option<LoginError>,
     pub saved: Option<SavedLogin>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LoginPurpose {
+    AddAccount,
+    CompleteCoding,
+}
+
+#[derive(Clone)]
+pub(crate) struct SavedCodingTarget {
+    pub snapshot: AccountSnapshot,
+    pub revision: String,
+    pub details: super::checkpoint::ProfileDetails,
+}
+pub(crate) struct SavedCodingInput {
+    pub target: SavedCodingTarget,
+    pub context: LibraryContext,
+    pub app_version: Option<String>,
+}
+pub(crate) struct BeginSavedCoding {
+    pub flow_id: String,
+    pub needs_prepare: bool,
+}
+
+pub(crate) fn identity_source_name(source: super::checkpoint::IdentitySource) -> &'static str {
+    use super::checkpoint::IdentitySource;
+    match source {
+        IdentitySource::OfficialLogin => "officialLogin",
+        IdentitySource::NativeCapture => "nativeCapture",
+        IdentitySource::PackageDeclared => "packageDeclared",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +159,8 @@ pub(crate) enum FlowError {
 #[derive(Clone)]
 pub(crate) struct LoginDraft {
     pub family: OAuthFamily,
-    pub poll_token: PollToken,
+    pub poll_token: Option<PollToken>,
+    pub completion: Option<SavedCodingTarget>,
     pub init: Option<OAuthInit>,
     pub ready: Option<Arc<PollReady>>,
     pub business: Option<BusinessToken>,
@@ -137,6 +173,17 @@ pub(crate) struct LoginDraft {
     pub poll_deadline: Option<Instant>,
     pub app_version: Option<String>,
     pub evidence: Option<super::session_checks::SessionCheckReport>,
+}
+impl LoginDraft {
+    /// Local operation binding only. Official project access is established by
+    /// the selected business credential, never by this cache-slot identifier.
+    pub(crate) fn key_scope_account_id(&self) -> Result<String, FlowError> {
+        self.completion
+            .as_ref()
+            .map(|target| target.snapshot.identity().opaque_id())
+            .or_else(|| self.ready.as_ref().map(|ready| ready.user.id.clone()))
+            .ok_or(FlowError::WrongStage)
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -162,6 +209,11 @@ pub(crate) struct SaveQuery {
 }
 struct Flow {
     family: OAuthFamily,
+    purpose: LoginPurpose,
+    completion_target: Option<(String, String)>,
+    completion_session: Option<[u8; 32]>,
+    created_at: Instant,
+    context_id: Option<String>,
     display: LoginDisplay,
     save_query: Option<SaveQuery>,
     key_cleanup: Option<KeyCleanup>,
@@ -194,6 +246,183 @@ pub(crate) struct WorkLease {
 }
 
 impl LoginFlowStore {
+    pub(crate) fn saved_entry(
+        &self,
+        binding: &VaultBinding,
+        context_id: &str,
+        target_id: &str,
+        revision: &str,
+        now: Instant,
+    ) -> Result<Option<String>, FlowError> {
+        let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        expire_due(&mut flows, now);
+        Ok(flows
+            .iter()
+            .find(|(_, flow)| {
+                &flow.binding == binding
+                    && flow.context_id.as_deref() == Some(context_id)
+                    && flow
+                        .completion_target
+                        .as_ref()
+                        .is_some_and(|(id, original_revision)| {
+                            id == target_id
+                                && if flow.stage == FlowStage::Saved {
+                                    original_revision == revision
+                                } else {
+                                    !terminal(flow.stage)
+                                        || flow.in_flight.is_some()
+                                        || flow.key_may_exist
+                                        || flow.save_query.is_some()
+                                        || flow.key_cleanup.is_some()
+                                }
+                        })
+            })
+            .map(|(id, _)| id.clone()))
+    }
+    pub(crate) fn begin_saved(
+        &self,
+        binding: VaultBinding,
+        input: SavedCodingInput,
+        now: Instant,
+    ) -> Result<BeginSavedCoding, FlowError> {
+        let SavedCodingInput {
+            target,
+            context,
+            app_version,
+        } = input;
+        let native = context.cipher().map_err(|_| FlowError::WrongStage)?;
+        let family = target.snapshot.identity().family();
+        if !target
+            .snapshot
+            .identity()
+            .matches_scope(context.context_id(), family)
+        {
+            return Err(FlowError::StaleWork);
+        }
+        let session_binding =
+            super::oauth_account::saved_session_binding(&native, &target.snapshot)
+                .map_err(|_| FlowError::WrongStage)?;
+        let business = super::oauth_account::saved_business_token(&native, &target.snapshot)
+            .map_err(|_| FlowError::WrongStage)?;
+        let coding_key = super::oauth_account::saved_coding_key(&native, &target.snapshot);
+        let account_id = target.snapshot.identity().opaque_id();
+        let context_id = context.context_id().to_owned();
+        let display = LoginDisplay {
+            account: Some(LoginAccount {
+                id: account_id.clone(),
+                label: target
+                    .details
+                    .label
+                    .clone()
+                    .or_else(|| native.profile_label(&target.snapshot).ok().flatten()),
+                duplicate: true,
+                identity_source: identity_source_name(target.details.identity_source),
+            }),
+            ..LoginDisplay::default()
+        };
+        let mut draft = LoginDraft {
+            family,
+            poll_token: None,
+            init: None,
+            ready: None,
+            business: Some(business),
+            project: None,
+            coding_key,
+            snapshot: Some(target.snapshot.clone()),
+            context: Some(context),
+            catalog_revision: Some(target.revision.clone()),
+            save_uncertain: false,
+            poll_deadline: None,
+            app_version,
+            evidence: target.details.evidence.clone(),
+            completion: Some(target.clone()),
+        };
+        let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        expire_due(&mut flows, now);
+        if let Some((id, flow)) = flows.iter_mut().find(|(_, flow)| {
+            flow.binding == binding
+                && flow.context_id.as_deref() == Some(&context_id)
+                && flow
+                    .completion_target
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &account_id)
+                && (flow.stage != FlowStage::Saved
+                    || flow
+                        .completion_target
+                        .as_ref()
+                        .is_some_and(|(_, revision)| revision == &target.revision))
+                && (!terminal(flow.stage)
+                    || flow.in_flight.is_some()
+                    || flow.key_may_exist
+                    || flow.save_query.is_some()
+                    || flow.key_cleanup.is_some()
+                    || flow.stage == FlowStage::Saved)
+        }) {
+            let resume = terminal(flow.stage)
+                && flow.stage != FlowStage::Saved
+                && flow.key_may_exist
+                && flow.in_flight.is_none()
+                && flow.save_query.is_none()
+                && flow.key_cleanup.is_none();
+            if resume {
+                if flow.completion_session != Some(session_binding) {
+                    return Err(FlowError::StaleWork);
+                }
+                flow.completion_target = Some((account_id, target.revision));
+                // An explicit re-entry can re-open only the same selected saved
+                // session. The durable project intent keeps this read-only.
+                draft.project = flow.display.project.clone();
+                let original_project = flow.display.project.clone();
+                flow.cancelled = Arc::new(AtomicBool::new(false));
+                flow.draft = Some(draft);
+                flow.display = display;
+                flow.display.project = original_project;
+                flow.stage = FlowStage::Preparing;
+                flow.expires = now + FLOW_LIFETIME;
+            }
+            return Ok(BeginSavedCoding {
+                flow_id: id.clone(),
+                needs_prepare: resume,
+            });
+        }
+        let active = flows
+            .values()
+            .filter(|flow| flow.in_flight.is_some() || !terminal(flow.stage))
+            .count();
+        if active >= MAX_FLOWS || flows.len() >= MAX_FLOWS + MAX_RECEIPTS {
+            return Err(FlowError::Capacity);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        flows.insert(
+            id.clone(),
+            Flow {
+                family,
+                purpose: LoginPurpose::CompleteCoding,
+                completion_target: Some((account_id, target.revision)),
+                completion_session: Some(session_binding),
+                created_at: now,
+                context_id: Some(context_id),
+                display,
+                save_query: None,
+                key_cleanup: None,
+                binding,
+                draft: Some(draft),
+                stage: FlowStage::Preparing,
+                expires: now + FLOW_LIFETIME,
+                in_flight: None,
+                next_work: 0,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                key_may_exist: false,
+                key_created: false,
+                key_intent_generation: None,
+                saved_account_id: None,
+            },
+        );
+        Ok(BeginSavedCoding {
+            flow_id: id,
+            needs_prepare: true,
+        })
+    }
     pub(crate) fn begin(
         &self,
         binding: VaultBinding,
@@ -215,13 +444,19 @@ impl LoginFlowStore {
             id.clone(),
             Flow {
                 family,
+                purpose: LoginPurpose::AddAccount,
+                completion_target: None,
+                completion_session: None,
+                created_at: now,
+                context_id: None,
                 display: LoginDisplay::default(),
                 save_query: None,
                 key_cleanup: None,
                 binding,
                 draft: Some(LoginDraft {
                     family,
-                    poll_token,
+                    poll_token: Some(poll_token),
+                    completion: None,
                     init: None,
                     ready: None,
                     business: None,
@@ -247,6 +482,35 @@ impl LoginFlowStore {
             },
         );
         Ok(id)
+    }
+    pub(crate) fn bind_context(&self, id: &str, context_id: &str) -> Result<(), FlowError> {
+        let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        let flow = flows.get_mut(id).ok_or(FlowError::Missing)?;
+        if flow
+            .context_id
+            .as_deref()
+            .is_some_and(|old| old != context_id)
+        {
+            return Err(FlowError::StaleWork);
+        }
+        flow.context_id = Some(context_id.to_owned());
+        Ok(())
+    }
+    pub(crate) fn latest(
+        &self,
+        binding: &VaultBinding,
+        context_id: &str,
+        now: Instant,
+    ) -> Result<Option<String>, FlowError> {
+        let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        expire_due(&mut flows, now);
+        Ok(flows
+            .iter()
+            .filter(|(_, flow)| {
+                &flow.binding == binding && flow.context_id.as_deref() == Some(context_id)
+            })
+            .max_by_key(|(_, flow)| flow.created_at)
+            .map(|(id, _)| id.clone()))
     }
     pub(crate) fn acquire(
         &self,
@@ -337,6 +601,11 @@ impl LoginFlowStore {
         let flow = flows.get(id).ok_or(FlowError::Missing)?;
         Ok(LoginProgress {
             flow_id: id.into(),
+            purpose: flow.purpose,
+            source_catalog_revision: flow
+                .completion_target
+                .as_ref()
+                .map(|(_, revision)| revision.clone()),
             phase: match flow.stage {
                 FlowStage::Initializing | FlowStage::Preparing => "preparing",
                 FlowStage::Waiting => "waiting",
@@ -602,14 +871,6 @@ impl WorkLease {
         );
         Ok(())
     }
-    pub(crate) fn bound_deadline(&self, deadline: Instant) -> Result<(), FlowError> {
-        self.check()?;
-        let mut flows = self.owner.lock().map_err(|_| FlowError::Poisoned)?;
-        let flow = flows.get_mut(&self.flow_id).ok_or(FlowError::Missing)?;
-        self.matches(flow)?;
-        flow.expires = flow.expires.min(deadline);
-        Ok(())
-    }
     pub(crate) fn recover_key_intent(&self, created: bool) -> Result<(), FlowError> {
         self.check()?;
         let mut flows = self.owner.lock().map_err(|_| FlowError::Poisoned)?;
@@ -672,6 +933,7 @@ impl WorkLease {
         flow.key_created = true;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn mark_key_not_sent(&self) -> Result<(), FlowError> {
         let mut flows = self.owner.lock().map_err(|_| FlowError::Poisoned)?;
         let flow = flows.get_mut(&self.flow_id).ok_or(FlowError::Missing)?;
@@ -748,7 +1010,8 @@ fn expire_due(flows: &mut BTreeMap<String, Flow>, now: Instant) {
         if terminal(flow.stage) {
             return flow.in_flight.is_some()
                 || flow.save_query.is_some()
-                || flow.key_cleanup.is_some();
+                || flow.key_cleanup.is_some()
+                || (flow.purpose == LoginPurpose::CompleteCoding && flow.key_may_exist);
         }
         flow.cancelled.store(true, Ordering::Release);
         flow.draft = None;

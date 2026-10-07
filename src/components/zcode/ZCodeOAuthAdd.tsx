@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -36,11 +42,13 @@ export function ZCodeOAuthAdd({
   onClose,
   onSaved,
   libraryDataRoot,
+  savedAccount,
 }: {
   open: boolean;
   onClose: () => void;
   onSaved: () => Promise<void>;
   libraryDataRoot?: string;
+  savedAccount?: { id: string; catalogRevision: string };
 }) {
   const { t } = useTranslation();
   const copy = (
@@ -57,6 +65,7 @@ export function ZCodeOAuthAdd({
   const [uncertain, setUncertain] = useState<Write | null>(null);
   const [updateDuplicate, setUpdateDuplicate] = useState(false);
   const [listRefreshFailed, setListRefreshFailed] = useState(false);
+  const [previousReadFailed, setPreviousReadFailed] = useState(false);
   const flow = useRef<string | null>(null);
   const generation = useRef(0);
   const readGeneration = useRef(0);
@@ -66,6 +75,8 @@ export function ZCodeOAuthAdd({
   const notified = useRef(new Set<string>());
   const savedCallback = useRef(onSaved);
   savedCallback.current = onSaved;
+  const savedId = savedAccount?.id;
+  const savedRevision = savedAccount?.catalogRevision;
 
   const abandon = useCallback(() => {
     generation.current += 1;
@@ -86,19 +97,8 @@ export function ZCodeOAuthAdd({
     setUncertain(null);
     setUpdateDuplicate(false);
     setListRefreshFailed(false);
+    setPreviousReadFailed(false);
   }, []);
-
-  useEffect(() => {
-    alive.current = open;
-    if (open) {
-      reset();
-      setFamily("bigmodel");
-    }
-    return () => {
-      alive.current = false;
-      abandon();
-    };
-  }, [open, libraryDataRoot, abandon, reset]);
 
   const current = useCallback(
     (version: number, flowId?: string) =>
@@ -133,15 +133,78 @@ export function ZCodeOAuthAdd({
       ) {
         // Record before awaiting the list refresh. A saved receipt is never a Save retry.
         notified.current.add(next.flowId);
-        void Promise.resolve()
-          .then(() => savedCallback.current())
-          .catch(() => {
+        void (async () => {
+          try {
+            await savedCallback.current();
+          } catch {
             if (current(version, next.flowId)) setListRefreshFailed(true);
-          });
+          }
+        })();
       }
     },
     [current],
   );
+
+  const restore = useCallback(async () => {
+    if (!alive.current || readInFlight.current || inFlight.current) return;
+    const version = generation.current;
+    const readVersion = ++readGeneration.current;
+    readInFlight.current = true;
+    setReading(true);
+    setError(null);
+    setPreviousReadFailed(false);
+    try {
+      let next = await zcodeLoginApi.lastProgress(libraryDataRoot);
+      if (!current(version) || readGeneration.current !== readVersion) return;
+      if (
+        savedId &&
+        savedRevision &&
+        !(
+          next?.purpose === "completeCoding" &&
+          next.account?.id === savedId &&
+          next.sourceCatalogRevision === savedRevision &&
+          !["failed", "expired", "cancelled"].includes(next.phase)
+        )
+      ) {
+        next = await zcodeLoginApi.beginSavedCoding(
+          savedId,
+          savedRevision,
+          libraryDataRoot,
+        );
+        if (!current(version) || readGeneration.current !== readVersion) {
+          void zcodeLoginApi.cancel(next.flowId).catch(() => {});
+          return;
+        }
+      }
+      if (next) {
+        flow.current = next.flowId;
+        accept(next, version);
+      }
+    } catch (cause) {
+      if (current(version) && readGeneration.current === readVersion) {
+        setError(safeAccountError(cause));
+        setPreviousReadFailed(true);
+      }
+    } finally {
+      if (current(version) && readGeneration.current === readVersion) {
+        readInFlight.current = false;
+        setReading(false);
+      }
+    }
+  }, [libraryDataRoot, savedId, savedRevision, current, accept]);
+
+  useLayoutEffect(() => {
+    alive.current = open;
+    if (open) {
+      reset();
+      setFamily("bigmodel");
+      void restore();
+    }
+    return () => {
+      alive.current = false;
+      abandon();
+    };
+  }, [open, abandon, reset, restore]);
 
   const read = useCallback(async () => {
     const flowId = flow.current;
@@ -267,7 +330,10 @@ export function ZCodeOAuthAdd({
             )
           : action === "decline"
             ? await zcodeLoginApi.declineKey(flowId)
-            : await zcodeLoginApi.save(flowId, updateDuplicate);
+            : await zcodeLoginApi.save(
+                flowId,
+                progress.purpose === "completeCoding" || updateDuplicate,
+              );
       if (next.flowId === flowId) accept(next, version);
     } catch (cause) {
       if (current(version, flowId)) {
@@ -298,6 +364,7 @@ export function ZCodeOAuthAdd({
     setPaused(true);
   };
   const phase = progress?.phase;
+  const completeCoding = progress?.purpose === "completeCoding";
   const blocked = busy !== null || reading;
   const keyUncertain =
     progress?.error?.remedy !== "retryKeyConsent" &&
@@ -309,15 +376,24 @@ export function ZCodeOAuthAdd({
     progress?.error?.remedy !== "retrySave" &&
     (uncertain === "save" || !!progress?.error);
   const title = !phase
-    ? copy("title", "Add a sign-in account")
+    ? savedAccount
+      ? copy("completeSavedTitle", "Complete the saved Coding connection")
+      : copy("title", "Add a sign-in account")
     : phase === "waiting"
       ? copy("waiting", "Waiting for official authorization")
       : phase === "preparing"
-        ? copy("preparing", "Identity verified; preparing connections")
+        ? completeCoding
+          ? copy("preparingSaved", "Preparing the saved account connection")
+          : copy("preparing", "Identity verified; preparing connections")
         : phase === "keyRequired"
           ? copy("keyTitle", "Complete the Coding Plan connection")
           : phase === "review"
-            ? copy("review", "Confirm this account before saving")
+            ? completeCoding
+              ? copy(
+                  "reviewSavedCoding",
+                  "Review the Coding connection before saving",
+                )
+              : copy("review", "Confirm this account before saving")
             : phase === "saved"
               ? copy("saved", "Account save result")
               : phase === "expired"
@@ -354,7 +430,20 @@ export function ZCodeOAuthAdd({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 overflow-y-auto px-6 py-5">
-          {!progress && (
+          {!progress && reading && (
+            <p role="status" className="text-sm">
+              {savedAccount
+                ? copy(
+                    "preparingSaved",
+                    "Preparing the saved account connection",
+                  )
+                : copy(
+                    "checkingPrevious",
+                    "Checking the previous sign-in result…",
+                  )}
+            </p>
+          )}
+          {!progress && !savedAccount && (
             <>
               <p className="text-sm">
                 {copy(
@@ -402,7 +491,14 @@ export function ZCodeOAuthAdd({
                       {copy("identity", "Identity source")}
                     </dt>
                     <dd>
-                      {copy("officialIdentity", "Verified official sign-in")}
+                      {progress.account.identitySource === "officialLogin"
+                        ? copy("officialIdentity", "Verified official sign-in")
+                        : progress.account.identitySource === "nativeCapture"
+                          ? copy("nativeIdentity", "Captured native session")
+                          : copy(
+                              "packageIdentity",
+                              "Declared by account bundle",
+                            )}
                     </dd>
                   </>
                 )}
@@ -521,10 +617,15 @@ export function ZCodeOAuthAdd({
                 <>
                   {phase === "review" && (
                     <p className="text-sm">
-                      {copy(
-                        "saveScope",
-                        "Save this account's login session, required official connection credentials and masked label in the local encrypted vault. Any existing Key supplied for this connection will be reused and encrypted with your confirmation.",
-                      )}
+                      {completeCoding
+                        ? copy(
+                            "saveCodingScope",
+                            "Save the verified Coding connection to this selected account in the encrypted vault. Its stable identity and the current ZCode sign-in remain unchanged.",
+                          )
+                        : copy(
+                            "saveScope",
+                            "Save this account's login session, required official connection credentials and masked label in the local encrypted vault. Any existing Key supplied for this connection will be reused and encrypted with your confirmation.",
+                          )}
                     </p>
                   )}
                   <p className="text-xs text-muted-foreground">
@@ -535,46 +636,48 @@ export function ZCodeOAuthAdd({
                   </p>
                 </>
               )}
-              {phase === "review" && progress.account?.duplicate && (
-                <div className="space-y-3 rounded-md border border-border-default p-3 text-sm">
-                  <p>
-                    {copy(
-                      "duplicate",
-                      "This account is already saved. Keep the existing account by default, or explicitly update it after the new candidate is complete.",
-                    )}
-                  </p>
-                  <label className="flex items-start gap-2">
-                    <Checkbox
-                      checked={updateDuplicate}
-                      disabled={blocked || saveUncertain}
-                      onCheckedChange={(checked) =>
-                        setUpdateDuplicate(checked === true)
-                      }
-                      aria-label={copy(
-                        "updateDuplicate",
-                        "Explicitly update this existing account",
-                      )}
-                    />
-                    <span>
+              {phase === "review" &&
+                progress.account?.duplicate &&
+                !completeCoding && (
+                  <div className="space-y-3 rounded-md border border-border-default p-3 text-sm">
+                    <p>
                       {copy(
-                        "updateDuplicate",
-                        "Explicitly update this existing account",
+                        "duplicate",
+                        "This account is already saved. Keep the existing account by default, or explicitly update it after the new candidate is complete.",
                       )}
-                    </span>
-                  </label>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={blocked || saveUncertain}
-                    onClick={startAnother}
-                  >
-                    {copy(
-                      "differentAccount",
-                      "Sign in with a different account",
-                    )}
-                  </Button>
-                </div>
-              )}
+                    </p>
+                    <label className="flex items-start gap-2">
+                      <Checkbox
+                        checked={updateDuplicate}
+                        disabled={blocked || saveUncertain}
+                        onCheckedChange={(checked) =>
+                          setUpdateDuplicate(checked === true)
+                        }
+                        aria-label={copy(
+                          "updateDuplicate",
+                          "Explicitly update this existing account",
+                        )}
+                      />
+                      <span>
+                        {copy(
+                          "updateDuplicate",
+                          "Explicitly update this existing account",
+                        )}
+                      </span>
+                    </label>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={blocked || saveUncertain}
+                      onClick={startAnother}
+                    >
+                      {copy(
+                        "differentAccount",
+                        "Sign in with a different account",
+                      )}
+                    </Button>
+                  </div>
+                )}
               {progress.keyCreated && (
                 <p className="text-sm">
                   {copy(
@@ -629,32 +732,42 @@ export function ZCodeOAuthAdd({
               )}
               {phase === "saved" && (
                 <p className="text-sm">
-                  {copy(
-                    "savedNext",
-                    "You can add another account. To switch later, choose the account in the list and review the client impact.",
-                  )}
+                  {completeCoding
+                    ? copy(
+                        "savedCodingNext",
+                        "The selected account's connection was saved. Return to the account list to review its capabilities.",
+                      )
+                    : copy(
+                        "savedNext",
+                        "You can add another account. To switch later, choose the account in the list and review the client impact.",
+                      )}
                 </p>
               )}
             </>
           )}
           {error && (
             <p role="alert" className="text-sm text-destructive">
-              {failureKey === "operation_failed"
-                ? progress
-                  ? copy(
-                      "operationFailed",
-                      "The sign-in result could not be verified. Query the original result to check this account's progress.",
-                    )
-                  : copy(
-                      "beginFailed",
-                      "No official authorization result was received. Try starting official sign-in again.",
-                    )
-                : t(`zcode.accounts.errors.${failureKey}`, {
-                    defaultValue:
-                      accountErrorText[
-                        failureKey as keyof typeof accountErrorText
-                      ] ?? accountErrorText.operation_failed,
-                  })}
+              {previousReadFailed
+                ? copy(
+                    "previousReadFailed",
+                    "The previous sign-in result could not be read. Query it again to recover the original operation.",
+                  )
+                : failureKey === "operation_failed"
+                  ? progress
+                    ? copy(
+                        "operationFailed",
+                        "The sign-in result could not be verified. Query the original result to check this account's progress.",
+                      )
+                    : copy(
+                        "beginFailed",
+                        "No official authorization result was received. Try starting official sign-in again.",
+                      )
+                  : t(`zcode.accounts.errors.${failureKey}`, {
+                      defaultValue:
+                        accountErrorText[
+                          failureKey as keyof typeof accountErrorText
+                        ] ?? accountErrorText.operation_failed,
+                    })}
             </p>
           )}
           {uncertain && (
@@ -664,6 +777,23 @@ export function ZCodeOAuthAdd({
                 "The response was not confirmed. Query the original result before another action; do not repeat the write.",
               )}
             </p>
+          )}
+          {!progress && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={blocked}
+              onClick={() => void restore()}
+            >
+              {savedAccount
+                ? copy("prepareSaved", "Prepare saved Coding connection")
+                : copy("queryPrevious", "Query previous sign-in result")}
+            </Button>
+          )}
+          {!progress && reading && (
+            <Button variant="outline" size="sm" onClick={cancelRead}>
+              {copy("cancelRead", "Cancel reading")}
+            </Button>
           )}
           {progress && (
             <div className="flex flex-wrap gap-2">
@@ -701,7 +831,7 @@ export function ZCodeOAuthAdd({
               ? copy("backToList", "Return to accounts")
               : copy("cancel", "Cancel")}
           </Button>
-          {!progress && (
+          {!progress && !savedAccount && (
             <Button disabled={blocked} onClick={() => void begin()}>
               {copy("continue", "Continue official sign-in")}
             </Button>
@@ -733,10 +863,12 @@ export function ZCodeOAuthAdd({
               disabled={blocked || saveUncertain}
               onClick={() => void write("save")}
             >
-              {copy("save", "Save to encrypted account vault")}
+              {completeCoding
+                ? copy("saveCoding", "Save verified Coding connection")
+                : copy("save", "Save to encrypted account vault")}
             </Button>
           )}
-          {phase === "saved" && (
+          {phase === "saved" && !completeCoding && (
             <Button disabled={blocked} onClick={startAnother}>
               {copy("addAnother", "Add another account")}
             </Button>
@@ -746,9 +878,14 @@ export function ZCodeOAuthAdd({
             phase === "cancelled") && (
             <Button
               disabled={blocked || !!progress?.keyMayExist}
-              onClick={startAnother}
+              onClick={() => {
+                startAnother();
+                if (savedAccount) void restore();
+              }}
             >
-              {copy("restart", "Start a new sign-in")}
+              {savedAccount
+                ? copy("prepareSaved", "Prepare saved Coding connection")
+                : copy("restart", "Start a new sign-in")}
             </Button>
           )}
         </DialogFooter>

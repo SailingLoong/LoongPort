@@ -43,18 +43,14 @@ pub(crate) struct BundlePreviewInput {
     pub file: Zeroizing<Vec<u8>>,
     pub password: Zeroizing<String>,
 }
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ImportChoice {
-    pub index: usize,
-    pub update_duplicate: bool,
-}
+pub(crate) use super::import_reviews::ImportChoice;
 pub(crate) struct BundleCommitInput {
     pub revision: String,
     pub preview_id: String,
     pub selected: Vec<ImportChoice>,
 }
 
+#[cfg(all(test, unix))]
 pub(super) async fn preview_bundle(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
@@ -105,6 +101,7 @@ pub(super) async fn preview_bundle(
     })
     .await
 }
+#[cfg(all(test, unix))]
 pub(super) async fn commit_bundle(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
@@ -647,7 +644,13 @@ async fn run(
             let session = db.secret_session();
             let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
             let native = context.vault_cipher()?;
-            let result = VaultAccountStore::new(session.root(), &vault)?.catalog_status(&native)?;
+            let result = VaultAccountStore::new(session.root(), &vault)?
+                .catalog_status_for_connection(
+                    &native,
+                    context.family(),
+                    context.connection_kind(),
+                    context.app_version(),
+                )?;
             let fresh = ReadOnlyContext::assess(probe.observe()?, &contracts)?;
             if fresh.context_revision() != context.context_revision() {
                 return Err(BlockedReason::ContextChanged.into());
@@ -805,3 +808,403 @@ pub(super) async fn run_owned<T: Send + 'static>(
 #[cfg(all(test, unix))]
 #[path = "runtime_tests.rs"]
 mod tests;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CurrentIdentity {
+    context_revision: String,
+    id: Option<String>,
+    label: Option<String>,
+    family: Option<&'static str>,
+    read_at: u64,
+}
+/// A user-initiated read is separate from passive library/status queries and
+/// grants no capture or native write authority.
+pub(super) async fn read_current_identity(
+    db: Arc<Database>,
+    probe: Arc<dyn ContextProbe>,
+    contracts: Vec<ContractEntry>,
+) -> Result<CurrentIdentity, RuntimeError> {
+    run_owned(db, move |db| {
+        let session = db.secret_session();
+        let _vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let context = ReadOnlyContext::assess(probe.observe()?, &contracts)?;
+        let native = context.vault_cipher()?;
+        let gate = || {
+            let fresh = ReadOnlyContext::assess(
+                probe.observe().map_err(TransactionError::Admission)?,
+                &contracts,
+            )
+            .map_err(TransactionError::Admission)?;
+            if fresh.context_revision() != context.context_revision() {
+                return Err(TransactionError::SourceChanged);
+            }
+            Ok(())
+        };
+        let snapshot = super::transaction::read_current_profile(
+            context.native_root(),
+            context.root_identity(),
+            &native,
+            context.family(),
+            &gate,
+        )?;
+        let label = snapshot
+            .as_ref()
+            .map(|snapshot| native.profile_label(snapshot))
+            .transpose()
+            .map_err(|error| {
+                TransactionError::Checkpoint(super::checkpoint::CheckpointError::Native(error))
+            })?
+            .flatten();
+        Ok(CurrentIdentity {
+            context_revision: context.context_revision(),
+            id: snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.identity().opaque_id()),
+            label,
+            family: snapshot
+                .as_ref()
+                .map(|snapshot| match snapshot.identity().family() {
+                    super::core::OAuthFamily::Zai => "zai",
+                    super::core::OAuthFamily::BigModel => "bigmodel",
+                }),
+            read_at: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        })
+    })
+    .await
+}
+
+fn library_binding(
+    db: &Database,
+    context: &super::library_context::LibraryContext,
+    revision: String,
+) -> Result<Binding, RuntimeError> {
+    let session = db.secret_session();
+    let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+    let meta = vault.metadata();
+    Ok(Binding {
+        vault_root: session.root().to_owned(),
+        vault_id: meta.vault_id.clone(),
+        key_id: meta.key_id.clone(),
+        vault_revision: meta.revision,
+        context_revision: context.context_id().into(),
+        catalog_revision: revision,
+    })
+}
+fn require_library_binding(
+    db: &Database,
+    context: &super::library_context::LibraryContext,
+    expected: &Binding,
+) -> Result<(), RuntimeError> {
+    if library_binding(db, context, expected.catalog_revision.clone())? != *expected {
+        return Err(TransactionError::SourceChanged.into());
+    }
+    Ok(())
+}
+pub(super) async fn preview_library_bundle(
+    db: Arc<Database>,
+    data_root: Option<std::path::PathBuf>,
+    input: BundlePreviewInput,
+) -> Result<BundlePreview, RuntimeError> {
+    run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let native = context.cipher()?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        let catalog = store.import_catalog(&native, &input.revision)?;
+        let inspected =
+            super::bundle_import::inspect(&input.file, &input.password, &native, &catalog)
+                .map_err(|error| match error {
+                    super::bundle::BundleFailure::Authentication => {
+                        RuntimeError::BundleAuthentication
+                    }
+                    _ => RuntimeError::BundleInvalid,
+                })?;
+        let meta = vault.metadata();
+        let binding = Binding {
+            vault_root: session.root().into(),
+            vault_id: meta.vault_id.clone(),
+            key_id: meta.key_id.clone(),
+            vault_revision: meta.revision,
+            context_revision: context.context_id().into(),
+            catalog_revision: input.revision,
+        };
+        let mut reviews = import_reviews()
+            .lock()
+            .map_err(|_| RuntimeError::TaskFailed)?;
+        let preview_id = reviews.issue(binding, inspected.accounts, std::time::Instant::now());
+        reviews
+            .attach_context(&preview_id, context)
+            .map_err(|_| RuntimeError::TaskFailed)?;
+        let expires = preview_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            if let Ok(mut reviews) = import_reviews().lock() {
+                reviews.cancel(&expires);
+            }
+        });
+        Ok(BundlePreview {
+            preview_id,
+            rows: inspected.rows,
+        })
+    })
+    .await
+}
+struct BundleCheckGuard {
+    preview_id: String,
+    generation: u64,
+}
+impl Drop for BundleCheckGuard {
+    fn drop(&mut self) {
+        if let Ok(mut reviews) = import_reviews().lock() {
+            reviews.abandon_check(&self.preview_id, self.generation);
+        }
+    }
+}
+pub(super) async fn check_library_bundle(
+    db: Arc<Database>,
+    preview_id: String,
+    selected: Vec<ImportChoice>,
+    allow: bool,
+) -> Result<super::import_reviews::CheckProgress, RuntimeError> {
+    if !allow {
+        return Err(TransactionError::NotAdmitted.into());
+    }
+    let id = preview_id.clone();
+    let (context, lease, guard, app_version) = run_owned(Arc::clone(&db), move |db| {
+        let (binding, context) = {
+            let mut reviews = import_reviews()
+                .lock()
+                .map_err(|_| RuntimeError::TaskFailed)?;
+            let now = std::time::Instant::now();
+            (
+                reviews
+                    .review_binding(&id, now)
+                    .ok_or(TransactionError::SourceChanged)?,
+                reviews
+                    .review_context(&id, now)
+                    .ok_or(TransactionError::SourceChanged)?,
+            )
+        };
+        require_library_binding(db, &context, &binding)?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        VaultAccountStore::new(session.root(), &vault)?
+            .import_catalog(&context.cipher()?, &binding.catalog_revision)?;
+        let lease = import_reviews()
+            .lock()
+            .map_err(|_| RuntimeError::TaskFailed)?
+            .begin_check(&id, &binding, selected, std::time::Instant::now())
+            .map_err(|_| TransactionError::SourceChanged)?;
+        let guard = BundleCheckGuard {
+            preview_id: lease.preview_id.clone(),
+            generation: lease.generation,
+        };
+        let app_version = super::native_context::library_app_version(context.data_root());
+        Ok((context, lease, guard, app_version))
+    })
+    .await?;
+    let worker_db = Arc::clone(&db);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let Ok(native) = context.cipher() else {
+            return;
+        };
+        let Ok(transport) = super::official_http::ReqwestOfficialTransport::new() else {
+            return;
+        };
+        let client = super::official::OfficialClient::new(transport);
+        let check = || {
+            lease.check()?;
+            require_library_binding(&worker_db, &context, &lease.binding)
+                .map_err(|_| super::official::OfficialError::Cancelled)
+        };
+        for (index, snapshot) in &lease.accounts {
+            let report = match super::session_checks::check_session(
+                &client,
+                &native,
+                snapshot,
+                app_version.as_deref(),
+                chrono::Utc::now().timestamp().max(0) as u64,
+                &check,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            let Ok(mut reviews) = import_reviews().lock() else {
+                return;
+            };
+            if reviews.record_result(&lease, *index, report).is_err() {
+                return;
+            }
+        }
+        if let Ok(mut reviews) = import_reviews().lock() {
+            let _ = reviews.finish_check(&lease, vec![]);
+        }
+    });
+    bundle_check_progress(db, preview_id).await
+}
+pub(super) async fn bundle_check_progress(
+    db: Arc<Database>,
+    preview_id: String,
+) -> Result<super::import_reviews::CheckProgress, RuntimeError> {
+    run_owned(db, move |db| {
+        let mut reviews = import_reviews()
+            .lock()
+            .map_err(|_| RuntimeError::TaskFailed)?;
+        let now = std::time::Instant::now();
+        let binding = reviews
+            .review_binding(&preview_id, now)
+            .ok_or(TransactionError::SourceChanged)?;
+        let context = reviews
+            .review_context(&preview_id, now)
+            .ok_or(TransactionError::SourceChanged)?;
+        require_library_binding(db, &context, &binding)?;
+        reviews
+            .check_progress(&preview_id, now)
+            .ok_or_else(|| TransactionError::SourceChanged.into())
+    })
+    .await
+}
+pub(super) async fn commit_library_bundle(
+    db: Arc<Database>,
+    data_root: Option<std::path::PathBuf>,
+    input: BundleCommitInput,
+) -> Result<Vec<CaptureCommitOutcome>, RuntimeError> {
+    run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let binding = library_binding(db, &context, input.revision.clone())?;
+        let (mut review, mut checked) = import_reviews()
+            .lock()
+            .map_err(|_| RuntimeError::TaskFailed)?
+            .consume_checked(
+                &input.preview_id,
+                &binding,
+                &input.selected,
+                std::time::Instant::now(),
+            )
+            .ok_or(TransactionError::SourceChanged)?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let native = context.cipher()?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        let mut items = Vec::with_capacity(input.selected.len());
+        for choice in input.selected {
+            let snapshot = review
+                .accounts
+                .get_mut(choice.index)
+                .and_then(Option::take)
+                .ok_or(TransactionError::SourceChanged)?;
+            let evidence = checked
+                .remove(&choice.index)
+                .ok_or(TransactionError::SourceChanged)?;
+            items.push(super::transaction::IncomingProfile {
+                snapshot,
+                update_duplicate: choice.update_duplicate,
+                evidence: Some(evidence),
+                origin: super::checkpoint::IdentitySource::PackageDeclared,
+            });
+        }
+        store
+            .import_checked_profiles(&native, &input.revision, items)
+            .map_err(Into::into)
+    })
+    .await
+}
+
+/// Explicit backend read capability; no UI invokes this automatically.
+pub(super) async fn check_saved_connections(
+    db: Arc<Database>,
+    request_id: String,
+    data_root: Option<std::path::PathBuf>,
+    revision: String,
+    id: String,
+    allow_official_check: bool,
+) -> Result<CatalogStatus, RuntimeError> {
+    if !allow_official_check {
+        return Err(TransactionError::NotAdmitted.into());
+    }
+    let lease = connection_requests()
+        .begin(request_id, std::time::Instant::now())
+        .map_err(|_| RuntimeError::TaskFailed)?;
+    let (context, bound, snapshot, version) = run_owned(Arc::clone(&db), move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let bound = library_binding(db, &context, revision.clone())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        let catalog = store.import_catalog(&context.cipher()?, &revision)?;
+        let snapshot = catalog
+            .profiles()
+            .find(|snapshot| snapshot.identity().opaque_id() == id)
+            .ok_or(TransactionError::SourceChanged)?
+            .clone();
+        let version = super::native_context::library_app_version(context.data_root());
+        Ok((context, bound, snapshot, version))
+    })
+    .await?;
+    lease
+        .bind(format!(
+            "{}:{}:{}:{}",
+            bound.vault_id,
+            bound.key_id,
+            context.context_id(),
+            snapshot.identity().opaque_id()
+        ))
+        .map_err(|_| RuntimeError::TaskFailed)?;
+    let native = context.cipher()?;
+    let client = super::official::OfficialClient::new(
+        super::official_http::ReqwestOfficialTransport::new()
+            .map_err(|_| RuntimeError::TaskFailed)?,
+    );
+    let check = || {
+        lease
+            .check()
+            .map_err(|_| super::official::OfficialError::Cancelled)?;
+        require_library_binding(&db, &context, &bound)
+            .map_err(|_| super::official::OfficialError::Cancelled)?;
+        let session = db.secret_session();
+        let vault = session
+            .read()
+            .map_err(|_| super::official::OfficialError::Cancelled)?;
+        VaultAccountStore::new(session.root(), &vault)
+            .and_then(|store| store.import_catalog(&native, &bound.catalog_revision))
+            .map(|_| ())
+            .map_err(|_| super::official::OfficialError::Cancelled)
+    };
+    let report = tokio::select! {
+        biased;
+        _ = lease.cancelled() => return Err(TransactionError::SourceChanged.into()),
+        result = super::session_checks::check_session(&client,&native,&snapshot,version.as_deref(),chrono::Utc::now().timestamp().max(0) as u64,&check) => result.map_err(|_|TransactionError::SourceChanged)?,
+    };
+    run_owned(db, move |db| {
+        lease
+            .admit_commit()
+            .map_err(|_| TransactionError::SourceChanged)?;
+        require_library_binding(db, &context, &bound)?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        VaultAccountStore::new(session.root(), &vault)?
+            .update_profile_evidence(
+                &context.cipher()?,
+                &bound.catalog_revision,
+                &snapshot.identity().opaque_id(),
+                report,
+            )
+            .map_err(Into::into)
+    })
+    .await
+}
+
+fn connection_requests() -> &'static super::connection_check::Requests {
+    static REQUESTS: OnceLock<super::connection_check::Requests> = OnceLock::new();
+    REQUESTS.get_or_init(super::connection_check::Requests::default)
+}
+pub(super) fn cancel_connection_check(request_id: &str) -> Result<&'static str, RuntimeError> {
+    connection_requests()
+        .cancel(request_id, std::time::Instant::now())
+        .map_err(|_| RuntimeError::TaskFailed)
+}

@@ -21,6 +21,8 @@ struct State {
     checks: usize,
     cancel_after_check: Option<(usize, LoginFlowStore, String)>,
     expire_on_check: bool,
+    saved_completion_target: Option<String>,
+    saved_revision: Option<String>,
 }
 #[derive(Clone, Default)]
 struct Store(Arc<Mutex<State>>);
@@ -153,19 +155,20 @@ impl LoginPersistence for Store {
             }
         })
     }
-    fn save<'a>(
-        &'a self,
-        _: &'a VaultBinding,
-        _: &'a LibraryContext,
-        revision: &'a str,
-        request_id: &'a str,
-        snapshot: &'a AccountSnapshot,
-        _: Option<&'a super::super::session_checks::SessionCheckReport>,
-        _: bool,
-    ) -> StoreFuture<'a, CaptureCommitOutcome> {
+    fn save<'a>(&'a self, input: SaveInput<'a>) -> StoreFuture<'a, CaptureCommitOutcome> {
+        let SaveInput {
+            revision,
+            request_id,
+            snapshot,
+            completion,
+            ..
+        } = input;
         Box::pin(async move {
             let mut state = self.0.lock().unwrap();
             state.events.push("save");
+            state.saved_completion_target =
+                completion.map(|target| target.snapshot.identity().opaque_id());
+            state.saved_revision = Some(revision.into());
             if !state.catalog_revision.is_empty() && state.catalog_revision != revision {
                 return Err(StoreFailure::Changed);
             }
@@ -255,7 +258,7 @@ fn fixture_family(
         )
         .unwrap();
     let ready = Arc::new(PollReady {
-        family: family,
+        family,
         user: OfficialUser {
             id: "account".into(),
             name: Some("Sample".into()),
@@ -298,6 +301,389 @@ fn fixture_family(
     .unwrap();
     let scope = KeyScope::new(family, "account", "org", "project").unwrap();
     (service, id, scope)
+}
+
+const SAVED_CUSTOMER: &str = r#"{"code":200,"data":{"customerNumber":"business-owner","organizations":[{"organizationId":"org","projects":[{"projectId":"project","projectType":1}]}]}}"#;
+
+#[tokio::test]
+async fn saved_coding_does_not_send_unchanged_start_jwt_when_native_version_is_known() {
+    let (service, id, _) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[{"name":"zcode-api-key","apiKey":"saved-key"}]}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"saved-secret"}}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(
+            r#"{"code":200,"data":[{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]}"#,
+        ),
+        Ok(r#"{"code":200,"data":{"limits":[]}}"#),
+    ]);
+    let lease = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    lease
+        .update(|draft, _| draft.app_version = Some("3.14.4".into()))
+        .unwrap();
+    service.prepare(lease).await.unwrap();
+    let requests = service.client.transport.0.lock().unwrap();
+    assert!(!requests
+        .iter()
+        .any(|request| request.url.contains("/billing/balance")));
+    assert!(!requests.iter().any(|request| request
+        .authorization
+        .as_ref()
+        .is_some_and(|secret| secret.expose().contains("synthetic-jwt"))));
+    assert_eq!(requests.len(), 6);
+}
+
+fn saved_fixture(
+    results: &[Result<&str, OfficialError>],
+) -> (LoginService<Transport, Store>, String, AccountSnapshot) {
+    let (service, old_id, _) = fixture(results);
+    let lease = service
+        .flows
+        .acquire(&old_id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    let (binding, draft) = lease.draft().unwrap();
+    let snapshot = draft.snapshot.unwrap();
+    drop(lease);
+    service.flows.cancel(&old_id, Instant::now()).unwrap();
+    service.persistence.0.lock().unwrap().duplicate = true;
+    let begin = service
+        .flows
+        .begin_saved(
+            binding,
+            SavedCodingInput {
+                target: SavedCodingTarget {
+                    snapshot: snapshot.clone(),
+                    revision: "synthetic-revision".into(),
+                    details: super::super::checkpoint::ProfileDetails::default(),
+                },
+                context: draft.context.unwrap(),
+                app_version: None,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    (service, begin.flow_id, snapshot)
+}
+
+#[tokio::test]
+async fn saved_coding_reuses_business_session_and_existing_key_without_oauth_or_source_upgrade() {
+    let (service, id, original) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[{"name":"zcode-api-key","apiKey":"saved-key"}]}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"saved-secret"}}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(
+            r#"{"code":200,"data":[{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]}"#,
+        ),
+        Ok(r#"{"code":200,"data":{"limits":[]}}"#),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "review");
+    assert_eq!(progress.account.unwrap().identity_source, "packageDeclared");
+    assert_eq!(progress.connections.unwrap().coding, "ready");
+    let lease = service
+        .flows
+        .acquire(&id, WorkKind::Save, Instant::now())
+        .unwrap();
+    let (_, draft) = lease.draft().unwrap();
+    assert!(draft.ready.is_none());
+    assert!(super::super::oauth_account::coding_only_change(
+        &original,
+        draft.snapshot.as_ref().unwrap()
+    ));
+    service.save(lease, true).await.unwrap();
+    let state = service.persistence.0.lock().unwrap();
+    assert_eq!(
+        state.saved_completion_target.as_deref(),
+        Some(original.identity().opaque_id().as_str())
+    );
+    assert_eq!(state.saved_revision.as_deref(), Some("synthetic-revision"));
+    let requests = service.client.transport.0.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    assert!(requests
+        .iter()
+        .all(|request| request.method == OfficialMethod::Get
+            && !request.url.contains("/oauth/")
+            && !request.url.contains("/auth/z/login")));
+    assert_eq!(
+        requests[0].authorization.as_ref().unwrap().expose(),
+        "synthetic-business"
+    );
+}
+
+#[tokio::test]
+async fn saved_coding_decline_keeps_the_complete_original_start_session() {
+    let (service, id, original) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(SAVED_CUSTOMER),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.flows.progress(&id, Instant::now()).unwrap().phase,
+        "keyRequired"
+    );
+    service
+        .decline_key(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let lease = service
+        .flows
+        .acquire(&id, WorkKind::Save, Instant::now())
+        .unwrap();
+    let (_, draft) = lease.draft().unwrap();
+    assert_eq!(
+        draft
+            .snapshot
+            .unwrap()
+            .scoped_document()
+            .to_bytes()
+            .unwrap(),
+        original.scoped_document().to_bytes().unwrap()
+    );
+    assert!(service
+        .client
+        .transport
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.method == OfficialMethod::Get));
+}
+
+#[tokio::test]
+async fn saved_coding_rejects_stale_catalog_before_network_and_does_not_adopt_new_revision() {
+    let (service, id, _) = saved_fixture(&[]);
+    service.persistence.0.lock().unwrap().catalog_revision = "changed-revision".into();
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(
+        progress.error.unwrap().code,
+        "zcode.account.catalog_changed"
+    );
+    assert!(service.client.transport.0.lock().unwrap().is_empty());
+    assert_eq!(
+        progress.source_catalog_revision.as_deref(),
+        Some("synthetic-revision")
+    );
+}
+
+#[tokio::test]
+async fn saved_coding_original_project_intent_is_read_only_even_with_another_declared_identity() {
+    let (service, id, _) = saved_fixture(&[Ok(SAVED_CUSTOMER), Ok(r#"{"code":200,"data":[]}"#)]);
+    service
+        .persistence
+        .0
+        .lock()
+        .unwrap()
+        .ledger
+        .reserve(
+            KeyScope::new(
+                OAuthFamily::BigModel,
+                "other-declared-identity",
+                "org",
+                "project",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "keyRequired");
+    assert!(progress.key_may_exist);
+    assert_eq!(
+        progress.error.unwrap().code,
+        "zcode.account.key_result_unknown"
+    );
+    assert!(service
+        .client
+        .transport
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.method == OfficialMethod::Get));
+}
+
+#[tokio::test]
+async fn saved_coding_cancelled_uncertainty_queries_original_project_and_never_reposts() {
+    let (service, id, _) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Err(OfficialError::Transport),
+        // Recovery must read the original key list first, even if the current
+        // customer response would now select a different default project.
+        Ok(r#"{"code":200,"data":[{"name":"zcode-api-key","apiKey":"created-key"}]}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"created-secret"}}"#),
+        Ok(
+            r#"{"code":200,"data":{"customerNumber":"business-owner","organizations":[{"organizationId":"other-org","projects":[{"projectId":"different-default","projectType":1}]}]}}"#,
+        ),
+        Ok(
+            r#"{"code":200,"data":[{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]}"#,
+        ),
+        Ok(r#"{"code":200,"data":{"limits":[]}}"#),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    service
+        .create_key(
+            service
+                .flows
+                .acquire(&id, WorkKind::CreateKey, Instant::now())
+                .unwrap(),
+            "org",
+            "project",
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .flows
+            .progress(&id, Instant::now())
+            .unwrap()
+            .key_may_exist
+    );
+    let read = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    let (binding, draft) = read.draft().unwrap();
+    drop(read);
+    service.flows.cancel(&id, Instant::now()).unwrap();
+    let resumed = service
+        .flows
+        .begin_saved(
+            binding,
+            SavedCodingInput {
+                target: draft.completion.unwrap(),
+                context: draft.context.unwrap(),
+                app_version: None,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(resumed.flow_id, id);
+    assert!(resumed.needs_prepare);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "review");
+    assert_eq!(progress.project.unwrap().project_id, "project");
+    let requests = service.client.transport.0.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == OfficialMethod::Post)
+            .count(),
+        1
+    );
+    assert!(requests[5]
+        .url
+        .ends_with("/organization/org/projects/project/api_keys"));
+    assert!(requests[6]
+        .url
+        .ends_with("/organization/org/projects/project/api_keys/copy/created-key"));
+}
+
+#[tokio::test]
+async fn saved_coding_committed_save_receipt_survives_cancel_and_lost_reply() {
+    let (service, id, original) = saved_fixture(&[]);
+    let prepare = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    prepare.finish(FlowStage::Review, |_| {}).unwrap();
+    {
+        let mut state = service.persistence.0.lock().unwrap();
+        state.commit_unknown = true;
+        state.save_error = Some(StoreFailure::Unknown);
+        state.cancel_on_save = Some((service.flows.clone(), id.clone()));
+    }
+    service
+        .save(
+            service
+                .flows
+                .acquire(&id, WorkKind::Save, Instant::now())
+                .unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "saved");
+    assert_eq!(progress.purpose, LoginPurpose::CompleteCoding);
+    assert_eq!(progress.saved.unwrap().id, original.identity().opaque_id());
+    assert_eq!(
+        service
+            .persistence
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| **event == "save")
+            .count(),
+        1
+    );
+    assert!(service.client.transport.0.lock().unwrap().is_empty());
 }
 #[tokio::test]
 async fn create_consent_must_match_current_project_before_any_reservation_or_request() {
@@ -1102,4 +1488,295 @@ async fn review_lost_cleanup_acknowledgment_resolves_without_more_http_after_can
         assert_eq!(service.client.transport.0.lock().unwrap().len(), count);
         assert!(!service.persistence.0.lock().unwrap().ledger.is_empty());
     }
+}
+
+#[tokio::test]
+async fn review_saved_catalog_replacement_during_key_discovery_blocks_post() {
+    let (service, id, _) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(r#"{"code":200,"data":{"name":"zcode-api-key","apiKey":"created"}}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"created-secret"}}"#),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.flows.progress(&id, Instant::now()).unwrap().phase,
+        "keyRequired"
+    );
+    struct ReplaceCatalogAfterGet {
+        inner: Transport,
+        store: Store,
+    }
+    impl OfficialTransport for ReplaceCatalogAfterGet {
+        fn send(&self, request: OfficialRequest) -> TransportFuture<'_> {
+            let replace =
+                request.method == OfficialMethod::Get && request.url.ends_with("/api_keys");
+            let sent = self.inner.send(request);
+            Box::pin(async move {
+                let result = sent.await;
+                if replace {
+                    let mut state = self.store.0.lock().unwrap();
+                    state.catalog_revision = "replacement-catalog".into();
+                    state.duplicate = false;
+                }
+                result
+            })
+        }
+    }
+    let transport = ReplaceCatalogAfterGet {
+        inner: service.client.transport,
+        store: service.persistence.clone(),
+    };
+    let service = LoginService {
+        flows: service.flows,
+        client: OfficialClient::new(transport),
+        persistence: service.persistence,
+    };
+    service
+        .create_key(
+            service
+                .flows
+                .acquire(&id, WorkKind::CreateKey, Instant::now())
+                .unwrap(),
+            "org",
+            "project",
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    let posts = service
+        .client
+        .transport
+        .inner
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == OfficialMethod::Post)
+        .count();
+    println!(
+        "Post count after catalog replacement: {posts}; final error: {}",
+        progress.error.unwrap().code
+    );
+    assert!(
+        service
+            .persistence
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .contains(&"not-sent"),
+        "Exact unsubmitted reservation must be cleared"
+    );
+    assert_eq!(posts, 0, "The selected catalog row was removed before POST, so saved Coding consent must be invalidated before transmission");
+}
+
+#[tokio::test]
+async fn review_saved_coding_label_change_recovers_original_project_once() {
+    let (service, id, _) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Err(OfficialError::Transport),
+        // Recovery must read the original key list first, even if the current
+        // customer response would now select a different default project.
+        Ok(r#"{"code":200,"data":[{"name":"zcode-api-key","apiKey":"created-key"}]}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"created-secret"}}"#),
+        Ok(
+            r#"{"code":200,"data":{"customerNumber":"business-owner","organizations":[{"organizationId":"other-org","projects":[{"projectId":"different-default","projectType":1}]}]}}"#,
+        ),
+        Ok(
+            r#"{"code":200,"data":[{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]}"#,
+        ),
+        Ok(r#"{"code":200,"data":{"limits":[]}}"#),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    service
+        .create_key(
+            service
+                .flows
+                .acquire(&id, WorkKind::CreateKey, Instant::now())
+                .unwrap(),
+            "org",
+            "project",
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .flows
+            .progress(&id, Instant::now())
+            .unwrap()
+            .key_may_exist
+    );
+    let read = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    let (binding, draft) = read.draft().unwrap();
+    drop(read);
+    service.flows.cancel(&id, Instant::now()).unwrap();
+    let mut target = draft.completion.unwrap();
+    target.revision = "after-label-edit".into();
+    target.details.label = Some("Renamed saved account".into());
+    service.persistence.0.lock().unwrap().catalog_revision = target.revision.clone();
+    let resumed = service
+        .flows
+        .begin_saved(
+            binding,
+            SavedCodingInput {
+                target,
+                context: draft.context.unwrap(),
+                app_version: None,
+            },
+            Instant::now() + std::time::Duration::from_secs(3600),
+        )
+        .unwrap();
+    assert_eq!(resumed.flow_id, id);
+    assert!(resumed.needs_prepare);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "review");
+    assert_eq!(progress.project.unwrap().project_id, "project");
+    let requests = service.client.transport.0.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == OfficialMethod::Post)
+            .count(),
+        1
+    );
+    assert!(requests[5]
+        .url
+        .ends_with("/organization/org/projects/project/api_keys"));
+    assert!(requests[6]
+        .url
+        .ends_with("/organization/org/projects/project/api_keys/copy/created-key"));
+}
+
+#[tokio::test]
+async fn review_saved_coding_changed_session_cannot_reopen_uncertain_creation() {
+    let (service, id, _) = saved_fixture(&[
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Ok(SAVED_CUSTOMER),
+        Ok(r#"{"code":200,"data":[]}"#),
+        Err(OfficialError::Transport),
+        // Recovery must read the original key list first, even if the current
+        // customer response would now select a different default project.
+        Ok(r#"{"code":200,"data":[{"name":"zcode-api-key","apiKey":"created-key"}]}"#),
+        Ok(r#"{"code":200,"data":{"secretKey":"created-secret"}}"#),
+        Ok(
+            r#"{"code":200,"data":{"customerNumber":"business-owner","organizations":[{"organizationId":"other-org","projects":[{"projectId":"different-default","projectType":1}]}]}}"#,
+        ),
+        Ok(
+            r#"{"code":200,"data":[{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]}"#,
+        ),
+        Ok(r#"{"code":200,"data":{"limits":[]}}"#),
+    ]);
+    service
+        .prepare(
+            service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    service
+        .create_key(
+            service
+                .flows
+                .acquire(&id, WorkKind::CreateKey, Instant::now())
+                .unwrap(),
+            "org",
+            "project",
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .flows
+            .progress(&id, Instant::now())
+            .unwrap()
+            .key_may_exist
+    );
+    let read = service
+        .flows
+        .acquire(&id, WorkKind::Prepare, Instant::now())
+        .unwrap();
+    let (binding, draft) = read.draft().unwrap();
+    drop(read);
+    service.flows.cancel(&id, Instant::now()).unwrap();
+    let mut target = draft.completion.unwrap();
+    target.revision = "after-label-edit".into();
+    target.details.label = Some("Renamed saved account".into());
+    service.persistence.0.lock().unwrap().catalog_revision = target.revision.clone();
+    let context = draft.context.unwrap();
+    let native = context.cipher().unwrap();
+    let mut fields: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&target.snapshot.scoped_document().to_bytes().unwrap()).unwrap();
+    fields.insert(
+        target.snapshot.identity().credential_keys()[1].clone(),
+        native.encrypt("different-saved-business").unwrap(),
+    );
+    target.snapshot = native
+        .inspect(
+            &super::super::core::CredentialDocument::parse(&serde_json::to_vec(&fields).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let result = service.flows.begin_saved(
+        binding,
+        SavedCodingInput {
+            target,
+            context,
+            app_version: None,
+        },
+        Instant::now(),
+    );
+    assert!(matches!(result, Err(FlowError::StaleWork)));
+    let requests = service.client.transport.0.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.method == OfficialMethod::Post)
+            .count(),
+        1
+    );
+    assert!(
+        service
+            .flows
+            .progress(&id, Instant::now())
+            .unwrap()
+            .key_may_exist
+    );
 }

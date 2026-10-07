@@ -4,6 +4,92 @@ use super::core::{AccountIdentity, AccountSnapshot, CredentialDocument, OAuthFam
 use super::native::{NativeCipher, NativeError};
 use super::official::{BusinessToken, CodingKey, PollReady};
 
+/// Reads the selected session's business credential; its cache identity is not
+/// an upstream authorization proof.
+pub(crate) fn saved_business_token(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+) -> Result<BusinessToken, NativeError> {
+    let keys = snapshot.identity().credential_keys();
+    let document = snapshot.scoped_document();
+    let encrypted = document.get(&keys[1]).ok_or(NativeError::InvalidSession)?;
+    let secret = native.decrypt(encrypted)?;
+    BusinessToken::from_stored(snapshot.identity().family(), &secret)
+        .map_err(|_| NativeError::InvalidSession)
+}
+
+/// Non-secret continuity binding for an explicitly selected saved session.
+/// Encryption nonces and catalog metadata are not credentials.
+pub(crate) fn saved_session_binding(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+) -> Result<[u8; 32], NativeError> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"zcode-saved-session:v1\0");
+    digest.update(snapshot.identity().opaque_id());
+    let document = snapshot.scoped_document();
+    for key in snapshot.identity().credential_keys() {
+        match document.get(&key) {
+            Some(value) => {
+                let plain = native.decrypt(value)?;
+                digest.update([1]);
+                digest.update((plain.len() as u64).to_be_bytes());
+                digest.update(plain.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    Ok(digest.finalize().into())
+}
+
+pub(crate) fn saved_coding_key(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+) -> Option<CodingKey> {
+    let keys = snapshot.identity().credential_keys();
+    let document = snapshot.scoped_document();
+    let secret = native.decrypt(document.get(&keys[5])?).ok()?;
+    CodingKey::new(&secret).ok()
+}
+
+pub(crate) fn complete_coding_snapshot(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+    key: Option<&CodingKey>,
+) -> Result<AccountSnapshot, NativeError> {
+    let Some(key) = key else {
+        return Ok(snapshot.clone());
+    };
+    let document = snapshot.scoped_document();
+    if native.inspect(&document)?.identity() != snapshot.identity() {
+        return Err(NativeError::InvalidSession);
+    }
+    let mut fields: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&document.to_bytes().map_err(NativeError::Core)?)
+            .map_err(|_| NativeError::InvalidSession)?;
+    fields.insert(
+        snapshot.identity().credential_keys()[5].clone(),
+        native.encrypt(key.expose())?,
+    );
+    let bytes = serde_json::to_vec(&fields).map_err(|_| NativeError::InvalidSession)?;
+    native.inspect(&CredentialDocument::parse(&bytes).map_err(NativeError::Core)?)
+}
+
+pub(crate) fn coding_only_change(original: &AccountSnapshot, candidate: &AccountSnapshot) -> bool {
+    if original.identity() != candidate.identity() {
+        return false;
+    }
+    let before = original.scoped_document();
+    let after = candidate.scoped_document();
+    original
+        .identity()
+        .credential_keys()
+        .iter()
+        .enumerate()
+        .all(|(index, key)| index == 5 || before.get(key) == after.get(key))
+}
+
 pub(crate) fn build_snapshot(
     native: &NativeCipher,
     ready: &PollReady,

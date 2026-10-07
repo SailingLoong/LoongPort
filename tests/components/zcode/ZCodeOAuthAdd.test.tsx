@@ -13,6 +13,8 @@ import { settingsApi } from "@/lib/api/settings";
 vi.mock("@/lib/api/zcodeLogin", () => ({
   zcodeLoginApi: {
     begin: vi.fn(),
+    lastProgress: vi.fn(),
+    beginSavedCoding: vi.fn(),
     progress: vi.fn(),
     confirmKey: vi.fn(),
     declineKey: vi.fn(),
@@ -89,6 +91,11 @@ function mount() {
   return { ...view, onClose, onSaved };
 }
 async function begin() {
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Continue official sign-in" }),
+    ).toBeEnabled(),
+  );
   fireEvent.click(
     screen.getByRole("button", { name: "Continue official sign-in" }),
   );
@@ -108,6 +115,10 @@ async function query(next: LoginProgress) {
 
 describe("ZCode official login dialog", () => {
   beforeEach(() => {
+    vi.mocked(zcodeLoginApi.lastProgress).mockReset().mockResolvedValue(null);
+    vi.mocked(zcodeLoginApi.beginSavedCoding)
+      .mockReset()
+      .mockResolvedValue(result("keyRequired", { purpose: "completeCoding" }));
     vi.mocked(zcodeLoginApi.begin).mockReset().mockResolvedValue(result());
     vi.mocked(zcodeLoginApi.progress).mockReset().mockResolvedValue(result());
     vi.mocked(zcodeLoginApi.confirmKey)
@@ -145,6 +156,7 @@ describe("ZCode official login dialog", () => {
     const button = screen.getByRole("button", {
       name: "Continue official sign-in",
     });
+    await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
     fireEvent.click(button);
     expect(zcodeLoginApi.begin).toHaveBeenCalledExactlyOnceWith("bigmodel");
@@ -160,6 +172,11 @@ describe("ZCode official login dialog", () => {
       new Error("private-begin-response"),
     );
     mount();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Continue official sign-in" }),
+      ).toBeEnabled(),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Continue official sign-in" }),
     );
@@ -449,6 +466,11 @@ describe("ZCode official login dialog", () => {
     const pending = deferred<LoginProgress>();
     vi.mocked(zcodeLoginApi.begin).mockReturnValueOnce(pending.promise);
     const { onClose, onSaved, rerender } = mount();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Continue official sign-in" }),
+      ).toBeEnabled(),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Continue official sign-in" }),
     );
@@ -495,6 +517,7 @@ describe("ZCode official login dialog", () => {
       result("waiting", { family: "zai" }),
     );
     mount();
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("option", { name: "z.ai" }));
     await begin();
@@ -519,6 +542,7 @@ describe("ZCode official login dialog", () => {
     vi.useFakeTimers();
     const { unmount } = mount();
     try {
+      await act(async () => {});
       vi.mocked(zcodeLoginApi.begin).mockResolvedValue(
         result("waiting", {
           authorization: {
@@ -705,4 +729,180 @@ describe("ZCode official login dialog", () => {
       }),
     ).toBeInTheDocument();
   });
+
+  it("recovers a saved receipt after closing and reopening without replaying the save", async () => {
+    vi.mocked(zcodeLoginApi.save).mockRejectedValue(new Error("lost-save"));
+    const { rerender, onClose, onSaved } = mount();
+    await begin();
+    await query(result("review"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save to encrypted account vault" }),
+    );
+    await screen.findByRole("alert");
+    rerender(
+      <ZCodeOAuthAdd open={false} onClose={onClose} onSaved={onSaved} />,
+    );
+    vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(result("saved"));
+    rerender(<ZCodeOAuthAdd open onClose={onClose} onSaved={onSaved} />);
+    await screen.findByText("Account saved in the encrypted vault.");
+    expect(zcodeLoginApi.save).toHaveBeenCalledTimes(1);
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    rerender(
+      <ZCodeOAuthAdd open={false} onClose={onClose} onSaved={onSaved} />,
+    );
+    rerender(<ZCodeOAuthAdd open onClose={onClose} onSaved={onSaved} />);
+    await screen.findByText("Account saved in the encrypted vault.");
+    expect(onSaved).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a restored result from the old library when the source changes", async () => {
+    const old = deferred<LoginProgress | null>();
+    vi.mocked(zcodeLoginApi.lastProgress)
+      .mockReturnValueOnce(old.promise)
+      .mockResolvedValueOnce(null);
+    const onSaved = vi.fn(async () => {});
+    const { rerender } = render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={onSaved}
+        libraryDataRoot="/old"
+      />,
+    );
+    rerender(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={onSaved}
+        libraryDataRoot="/new"
+      />,
+    );
+    await act(async () => old.resolve(result("saved")));
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("Account saved in the encrypted vault."),
+    ).not.toBeInTheDocument();
+    expect(zcodeLoginApi.lastProgress).toHaveBeenLastCalledWith("/new");
+  });
+
+  it("completes the selected saved session without another official login or an invented identity source", async () => {
+    const selected = { id: "opaque", catalogRevision: "catalog" };
+    vi.mocked(zcodeLoginApi.beginSavedCoding).mockResolvedValue(
+      result("keyRequired", {
+        purpose: "completeCoding",
+        account: {
+          id: "opaque",
+          label: "a…",
+          duplicate: true,
+          identitySource: "packageDeclared",
+        },
+      }),
+    );
+    vi.mocked(zcodeLoginApi.confirmKey).mockResolvedValue(
+      result("review", {
+        purpose: "completeCoding",
+        account: {
+          id: "opaque",
+          label: "a…",
+          duplicate: true,
+          identitySource: "packageDeclared",
+        },
+      }),
+    );
+    render(
+      <ZCodeOAuthAdd
+        open
+        savedAccount={selected}
+        libraryDataRoot="/synthetic/library"
+        onClose={vi.fn()}
+        onSaved={vi.fn(async () => {})}
+      />,
+    );
+    await screen.findByRole("button", {
+      name: "Authorize creating and saving this Key",
+    });
+    expect(zcodeLoginApi.beginSavedCoding).toHaveBeenCalledExactlyOnceWith(
+      "opaque",
+      "catalog",
+      "/synthetic/library",
+    );
+    expect(settingsApi.openExternal).not.toHaveBeenCalled();
+    expect(zcodeLoginApi.begin).not.toHaveBeenCalled();
+    expect(screen.getByText("Declared by account bundle")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Verified official sign-in"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Authorize creating and saving this Key",
+      }),
+    );
+    const save = await screen.findByRole("button", {
+      name: "Save verified Coding connection",
+    });
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "Explicitly update this existing account",
+      }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(zcodeLoginApi.save).toHaveBeenCalledExactlyOnceWith(
+        "flow-one",
+        true,
+      ),
+    );
+  });
+
+  it("restores the original saved-account preparation without starting a second one", async () => {
+    vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(
+      result("keyRequired", {
+        purpose: "completeCoding",
+        sourceCatalogRevision: "catalog",
+      }),
+    );
+    render(
+      <ZCodeOAuthAdd
+        open
+        savedAccount={{ id: "opaque", catalogRevision: "catalog" }}
+        onClose={vi.fn()}
+        onSaved={vi.fn(async () => {})}
+      />,
+    );
+    await screen.findByRole("button", {
+      name: "Authorize creating and saving this Key",
+    });
+    expect(zcodeLoginApi.beginSavedCoding).not.toHaveBeenCalled();
+    expect(zcodeLoginApi.confirmKey).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "older-catalog"])(
+    "does not use an old saved receipt to complete a newer catalog (%s)",
+    async (sourceCatalogRevision) => {
+      vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(
+        result("saved", { purpose: "completeCoding", sourceCatalogRevision }),
+      );
+      const onSaved = vi.fn(async () => {});
+      render(
+        <ZCodeOAuthAdd
+          open
+          savedAccount={{ id: "opaque", catalogRevision: "current-catalog" }}
+          onClose={vi.fn()}
+          onSaved={onSaved}
+        />,
+      );
+      await screen.findByRole("button", {
+        name: "Authorize creating and saving this Key",
+      });
+      expect(zcodeLoginApi.beginSavedCoding).toHaveBeenCalledExactlyOnceWith(
+        "opaque",
+        "current-catalog",
+        undefined,
+      );
+      expect(onSaved).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText("Account saved in the encrypted vault."),
+      ).not.toBeInTheDocument();
+    },
+  );
 });

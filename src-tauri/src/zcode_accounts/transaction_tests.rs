@@ -2326,6 +2326,175 @@ fn login_save_receipt_is_atomic_idempotent_and_survives_lost_reply() {
         )
         .is_err());
 }
+
+#[test]
+fn saved_coding_save_binds_original_revision_target_and_source_without_other_mutation() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    let catalog = local
+        .import_catalog(&fixture.native, &status.revision)
+        .unwrap();
+    let original = catalog.get(&fixture.a).unwrap().clone();
+    let target = super::super::oauth::SavedCodingTarget {
+        snapshot: original.clone(),
+        revision: status.revision.clone(),
+        details: catalog.details(&original, &fixture.native),
+    };
+    let candidate = super::super::oauth_account::complete_coding_snapshot(
+        &fixture.native,
+        &original,
+        Some(&super::super::official::CodingKey::new("replacement-coding").unwrap()),
+    )
+    .unwrap();
+    let native_before = fs::read(fixture.native_root.path().join("credentials.json")).unwrap();
+    let other_before = catalog
+        .get(&fixture.b)
+        .unwrap()
+        .scoped_document()
+        .to_bytes()
+        .unwrap();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request = |revision| LoginProfileSave {
+        revision,
+        request_id: &request_id,
+        snapshot: candidate.clone(),
+        evidence: None,
+        update_duplicate: true,
+        completion: Some(&target),
+    };
+    assert_eq!(
+        local.save_login_profile_for(&fixture.native, request("stale-revision")),
+        Err(TransactionError::CatalogChanged)
+    );
+    let mut wrong = request(&status.revision);
+    wrong.snapshot = catalog.get(&fixture.b).unwrap().clone();
+    assert_eq!(
+        local.save_login_profile_for(&fixture.native, wrong),
+        Err(TransactionError::SourceChanged)
+    );
+    assert_eq!(
+        local
+            .save_login_profile_for(&fixture.native, request(&status.revision))
+            .unwrap(),
+        CaptureCommitOutcome::Refreshed
+    );
+    assert_eq!(
+        local
+            .save_login_profile_for(&fixture.native, request(&status.revision))
+            .unwrap(),
+        CaptureCommitOutcome::Refreshed
+    );
+    let updated = fixture.catalog();
+    let saved = updated.get(&fixture.a).unwrap();
+    assert!(super::super::oauth_account::coding_only_change(
+        &original, saved
+    ));
+    assert_eq!(
+        updated.details(saved, &fixture.native).identity_source,
+        super::super::checkpoint::IdentitySource::NativeCapture
+    );
+    assert_eq!(
+        updated
+            .get(&fixture.b)
+            .unwrap()
+            .scoped_document()
+            .to_bytes()
+            .unwrap(),
+        other_before
+    );
+    assert_eq!(
+        fs::read(fixture.native_root.path().join("credentials.json")).unwrap(),
+        native_before
+    );
+}
+
+#[test]
+fn saved_coding_decline_records_kept_receipt_and_preserves_start_metadata() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    let catalog = local
+        .import_catalog(&fixture.native, &status.revision)
+        .unwrap();
+    let original = catalog.get(&fixture.a).unwrap().clone();
+    let target = super::super::oauth::SavedCodingTarget {
+        snapshot: original.clone(),
+        revision: status.revision.clone(),
+        details: catalog.details(&original, &fixture.native),
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        local
+            .save_login_profile_for(
+                &fixture.native,
+                LoginProfileSave {
+                    revision: &status.revision,
+                    request_id: &request_id,
+                    snapshot: original.clone(),
+                    evidence: None,
+                    update_duplicate: true,
+                    completion: Some(&target)
+                }
+            )
+            .unwrap(),
+        CaptureCommitOutcome::Kept
+    );
+    let updated = fixture.catalog();
+    assert!(updated.source_verified(&fixture.a));
+    assert_eq!(
+        updated
+            .get(&fixture.a)
+            .unwrap()
+            .scoped_document()
+            .to_bytes()
+            .unwrap(),
+        original.scoped_document().to_bytes().unwrap()
+    );
+    assert_eq!(
+        local
+            .login_receipt(&fixture.native, &request_id)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        CaptureCommitOutcome::Kept
+    );
+}
+
+#[test]
+fn saved_coding_eligibility_uses_only_selected_credentials_and_keeps_internal_marker_private() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let original = fixture.native.inspect(&fixture.fresh).unwrap();
+    let keys = original.identity().credential_keys();
+    for has_business in [true, false] {
+        let mut fields: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&original.scoped_document().to_bytes().unwrap()).unwrap();
+        fields.remove(&keys[5]);
+        if !has_business {
+            fields.insert(
+                keys[1].clone(),
+                fixture.native.encrypt("invalid\nheader").unwrap(),
+            );
+        }
+        let snapshot = fixture
+            .native
+            .inspect(&CredentialDocument::parse(&serde_json::to_vec(&fields).unwrap()).unwrap())
+            .unwrap();
+        let mut catalog = ProfileCatalog::default();
+        catalog.upsert_unverified(snapshot.clone());
+        let row = saved_account(&fixture.native, &catalog, &snapshot).unwrap();
+        assert!(row.needs_key);
+        assert_eq!(row.can_complete_coding, has_business);
+        assert_eq!(row.complete_coding_blocked_reason.is_some(), !has_business);
+        let dto = serde_json::to_string(&row).unwrap();
+        assert!(!dto.contains("preservedNativeStart"));
+        assert!(!dto.contains("saved-business"));
+        assert_eq!(
+            snapshot.scoped_document().get(&keys[4]),
+            original.scoped_document().get(&keys[4])
+        );
+    }
+}
 #[test]
 fn login_duplicate_default_keep_also_has_a_durable_receipt_without_changing_old_session() {
     let fixture = Fixture::new(OAuthFamily::Zai);
@@ -2700,4 +2869,300 @@ fn io_key_cleanup_retry_is_noop_when_exact_copied_request_is_already_absent() {
     assert_eq!(fs::read(&path).unwrap(), with_new_a);
     assert!(store.key_intent(&a).unwrap().is_some());
     assert!(store.key_intent(&b).unwrap().is_some());
+}
+
+#[test]
+fn io_library_labels_are_local_atomic_and_require_current_catalog() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let before = store.catalog_status(&f.native).unwrap();
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    store
+        .set_profile_label(
+            &f.native,
+            &before.revision,
+            &f.a.opaque_id(),
+            Some("Synthetic personal account".into()),
+        )
+        .unwrap();
+    let after = store.catalog_status(&f.native).unwrap();
+    assert_ne!(before.revision, after.revision);
+    assert_eq!(
+        after
+            .profiles
+            .iter()
+            .find(|row| row.id == f.a.opaque_id())
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("Synthetic personal account")
+    );
+    assert!(f.catalog().source_verified(&f.a));
+    assert_eq!(
+        native_before,
+        fs::read(f.native_root.path().join("credentials.json")).unwrap()
+    );
+    let bytes = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("Synthetic personal account"));
+    assert_eq!(
+        store.set_profile_label(
+            &f.native,
+            &before.revision,
+            &f.a.opaque_id(),
+            Some("stale".into())
+        ),
+        Err(TransactionError::CatalogChanged)
+    );
+    assert_eq!(
+        bytes,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    store
+        .set_profile_label(&f.native, &after.revision, &f.a.opaque_id(), None)
+        .unwrap();
+    assert_eq!(
+        f.catalog()
+            .details(f.catalog().get(&f.a).unwrap(), &f.native)
+            .label,
+        None
+    );
+}
+
+#[test]
+fn io_library_activation_is_granted_only_for_matching_admitted_native_selection() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let library = store.catalog_status(&f.native).unwrap();
+    assert!(
+        library.actions.can_add
+            && library.actions.can_import
+            && library.actions.can_backup
+            && library.actions.can_edit_labels
+    );
+    assert!(library
+        .profiles
+        .iter()
+        .all(|row| !row.can_activate && row.activation_blocked_reason.is_some()));
+    let native = store
+        .catalog_status_for_connection(
+            &f.native,
+            OAuthFamily::Zai,
+            super::super::checkpoint::ConnectionKind::Coding,
+            "3.14.4",
+        )
+        .unwrap();
+    assert!(native
+        .profiles
+        .iter()
+        .all(|row| row.can_activate && row.activation_blocked_reason.is_none()));
+    let wrong_family = store
+        .catalog_status_for_connection(
+            &f.native,
+            OAuthFamily::BigModel,
+            super::super::checkpoint::ConnectionKind::Coding,
+            "3.14.4",
+        )
+        .unwrap();
+    assert!(wrong_family.profiles.iter().all(|row| !row.can_activate));
+    assert!(library.current.is_none() && native.current.is_none());
+}
+
+#[test]
+fn io_explicit_current_identity_reads_without_capture_or_catalog_mutation() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let catalog_before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let credentials_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let snapshot = read_current_profile(
+        f.native_root.path(),
+        native_root_identity(f.native_root.path()).unwrap(),
+        &f.native,
+        OAuthFamily::Zai,
+        &|| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(snapshot.identity() == &f.a);
+    assert_eq!(
+        catalog_before,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(
+        credentials_before,
+        fs::read(f.native_root.path().join("credentials.json")).unwrap()
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+}
+#[test]
+fn io_explicit_current_identity_rejects_late_source_change() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let root = f.native_root.path();
+    let gate = || {
+        write_durable(
+            &root.join("credentials.json"),
+            &native_document(OAuthFamily::Zai, "b", "changed")
+                .to_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        Ok(())
+    };
+    assert!(matches!(
+        read_current_profile(
+            root,
+            native_root_identity(root).unwrap(),
+            &f.native,
+            OAuthFamily::Zai,
+            &gate
+        ),
+        Err(TransactionError::SourceChanged)
+    ));
+}
+
+#[tokio::test]
+async fn io_checked_bundle_preserves_whole_session_and_allows_coding_without_business_identity_proof(
+) {
+    use super::super::capture_reviews::Binding;
+    use super::super::import_reviews::{ImportChoice, Reviews};
+    use super::super::official::*;
+    use std::sync::Mutex;
+    struct OfficialFixture(Mutex<Vec<OfficialMethod>>);
+    impl OfficialTransport for OfficialFixture {
+        fn send(&self, request: OfficialRequest) -> TransportFuture<'_> {
+            self.0.lock().unwrap().push(request.method);
+            let (status, data) = if request.url.contains("subscription") {
+                (
+                    200,
+                    serde_json::json!([{"productId":"coding-pro","status":"VALID","inCurrentPeriod":true}]),
+                )
+            } else if request.url.contains("quota") {
+                (
+                    200,
+                    serde_json::json!({"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"usage":0,"currentValue":0,"remaining":0,"percentage":0}]}),
+                )
+            } else {
+                (401, serde_json::Value::Null)
+            };
+            Box::pin(async move {
+                Ok(OfficialResponse {
+                    status,
+                    body: zeroize::Zeroizing::new(
+                        serde_json::to_vec(&serde_json::json!({"code":0,"data":data})).unwrap(),
+                    ),
+                })
+            })
+        }
+    }
+    let f = Fixture::new(OAuthFamily::Zai);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let status = store.catalog_status(&f.native).unwrap();
+    let catalog = store.import_catalog(&f.native, &status.revision).unwrap();
+    let snapshot = f
+        .native
+        .inspect(&native_document(
+            OAuthFamily::Zai,
+            "import-ready",
+            "whole-session",
+        ))
+        .unwrap();
+    let bytes = snapshot.scoped_document().to_bytes().unwrap();
+    let bundle = super::super::bundle::encode_bundle(
+        &[super::super::bundle::BundleExportAccount {
+            snapshot: &snapshot,
+            created_at: "2026-10-07T00:00:00Z",
+        }],
+        &f.native,
+        "synthetic-password",
+        "2026-10-07T00:00:00Z",
+    )
+    .unwrap();
+    let inspected =
+        super::super::bundle_import::inspect(&bundle, "synthetic-password", &f.native, &catalog)
+            .unwrap();
+    let binding = Binding {
+        vault_root: f.vault_root.path().into(),
+        vault_id: "synthetic-vault".into(),
+        key_id: "key".into(),
+        vault_revision: 1,
+        context_revision: "library".into(),
+        catalog_revision: status.revision.clone(),
+    };
+    let now = std::time::Instant::now();
+    let mut reviews = Reviews::default();
+    let id = reviews.issue(binding.clone(), inspected.accounts, now);
+    let selected = vec![ImportChoice {
+        index: 0,
+        update_duplicate: false,
+    }];
+    let lease = reviews
+        .begin_check(&id, &binding, selected.clone(), now)
+        .unwrap();
+    let client = OfficialClient::new(OfficialFixture(Mutex::new(vec![])));
+    let report = super::super::session_checks::check_session(
+        &client,
+        &f.native,
+        &lease.accounts[0].1,
+        None,
+        42,
+        &|| lease.check(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        report.display().business.check.state,
+        super::super::session_checks::CheckState::Accepted
+    );
+    assert_eq!(
+        report.display().coding.entitlement,
+        super::super::session_checks::EntitlementState::Available
+    );
+    reviews.finish_check(&lease, vec![(0, report)]).unwrap();
+    let progress = reviews.check_progress(&id, now).unwrap();
+    assert_eq!(progress.selected, selected);
+    assert_eq!(progress.status, "ready");
+    let mut changed = selected.clone();
+    changed[0].update_duplicate = true;
+    assert!(reviews
+        .consume_checked(&id, &binding, &changed, now)
+        .is_none());
+    let (mut review, mut reports) = reviews
+        .consume_checked(&id, &binding, &selected, now)
+        .unwrap();
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    let outcome = store
+        .import_checked_profiles(
+            &f.native,
+            &status.revision,
+            vec![IncomingProfile {
+                snapshot: review.accounts[0].take().unwrap(),
+                update_duplicate: false,
+                evidence: reports.remove(&0),
+                origin: super::super::checkpoint::IdentitySource::PackageDeclared,
+            }],
+        )
+        .unwrap();
+    assert_eq!(outcome, vec![CaptureCommitOutcome::Saved]);
+    let updated = f.catalog();
+    let saved = updated.get(snapshot.identity()).unwrap();
+    assert_eq!(saved.scoped_document().to_bytes().unwrap(), bytes);
+    assert_eq!(
+        updated.details(saved, &f.native).identity_source,
+        super::super::checkpoint::IdentitySource::PackageDeclared
+    );
+    assert!(!updated.source_verified(saved.identity()));
+    assert!(updated.can_activate(
+        saved,
+        &f.native,
+        Some((super::super::checkpoint::ConnectionKind::Coding, "3.14.4"))
+    ));
+    assert_eq!(
+        native_before,
+        fs::read(f.native_root.path().join("credentials.json")).unwrap()
+    );
+    assert!(client
+        .transport
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|method| *method == OfficialMethod::Get));
 }

@@ -63,6 +63,8 @@ pub(crate) struct ProfileDetails {
     pub evidence: Option<SessionCheckReport>,
     #[serde(default = "require_capability_default")]
     pub requires_capability_check: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_native_start: Option<[u8; 32]>,
 }
 fn require_capability_default() -> bool {
     true
@@ -74,6 +76,7 @@ impl Default for ProfileDetails {
             identity_source: IdentitySource::PackageDeclared,
             evidence: None,
             requires_capability_check: false,
+            preserved_native_start: None,
         }
     }
 }
@@ -198,15 +201,47 @@ impl ProfileCatalog {
         native: &NativeCipher,
         selection: Option<(ConnectionKind, &str)>,
     ) -> bool {
+        if !snapshot
+            .identity()
+            .matches_scope(native.context(), snapshot.identity().family())
+        {
+            return false;
+        }
         let details = self.details(snapshot, native);
+        if let (Some((kind, _)), Some(report)) = (selection, details.evidence.as_ref()) {
+            let display = report.display();
+            let unavailable = match kind {
+                ConnectionKind::Start => {
+                    display.start.check.state == CheckState::Unavailable
+                        || display.start.entitlement == EntitlementState::Unavailable
+                }
+                ConnectionKind::Coding => {
+                    display.coding.check.state == CheckState::Unavailable
+                        || display.coding.entitlement == EntitlementState::Unavailable
+                }
+            };
+            if unavailable {
+                return false;
+            }
+        }
         if self.source_verified(snapshot.identity()) && !details.requires_capability_check {
             return true;
         }
         let Some((kind, version)) = selection else {
             return false;
         };
+        if kind == ConnectionKind::Start
+            && details.identity_source == IdentitySource::NativeCapture
+            && details.preserved_native_start.is_some()
+            && details.preserved_native_start
+                == super::session_checks::consumed_start_fingerprint(native, snapshot)
+        {
+            // Preserve the old local capture admission only for its unchanged
+            // Start credential. This is never an upstream acceptance result.
+            return true;
+        }
         details.evidence.is_some_and(|report| {
-            ready(&report.display(), kind)
+            self.connection_ready(snapshot, native, kind)
                 && (kind != ConnectionKind::Start || report.start_checked_for(version))
         })
     }
@@ -218,8 +253,17 @@ impl ProfileCatalog {
     ) -> Result<(), CheckpointError> {
         let snapshot = self.get(identity).ok_or(CheckpointError::InvalidPayload)?;
         let mut details = self.details(snapshot, native);
-        details.requires_capability_check = true;
+        // A read-only check must not erase the established beta.3 capture
+        // admission on a transport failure. Known rejection is checked above.
+        let legacy_native = self.source_verified(identity) && !details.requires_capability_check;
+        details.requires_capability_check = !legacy_native;
         let evidence = evidence.retain_matching(native, snapshot);
+        let start = evidence.display().start;
+        if start.check.reason == Some(super::session_checks::CheckReason::AuthRejected)
+            || start.entitlement == EntitlementState::Unavailable
+        {
+            details.preserved_native_start = None;
+        }
         details.evidence = Some(match details.evidence.as_ref() {
             Some(previous) => evidence.preserve_previous_acceptance(previous, native, snapshot),
             None => evidence,
@@ -289,10 +333,65 @@ impl ProfileCatalog {
                 identity_source: origin,
                 evidence: incoming,
                 requires_capability_check: true,
+                preserved_native_start: None,
             },
         );
         self.upsert_unverified(snapshot);
         true
+    }
+    pub(crate) fn replace_coding_profile(
+        &mut self,
+        original: &AccountSnapshot,
+        candidate: AccountSnapshot,
+        native: &NativeCipher,
+        evidence: Option<SessionCheckReport>,
+    ) -> Result<bool, CheckpointError> {
+        let current = self
+            .get(original.identity())
+            .ok_or(CheckpointError::InvalidPayload)?;
+        let original_bytes = original
+            .scoped_document()
+            .to_bytes()
+            .map_err(CheckpointError::Core)?;
+        if current
+            .scoped_document()
+            .to_bytes()
+            .map_err(CheckpointError::Core)?
+            != original_bytes
+            || !super::oauth_account::coding_only_change(original, &candidate)
+        {
+            return Err(CheckpointError::InvalidPayload);
+        }
+        if candidate
+            .scoped_document()
+            .to_bytes()
+            .map_err(CheckpointError::Core)?
+            == original_bytes
+        {
+            return Ok(false);
+        }
+        if super::oauth_account::saved_coding_key(native, &candidate).is_none() {
+            return Err(CheckpointError::InvalidPayload);
+        }
+        let mut details = self.details(original, native);
+        if self.source_verified(original.identity()) && !details.requires_capability_check {
+            details.preserved_native_start =
+                super::session_checks::consumed_start_fingerprint(native, original);
+        }
+        if details.identity_source != IdentitySource::NativeCapture {
+            details.preserved_native_start = None;
+        }
+        details.evidence = match (details.evidence.as_ref(), evidence) {
+            (Some(previous), Some(current)) => {
+                Some(previous.with_coding_from(&current, native, &candidate))
+            }
+            (Some(previous), None) => Some(previous.retain_matching(native, &candidate)),
+            (None, current) => current.map(|report| report.retain_matching(native, &candidate)),
+        };
+        details.requires_capability_check = true;
+        self.details.insert(candidate.identity().clone(), details);
+        self.upsert_unverified(candidate);
+        Ok(true)
     }
     pub(crate) fn profiles(&self) -> impl Iterator<Item = &AccountSnapshot> {
         self.profiles.values()

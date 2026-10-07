@@ -7,6 +7,159 @@ fn native() -> NativeCipher {
 }
 
 #[test]
+fn saved_coding_preserves_only_unchanged_native_start_admission_and_original_source() {
+    let native = native();
+    let original = native
+        .inspect(&native_document(OAuthFamily::Zai, "saved", "original"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(original.clone());
+    catalog
+        .set_label(original.identity(), &native, Some("Saved label".into()))
+        .unwrap();
+    let candidate = super::super::oauth_account::complete_coding_snapshot(
+        &native,
+        &original,
+        Some(&super::super::official::CodingKey::new("new-coding").unwrap()),
+    )
+    .unwrap();
+    assert!(catalog
+        .replace_coding_profile(&original, candidate.clone(), &native, None)
+        .unwrap());
+    let details = catalog.details(&candidate, &native);
+    assert_eq!(details.identity_source, IdentitySource::NativeCapture);
+    assert_eq!(details.label.as_deref(), Some("Saved label"));
+    assert!(catalog.can_activate(&candidate, &native, Some((ConnectionKind::Start, "3.14.4"))));
+    assert!(!catalog.can_activate(
+        &candidate,
+        &native,
+        Some((ConnectionKind::Coding, "3.14.4"))
+    ));
+    assert!(!catalog.can_activate(
+        &candidate,
+        &NativeCipher::new("other-context", TEST_SECRET).unwrap(),
+        Some((ConnectionKind::Start, "3.14.4"))
+    ));
+    let mut changed = candidate.scoped_document();
+    changed = replace(
+        &changed,
+        "zcodejwttoken",
+        native.encrypt("changed-start").unwrap(),
+    );
+    let changed = native.inspect(&changed).unwrap();
+    catalog.upsert_unverified(changed.clone());
+    assert!(!catalog.can_activate(&changed, &native, Some((ConnectionKind::Start, "3.14.4"))));
+}
+
+#[test]
+fn saved_coding_decline_is_exact_noop_and_package_never_acquires_native_start_marker() {
+    let native = native();
+    let original = native
+        .inspect(&native_document(OAuthFamily::Zai, "saved", "original"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert_unverified(original.clone());
+    assert!(!catalog
+        .replace_coding_profile(&original, original.clone(), &native, None)
+        .unwrap());
+    let candidate = super::super::oauth_account::complete_coding_snapshot(
+        &native,
+        &original,
+        Some(&super::super::official::CodingKey::new("new-coding").unwrap()),
+    )
+    .unwrap();
+    catalog
+        .replace_coding_profile(&original, candidate.clone(), &native, None)
+        .unwrap();
+    let details = catalog.details(&candidate, &native);
+    assert_eq!(details.identity_source, IdentitySource::PackageDeclared);
+    assert!(details.preserved_native_start.is_none());
+    assert!(!catalog.can_activate(&candidate, &native, Some((ConnectionKind::Start, "3.14.4"))));
+    let other = native
+        .inspect(&native_document(OAuthFamily::Zai, "other", "other"))
+        .unwrap();
+    assert!(catalog
+        .replace_coding_profile(&candidate, other, &native, None)
+        .is_err());
+}
+
+#[test]
+fn saved_coding_cannot_delete_or_empty_a_key_under_completion_consent() {
+    let native = native();
+    let original = native
+        .inspect(&native_document(OAuthFamily::Zai, "saved", "original"))
+        .unwrap();
+    for replacement in [None, Some(native.encrypt(" ").unwrap())] {
+        let mut catalog = ProfileCatalog::default();
+        catalog.upsert(original.clone());
+        let mut fields: BTreeMap<String, String> =
+            serde_json::from_slice(&original.scoped_document().to_bytes().unwrap()).unwrap();
+        let key = original.identity().credential_keys()[5].clone();
+        if let Some(value) = replacement {
+            fields.insert(key, value);
+        } else {
+            fields.remove(&key);
+        }
+        let candidate = AccountSnapshot::capture(
+            original.identity().clone(),
+            &CredentialDocument::parse(&serde_json::to_vec(&fields).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(catalog
+            .replace_coding_profile(&original, candidate, &native, None)
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn saved_coding_preserved_native_start_is_revoked_by_later_explicit_auth_rejection() {
+    struct Rejected;
+    impl super::super::official::OfficialTransport for Rejected {
+        fn send(
+            &self,
+            _: super::super::official::OfficialRequest,
+        ) -> super::super::official::TransportFuture<'_> {
+            Box::pin(async {
+                Ok(super::super::official::OfficialResponse {
+                    status: 401,
+                    body: zeroize::Zeroizing::new(Vec::new()),
+                })
+            })
+        }
+    }
+    let native = native();
+    let original = native
+        .inspect(&native_document(OAuthFamily::Zai, "saved", "original"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(original.clone());
+    let candidate = super::super::oauth_account::complete_coding_snapshot(
+        &native,
+        &original,
+        Some(&super::super::official::CodingKey::new("new-coding").unwrap()),
+    )
+    .unwrap();
+    catalog
+        .replace_coding_profile(&original, candidate.clone(), &native, None)
+        .unwrap();
+    assert!(catalog.can_activate(&candidate, &native, Some((ConnectionKind::Start, "3.14.4"))));
+    let report = super::super::session_checks::check_session(
+        &super::super::official::OfficialClient::new(Rejected),
+        &native,
+        &candidate,
+        Some("3.14.4"),
+        123,
+        &|| Ok(()),
+    )
+    .await
+    .unwrap();
+    catalog
+        .set_evidence(candidate.identity(), &native, report)
+        .unwrap();
+    assert!(!catalog.can_activate(&candidate, &native, Some((ConnectionKind::Start, "3.14.4"))));
+}
+
+#[test]
 fn checkpoint_imported_profile_remains_unverified_until_fresh_local_capture() {
     let vault = VaultContext::generate().unwrap();
     let native = native();
@@ -677,4 +830,102 @@ fn login_receipt_capacity_rejects_new_work_without_forgetting_old_results() {
         ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native).unwrap();
     assert!(opened.login_receipt(&first).is_some());
     assert_eq!(opened.login_receipts.len(), MAX_LOGIN_RECEIPTS);
+}
+
+#[tokio::test]
+async fn readonly_connection_check_keeps_legacy_native_admission_on_timeout_but_not_known_rejection(
+) {
+    use super::super::official::*;
+    struct Reply(bool);
+    impl OfficialTransport for Reply {
+        fn send(&self, _: OfficialRequest) -> TransportFuture<'_> {
+            let reject = self.0;
+            Box::pin(async move {
+                if reject {
+                    Ok(OfficialResponse {
+                        status: 401,
+                        body: zeroize::Zeroizing::new(vec![]),
+                    })
+                } else {
+                    Err(OfficialError::Timeout)
+                }
+            })
+        }
+    }
+    let native = native();
+    let snapshot = native
+        .inspect(&native_document(OAuthFamily::Zai, "native", "synthetic"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(snapshot.clone());
+    for reject in [false, true] {
+        let report = super::super::session_checks::check_session(
+            &OfficialClient::new(Reply(reject)),
+            &native,
+            &snapshot,
+            Some("3.14.4"),
+            100,
+            &|| Ok(()),
+        )
+        .await
+        .unwrap();
+        catalog
+            .set_evidence(snapshot.identity(), &native, report)
+            .unwrap();
+        for kind in [ConnectionKind::Start, ConnectionKind::Coding] {
+            assert_eq!(
+                catalog.can_activate(&snapshot, &native, Some((kind, "3.14.4"))),
+                !reject
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_rejected_native_connection_stays_rejected_after_timeout() {
+    use super::super::official::*;
+    struct Reply(bool);
+    impl OfficialTransport for Reply {
+        fn send(&self, _: OfficialRequest) -> TransportFuture<'_> {
+            let reject = self.0;
+            Box::pin(async move {
+                if reject {
+                    Ok(OfficialResponse {
+                        status: 401,
+                        body: zeroize::Zeroizing::new(vec![]),
+                    })
+                } else {
+                    Err(OfficialError::Timeout)
+                }
+            })
+        }
+    }
+    let native = native();
+    let snapshot = native
+        .inspect(&native_document(OAuthFamily::Zai, "native", "synthetic"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(snapshot.clone());
+    for reject in [true, false] {
+        let report = super::super::session_checks::check_session(
+            &OfficialClient::new(Reply(reject)),
+            &native,
+            &snapshot,
+            Some("3.14.4"),
+            100,
+            &|| Ok(()),
+        )
+        .await
+        .unwrap();
+        catalog
+            .set_evidence(snapshot.identity(), &native, report)
+            .unwrap();
+        for kind in [ConnectionKind::Start, ConnectionKind::Coding] {
+            assert_eq!(
+                catalog.can_activate(&snapshot, &native, Some((kind, "3.14.4"))),
+                false,
+                "A timeout must not restore admission after an official rejection"
+            );
+        }
+    }
 }

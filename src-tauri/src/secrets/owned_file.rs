@@ -38,12 +38,14 @@ pub(crate) const JOURNAL_FILE: &str = "zcode_account_transaction.json";
 pub(crate) const RECOVERY_FILE: &str = "zcode_account_recovery.json";
 pub(crate) const OPERATION_FILE: &str = "zcode_account_operations.json";
 pub(crate) const KEY_INTENT_FILE: &str = "zcode_oauth_key_intents.json";
-const ZCODE_FILES: [&str; 5] = [
+pub(crate) const BUNDLE_EXPORT_FILE: &str = "zcode_bundle_exports.json";
+const ZCODE_FILES: [&str; 6] = [
     PROFILE_FILE,
     JOURNAL_FILE,
     RECOVERY_FILE,
     OPERATION_FILE,
     KEY_INTENT_FILE,
+    BUNDLE_EXPORT_FILE,
 ];
 
 const LEGACY_CONFIG_FILES: [&str; 3] = ["config.json", "config.json.bak", "config.json.migrated"];
@@ -180,6 +182,7 @@ mod tests {
             "zcode_account_recovery.json",
             "zcode_account_operations.json",
             KEY_INTENT_FILE,
+            BUNDLE_EXPORT_FILE,
         ];
         for name in names {
             let file = OwnedFile::registered(name).expect("new account file must be protected");
