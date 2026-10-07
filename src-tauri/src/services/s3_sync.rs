@@ -29,6 +29,7 @@ pub(crate) fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
 
 /// Check S3 connectivity by issuing a HEAD request against the bucket.
 pub async fn check_connection(settings: &S3SyncSettings) -> Result<(), AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let creds = creds_for(settings);
     s3::test_connection(&creds).await
@@ -39,6 +40,7 @@ pub async fn upload(
     db: &crate::database::Database,
     settings: &mut S3SyncSettings,
 ) -> Result<Value, AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let snapshot = build_local_snapshot(db)?;
     let manifest: SyncManifest =
@@ -105,6 +107,7 @@ pub async fn upload(
 pub(crate) async fn fetch_snapshot(
     settings: &S3SyncSettings,
 ) -> Result<DownloadedSnapshot, AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let creds = creds_for(settings);
 

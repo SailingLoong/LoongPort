@@ -150,6 +150,7 @@ where
     Fut: Future<Output = Result<T, AppError>>,
 {
     let _guard = sync_mutex().lock().await;
+    ensure_upgrade_sync_admitted()?;
     operation.await
 }
 
@@ -268,6 +269,7 @@ impl RemoteLayout {
 pub(crate) fn build_local_snapshot(
     db: &crate::database::Database,
 ) -> Result<LocalSnapshot, AppError> {
+    ensure_upgrade_sync_admitted()?;
     // Keep the DB's skill rows and the filesystem SSOT at one logical point in
     // time. Skill writers take the matching write guard around both mutations.
     let _skill_state_guard = skill_state_read_guard();
@@ -502,6 +504,7 @@ pub(crate) fn apply_snapshot(
     db_sql: &[u8],
     skills_zip: &[u8],
 ) -> Result<(), AppError> {
+    ensure_upgrade_sync_admitted()?;
     apply_snapshot_with_store(
         db,
         manifest,
@@ -544,6 +547,7 @@ pub(crate) fn restore_from_sync(
     password: &str,
     store: &dyn crate::secrets::key_store::KeyStore,
 ) -> Result<(), AppError> {
+    ensure_upgrade_sync_admitted()?;
     validate_manifest_compat(&snapshot.manifest, snapshot.layout)?;
     if snapshot.manifest.snapshot_id != expected_snapshot_id {
         return Err(publication_conflict());
@@ -1829,4 +1833,11 @@ mod adoption_tests {
         assert!(!local.secrets.root().join("skills").exists());
         assert!(!local.secrets.root().join(".vault-transition").exists());
     }
+}
+
+/// Both transports and restoration share the device-local upgrade admission.
+pub(crate) fn ensure_upgrade_sync_admitted() -> Result<(), AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_sync_admitted(
+        &crate::live::engine::DeviceStore::for_device(),
+    )
 }

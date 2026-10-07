@@ -8,7 +8,7 @@ use crate::{
 };
 use std::path::Path;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SchemaVersions {
     pub upstream: i32,
     pub loongport: i32,
@@ -112,6 +112,13 @@ pub(crate) struct StableInspection {
 }
 
 impl UpgradeInspection {
+    pub(crate) fn ensure_runtime_admitted(&self) -> Result<(), AppError> {
+        let device = match self {
+            Self::Stable(stable) => &stable.device,
+            Self::RecoveryRequired(evidence) => &evidence.device,
+        };
+        checkpoint::ensure_sync_admitted(device)
+    }
     pub(crate) fn is_recovery_required(&self) -> bool {
         matches!(self, Self::RecoveryRequired(_))
     }
@@ -464,3 +471,11 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "upgrade_checkpoint_tests.rs"]
+mod checkpoint_tests;
+
+#[allow(dead_code)]
+#[path = "upgrade_checkpoint.rs"]
+pub(crate) mod checkpoint;

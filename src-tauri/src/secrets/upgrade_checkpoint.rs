@@ -1,0 +1,315 @@
+//! Authenticated, device-local upgrade checkpoint and private staging only.
+//! Publication remains with the startup and credential-generation owners.
+
+use super::*;
+use crate::config_file_io;
+use crate::secrets::owned_file::DeviceFile;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use zeroize::{Zeroize, Zeroizing};
+
+pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
+const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedFile {
+    path: PathBuf,
+    revision: inspection::SourceRevision,
+    bytes: Option<Vec<u8>>,
+}
+impl Drop for CapturedFile {
+    fn drop(&mut self) {
+        if let Some(bytes) = &mut self.bytes {
+            bytes.zeroize();
+        }
+    }
+}
+impl CapturedFile {
+    fn capture(path: &Path) -> Result<Self, AppError> {
+        if !path.is_absolute() {
+            return Err(invalid());
+        }
+        let revision = inspection::file_revision(path)?;
+        let bytes = config_file_io::read_regular_file(path, MAX_BYTES)
+            .map_err(|e| AppError::io(path, e))?;
+        inspection::verify_unchanged(path, &revision)?;
+        Ok(Self {
+            path: path.to_owned(),
+            revision,
+            bytes,
+        })
+    }
+    fn verify(&self) -> Result<(), AppError> {
+        inspection::verify_unchanged(&self.path, &self.revision)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    format: u32,
+    id: String,
+    root: PathBuf,
+    device: PathBuf,
+    metadata: VaultMetadata,
+    source_versions: SchemaVersions,
+    target_versions: SchemaVersions,
+    database_revision: inspection::SourceRevision,
+    database: String,
+    database_digest: String,
+    vault_file: CapturedFile,
+    files: Vec<CapturedFile>,
+    device_paths: Vec<PathBuf>,
+}
+impl Drop for Manifest {
+    fn drop(&mut self) {
+        self.database.zeroize();
+    }
+}
+fn invalid() -> AppError {
+    AppError::Config("upgrade.invalid_checkpoint".into())
+}
+fn descriptor() -> Result<DeviceFile, AppError> {
+    DeviceFile::registered(FILE)
+}
+fn path(device: &DeviceStore) -> PathBuf {
+    device.root().join(FILE)
+}
+fn device_paths(device: &DeviceStore) -> Result<Vec<PathBuf>, AppError> {
+    Ok(super::super::files::device_file_paths(device.root())?
+        .into_iter()
+        .filter(|(file, _)| file.relative_path() != Path::new(FILE))
+        .map(|(_, path)| path)
+        .collect())
+}
+
+fn image(bytes: &[u8], root: &Path, device: &Path) -> Result<Connection, AppError> {
+    let base = inspection::private_temp_base(root, device)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("loongport-checkpoint-")
+        .tempdir_in(base)
+        .map_err(|_| invalid())?;
+    config_file_io::ensure_private_directory(temporary.path())?;
+    let file = temporary.path().join("checkpoint.db");
+    let result = (|| {
+        config_file_io::write_durable(&file, bytes)?;
+        let copy = Connection::open_with_flags(&file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity: String = copy.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if integrity != "ok" {
+            return Err(invalid());
+        }
+        let mut memory = Connection::open_in_memory()?;
+        database::vault::copy(&copy, &mut memory)?;
+        copy.close().map_err(|_| invalid())?;
+        Ok(memory)
+    })();
+    temporary
+        .close()
+        .map_err(|_| AppError::Config("upgrade.temporary_cleanup_failed".into()))?;
+    result
+}
+
+impl Manifest {
+    fn verify_source(
+        &self,
+        root: &Path,
+        device: &DeviceStore,
+        vault: &VaultContext,
+        id: &str,
+    ) -> Result<(), AppError> {
+        if self.format != 1
+            || self.id != id
+            || self.root != root
+            || self.device != device.root()
+            || self.metadata != *vault.metadata()
+            || self.source_versions.upstream != database::SCHEMA_VERSION
+            || self.source_versions.loongport
+                != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || self.target_versions.upstream != database::UPSTREAM4_SCHEMA_VERSION
+            || self.target_versions.loongport != self.source_versions.loongport
+        {
+            return Err(invalid());
+        }
+        if pending_generation(root)? {
+            return Err(AppError::Config("secret.recovery_required".into()));
+        }
+        crate::secrets::owned_file::ensure_no_pending_zcode_transaction(root)?;
+        inspection::verify_unchanged(
+            &root.join(crate::config::DB_FILE_NAME),
+            &self.database_revision,
+        )?;
+        self.vault_file.verify()?;
+        if device_paths(device)? != self.device_paths {
+            return Err(changed());
+        }
+        for file in &self.files {
+            file.verify()?;
+        }
+        Ok(())
+    }
+    fn database(&self, vault: &VaultContext) -> Result<Connection, AppError> {
+        let bytes = Zeroizing::new(STANDARD.decode(&self.database).map_err(|_| invalid())?);
+        let conn = image(&bytes, &self.root, &self.device)?;
+        database::vault::check_identity(&conn, vault)?;
+        crate::secrets::inventory::validate_database(&conn, vault)?;
+        if Database::get_user_version(&conn)? != self.source_versions.upstream
+            || database::loongport_schema::read_stored_version(&conn)?
+                != self.source_versions.loongport
+            || Database::content_digest(&conn)? != self.database_digest
+        {
+            return Err(invalid());
+        }
+        Ok(conn)
+    }
+}
+
+/// Caller owns the sync mutex and startup admission. Client paths come from the
+/// backend's affected-file plan, including absent files and catalog ownership.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Boundary {
+    Authenticated,
+    Published,
+}
+
+pub(crate) fn create(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    clients: &[PathBuf],
+) -> Result<String, AppError> {
+    create_with_hook(root, device, vault, clients, &mut |_| Ok(()))
+}
+
+pub(super) fn create_with_hook(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    clients: &[PathBuf],
+    hook: &mut dyn FnMut(Boundary) -> Result<(), AppError>,
+) -> Result<String, AppError> {
+    if config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))?
+        .is_some()
+    {
+        return Err(AppError::Config("upgrade.checkpoint_pending".into()));
+    }
+    let inspected = inspect(root, device)?;
+    inspected.validate_device_state(vault)?;
+    inspected.validate_database(root, vault)?;
+    crate::secrets::owned_file::ensure_no_pending_zcode_transaction(root)?;
+    let UpgradeInspection::Stable(stable) = inspected else {
+        return Err(invalid());
+    };
+    hook(Boundary::Authenticated)?;
+    let captured =
+        inspection::capture(&root.join(crate::config::DB_FILE_NAME))?.ok_or_else(invalid)?;
+    let source_versions = stable.source_versions.ok_or_else(invalid)?;
+    let paths = device_paths(device)?;
+    let files = paths
+        .iter()
+        .chain(clients)
+        .map(|p| CapturedFile::capture(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let manifest = Manifest {
+        format: 1,
+        id: id.clone(),
+        root: root.to_owned(),
+        device: device.root().to_owned(),
+        metadata: vault.metadata().clone(),
+        source_versions,
+        target_versions: SchemaVersions {
+            upstream: database::UPSTREAM4_SCHEMA_VERSION,
+            loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+        },
+        database_revision: captured.revision,
+        database: STANDARD.encode(&*captured.image.serialize(rusqlite::MAIN_DB)?),
+        database_digest: Database::content_digest(&captured.image)?,
+        vault_file: CapturedFile::capture(&root.join("vault.json"))?,
+        files,
+        device_paths: paths,
+    };
+    let plaintext = Zeroizing::new(serde_json::to_vec(&manifest).map_err(|_| invalid())?);
+    if plaintext.len() as u64 > MAX_BYTES / 2 {
+        return Err(AppError::Config("upgrade.checkpoint_too_large".into()));
+    }
+    let ciphertext = descriptor()?.encode(vault, &plaintext)?;
+    // Verify decryptability, full logical DB content and source before publishing.
+    let decoded = descriptor()?.decode(vault, &ciphertext)?;
+    let verified: Manifest = serde_json::from_slice(&decoded).map_err(|_| invalid())?;
+    verified.database(vault)?;
+    verified.verify_source(root, device, vault, &id)?;
+    stable.verify_unchanged(root)?;
+    config_file_io::ensure_private_directory(device.root())?;
+    config_file_io::write_durable_new(&path(device), &ciphertext)?;
+    hook(Boundary::Published)?;
+    // Readback is part of checkpoint creation; failure retains the artifact.
+    load(root, device, vault, &id)?.database(vault)?;
+    Ok(id)
+}
+
+fn load(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+) -> Result<Manifest, AppError> {
+    let bytes = config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))?
+        .ok_or_else(invalid)?;
+    let plaintext = descriptor()?.decode(vault, &bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    manifest.verify_source(root, device, vault, id)?;
+    Ok(manifest)
+}
+
+/// Explicit staging, never ordinary initialization. Nothing is published here.
+pub(crate) fn stage(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+) -> Result<Connection, AppError> {
+    let manifest = load(root, device, vault, id)?;
+    let conn = manifest.database(vault)?;
+    Database::create_tables_on_conn(&conn)?;
+    Database::apply_upstream4_migrations_on_conn(&conn)?;
+    database::vault::check_identity(&conn, vault)?;
+    crate::secrets::inventory::validate_database(&conn, vault)?;
+    if Database::get_user_version(&conn)? != manifest.target_versions.upstream
+        || database::loongport_schema::read_stored_version(&conn)?
+            != manifest.target_versions.loongport
+    {
+        return Err(invalid());
+    }
+    manifest.verify_source(root, device, vault, id)?;
+    Ok(conn)
+}
+
+/// Presence alone pauses both sync directions; corruption cannot lift admission.
+pub(crate) fn ensure_sync_admitted(device: &DeviceStore) -> Result<(), AppError> {
+    crate::secrets::files::device_directory_exists(device.root())?;
+    match std::fs::symlink_metadata(path(device)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(AppError::Config("upgrade.sync_paused".into())),
+    }
+}
+
+/// Authenticated recovery after a caller loses the creation result.
+pub(crate) fn existing_id(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+) -> Result<String, AppError> {
+    let bytes = config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))?
+        .ok_or_else(invalid)?;
+    let plaintext = descriptor()?.decode(vault, &bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    manifest.verify_source(root, device, vault, &manifest.id)?;
+    manifest.database(vault)?;
+    Ok(manifest.id.clone())
+}

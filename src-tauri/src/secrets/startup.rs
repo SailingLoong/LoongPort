@@ -93,6 +93,11 @@ impl StartupCoordinator {
             Phase::Initializing => return Err("secret.initializing".into()),
             Phase::Failed | Phase::Recovered => return Err("secret.restart_required".into()),
         }
+        self.inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .ensure_runtime_admitted()
+            .map_err(super::error::public_code)?;
         let session = unlock()?;
         *phase = Phase::Initializing;
         drop(phase);
@@ -601,5 +606,34 @@ mod tests {
         assert!(coordinator
             .run_attempt(|| panic!("requires restart"), |_| Ok(()))
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_admission_tests {
+    use super::*;
+    #[test]
+    fn pending_upgrade_stops_unlock_before_any_runtime_callback() {
+        let home = crate::secrets::testing::tempdir().unwrap();
+        let root = home.path().join("data");
+        let device = crate::live::engine::DeviceStore::at(home.path().join("device"));
+        crate::config_file_io::ensure_private_directory(device.root()).unwrap();
+        std::fs::write(
+            device.root().join(super::super::upgrade::checkpoint::FILE),
+            b"pending",
+        )
+        .unwrap();
+        let inspected = super::super::upgrade::inspect(&root, &device).unwrap();
+        let coordinator = StartupCoordinator::new(root, inspected);
+        let unlocked = std::cell::Cell::new(false);
+        let result = coordinator.run_attempt(
+            || {
+                unlocked.set(true);
+                Err("unlock should not run".into())
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(result, Err("upgrade.sync_paused".into()));
+        assert!(!unlocked.get());
     }
 }

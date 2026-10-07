@@ -17,14 +17,14 @@ pub(crate) struct InspectedDatabase {
 }
 
 /// Deliberately not serializable or Debug: paths/digests are private evidence.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SourceRevision {
     path: PathBuf,
     directories: Vec<(PathBuf, FileIdentity)>,
     files: Vec<Option<FileRevision>>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileIdentity {
     #[cfg(unix)]
     device: u64,
@@ -36,7 +36,7 @@ struct FileIdentity {
     id: [u8; 16],
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileStamp {
     identity: FileIdentity,
     len: u64,
@@ -49,7 +49,7 @@ struct FileStamp {
     attributes: u32,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileRevision {
     stamp: FileStamp,
     digest: [u8; 32],
@@ -387,3 +387,13 @@ pub(crate) fn verify_unchanged(path: &Path, revision: &SourceRevision) -> Result
 #[cfg(test)]
 #[path = "inspection_tests.rs"]
 mod tests;
+
+/// Capture caller-owned file revisions using the same pinned path/identity reader.
+pub(crate) fn file_revision(path: &Path) -> Result<SourceRevision, AppError> {
+    observe(path, None)
+}
+
+/// Scratch must stay outside both device and synchronized data roots.
+pub(crate) fn private_temp_base(root: &Path, device: &Path) -> Result<PathBuf, AppError> {
+    inspection_temp_base(root, device, &std::env::temp_dir())
+}

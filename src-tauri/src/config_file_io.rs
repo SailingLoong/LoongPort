@@ -477,6 +477,23 @@ pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Publish a durable private file only if its destination is still absent.
+/// A concurrent creator or symlink is preserved, never replaced.
+pub(crate) fn write_durable_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let staged = stage_write(path, bytes, Some(0o600), true)?;
+    let publication = fs::hard_link(&staged.tmp, path);
+    let cleanup = fs::remove_file(&staged.tmp);
+    publication.map_err(|e| AppError::io(path, e))?;
+    cleanup.map_err(|e| AppError::io(&staged.tmp, e))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| AppError::io(parent, e))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
