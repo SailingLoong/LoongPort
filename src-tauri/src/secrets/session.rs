@@ -145,7 +145,10 @@ impl SecretSession {
     }
 
     pub(crate) fn ephemeral() -> Result<Arc<Self>, AppError> {
-        let directory = tempfile::tempdir()
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .map_err(|_| AppError::Config("secret.temporary_storage_unavailable".into()))?;
+        let directory = tempfile::tempdir_in(base)
             .map_err(|_| AppError::Config("secret.temporary_storage_unavailable".into()))?;
         let vault = VaultContext::generate().map_err(super::inventory::secret_error)?;
         Ok(Arc::new(Self {

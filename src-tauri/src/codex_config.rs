@@ -4976,7 +4976,8 @@ mod tests {
 
     impl CodexLiveTestHome {
         fn new() -> Self {
-            let dir = tempfile::tempdir().expect("create isolated Codex live test home");
+            let dir =
+                crate::secrets::testing::tempdir().expect("create isolated Codex live test home");
             let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
             crate::secrets::testing::initialize_database().expect("initialize isolated settings");

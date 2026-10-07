@@ -377,7 +377,7 @@ mod tests {
         }
     }
     fn fixture() -> (tempfile::TempDir, Database, Remote) {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::secrets::testing::tempdir().unwrap();
         let vault = VaultContext::generate()
             .unwrap()
             .with_password("cleanup recovery password")

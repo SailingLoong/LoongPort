@@ -53,3 +53,9 @@ pub(crate) fn initialize_database() -> Result<Database, AppError> {
     crate::settings::unlock_settings_for_test(session.clone())?;
     Database::init_with_secrets(session)
 }
+
+/// Allocate an isolated storage fixture using the physical temporary directory.
+/// Storage tests must not inherit system path aliases from the temporary base.
+pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}

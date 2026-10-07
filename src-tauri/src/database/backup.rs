@@ -1771,7 +1771,7 @@ mod tests {
 
     impl TestHomeGuard {
         fn new() -> Self {
-            let temp_dir = tempfile::tempdir().expect("create isolated test home");
+            let temp_dir = crate::secrets::testing::tempdir().expect("create isolated test home");
             let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temp_dir.path());
             // Prevent the Windows legacy-HOME fallback without mutating HOME:

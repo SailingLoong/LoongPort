@@ -133,16 +133,23 @@ fn inspection_refuses_changes_between_copy_observation_and_validation() {
             writer
                 .execute_batch("INSERT INTO inspection_rows VALUES('wal')")
                 .unwrap();
+            let mut writer = Some(writer);
             let result = capture_with_hook(&path, &mut |point| {
                 if point == phase {
                     match mutation {
                         "wal-append" => writer
+                            .as_ref()
+                            .unwrap()
                             .execute_batch("INSERT INTO inspection_rows VALUES('later')")
                             .unwrap(),
                         "wal-truncate" => writer
+                            .as_ref()
+                            .unwrap()
                             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
                             .unwrap(),
                         "replace" => {
+                            // SQLite's Windows handle prevents replacement while open.
+                            drop(writer.take());
                             let replacement = dir.path().join("replacement");
                             std::fs::copy(&path, &replacement).unwrap();
                             std::fs::rename(replacement, &path).unwrap();
@@ -150,7 +157,13 @@ fn inspection_refuses_changes_between_copy_observation_and_validation() {
                         "add-journal" => {
                             std::fs::write(sidecar(&path, "-journal"), b"changed").unwrap()
                         }
-                        "remove-shm" => std::fs::remove_file(sidecar(&path, "-shm")).unwrap(),
+                        "remove-shm" => {
+                            drop(writer.take());
+                            // Closing the last writer may already remove the SHM file.
+                            if sidecar(&path, "-shm").exists() {
+                                std::fs::remove_file(sidecar(&path, "-shm")).unwrap();
+                            }
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -288,4 +301,19 @@ fn inspection_refuses_a_source_alias_before_allocating_scratch() {
     std::os::unix::fs::symlink(&root, &alias).unwrap();
     assert!(inspection_temp_base(&alias, &tree.path().join("device"), &requested).is_err());
     assert!(std::fs::read_dir(&requested).unwrap().next().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn inspection_device_alias_only_denies_scratch_membership() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let source = dir.path().join("source");
+    let actual = dir.path().join("device");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&actual).unwrap();
+    let alias = dir.path().join("alias");
+    symlink(&actual, &alias).unwrap();
+    assert!(inspection_temp_base(&source, &alias, &std::env::temp_dir()).is_ok());
+    assert!(inspection_temp_base(&source, &alias, &actual).is_err());
 }

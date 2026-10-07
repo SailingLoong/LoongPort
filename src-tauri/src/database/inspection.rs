@@ -286,19 +286,27 @@ fn observe(path: &Path, destination: Option<&Path>) -> Result<SourceRevision, Ap
 
 fn inspection_temp_base(root: &Path, device: &Path, requested: &Path) -> Result<PathBuf, AppError> {
     let root_exists = crate::secrets::files::device_directory_exists(root)?;
-    let device_exists = crate::secrets::files::device_directory_exists(device)?;
+    // The device root is a denied destination, not a source we are admitting.
+    // Canonicalizing it cannot authorize reading device members. Its aliases
+    // must not impose unrelated path admission on an otherwise valid DB source.
+    let device = match device.canonicalize() {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(error("storage_unavailable")),
+    };
     let temp = requested
         .canonicalize()
         .map_err(|_| error("temporary_storage_unavailable"))?;
-    for (owned, exists) in [(root, root_exists), (device, device_exists)] {
-        if exists {
-            let canonical = owned
-                .canonicalize()
-                .map_err(|_| error("storage_unavailable"))?;
-            if temp.starts_with(canonical) {
-                return Err(error("temporary_storage_unavailable"));
-            }
+    if root_exists {
+        let canonical = root
+            .canonicalize()
+            .map_err(|_| error("storage_unavailable"))?;
+        if temp.starts_with(canonical) {
+            return Err(error("temporary_storage_unavailable"));
         }
+    }
+    if device.is_some_and(|device| temp.starts_with(device)) {
+        return Err(error("temporary_storage_unavailable"));
     }
     Ok(temp)
 }

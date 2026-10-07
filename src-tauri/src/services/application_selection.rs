@@ -401,7 +401,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn explicit_model_selection_replaces_old_preference_and_rolls_back_on_commit_failure() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::secrets::testing::tempdir().unwrap();
         let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         struct RestoreHome(Option<std::ffi::OsString>);
         impl Drop for RestoreHome {

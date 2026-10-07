@@ -539,7 +539,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let home = tempfile::tempdir().unwrap();
+            let home = crate::secrets::testing::tempdir().unwrap();
             let old = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
             let root = crate::config::get_app_config_dir();
