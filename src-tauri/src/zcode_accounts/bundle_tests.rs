@@ -57,8 +57,8 @@ fn export_selected_snapshot_roundtrips_complete_credentials_and_official_name_on
             .unwrap()
             .keys()
             .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["config", "createdAt", "credentials", "name"]
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["config", "createdAt", "credentials", "name"])
     );
     assert_eq!(account["credentials"].as_object().unwrap().len(), 7);
     assert!(account["credentials"].get("ssh:unrelated").is_none());

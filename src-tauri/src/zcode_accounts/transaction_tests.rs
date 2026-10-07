@@ -2812,7 +2812,8 @@ fn review_legacy_native_record_label_edit_keeps_existing_activation_contract() {
 
 #[test]
 fn io_key_cleanup_retry_is_noop_when_exact_unsubmitted_request_is_already_absent() {
-    let root = tempfile::tempdir().unwrap();
+    let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+    let root = tempfile::tempdir_in(temp).unwrap();
     crate::config_file_io::ensure_private_directory(root.path()).unwrap();
     let vault = VaultContext::generate().unwrap();
     let store = VaultAccountStore::new(root.path(), &vault).unwrap();
@@ -2844,7 +2845,8 @@ fn io_key_cleanup_retry_is_noop_when_exact_unsubmitted_request_is_already_absent
 }
 #[test]
 fn io_key_cleanup_retry_is_noop_when_exact_copied_request_is_already_absent() {
-    let root = tempfile::tempdir().unwrap();
+    let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+    let root = tempfile::tempdir_in(temp).unwrap();
     crate::config_file_io::ensure_private_directory(root.path()).unwrap();
     let vault = VaultContext::generate().unwrap();
     let store = VaultAccountStore::new(root.path(), &vault).unwrap();
