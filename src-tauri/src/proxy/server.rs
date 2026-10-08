@@ -72,6 +72,10 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    pub(crate) fn failover_manager(&self) -> &Arc<FailoverSwitchManager> {
+        &self.state.failover_manager
+    }
+
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,

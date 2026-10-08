@@ -4,6 +4,7 @@ import { CodexAuthSection, CodexConfigSection } from "./CodexConfigSections";
 import { CodexCommonConfigModal } from "./CodexCommonConfigModal";
 
 interface CodexConfigEditorProps {
+  commonConfigReadOnly?: boolean;
   authValue: string;
 
   configValue: string;
@@ -51,6 +52,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
   onConfigChange,
   onAuthBlur,
   useCommonConfig,
+  commonConfigReadOnly = false,
   onCommonConfigToggle,
   commonConfigSnippet,
   onCommonConfigSnippetChange,
@@ -95,6 +97,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
         providerName={providerName}
         showRemoteCompaction={showRemoteCompaction}
         useCommonConfig={useCommonConfig}
+        commonConfigReadOnly={commonConfigReadOnly}
         onCommonConfigToggle={onCommonConfigToggle}
         onEditCommonConfig={() => setIsCommonConfigModalOpen(true)}
         commonConfigError={commonConfigError}
@@ -104,6 +107,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
 
       {/* Common Config Modal */}
       <CodexCommonConfigModal
+        readOnly={commonConfigReadOnly}
         isOpen={isCommonConfigModalOpen}
         onClose={handleCloseCommonConfigModal}
         value={commonConfigSnippet}

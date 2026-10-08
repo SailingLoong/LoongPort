@@ -387,6 +387,11 @@ impl Drop for CodexAuthFileTransaction {
     }
 }
 
+/// Nonpersistent authority to commit a request's automatic route change.
+/// The app's existing mode lifecycle owns invalidation; the response may finish.
+#[derive(Clone)]
+pub(crate) struct RequestIdentity(Arc<()>);
+
 pub struct ProxyService {
     db: Arc<Database>,
     owner: Weak<ProxyService>,
@@ -400,6 +405,7 @@ pub struct ProxyService {
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
     takeover_lock: Arc<tokio::sync::Mutex<()>>,
+    request_identities: std::sync::Mutex<std::collections::HashMap<String, Arc<()>>>,
     /// 被动模型监控入口（从 ModelVerificationCoordinator 单向流入，随 server 组装传下去）
     passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     /// 模型对齐告警状态（owner 在代理域；命令层读取、转发层随 server 组装共享）。
@@ -441,12 +447,24 @@ impl ProxyService {
         codex_oauth_manager: Arc<CodexOAuthManager>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     ) -> Arc<Self> {
-        for app in AppType::all() {
-            if let Err(error) = crate::proxy::application_routing::migrate(&db, app.as_str()) {
-                log::error!(
-                    "Application routing migration failed for {}: {error}",
-                    app.as_str()
-                );
+        // Legacy preparation belongs only to the admitted legacy startup path.
+        // Modern construction must not rewrite routing while mode recovery is pending.
+        match crate::mode::operation::uses_upstream4_schema(&db) {
+            Ok(false) => {
+                for app in AppType::all() {
+                    if let Err(error) =
+                        crate::proxy::application_routing::migrate(&db, app.as_str())
+                    {
+                        log::error!(
+                            "Application routing migration failed for {}: {error}",
+                            app.as_str()
+                        );
+                    }
+                }
+            }
+            Ok(true) => {}
+            Err(error) => {
+                log::error!("Application routing initialization was not admitted: {error}")
             }
         }
         Arc::new_cyclic(|owner| Self {
@@ -463,7 +481,48 @@ impl ProxyService {
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
             takeover_lock: Arc::new(tokio::sync::Mutex::new(())),
+            request_identities: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Caller holds the app switch lock while capturing route facts.
+    pub(crate) fn request_identity(&self, app: &str) -> Result<RequestIdentity, AppError> {
+        let mut identities = self
+            .request_identities
+            .lock()
+            .map_err(|_| AppError::Config("proxy.request_identity_unavailable".into()))?;
+        Ok(RequestIdentity(
+            identities
+                .entry(app.into())
+                .or_insert_with(|| Arc::new(()))
+                .clone(),
+        ))
+    }
+
+    /// Caller owns the app lock. Revocation is deliberately not rolled back on
+    /// partial failure: a later checked recovery cannot revive an old request.
+    pub(crate) fn invalidate_app_requests(&self, app: &str) -> Result<(), AppError> {
+        self.request_identities
+            .lock()
+            .map_err(|_| AppError::Config("proxy.request_identity_unavailable".into()))?
+            .remove(app);
+        Ok(())
+    }
+
+    pub(crate) fn request_identity_is_current(
+        &self,
+        app: &str,
+        identity: Option<&RequestIdentity>,
+    ) -> Result<bool, AppError> {
+        let identities = self
+            .request_identities
+            .lock()
+            .map_err(|_| AppError::Config("proxy.request_identity_unavailable".into()))?;
+        Ok(identity.is_some_and(|identity| {
+            identities
+                .get(app)
+                .is_some_and(|current| Arc::ptr_eq(current, &identity.0))
+        }))
     }
 
     pub(crate) fn database(&self) -> &Arc<Database> {
@@ -1046,6 +1105,65 @@ impl ProxyService {
         }
     }
 
+    /// A completed request may still belong to a server stopped before a new
+    /// listener attached the same route. Keep the existing lifecycle/app locks
+    /// through commit and admit only the active server's original manager.
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn lock_active_failover(
+        &self,
+        app_type: &str,
+        manager: &crate::proxy::failover_switch::FailoverSwitchManager,
+    ) -> Option<(
+        tokio::sync::OwnedMutexGuard<()>,
+        tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        let lifecycle = self.takeover_lock.clone().lock_owned().await;
+        let app = self.switch_locks.lock_for_app(app_type).await;
+        let active = self
+            .server
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|server| manager.same_instance(server.failover_manager()));
+        active.then_some((lifecycle, app))
+    }
+
+    #[cfg(all(
+        any(test, feature = "test-hooks"),
+        any(feature = "gui", feature = "test-hooks")
+    ))]
+    pub(crate) async fn active_failover_manager_for_test(
+        &self,
+    ) -> Arc<crate::proxy::failover_switch::FailoverSwitchManager> {
+        self.server
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .failover_manager()
+            .clone()
+    }
+
+    /// Explicit workspace health reset must not mutate route eligibility while
+    /// the same app has a pending/unknown configuration operation.
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn reset_routing_errors(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let app = AppType::from_str(app_type).map_err(|error| error.to_string())?;
+        let _guard = self.lock_switch_for_app(app_type).await;
+        crate::mode::operation::admit_metadata_write(self, &app)
+            .map_err(|error| error.to_string())?;
+        self.db
+            .update_provider_health(provider_id, app_type, true, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.reset_provider_circuit_breaker(provider_id, app_type)
+            .await
+    }
+
     pub(crate) async fn lock_switch_for_app(
         &self,
         app_type: &str,
@@ -1325,6 +1443,8 @@ impl ProxyService {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
         let _guard = self.switch_locks.lock_for_app(app.as_str()).await;
+        crate::mode::operation::admit_metadata_write(self, &app)
+            .map_err(|error| error.to_string())?;
         let modern =
             crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())?;
         let was_running = self.is_running().await;
@@ -4238,6 +4358,24 @@ impl ProxyService {
     #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
+        let modern = crate::mode::operation::uses_upstream4_schema(&self.db)
+            .map_err(|error| error.to_string())?;
+        let _configuration = if modern {
+            Some(self.lock_configuration_import().await)
+        } else {
+            None
+        };
+        let _lifecycle = if modern {
+            None
+        } else {
+            Some(self.takeover_lock.lock().await)
+        };
+        let attached = if modern {
+            crate::mode::controller::reconfiguration_apps_locked(self)
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
         // 记录旧配置用于判定是否需要重启
         let previous = self
             .db
@@ -4256,12 +4394,13 @@ impl ProxyService {
 
         // 检查服务器当前状态
         let mut server_guard = self.server.write().await;
-        if server_guard.is_none() {
+        if server_guard.is_none() && (!modern || attached.is_empty()) {
             return Ok(());
         }
 
         // 判断是否需要重启（地址或端口变更）
-        let require_restart = new_config.listen_address != previous.listen_address
+        let require_restart = server_guard.is_none()
+            || new_config.listen_address != previous.listen_address
             || new_config.listen_port != previous.listen_port;
 
         if require_restart {
@@ -4305,6 +4444,9 @@ impl ProxyService {
             // 必须先释放 server 写锁，再逐 app 获取 switch lock：set_takeover_for_app
             // 按 switch lock -> server lock 的顺序执行，反向持锁会造成死锁。
             drop(server_guard);
+            if modern {
+                return crate::mode::controller::reconfigure_attached_locked(self, attached).await;
+            }
             let mut updated_any = false;
             for app_type in [
                 AppType::Claude,
@@ -4327,6 +4469,10 @@ impl ProxyService {
             log::info!("代理配置已实时应用，无需重启代理服务器");
         }
 
+        drop(server_guard);
+        if modern {
+            crate::mode::controller::reconfigure_attached_locked(self, attached).await?;
+        }
         Ok(())
     }
 

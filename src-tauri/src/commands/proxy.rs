@@ -404,16 +404,9 @@ pub async fn reset_circuit_breaker(
     app_type: String,
 ) -> Result<(), String> {
     require_proxy_app(&app_type)?;
-    // 1. 重置数据库健康状态
-    let db = &state.db;
-    db.update_provider_health(&provider_id, &app_type, true, None)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // 2. 如果代理正在运行，重置内存中的熔断器状态
     state
         .proxy_service
-        .reset_provider_circuit_breaker(&provider_id, &app_type)
+        .reset_routing_errors(&provider_id, &app_type)
         .await?;
 
     let _ = app_handle;

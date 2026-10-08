@@ -114,6 +114,13 @@ pub fn get_model_pref(db: &Database, app_type: &str) -> Option<String> {
 }
 
 /// 写某应用的模型偏好（`None` 清除，回到不限）。
+pub(crate) fn get_model_pref_checked(
+    db: &Database,
+    app_type: &str,
+) -> Result<Option<String>, crate::error::AppError> {
+    db.get_setting(&format!("{SETTING_MODEL_PREFIX}{app_type}"))
+}
+
 pub fn set_model_pref(
     db: &Database,
     app_type: &str,

@@ -130,6 +130,60 @@ impl LiveNow {
     }
 }
 
+fn claude_proxy_projection(route: &Provider, url: &str) -> ClaudeProjection {
+    let auth = if route.uses_managed_account_auth() {
+        ProxyAuth::Managed {
+            auth_token: !route.is_github_copilot() || !route.claude_uses_api_key_field(),
+        }
+    } else {
+        ProxyAuth::FollowRow
+    };
+    proxy_projection(
+        &ClaudeProjection::of(&route.settings_config),
+        url,
+        auth,
+        None,
+    )
+}
+
+fn gemini_proxy_projection(route: &Provider, url: &str) -> GeminiProjection {
+    GeminiProjection::proxy_contract(
+        &GeminiProjection::of(&route.settings_config, false),
+        url,
+        PROXY_TOKEN_PLACEHOLDER,
+    )
+}
+
+fn grok_proxy_projection(route: &Provider, url: &str) -> Result<GrokProjection, AppError> {
+    GrokProjection::proxy_contract(
+        &grok_direct::projection(route)?,
+        &format!("{}/grokbuild/v1", url.trim_end_matches('/')),
+        PROXY_TOKEN_PLACEHOLDER,
+    )
+    .map_err(|error| AppError::Config(error.to_string()))
+}
+
+fn expected_proxy_contract(
+    service: &ProxyService,
+    app: &AppType,
+    route: &Provider,
+    live: &LiveNow,
+    url: &str,
+) -> Result<Contract, AppError> {
+    Ok(match app {
+        AppType::Claude => contract::claude(&claude_proxy_projection(route, url)),
+        AppType::Gemini => contract::gemini(&gemini_proxy_projection(route, url)),
+        AppType::GrokBuild => contract::grok(&grok_proxy_projection(route, url)?),
+        AppType::Codex => codex_direct::planned_proxy_contract(
+            service.database(),
+            &live.codex_owner(),
+            route,
+            &format!("{}/v1", url.trim_end_matches('/')),
+        )?,
+        _ => return Err(invalid()),
+    })
+}
+
 fn write_proxy(
     service: &ProxyService,
     app: &AppType,
@@ -138,11 +192,11 @@ fn write_proxy(
     live: &LiveNow,
     mut target: PendingTarget,
     url: &str,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let mut next = target.state.clone().ok_or_else(invalid)?;
     match app {
         AppType::Codex => {
-            codex_direct::apply_mode(
+            return codex_direct::apply_mode(
                 service,
                 &live.codex_owner(),
                 codex_direct::Target::Proxy {
@@ -151,22 +205,10 @@ fn write_proxy(
                 },
                 operation,
                 target,
-            )?;
+            );
         }
         AppType::Claude => {
-            let auth = if route.uses_managed_account_auth() {
-                ProxyAuth::Managed {
-                    auth_token: !route.is_github_copilot() || !route.claude_uses_api_key_field(),
-                }
-            } else {
-                ProxyAuth::FollowRow
-            };
-            let projection = proxy_projection(
-                &ClaudeProjection::of(&route.settings_config),
-                url,
-                auth,
-                None,
-            );
+            let projection = claude_proxy_projection(route, url);
             next.contract = Some(contract::claude(&projection));
             target.state = Some(next);
             let patch = direct_patch(live.claude_owner().as_ref(), &projection);
@@ -174,23 +216,14 @@ fn write_proxy(
             claude_direct::run_with_write(&write, operation, Some(&patch), target)?;
         }
         AppType::Gemini => {
-            let projection = GeminiProjection::proxy_contract(
-                &GeminiProjection::of(&route.settings_config, false),
-                url,
-                PROXY_TOKEN_PLACEHOLDER,
-            );
+            let projection = gemini_proxy_projection(route, url);
             next.contract = Some(contract::gemini(&projection));
             target.state = Some(next);
             let write = AppWrite::begin_mode(service, app)?;
             gemini_direct::run_with_write(&write, operation, Some(&projection), target)?;
         }
         AppType::GrokBuild => {
-            let projection = GrokProjection::proxy_contract(
-                &grok_direct::projection(route)?,
-                &format!("{}/grokbuild/v1", url.trim_end_matches('/')),
-                PROXY_TOKEN_PLACEHOLDER,
-            )
-            .map_err(|e| AppError::Config(e.to_string()))?;
+            let projection = grok_proxy_projection(route, url)?;
             next.contract = Some(contract::grok(&projection));
             target.state = Some(next);
             let write = AppWrite::begin_mode(service, app)?;
@@ -205,7 +238,7 @@ fn write_proxy(
         }
         _ => return Err(invalid()),
     }
-    Ok(())
+    Ok(false)
 }
 
 fn write_direct(
@@ -215,7 +248,7 @@ fn write_direct(
     direct: Option<&Provider>,
     live: &LiveNow,
     target: PendingTarget,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     if *app == AppType::Codex {
         return codex_direct::apply_mode(
             service,
@@ -257,7 +290,7 @@ fn write_direct(
         }
         _ => return Err(invalid()),
     }
-    Ok(())
+    Ok(false)
 }
 
 fn write_target_only(
@@ -292,6 +325,7 @@ pub(crate) async fn enter_locked(
     };
     admit(service, app, &route).map_err(err)?;
     let live = LiveNow::of(service, app, &before).map_err(err)?;
+    service.invalidate_app_requests(app.as_str()).map_err(err)?;
     service.start_for_mode().await?;
     let (url, _) = service.build_proxy_urls().await?;
     let target = PendingTarget::mode(ModeState {
@@ -310,6 +344,7 @@ pub(crate) async fn enter_locked(
     })
     .await
     .map_err(err)?
+    .map(|_| ())
     .map_err(err)
 }
 
@@ -322,6 +357,7 @@ pub(crate) fn exit_locked(
     if !before.attached && (keep_mode || !before.is_proxy()) {
         return Ok(());
     }
+    service.invalidate_app_requests(app.as_str())?;
     let direct = current::direct_provider(service.database(), app)?;
     let live = LiveNow::of(service, app, &before)?;
     let next = ModeState {
@@ -346,6 +382,7 @@ pub(crate) fn exit_locked(
         &live,
         PendingTarget::mode(next),
     )
+    .map(|_| ())
 }
 
 pub(crate) async fn switch_route_locked(
@@ -393,6 +430,7 @@ pub(crate) async fn switch_route_locked(
     })
     .await
     .map_err(err)?
+    .map(|_| ())
     .map_err(err)
 }
 
@@ -440,9 +478,56 @@ pub(crate) fn save_row_locked(
             },
             &url,
         )
+        .map(|_| ())
     } else {
+        write_direct(service, app, op::APPLY, Some(provider), &live, target).map(|_| ())
+    }
+}
+
+/// The selection service owns the app lock and supplies a typed durable target.
+pub(crate) fn select_locked(
+    service: &ProxyService,
+    app: &AppType,
+    provider: &Provider,
+    mut target: PendingTarget,
+) -> Result<bool, AppError> {
+    let before = mode(service, app)?;
+    if crate::proxy::application_routing::blocked_tier_ids_checked(
+        service.database(),
+        app.as_str(),
+    )?
+    .contains(&provider.id)
+    {
+        return Err(AppError::Config("routing.blocked".into()));
+    }
+    crate::services::provider::validate_provider_selection(service.database(), app, &provider.id)?;
+    let live = LiveNow::of(service, app, &before)?;
+    if before.is_proxy() {
+        admit(service, app, provider)?;
+        let attached = before.attached;
+        let mut next = before;
+        next.proxy_route = Some(provider.id.clone());
+        target.state = Some(next);
+        if !attached {
+            write_target_only(service, app, op::APPLY, target)?;
+            return Ok(false);
+        }
+        let (url, _) =
+            futures::executor::block_on(service.build_proxy_urls()).map_err(AppError::Message)?;
+        write_proxy(service, app, op::APPLY, provider, &live, target, &url)
+    } else {
+        target.pointer = Some(provider.id.clone());
         write_direct(service, app, op::APPLY, Some(provider), &live, target)
     }
+}
+
+pub(crate) fn apply_order_locked(
+    service: &ProxyService,
+    app: &AppType,
+    target: PendingTarget,
+) -> Result<(), AppError> {
+    mode(service, app)?;
+    write_target_only(service, app, op::APPLY, target)
 }
 
 pub(crate) fn files(app: &AppType) -> Result<Vec<LiveFile>, AppError> {
@@ -497,6 +582,61 @@ fn persisted_apps(service: &ProxyService) -> Result<Vec<AppType>, AppError> {
         .into_iter()
         .filter(|app| live.apps.contains_key(app.as_str()))
         .collect())
+}
+
+/// A listener change affects every attached app. The caller holds the existing
+/// configuration-import locks, so these admitted facts cannot change before the
+/// new listener is projected. Detached Proxy intent must remain detached.
+pub(crate) fn reconfiguration_apps_locked(
+    service: &ProxyService,
+) -> Result<Vec<AppType>, AppError> {
+    let mut attached = Vec::new();
+    for app in persisted_apps(service)? {
+        let before = mode(service, &app)?;
+        if before.is_proxy() && before.attached {
+            let route = before.proxy_route.as_deref().ok_or_else(invalid)?;
+            admit(service, &app, &provider(service, &app, route)?)?;
+            attached.push(app);
+        }
+    }
+    Ok(attached)
+}
+
+/// Re-run the same projection after a saved-config retry as well as a restart.
+/// An app that failed before intent publication must not be reported repaired
+/// merely because the listener/DB already contain the requested configuration.
+pub(crate) async fn reconfigure_attached_locked(
+    service: &ProxyService,
+    apps: Vec<AppType>,
+) -> Result<(), String> {
+    let (url, _) = service.build_proxy_urls().await?;
+    let mut failures = Vec::new();
+    for app in apps {
+        let expected = (|| {
+            let before = mode(service, &app)?;
+            let route = provider(
+                service,
+                &app,
+                before.proxy_route.as_deref().ok_or_else(invalid)?,
+            )?;
+            let live = LiveNow::of(service, &app, &before)?;
+            let expected = expected_proxy_contract(service, &app, &route, &live, &url)?;
+            Ok::<_, AppError>(before.contract.as_ref() != Some(&expected))
+        })();
+        let result = match expected {
+            Ok(false) => Ok(()),
+            Ok(true) => enter_locked(service, &app, op::ATTACH).await,
+            Err(error) => Err(err(error)),
+        };
+        if let Err(error) = result {
+            failures.push(format!("{}: {error}", app.as_str()));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 /// The service owns takeover lifecycle; each app retains its original switch

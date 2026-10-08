@@ -8,6 +8,7 @@ interface GeminiEnvSectionProps {
   onBlur?: () => void;
   error?: string;
   useCommonConfig: boolean;
+  commonConfigReadOnly?: boolean;
   onCommonConfigToggle: (checked: boolean) => void;
   onEditCommonConfig: () => void;
   commonConfigError?: string;
@@ -22,6 +23,7 @@ export const GeminiEnvSection: React.FC<GeminiEnvSectionProps> = ({
   onBlur,
   error,
   useCommonConfig,
+  commonConfigReadOnly = false,
   onCommonConfigToggle,
   onEditCommonConfig,
   commonConfigError,
@@ -65,7 +67,10 @@ export const GeminiEnvSection: React.FC<GeminiEnvSectionProps> = ({
           <input
             type="checkbox"
             checked={useCommonConfig}
-            onChange={(e) => onCommonConfigToggle(e.target.checked)}
+            disabled={commonConfigReadOnly}
+            onChange={(e) => {
+              if (!commonConfigReadOnly) onCommonConfigToggle(e.target.checked);
+            }}
             className="w-4 h-4 text-blue-500 bg-white dark:bg-gray-800 border-border-default rounded focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-2"
           />
           {t("geminiConfig.writeCommonConfig", {

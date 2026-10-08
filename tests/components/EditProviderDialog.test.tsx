@@ -405,3 +405,23 @@ describe("EditProviderDialog", () => {
     expect(reopenedButton).toBeDisabled();
   });
 });
+
+it("refuses form submission after an open editor loses write admission", async () => {
+  const provider: Provider = { id: "safe", name: "Safe", settingsConfig: {} };
+  apiMocks.getEditSettings.mockResolvedValue({});
+  const onSubmit = vi.fn();
+  const props = {
+    open: true,
+    provider,
+    appId: "claude" as const,
+    onSubmit,
+    onOpenChange: vi.fn(),
+  };
+  const { rerender } = render(<EditProviderDialog {...props} />);
+  await waitFor(() =>
+    expect(document.getElementById("provider-form")).toBeInTheDocument(),
+  );
+  rerender(<EditProviderDialog {...props} mutationsDisabled />);
+  fireEvent.submit(document.getElementById("provider-form")!);
+  expect(onSubmit).not.toHaveBeenCalled();
+});

@@ -144,6 +144,7 @@ impl Drop for ActiveConnectionGuard {
 }
 
 pub struct RequestForwarder {
+    request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 共享的 ProviderRouter（持有熔断器状态）
     router: Arc<ProviderRouter>,
     status: Arc<RwLock<ProxyStatus>>,
@@ -328,6 +329,7 @@ impl RequestForwarder {
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            request_identity: None,
             router,
             codex_tool_carriers,
             status,
@@ -351,6 +353,14 @@ impl RequestForwarder {
             max_attempts,
             model_alignment,
         }
+    }
+
+    pub(crate) fn with_request_identity(
+        mut self,
+        identity: Option<crate::services::proxy::RequestIdentity>,
+    ) -> Self {
+        self.request_identity = identity;
+        self
     }
 
     async fn record_success_result(
@@ -395,6 +405,7 @@ impl RequestForwarder {
         let provider_id = provider.id.clone();
         let provider_name = provider.name.clone();
         let expected_current = self.current_provider_id_at_start.clone();
+        let request_identity = self.request_identity.clone();
 
         tokio::spawn(async move {
             manager
@@ -405,6 +416,7 @@ impl RequestForwarder {
                     &provider_id,
                     &provider_name,
                     &expected_current,
+                    request_identity.as_ref(),
                 )
                 .await
                 .warn_on_err(
@@ -4047,6 +4059,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            request_identity: None,
             router: Arc::new(ProviderRouter::new(db.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             current_providers: Arc::new(RwLock::new(HashMap::new())),

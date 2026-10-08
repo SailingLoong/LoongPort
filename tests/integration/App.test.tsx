@@ -44,7 +44,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/components/applications/ApplicationWorkspace", () => ({
   ApplicationWorkspace: ({ children, onOpenAccount }: any) => (
     <>
-      {children}
+      {typeof children === "function" ? children(false) : children}
       <button onClick={() => onOpenAccount({ kind: "relay", id: 1 })}>
         open-account
       </button>
@@ -214,6 +214,13 @@ vi.mock("@/components/mcp/McpPanel", () => ({
 
 const renderApp = () => {
   const client = new QueryClient();
+  // This harness mocks the workspace; seed its successful read in the shared cache.
+  for (const app of ["claude", "codex", "gemini", "grok"]) {
+    client.setQueryData(["applicationRouting", app], {
+      autoFailoverEnabled: false,
+      routingActive: false,
+    });
+  }
   return render(
     <QueryClientProvider client={client}>
       <Suspense fallback={<div data-testid="loading">loading</div>}>

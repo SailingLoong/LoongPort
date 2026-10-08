@@ -1,3 +1,4 @@
+import { useCommonConfigSnippet } from "@/components/providers/forms/hooks/useCommonConfigSnippet";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCodexCommonConfig } from "@/components/providers/forms/hooks/useCodexCommonConfig";
@@ -176,3 +177,226 @@ describe("common config snippet saving", () => {
     );
   });
 });
+
+const frozenHook = (
+  app: string,
+  readOnly: boolean,
+  onChange: (value: string) => void,
+  enabled = true,
+) => {
+  if (app === "claude")
+    return useCommonConfigSnippet({
+      settingsConfig: "{}",
+      onConfigChange: onChange,
+      readOnly,
+      enabled,
+    });
+  if (app === "codex")
+    return useCodexCommonConfig({
+      codexConfig: "",
+      onConfigChange: onChange,
+      readOnly,
+      enabled,
+    });
+  return useGeminiCommonConfig({
+    envValue: "",
+    onEnvChange: onChange,
+    envStringToObj: () => ({}),
+    envObjToString: () => "",
+    readOnly,
+    enabled,
+  });
+};
+
+it.each(["claude", "codex", "gemini"])(
+  "keeps %s snippets readable but rejects frozen save, clear, extract and merge",
+  async (app) => {
+    getCommonConfigSnippetMock.mockResolvedValue(
+      app === "codex" ? "[tui]\nnotifications = true" : '{"safe":"value"}',
+    );
+    const onChange = vi.fn();
+    const { result } = renderHook(() => frozenHook(app, true, onChange));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.commonConfigSnippet).toContain(
+      app === "codex" ? "notifications" : "safe",
+    );
+    await act(async () => {
+      await result.current.handleCommonConfigSnippetChange("");
+      await result.current.handleCommonConfigSnippetChange(
+        app === "codex" ? "foo = true" : '{"safe":"changed"}',
+      );
+      await result.current.handleExtract();
+      await result.current.handleCommonConfigToggle(true);
+    });
+    expect(setCommonConfigSnippetMock).not.toHaveBeenCalled();
+    expect(extractCommonConfigSnippetMock).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["claude", "codex", "gemini"])(
+  "checks current %s admission again after pending extraction resolves",
+  async (app) => {
+    getCommonConfigSnippetMock.mockResolvedValue("");
+    let finish!: (value: string) => void;
+    extractCommonConfigSnippetMock.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { result, rerender } = renderHook(
+      ({ frozen }) => frozenHook(app, frozen, vi.fn()),
+      { initialProps: { frozen: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.handleExtract();
+    });
+    rerender({ frozen: true });
+    await act(async () => {
+      finish(app === "codex" ? "foo = true" : '{"safe":"value"}');
+      await pending;
+    });
+    expect(setCommonConfigSnippetMock).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["claude", "codex", "gemini"])(
+  "preserves %s legacy storage when a delayed load loses write admission",
+  async (app) => {
+    const key =
+      app === "claude"
+        ? "cc-switch:common-config-snippet"
+        : `cc-switch:${app}-common-config-snippet`;
+    localStorage.setItem(
+      key,
+      app === "codex" ? "foo = true" : '{"safe":"legacy"}',
+    );
+    let finish!: (value: string) => void;
+    getCommonConfigSnippetMock.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { rerender } = renderHook(
+      ({ frozen }) => frozenHook(app, frozen, vi.fn()),
+      { initialProps: { frozen: false } },
+    );
+    const previous = finish;
+    rerender({ frozen: true });
+    await act(async () => {
+      previous("");
+      finish("");
+    });
+    expect(setCommonConfigSnippetMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).not.toBeNull();
+    localStorage.removeItem(key);
+  },
+);
+
+it.each(["claude", "codex", "gemini"])(
+  "refuses previously captured %s save callbacks after freeze",
+  async (app) => {
+    getCommonConfigSnippetMock.mockResolvedValue("");
+    const { result, rerender } = renderHook(
+      ({ frozen }) => frozenHook(app, frozen, vi.fn()),
+      { initialProps: { frozen: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const save = result.current.handleCommonConfigSnippetChange;
+    rerender({ frozen: true });
+    await act(async () => {
+      await save("");
+    });
+    expect(setCommonConfigSnippetMock).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["claude", "codex", "gemini"])(
+  "keeps the %s legacy migration on admitted source17",
+  async (app) => {
+    const key =
+      app === "claude"
+        ? "cc-switch:common-config-snippet"
+        : `cc-switch:${app}-common-config-snippet`;
+    const value = app === "codex" ? "foo = true" : '{"safe":"legacy"}';
+    localStorage.setItem(key, value);
+    getCommonConfigSnippetMock.mockResolvedValue("");
+    setCommonConfigSnippetMock.mockResolvedValue(undefined);
+    renderHook(() => frozenHook(app, false, vi.fn()));
+    await waitFor(() =>
+      expect(setCommonConfigSnippetMock).toHaveBeenCalledWith(app, value),
+    );
+    await waitFor(() => expect(localStorage.getItem(key)).toBeNull());
+  },
+);
+
+it.each(["codex", "gemini"])(
+  "does not load or migrate inactive %s hooks in another application form",
+  async (app) => {
+    const key = `cc-switch:${app}-common-config-snippet`;
+    localStorage.setItem(key, '{"safe":"legacy"}');
+    const { result } = renderHook(() => frozenHook(app, false, vi.fn(), false));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(getCommonConfigSnippetMock).not.toHaveBeenCalled();
+    expect(setCommonConfigSnippetMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).not.toBeNull();
+    localStorage.removeItem(key);
+  },
+);
+
+it.each(["claude", "codex", "gemini"])(
+  "waits for %s legacy reload before initializing a newly admitted draft",
+  async (app) => {
+    const key =
+      app === "claude"
+        ? "cc-switch:common-config-snippet"
+        : `cc-switch:${app}-common-config-snippet`;
+    if (app === "codex")
+      updateTomlCommonConfigSnippetMock.mockImplementation(
+        async (_config: string, snippet: string) => snippet,
+      );
+    const legacy =
+      app === "codex" ? "legacy_shared = true" : '{"LEGACY_SHARED":"retained"}';
+    localStorage.setItem(key, legacy);
+    let finish!: (value: string) => void;
+    getCommonConfigSnippetMock.mockResolvedValueOnce("").mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onChange = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ frozen }) => {
+        if (app === "gemini")
+          return useGeminiCommonConfig({
+            envValue: "",
+            onEnvChange: onChange,
+            envStringToObj: () => ({}),
+            envObjToString: (value) => JSON.stringify(value),
+            readOnly: frozen,
+          });
+        return frozenHook(app, frozen, onChange);
+      },
+      { initialProps: { frozen: true } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    rerender({ frozen: false });
+    await act(async () => {
+      finish("");
+    });
+    await waitFor(() =>
+      expect(setCommonConfigSnippetMock).toHaveBeenCalledWith(app, legacy),
+    );
+    await waitFor(() =>
+      expect(
+        onChange.mock.calls.some(([value]) =>
+          String(value).toLowerCase().includes("legacy_shared"),
+        ),
+      ).toBe(true),
+    );
+    localStorage.removeItem(key);
+  },
+);

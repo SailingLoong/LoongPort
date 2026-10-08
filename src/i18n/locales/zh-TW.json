@@ -54,6 +54,7 @@
     "invalidJson": "JSON 格式錯誤"
   },
   "commonConfig": {
+    "frozenHint": "舊公共片段目前為唯讀，已儲存內容仍可檢視，並保留用於相容與復原。",
     "guideTitle": "什麼是通用設定片段？",
     "guidePurpose": "用來在不同供應商之間共用外掛程式、環境變數等非敏感設定。切換供應商時不會遺失這些設定。",
     "guideUsage": "用法：① 點擊「從編輯內容擷取」儲存通用部分 ② 新增供應商時勾選「套用通用設定」",
@@ -3909,6 +3910,14 @@
     }
   },
   "applications": {
+    "routingModeDirect": "直連",
+    "routingModeProxy": "代理 · 已接管",
+    "routingModeDetached": "代理 · 未接管",
+    "operationNeedsVerification": "此應用的狀態需要核驗，暫時無法套用變更。",
+    "operationPublicationStarted": "設定發布可能已經開始。再次套用前，請先核驗應用狀態。",
+    "lastSuccessfulRead": "上次成功讀取：{{time}}",
+    "recheckOperation": "重新核驗狀態",
+    "routingModeUnknown": "未知",
     "currentConfiguration": "目前設定",
     "enabledConfigurations": "已啟用設定",
     "currentDescription": "已寫入應用程式的設定，可在下方切換。",

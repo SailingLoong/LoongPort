@@ -28,7 +28,21 @@ export interface SubscriptionWindow {
   resetAt: number | null;
 }
 
+/** Read-only facts from the existing mode owner; not a serialized operation journal. */
+export interface ApplicationModeState {
+  status: "ready" | "pending" | "unknown";
+  mode: "direct" | "proxy" | null;
+  attached: boolean | null;
+  currentProviderId: string | null;
+  directProviderId: string | null;
+  publicationStarted: boolean | null;
+  canWrite: boolean;
+  canRecheck: boolean;
+  legacyCommonConfigWritable?: boolean;
+}
+
 export interface ApplicationRouting {
+  modeState?: ApplicationModeState | null;
   autoFailoverEnabled: boolean;
   /** This application is currently served by a running proxy with takeover. */
   routingActive: boolean;

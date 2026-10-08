@@ -36,6 +36,7 @@ export function useCodexSwitchGuard(
     provider: Provider,
     quitChatgpt?: boolean,
   ) => Promise<SwitchResult | undefined>,
+  disabled = false,
 ) {
   const [pending, setPending] = useState<{
     provider: Provider;
@@ -46,8 +47,11 @@ export function useCodexSwitchGuard(
   // 所以用 ref 取当前值，避免把它写进依赖里让这个 effect 反复跑。
   const switchRef = useRef(switchProvider);
   switchRef.current = switchProvider;
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
 
   const guardedSwitch = useCallback(async (provider: Provider) => {
+    if (disabledRef.current) return;
     const result = await switchRef.current(provider);
     if (result?.status === "confirmationRequired") {
       setPending({ provider, targetName: result.targetName });
@@ -57,8 +61,10 @@ export function useCodexSwitchGuard(
   const switchDialog = (
     <SwitchTierConfirmDialog
       targetName={pending?.targetName ?? null}
+      disabled={disabled}
       onCancel={() => setPending(null)}
       onSwitch={(quitChatgpt) => {
+        if (disabledRef.current) return;
         const target = pending?.provider;
         setPending(null);
         if (target) switchRef.current(target, quitChatgpt);

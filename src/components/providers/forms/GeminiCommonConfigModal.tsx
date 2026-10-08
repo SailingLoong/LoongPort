@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import JsonEditor from "@/components/JsonEditor";
 
 interface GeminiCommonConfigModalProps {
+  readOnly?: boolean;
   isOpen: boolean;
   onClose: () => void;
   value: string;
@@ -21,7 +22,16 @@ interface GeminiCommonConfigModalProps {
  */
 export const GeminiCommonConfigModal: React.FC<
   GeminiCommonConfigModalProps
-> = ({ isOpen, onClose, value, onSave, error, onExtract, isExtracting }) => {
+> = ({
+  readOnly = false,
+  isOpen,
+  onClose,
+  value,
+  onSave,
+  error,
+  onExtract,
+  isExtracting,
+}) => {
   const { t } = useTranslation();
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [draftValue, setDraftValue] = useState(value);
@@ -53,6 +63,7 @@ export const GeminiCommonConfigModal: React.FC<
   };
 
   const handleSave = () => {
+    if (readOnly) return;
     if (onSave(draftValue)) {
       onClose();
     }
@@ -71,8 +82,10 @@ export const GeminiCommonConfigModal: React.FC<
             <Button
               type="button"
               variant="outline"
-              onClick={onExtract}
-              disabled={isExtracting}
+              onClick={() => {
+                if (!readOnly) onExtract();
+              }}
+              disabled={readOnly || isExtracting}
               className="gap-2"
             >
               {isExtracting ? (
@@ -88,7 +101,12 @@ export const GeminiCommonConfigModal: React.FC<
           <Button type="button" variant="outline" onClick={handleClose}>
             {t("common.cancel")}
           </Button>
-          <Button type="button" onClick={handleSave} className="gap-2">
+          <Button
+            type="button"
+            disabled={readOnly}
+            onClick={handleSave}
+            className="gap-2"
+          >
             <Save className="w-4 h-4" />
             {t("common.save")}
           </Button>
@@ -96,6 +114,11 @@ export const GeminiCommonConfigModal: React.FC<
       }
     >
       <div className="space-y-4">
+        {readOnly && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {t("commonConfig.frozenHint")}
+          </p>
+        )}
         <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 p-3 space-y-1.5">
           <p className="text-sm font-medium text-blue-800 dark:text-blue-300">
             {t("commonConfig.guideTitle")}
@@ -132,8 +155,11 @@ export const GeminiCommonConfigModal: React.FC<
         )}
 
         <JsonEditor
+          readOnly={readOnly}
           value={draftValue}
-          onChange={setDraftValue}
+          onChange={(value) => {
+            if (!readOnly) setDraftValue(value);
+          }}
           placeholder={`{
   "GEMINI_MODEL": "gemini-3.6-flash"
 }`}

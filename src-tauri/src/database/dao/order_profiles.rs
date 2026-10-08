@@ -95,6 +95,12 @@ fn write_state(
     app: &str,
     state: &mut OrderProfilesState,
 ) -> Result<(), AppError> {
+    normalize_state(state);
+    write_json(conn, &profiles_key(app), &state.profiles)?;
+    write_json(conn, &current_key(app), &state.current)
+}
+
+fn normalize_state(state: &mut OrderProfilesState) {
     state
         .profiles
         .retain(|profile| !profile.provider_ids.is_empty());
@@ -109,8 +115,6 @@ fn write_state(
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "default".into());
     }
-    write_json(conn, &profiles_key(app), &state.profiles)?;
-    write_json(conn, &current_key(app), &state.current)
 }
 
 /// Maintain references after the final inventory is known. The caller owns the
@@ -188,7 +192,7 @@ pub fn validate_order(
     validate_target(&conn, &state, app, name, ids).map(|_| ())
 }
 
-fn apply_on(
+fn select_order_on(
     conn: &Connection,
     state: &mut OrderProfilesState,
     app: &str,
@@ -198,7 +202,127 @@ fn apply_on(
     let index = validate_target(conn, state, app, name, ids)?;
     state.profiles[index].provider_ids = ids.to_vec();
     state.current = state.profiles[index].name.clone();
+    Ok(())
+}
+
+fn apply_on(
+    conn: &Connection,
+    state: &mut OrderProfilesState,
+    app: &str,
+    name: &str,
+    ids: &[String],
+) -> Result<(), AppError> {
+    select_order_on(conn, state, app, name, ids)?;
     application_routing::write_order_on(conn, app, ids)
+}
+
+/// Exact evidence for the original three-key owner, including absent settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderSnapshot {
+    pub profiles: Option<String>,
+    pub current: Option<String>,
+    pub priority: Option<String>,
+}
+
+fn snapshot_on(conn: &Connection, app: &str) -> Result<OrderSnapshot, AppError> {
+    let read = |key: String| -> Result<Option<String>, AppError> {
+        Ok(conn
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    };
+    Ok(OrderSnapshot {
+        profiles: read(profiles_key(app))?,
+        current: read(current_key(app))?,
+        priority: read(application_routing::priority_key(app))?,
+    })
+}
+
+fn planned_on(
+    conn: &Connection,
+    app: &str,
+    name: &str,
+    ids: &[String],
+) -> Result<OrderSnapshot, AppError> {
+    let mut state = read_state(conn, app)?;
+    select_order_on(conn, &mut state, app, name, ids)?;
+    normalize_state(&mut state);
+    Ok(OrderSnapshot {
+        profiles: Some(
+            serde_json::to_string(&state.profiles).map_err(|e| AppError::Config(e.to_string()))?,
+        ),
+        current: Some(
+            serde_json::to_string(&state.current).map_err(|e| AppError::Config(e.to_string()))?,
+        ),
+        priority: Some(serde_json::to_string(ids).map_err(|e| AppError::Config(e.to_string()))?),
+    })
+}
+
+pub(crate) fn prepare_apply(
+    db: &Database,
+    app: &str,
+    name: &str,
+    ids: &[String],
+) -> Result<(OrderSnapshot, OrderSnapshot), AppError> {
+    let conn = lock_conn!(db.conn);
+    Ok((snapshot_on(&conn, app)?, planned_on(&conn, app, name, ids)?))
+}
+
+fn verify_prepared_on(
+    conn: &Connection,
+    app: &str,
+    name: &str,
+    ids: &[String],
+    before: &OrderSnapshot,
+    planned: &OrderSnapshot,
+) -> Result<bool, AppError> {
+    let actual = snapshot_on(conn, app)?;
+    application_routing::validate_order_on(conn, app, ids)?;
+    if actual == *planned {
+        return Ok(true);
+    }
+    if actual != *before || planned_on(conn, app, name, ids)? != *planned {
+        return Err(AppError::Config("mode.routing_order_changed".into()));
+    }
+    Ok(false)
+}
+
+pub(crate) fn verify_prepared(
+    db: &Database,
+    app: &str,
+    name: &str,
+    ids: &[String],
+    before: &OrderSnapshot,
+    planned: &OrderSnapshot,
+) -> Result<(), AppError> {
+    let conn = lock_conn!(db.conn);
+    verify_prepared_on(&conn, app, name, ids, before, planned).map(|_| ())
+}
+
+/// Compare, mutate and read back under the original DAO's single SQLite transaction.
+pub(crate) fn apply_prepared(
+    db: &Database,
+    app: &str,
+    name: &str,
+    ids: &[String],
+    before: &OrderSnapshot,
+    planned: &OrderSnapshot,
+) -> Result<(), AppError> {
+    let mut conn = lock_conn!(db.conn);
+    let tx = conn.transaction()?;
+    if verify_prepared_on(&tx, app, name, ids, before, planned)? {
+        return Ok(());
+    }
+    let mut state = read_state(&tx, app)?;
+    apply_on(&tx, &mut state, app, name, ids)?;
+    write_state(&tx, app, &mut state)?;
+    if snapshot_on(&tx, app)? != *planned {
+        return Err(AppError::Config("mode.routing_order_changed".into()));
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Revalidates the named target at commit time; a removed draft is never recreated.
@@ -305,7 +429,28 @@ pub fn import(db: &Database, app: &str, profiles: Vec<OrderProfile>) -> Result<u
     Ok(count)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_original_tests() {
+    tests::profile_reads_do_not_persist_defaults();
+    tests::invalid_pointer_resolves_existing_profile_without_writing();
+    tests::save_and_read_leave_applied_order_until_commit();
+    tests::legacy_order_command_updates_the_applied_profile();
+    tests::apply_failure_rolls_back_chain_profile_and_pointer();
+    tests::rename_failure_does_not_leave_a_dangling_pointer();
+    tests::rename_and_delete_keep_current_valid();
+    tests::invalid_orders_never_change_state();
+    tests::import_validates_entire_file_before_commit();
+    tests::exported_json_round_trip_preserves_named_members_without_applying_them();
+    tests::invalid_imported_file_never_overwrites_an_existing_snapshot_or_applied_chain();
+    tests::deleting_provider_prunes_snapshots_and_preserves_surviving_identity();
+    tests::deleting_last_chain_member_never_expands_to_unselected_providers();
+    tests::deletion_falls_back_only_when_the_current_snapshot_loses_every_member();
+    tests::failed_reference_maintenance_rolls_back_provider_deletion();
+    tests::startup_repairs_historical_references_while_get_stays_read_only();
+    println!("PASS original named-order owner tests");
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
 
@@ -330,9 +475,9 @@ mod tests {
         db.conn.lock().unwrap().execute_batch("CREATE TRIGGER reject_pointer BEFORE INSERT ON settings WHEN NEW.key = 'application_order_profile_current_claude' BEGIN SELECT RAISE(ABORT, 'pointer rejected'); END;").unwrap();
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn profile_reads_do_not_persist_defaults() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn profile_reads_do_not_persist_defaults() {
         let db = database();
         validate_order(&db, "claude", "default", &["a".into()]).unwrap();
         let state = get(&db, "claude").unwrap();
@@ -346,9 +491,9 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn invalid_pointer_resolves_existing_profile_without_writing() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn invalid_pointer_resolves_existing_profile_without_writing() {
         let db = database();
         rename(&db, "claude", "default", "daily").unwrap();
         db.set_setting(&current_key("claude"), "\"removed\"")
@@ -360,9 +505,9 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn save_and_read_leave_applied_order_until_commit() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn save_and_read_leave_applied_order_until_commit() {
         let db = database();
         save(&db, "claude", "backup", &["b".into()]).unwrap();
         let state = get(&db, "claude").unwrap();
@@ -381,9 +526,9 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn legacy_order_command_updates_the_applied_profile() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn legacy_order_command_updates_the_applied_profile() {
         let db = database();
         save(&db, "claude", "daily", &["b".into()]).unwrap();
         apply_order(&db, "claude", "daily", &["b".into()]).unwrap();
@@ -393,9 +538,9 @@ mod tests {
         assert_eq!(state.profiles[1].provider_ids, vec!["a"]);
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn apply_failure_rolls_back_chain_profile_and_pointer() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn apply_failure_rolls_back_chain_profile_and_pointer() {
         let db = database();
         apply_order(&db, "claude", "default", &["a".into()]).unwrap();
         save(&db, "claude", "backup", &["b".into()]).unwrap();
@@ -409,9 +554,9 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn rename_failure_does_not_leave_a_dangling_pointer() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn rename_failure_does_not_leave_a_dangling_pointer() {
         let db = database();
         apply_order(&db, "claude", "default", &["a".into()]).unwrap();
         reject_pointer(&db);
@@ -421,9 +566,9 @@ mod tests {
         assert_eq!(state.current, "default");
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn rename_and_delete_keep_current_valid() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn rename_and_delete_keep_current_valid() {
         let db = database();
         save(&db, "claude", "backup", &["b".into()]).unwrap();
         assert!(rename(&db, "claude", "backup", "default").is_err());
@@ -436,9 +581,9 @@ mod tests {
         assert!(apply_order(&db, "claude", "backup", &["b".into()]).is_err());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn invalid_orders_never_change_state() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn invalid_orders_never_change_state() {
         let db = database();
         let before = get(&db, "claude").unwrap();
         for ids in [vec![], vec!["unknown".into()], vec!["a".into(), "a".into()]] {
@@ -450,9 +595,9 @@ mod tests {
         assert!(save(&db, "claude", " ", &["a".into()]).is_err());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn import_validates_entire_file_before_commit() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn import_validates_entire_file_before_commit() {
         let db = database();
         let before = get(&db, "claude").unwrap();
         let profile = |name: &str, id: &str| OrderProfile {
@@ -480,9 +625,9 @@ mod tests {
         assert_eq!(get(&db, "claude").unwrap().current, "default");
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn exported_json_round_trip_preserves_named_members_without_applying_them() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn exported_json_round_trip_preserves_named_members_without_applying_them() {
         let source = database();
         save(
             &source,
@@ -526,9 +671,9 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn invalid_imported_file_never_overwrites_an_existing_snapshot_or_applied_chain() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn invalid_imported_file_never_overwrites_an_existing_snapshot_or_applied_chain() {
         let db = database();
         save(&db, "claude", "Daily", &["a".into()]).unwrap();
         apply_order(&db, "claude", "Daily", &["a".into()]).unwrap();
@@ -548,9 +693,9 @@ mod tests {
             );
         }
     }
-    #[test]
-    #[serial_test::serial]
-    fn deleting_provider_prunes_snapshots_and_preserves_surviving_identity() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn deleting_provider_prunes_snapshots_and_preserves_surviving_identity() {
         let db = database();
         save(&db, "claude", "Travel", &["b".into(), "a".into()]).unwrap();
         save(&db, "claude", "Single", &["b".into()]).unwrap();
@@ -577,9 +722,9 @@ mod tests {
         assert_eq!(get(&db, "claude").unwrap(), state);
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn deleting_last_chain_member_never_expands_to_unselected_providers() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn deleting_last_chain_member_never_expands_to_unselected_providers() {
         let db = database();
         apply_order(&db, "claude", "default", &["b".into()]).unwrap();
         db.delete_provider("claude", "b").unwrap();
@@ -605,9 +750,9 @@ mod tests {
         assert!(export_json(&db, "claude").is_err());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn deletion_falls_back_only_when_the_current_snapshot_loses_every_member() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn deletion_falls_back_only_when_the_current_snapshot_loses_every_member() {
         let db = database();
         save(&db, "claude", "Single", &["b".into()]).unwrap();
         apply_order(&db, "claude", "Single", &["b".into()]).unwrap();
@@ -621,9 +766,9 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn failed_reference_maintenance_rolls_back_provider_deletion() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn failed_reference_maintenance_rolls_back_provider_deletion() {
         let db = database();
         apply_order(&db, "claude", "default", &["a".into(), "b".into()]).unwrap();
         let before = get(&db, "claude").unwrap();
@@ -637,9 +782,9 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn startup_repairs_historical_references_while_get_stays_read_only() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn startup_repairs_historical_references_while_get_stays_read_only() {
         let db = database();
         apply_order(&db, "claude", "default", &["b".into(), "a".into()]).unwrap();
         let key = profiles_key("claude");

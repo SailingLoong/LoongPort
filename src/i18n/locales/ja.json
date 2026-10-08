@@ -54,6 +54,7 @@
     "invalidJson": "JSON 形式が正しくありません"
   },
   "commonConfig": {
+    "frozenHint": "従来の共通スニペットは現在読み取り専用です。保存済みの内容は引き続き確認でき、互換性と復元のために保持されます。",
     "guideTitle": "共通設定スニペットとは？",
     "guidePurpose": "異なるプロバイダー間でプラグインや環境変数などの非機密設定を共有するための機能です。プロバイダーを切り替えてもこれらの設定は失われません。",
     "guideUsage": "使い方：① 「編集内容から抽出」をクリックして共通部分を保存  ② 新規プロバイダー作成時に「共通設定を適用」をチェック",
@@ -3908,6 +3909,14 @@
     }
   },
   "applications": {
+    "routingModeDirect": "直接接続",
+    "routingModeProxy": "プロキシ・接続中",
+    "routingModeDetached": "プロキシ・未接続",
+    "operationNeedsVerification": "変更を適用する前に、このアプリの状態を確認する必要があります。",
+    "operationPublicationStarted": "設定の反映が始まっている可能性があります。再適用する前に状態を確認してください。",
+    "lastSuccessfulRead": "最後に読み取れた日時：{{time}}",
+    "recheckOperation": "状態を再確認",
+    "routingModeUnknown": "不明",
     "currentConfiguration": "現在の設定",
     "enabledConfigurations": "有効な設定",
     "currentDescription": "アプリに保存された設定です。",

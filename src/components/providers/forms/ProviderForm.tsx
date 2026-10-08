@@ -1,7 +1,11 @@
+import {
+  applicationRoutingApi,
+  type ApplicationRouting,
+} from "@/lib/api/applicationRouting";
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -294,6 +298,31 @@ function ProviderFormFull({
     initialCodexOfficialIdentity !== null &&
     initialCodexOfficialIdentity !== "api_key";
   const queryClient = useQueryClient();
+  const commonSnippetApp =
+    appId === "claude" || appId === "codex" || appId === "gemini";
+  const snippetAdmission = useQuery({
+    queryKey: ["applicationRouting", appId],
+    queryFn: () => applicationRoutingApi.get(appId),
+    enabled: commonSnippetApp,
+  });
+  const commonConfigReadOnly =
+    !snippetAdmission.data ||
+    Boolean(snippetAdmission.error) ||
+    (snippetAdmission.data.modeState != null &&
+      snippetAdmission.data.modeState.legacyCommonConfigWritable !== true);
+  const isCommonConfigWriteAllowed = () => {
+    const current = queryClient.getQueryState<ApplicationRouting>([
+      "applicationRouting",
+      appId,
+    ]);
+    return (
+      commonSnippetApp &&
+      Boolean(current?.data) &&
+      !current?.error &&
+      (current?.data?.modeState == null ||
+        current.data.modeState.legacyCommonConfigWritable === true)
+    );
+  };
   const { data: settingsData } = useSettingsQuery();
   const showCommonConfigNotice =
     settingsData != null && settingsData.commonConfigConfirmed !== true;
@@ -823,6 +852,8 @@ function ProviderFormFull({
     isExtracting: isClaudeExtracting,
     handleExtract: handleClaudeExtract,
   } = useCommonConfigSnippet({
+    readOnly: commonConfigReadOnly,
+    isWriteAllowed: isCommonConfigWriteAllowed,
     settingsConfig: form.getValues("settingsConfig"),
     onConfigChange: handleSettingsConfigChange,
     initialData: appId === "claude" ? initialData : undefined,
@@ -842,6 +873,9 @@ function ProviderFormFull({
     handleExtract: handleCodexExtract,
     clearCommonConfigError: clearCodexCommonConfigError,
   } = useCodexCommonConfig({
+    enabled: appId === "codex",
+    readOnly: commonConfigReadOnly,
+    isWriteAllowed: isCommonConfigWriteAllowed,
     codexConfig,
     onConfigChange: handleCodexConfigChange,
     initialData: appId === "codex" ? initialData : undefined,
@@ -926,6 +960,9 @@ function ProviderFormFull({
     handleExtract: handleGeminiExtract,
     clearCommonConfigError: clearGeminiCommonConfigError,
   } = useGeminiCommonConfig({
+    enabled: appId === "gemini",
+    readOnly: commonConfigReadOnly,
+    isWriteAllowed: isCommonConfigWriteAllowed,
     envValue: geminiEnv,
     onEnvChange: handleGeminiEnvChange,
     envStringToObj,
@@ -1522,8 +1559,9 @@ function ProviderFormFull({
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
-      commonConfigEnabled:
-        appId === "claude"
+      commonConfigEnabled: !isCommonConfigWriteAllowed()
+        ? baseMeta?.commonConfigEnabled
+        : appId === "claude"
           ? useCommonConfig
           : appId === "codex"
             ? useCodexCommonConfigFlag
@@ -2339,6 +2377,7 @@ function ProviderFormFull({
           {appId === "codex" ? (
             <>
               <CodexConfigEditor
+                commonConfigReadOnly={commonConfigReadOnly}
                 authValue={codexAuth}
                 configValue={codexConfig}
                 providerName={form.watch("name")}
@@ -2364,6 +2403,7 @@ function ProviderFormFull({
           ) : appId === "gemini" ? (
             <>
               <GeminiConfigEditor
+                commonConfigReadOnly={commonConfigReadOnly}
                 envValue={geminiEnv}
                 configValue={geminiConfig}
                 onEnvChange={handleGeminiEnvChange}
@@ -2465,6 +2505,7 @@ function ProviderFormFull({
           ) : (
             <>
               <CommonConfigEditor
+                commonConfigReadOnly={commonConfigReadOnly}
                 value={form.getValues("settingsConfig")}
                 onChange={(value) => form.setValue("settingsConfig", value)}
                 useCommonConfig={useCommonConfig}

@@ -641,6 +641,57 @@ fn valid_digest(value: &Option<String>) -> bool {
 }
 
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
+    if target.model_preference.is_some() || target.routing_order.is_some() {
+        if op != state::op::APPLY || !matches!(app, "claude" | "codex" | "gemini" | "grokbuild") {
+            return Err(invalid_pending());
+        }
+        if let Some(action) = &target.model_preference {
+            if target.pointer.is_none()
+                && target
+                    .state
+                    .as_ref()
+                    .and_then(|mode| mode.proxy_route.as_ref())
+                    .is_none()
+            {
+                return Err(invalid_pending());
+            }
+            if matches!(action, state::ModelPreferenceAction::Set { model } if model.trim().is_empty())
+            {
+                return Err(invalid_pending());
+            }
+        }
+        if let Some(order) = &target.routing_order {
+            if order.profile_name.trim().is_empty()
+                || order.planned.profiles.is_none()
+                || order.planned.current.is_none()
+                || order.planned.priority.is_none()
+            {
+                return Err(invalid_pending());
+            }
+            if let Some(id) = target.pointer.as_ref().or_else(|| {
+                target
+                    .state
+                    .as_ref()
+                    .and_then(|mode| mode.proxy_route.as_ref())
+            }) {
+                if !order.provider_ids.contains(id) {
+                    return Err(invalid_pending());
+                }
+            }
+        }
+        if let Some(row) = &target.saved_row {
+            if let Some(id) = target.pointer.as_ref().or_else(|| {
+                target
+                    .state
+                    .as_ref()
+                    .and_then(|mode| mode.proxy_route.as_ref())
+            }) {
+                if saved_provider(row)?.id != *id {
+                    return Err(invalid_pending());
+                }
+            }
+        }
+    }
     if let Some(row) = &target.saved_row {
         if op != state::op::APPLY {
             return Err(invalid_pending());
@@ -797,6 +848,16 @@ pub(crate) fn verify_saved_row(
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
+    if let Some(order) = &target.routing_order {
+        crate::database::order_profiles::verify_prepared(
+            db,
+            app.as_str(),
+            &order.profile_name,
+            &order.provider_ids,
+            &order.before,
+            &order.planned,
+        )?;
+    }
     if let Some(row) = &target.saved_row {
         let planned = saved_provider(row)?;
         let current = db
@@ -844,9 +905,6 @@ pub(crate) fn commit_target(
         {
             return Err(verification_required());
         }
-        if row.clear_model_preference {
-            crate::proxy::auto_strategy::set_model_pref(db, app.as_str(), None)?;
-        }
     }
     if let Some(id) = target.pointer.as_deref() {
         if !super::current::provider_exists(db, app, id)? {
@@ -854,8 +912,39 @@ pub(crate) fn commit_target(
         }
         crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)?;
         db.set_current_provider(app.as_str(), id)?;
-        crate::proxy::auto_strategy::set_model_pref(db, app.as_str(), None)?;
         super::current::verify_direct_pointer(db, app, id)?;
+    }
+    let fallback_clear = target.pointer.is_some()
+        || target
+            .saved_row
+            .as_ref()
+            .is_some_and(|row| row.clear_model_preference);
+    let action = target
+        .model_preference
+        .as_ref()
+        .cloned()
+        .or_else(|| fallback_clear.then_some(state::ModelPreferenceAction::Clear {}));
+    if let Some(action) = action {
+        let model = match &action {
+            state::ModelPreferenceAction::Clear {} => None,
+            state::ModelPreferenceAction::Set { model } => Some(model.as_str()),
+        };
+        crate::proxy::auto_strategy::set_model_pref(db, app.as_str(), model)?;
+        if crate::proxy::auto_strategy::get_model_pref_checked(db, app.as_str())?.as_deref()
+            != Some(model.unwrap_or(""))
+        {
+            return Err(verification_required());
+        }
+    }
+    if let Some(order) = &target.routing_order {
+        crate::database::order_profiles::apply_prepared(
+            db,
+            app.as_str(),
+            &order.profile_name,
+            &order.provider_ids,
+            &order.before,
+            &order.planned,
+        )?;
     }
     if let Some(written) = &target.written {
         state::update(store, vault, |live| {
@@ -1011,3 +1100,19 @@ pub(crate) fn recover_pending(
 #[cfg(test)]
 #[path = "operation_tests.rs"]
 mod tests;
+
+/// Metadata writers share the app's unresolved-operation barrier. The caller
+/// owns the original service app lock; release the vault guard before DAO calls
+/// that pin their own credential generation. Legacy/independent apps are unchanged.
+pub(crate) fn admit_metadata_write(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+) -> Result<(), AppError> {
+    if app.supports_local_proxy() && uses_upstream4_schema(service.database())? {
+        AppWrite::begin_mode(service, app)?;
+        if !super::current::read_view(service, app).is_some_and(|view| view.can_write) {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+    }
+    Ok(())
+}

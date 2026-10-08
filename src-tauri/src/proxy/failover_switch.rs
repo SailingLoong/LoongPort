@@ -42,6 +42,10 @@ impl FailoverSwitchManager {
         self.service_owner = owner;
     }
 
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pending_switches, &other.pending_switches)
+    }
+
     /// 尝试执行故障转移切换
     ///
     /// 如果相同的切换已在进行中，则跳过；否则执行切换逻辑。
@@ -57,6 +61,7 @@ impl FailoverSwitchManager {
         provider_id: &str,
         provider_name: &str,
         expected_current: &str,
+        request_identity: Option<&crate::services::proxy::RequestIdentity>,
     ) -> Result<bool, AppError> {
         let switch_key = format!("{app_type}:{provider_id}");
 
@@ -79,6 +84,7 @@ impl FailoverSwitchManager {
                 provider_id,
                 provider_name,
                 expected_current,
+                request_identity,
             )
             .await;
 
@@ -98,6 +104,7 @@ impl FailoverSwitchManager {
         provider_id: &str,
         provider_name: &str,
         expected_current: &str,
+        request_identity: Option<&crate::services::proxy::RequestIdentity>,
     ) -> Result<bool, AppError> {
         // 检查该应用是否已被代理接管（enabled=true）
         // 只有被接管的应用才允许执行故障转移切换
@@ -119,8 +126,13 @@ impl FailoverSwitchManager {
         let Some(service) = self.service_owner.upgrade() else {
             return Err(AppError::Config("proxy.owner_unavailable".into()));
         };
-        let guard = service.lock_switch_for_app(app_type).await;
+        let Some(guard) = service.lock_active_failover(app_type, self).await else {
+            return Ok(false);
+        };
         if crate::mode::operation::uses_upstream4_schema(&self.db)? {
+            if !service.request_identity_is_current(app_type, request_identity)? {
+                return Ok(false);
+            }
             let app: crate::app_config::AppType = app_type.parse()?;
             let mode = {
                 let vault = self.db.secret_session().read()?;

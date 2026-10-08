@@ -78,3 +78,23 @@ describe("useCodexSwitchGuard", () => {
     expect(dialogProps.current?.targetName).toBeNull();
   });
 });
+
+it("refuses an already open confirmation after write admission is revoked", async () => {
+  const switchProvider = vi.fn().mockResolvedValue({
+    status: "confirmationRequired",
+    targetName: provider.name,
+  });
+  const { result, rerender } = renderHook(
+    ({ blocked }) => useCodexSwitchGuard(switchProvider, blocked),
+    { initialProps: { blocked: false } },
+  );
+  await act(async () => {
+    await result.current.guardedSwitch(provider);
+  });
+  rerender({ blocked: true });
+  render(result.current.switchDialog);
+  await act(async () => {
+    dialogProps.current?.onSwitch(false);
+  });
+  expect(switchProvider).toHaveBeenCalledTimes(1);
+});

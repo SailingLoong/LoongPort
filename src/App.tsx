@@ -1,10 +1,11 @@
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   ArrowLeft,
@@ -172,6 +173,17 @@ function App() {
 
   const navigation = useClientNavigation(getInitialView, getInitialApp);
   const activeApp = navigation.app;
+  // Observe the existing workspace query; do not mirror its facts in local state.
+  const routingAdmission = useQuery({
+    queryKey: ["applicationRouting", activeApp],
+    queryFn: () => applicationRoutingApi.get(activeApp),
+    enabled: false,
+  });
+  const providerWritesBlocked =
+    isProxyAppId(activeApp) &&
+    (!routingAdmission.data ||
+      Boolean(routingAdmission.error) ||
+      routingAdmission.data.modeState?.canWrite === false);
   const setActiveApp = navigation.setApp;
   const usesStore = usesProviderStore(activeApp);
   const sharedFeatureApp: AppId =
@@ -322,7 +334,10 @@ function App() {
   // ChatGPT 桌面版与命令行 codex 共用同一个 `~/.codex`，它在跑的时候切任何 codex 供应商
   // 都会撞上「它启动时读的旧配置还在生效，而且它退出时会回写 config.toml」。
   // 判据与 LoongPort 档位切换完全一致（同一个页面两种行为不该不一样）。
-  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(switchProvider);
+  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(
+    switchProvider,
+    providerWritesBlocked,
+  );
 
   const handleEnablePiProvider = async (provider: Provider) => {
     try {
@@ -776,12 +791,13 @@ function App() {
     provider: Provider;
     originalId?: string;
   }) => {
+    if (providerWritesBlocked) return;
     await updateProvider(provider, originalId);
     setEditingProvider(null);
   };
 
   const handleConfirmAction = async () => {
-    if (!confirmAction) return;
+    if (!confirmAction || providerWritesBlocked) return;
     const { provider, action } = confirmAction;
 
     if (action === "remove") {
@@ -1030,8 +1046,9 @@ function App() {
   };
 
   const renderContent = () => {
-    const providerList = (
+    const providerList = (mutationsDisabled = false) => (
       <ProviderList
+        mutationsDisabled={mutationsDisabled}
         showFailoverControls={false}
         providers={providers}
         appId={activeApp}
@@ -1206,7 +1223,7 @@ function App() {
                     ) : activeApp === "codex-image" ? (
                       <>
                         <ImageTabPage onOpenAddHub={handleOpenAddHub} />
-                        {providerList}
+                        {providerList()}
                       </>
                     ) : (
                       <ApplicationWorkspace
@@ -1223,7 +1240,7 @@ function App() {
                         }
                         onAdd={() => handleOpenAddHub()}
                       >
-                        {providerList}
+                        {(mutationsDisabled) => providerList(mutationsDisabled)}
                       </ApplicationWorkspace>
                     )}
                   </motion.div>
@@ -1690,6 +1707,7 @@ function App() {
       </main>
 
       <EditProviderDialog
+        mutationsDisabled={providerWritesBlocked}
         open={Boolean(editingProvider)}
         provider={effectiveEditingProvider}
         onOpenChange={(open) => {
@@ -1704,13 +1722,14 @@ function App() {
 
       {effectiveUsageProvider && (
         <UsageScriptModal
+          mutationsDisabled={providerWritesBlocked}
           key={effectiveUsageProvider.id}
           provider={effectiveUsageProvider}
           appId={activeApp}
           isOpen={Boolean(usageProvider)}
           onClose={() => setUsageProvider(null)}
           onSave={(script) => {
-            if (usageProvider) {
+            if (usageProvider && !providerWritesBlocked) {
               void saveUsageScript(usageProvider, script);
             }
           }}
@@ -1718,6 +1737,7 @@ function App() {
       )}
 
       <ConfirmDialog
+        confirmDisabled={providerWritesBlocked}
         isOpen={Boolean(confirmAction)}
         title={
           confirmAction?.action === "remove"

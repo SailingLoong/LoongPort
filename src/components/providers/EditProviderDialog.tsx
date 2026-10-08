@@ -12,6 +12,7 @@ import { AuthSettingsPanel } from "@/components/providers/AuthSettingsPanel";
 import { providersApi, type AppId, type ManagedAuthProvider } from "@/lib/api";
 
 interface EditProviderDialogProps {
+  mutationsDisabled?: boolean;
   open: boolean;
   provider: Provider | null;
   onOpenChange: (open: boolean) => void;
@@ -24,6 +25,7 @@ interface EditProviderDialogProps {
 }
 
 export function EditProviderDialog({
+  mutationsDisabled = false,
   open,
   provider,
   onOpenChange,
@@ -150,7 +152,7 @@ export function EditProviderDialog({
 
   const handleSubmit = useCallback(
     async (values: ProviderFormValues) => {
-      if (!provider) return;
+      if (!provider || mutationsDisabled) return;
 
       // 注意：values.settingsConfig 已经是最终的配置字符串
       // ProviderForm 已经为不同的 app 类型（Claude/Codex/Gemini）正确组装了配置
@@ -184,7 +186,7 @@ export function EditProviderDialog({
       });
       closeDialog();
     },
-    [appId, onSubmit, closeDialog, provider],
+    [appId, onSubmit, closeDialog, provider, mutationsDisabled],
   );
 
   if (!provider || !initialData) {
@@ -201,7 +203,7 @@ export function EditProviderDialog({
         <Button
           type="submit"
           form="provider-form"
-          disabled={isFormSubmitting || !isFormReady}
+          disabled={mutationsDisabled || isFormSubmitting || !isFormReady}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >
           <Save className="h-4 w-4 mr-2" />

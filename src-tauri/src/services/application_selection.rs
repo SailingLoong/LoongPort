@@ -1,9 +1,9 @@
 //! Application tier selection, confirmation and reversible configuration changes.
-use crate::{
-    app_config::AppType, error::AppError, events::emit_provider_switched, relay::chatgpt_app,
-    services::ProviderService, store::AppState,
-};
+use crate::{app_config::AppType, error::AppError, services::ProviderService, store::AppState};
+#[cfg(feature = "gui")]
+use crate::{events::emit_provider_switched, relay::chatgpt_app};
 use serde::Serialize;
+#[cfg(feature = "gui")]
 use tauri::Manager;
 
 /// 切换结果，前端据此出话。
@@ -48,12 +48,15 @@ pub struct TierSelection {
     pub model: Option<String>,
 }
 
-pub(crate) fn select_with_commit(
+pub(crate) fn select_legacy_with_commit(
     state: &AppState,
     app: &AppType,
     selection: &TierSelection,
     commit: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<crate::services::SwitchResult, AppError> {
+    if app.supports_local_proxy() && crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
     if !app.supports_local_proxy() {
         if selection.model.is_some() {
             return Err(AppError::Config(
@@ -92,6 +95,150 @@ pub(crate) fn select_with_commit(
     })
 }
 
+fn order_target(
+    state: &AppState,
+    app: &AppType,
+    order: &RoutingOrder,
+) -> Result<crate::mode::state::RoutingOrderTarget, AppError> {
+    let (before, planned) = crate::services::order_profiles::prepare_apply(
+        &state.db,
+        app.as_str(),
+        &order.profile_name,
+        &order.provider_ids,
+    )?;
+    Ok(crate::mode::state::RoutingOrderTarget {
+        profile_name: order.profile_name.clone(),
+        provider_ids: order.provider_ids.clone(),
+        before,
+        planned,
+    })
+}
+
+/// Selection, normalized row, explicit model choice and optional order share one intent.
+pub(crate) fn select_with_commit(
+    state: &AppState,
+    app: &AppType,
+    selection: &TierSelection,
+    order: Option<&RoutingOrder>,
+) -> Result<crate::services::SwitchResult, AppError> {
+    if let Some(order) = order {
+        if !app.supports_local_proxy() || !order.provider_ids.contains(&selection.provider_id) {
+            return Err(AppError::Config(
+                "Selected provider is outside the applied order".into(),
+            ));
+        }
+    }
+    if !app.supports_local_proxy() || !crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        return select_legacy_with_commit(state, app, selection, || {
+            if let Some(order) = order {
+                crate::services::order_profiles::apply_order(
+                    &state.db,
+                    app.as_str(),
+                    &order.profile_name,
+                    &order.provider_ids,
+                )?;
+            }
+            Ok(())
+        });
+    }
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
+    let previous = state
+        .db
+        .get_provider_by_id(&selection.provider_id, app.as_str())?
+        .ok_or_else(|| AppError::Config("Provider does not exist".into()))?;
+    let mut provider = previous.clone();
+    let mut target = crate::mode::state::PendingTarget::default();
+    if let Some(model) = &selection.model {
+        provider.settings_config =
+            crate::relay::model_catalog::select_model(app, &provider, model)?;
+        provider = ProviderService::prepare_provider_update(state, app, provider)?;
+        target.saved_row = Some(crate::mode::state::SavedRow {
+            before: crate::database::Database::provider_update_digest(&previous)?,
+            provider: crate::database::Database::provider_update_value(&provider)?,
+            clear_model_preference: false,
+        });
+        target.model_preference = Some(crate::mode::state::ModelPreferenceAction::Set {
+            model: model.clone(),
+        });
+    } else {
+        target.model_preference = Some(crate::mode::state::ModelPreferenceAction::Clear {});
+    }
+    target.routing_order = order
+        .map(|order| order_target(state, app, order))
+        .transpose()?;
+    let preserved =
+        crate::mode::controller::select_locked(&state.proxy_service, app, &provider, target)?;
+    let mut result = crate::services::SwitchResult::default();
+    if preserved {
+        result
+            .warnings
+            .push(crate::services::provider::codex_direct::CATALOG_PRESERVED_WARNING.into());
+    }
+    ProviderService::append_claude_plugin_sync_warning(state, app, &mut result);
+    Ok(result)
+}
+
+fn apply_order_locked(
+    state: &AppState,
+    app: &AppType,
+    order: &RoutingOrder,
+) -> Result<(), AppError> {
+    if !crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        return crate::services::order_profiles::apply_order(
+            &state.db,
+            app.as_str(),
+            &order.profile_name,
+            &order.provider_ids,
+        );
+    }
+    crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
+    let target = crate::mode::state::PendingTarget {
+        routing_order: Some(order_target(state, app, order)?),
+        ..Default::default()
+    };
+    crate::mode::controller::apply_order_locked(&state.proxy_service, app, target)
+}
+
+pub(crate) fn apply_order_change(
+    state: &AppState,
+    app: &AppType,
+    order: &RoutingOrder,
+) -> Result<(), AppError> {
+    if !app.supports_local_proxy() {
+        return Err(AppError::Config(
+            "Application does not support routing order".into(),
+        ));
+    }
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    apply_order_locked(state, app, order)
+}
+
+/// Both current-priority UI entry points use this same locked typed operation.
+pub(crate) fn apply_current_order_change(
+    state: &AppState,
+    app: &AppType,
+    ids: &[String],
+) -> Result<(), AppError> {
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    if !app.supports_local_proxy() || !crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        return crate::proxy::application_routing::set_order(&state.db, app.as_str(), ids);
+    }
+    crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
+    let current = crate::services::order_profiles::get(&state.db, app.as_str())?.current;
+    apply_order_locked(
+        state,
+        app,
+        &RoutingOrder {
+            profile_name: current,
+            provider_ids: ids.to_vec(),
+        },
+    )
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoutingOrder {
@@ -106,6 +253,7 @@ pub struct ApplicationRoutingChange {
     pub selection: Option<TierSelection>,
 }
 
+#[cfg(feature = "gui")]
 pub async fn apply_application_routing(
     app_handle: &tauri::AppHandle,
     app: AppType,
@@ -160,17 +308,6 @@ pub async fn apply_application_routing(
             });
         }
     }
-    let commit_order = || {
-        if let Some(order) = &change.order {
-            crate::services::order_profiles::apply_order(
-                &state.db,
-                app.as_str(),
-                &order.profile_name,
-                &order.provider_ids,
-            )?;
-        }
-        Ok(())
-    };
     let result = if let Some(selection) = selection {
         switch_tier_impl(
             app_handle,
@@ -178,12 +315,18 @@ pub async fn apply_application_routing(
             app.clone(),
             selection.model.as_deref(),
             user_choice.unwrap_or(false),
-            commit_order,
+            change.order.clone(),
         )
         .await?
     } else {
-        let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
-        commit_order()?;
+        let state = state.inner().clone();
+        let order = change
+            .order
+            .clone()
+            .ok_or_else(|| AppError::Config("No routing change was supplied".into()))?;
+        tauri::async_runtime::spawn_blocking(move || apply_order_change(&state, &app, &order))
+            .await
+            .map_err(|e| AppError::Message(e.to_string()))??;
         SwitchTierResult {
             provider_name: String::new(),
             chatgpt_was_running: false,
@@ -195,6 +338,7 @@ pub async fn apply_application_routing(
 }
 
 /// The model picker and tray share the same application selection operation.
+#[cfg(feature = "gui")]
 pub(crate) async fn switch_tier_model_command(
     app_handle: &tauri::AppHandle,
     provider_id: &str,
@@ -237,6 +381,7 @@ fn wants_chatgpt_quit(quit_chatgpt: bool, app_type: &AppType, taken_over: bool) 
     !taken_over && should_quit_chatgpt(quit_chatgpt, app_type)
 }
 
+#[cfg(feature = "gui")]
 pub(crate) async fn switch_tier_command(
     app_handle: &tauri::AppHandle,
     provider_id: &str,
@@ -275,13 +420,14 @@ pub(crate) fn should_quit_chatgpt(user_agreed: bool, app_type: &AppType) -> bool
     user_agreed && matches!(app_type, AppType::Codex)
 }
 
+#[cfg(feature = "gui")]
 async fn switch_tier_impl(
     app_handle: &tauri::AppHandle,
     provider_id: &str,
     app_type: AppType,
     model: Option<&str>,
     quit_chatgpt: bool,
-    commit: impl FnOnce() -> Result<(), AppError>,
+    order: Option<RoutingOrder>,
 ) -> Result<SwitchTierResult, AppError> {
     let quit_chatgpt = wants_chatgpt_quit(
         quit_chatgpt,
@@ -300,26 +446,23 @@ async fn switch_tier_impl(
     // `abort_on_unconfirmed_exit = false`：切档位只写 `config.toml`，退不掉也能照常切
     // （配置写进去就生效了），提示用户手动重启即可。这与「切回官方登录」相反 ——
     // 那条要删 `auth.json`，而 ChatGPT 退出时会重写它。
-    let switch_once = || {
-        let state = app_handle.state::<AppState>();
-        select_with_commit(
-            &state,
-            &app_type,
-            &TierSelection {
-                provider_id: provider_id.to_string(),
-                model: model.map(str::to_owned),
-            },
-            commit,
-        )
+    let worker_handle = app_handle.clone();
+    let worker_app = app_type.clone();
+    let selection = TierSelection {
+        provider_id: provider_id.into(),
+        model: model.map(str::to_owned),
     };
-
-    let (switched, chatgpt) = if quit_chatgpt {
-        chatgpt_app::around(false, switch_once)?
-    } else {
-        // 不需要碰 ChatGPT（非 codex，或用户选了「只切换」）：直接切，
-        // outcome 全默认（没关过 ⇒ 不重开）。
-        (switch_once()?, chatgpt_app::AroundOutcome::default())
-    };
+    let (switched, chatgpt) = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_handle.state::<AppState>();
+        let switch_once = || select_with_commit(&state, &worker_app, &selection, order.as_ref());
+        if quit_chatgpt {
+            chatgpt_app::around(false, switch_once)
+        } else {
+            Ok((switch_once()?, chatgpt_app::AroundOutcome::default()))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Message(e.to_string()))??;
 
     let mut warnings = chatgpt.warnings;
     warnings.extend(switched.warnings);
@@ -358,7 +501,16 @@ async fn switch_tier_impl(
     })
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_original_selection() {
+    tests::switch_tier_command_result_wire_contract_is_camel_case();
+    tests::chatgpt_quit_is_codex_only();
+    tests::switch_confirmation_is_decided_before_mutating_the_target();
+    tests::takeover_hot_switch_skips_confirmation_and_quit();
+    tests::explicit_model_selection_replaces_old_preference_and_rolls_back_on_commit_failure();
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
 
@@ -366,8 +518,8 @@ mod tests {
     /// `SwitchTierCommandResult`），serde 的 enum 级 `rename_all` 只转变体名、
     /// 不转变体字段 —— 没有这条闸的话 casing 分叉编译期完全静默
     /// （2026-08-16 线上事故：`target_name` 蛇形下发，确认弹窗永不打开）。
-    #[test]
-    fn switch_tier_command_result_wire_contract_is_camel_case() {
+    #[cfg_attr(test, test)]
+    pub(super) fn switch_tier_command_result_wire_contract_is_camel_case() {
         let confirmation = serde_json::to_value(SwitchTierCommandResult::ConfirmationRequired {
             target_name: "站点 · 分组".into(),
         })
@@ -398,11 +550,16 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn explicit_model_selection_replaces_old_preference_and_rolls_back_on_commit_failure() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn explicit_model_selection_replaces_old_preference_and_rolls_back_on_commit_failure(
+    ) {
         let _home = crate::secrets::testing::TestHome::new().unwrap();
         let db = std::sync::Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        let mut local_settings = crate::settings::get_settings();
+        local_settings.claude_config_dir =
+            Some(_home.path().join(".claude").to_string_lossy().into_owned());
+        crate::settings::update_settings(local_settings).unwrap();
         let settings = serde_json::json!({"env":{"ANTHROPIC_BASE_URL":"https://relay.example", "ANTHROPIC_AUTH_TOKEN":"example-key","ANTHROPIC_MODEL":"model-one","CLAUDE_CODE_SUBAGENT_MODEL":"worker"},"modelCatalog":{"models":[{"model":"model-one"},{"model":"model-two"}]}});
         let provider = crate::provider::Provider::with_id(
             "custom".into(),
@@ -420,7 +577,7 @@ mod tests {
             provider_id: "custom".into(),
             model: Some("model-two".into()),
         };
-        select_with_commit(&state, &AppType::Claude, &selection, || Ok(())).unwrap();
+        select_legacy_with_commit(&state, &AppType::Claude, &selection, || Ok(())).unwrap();
         assert_eq!(
             crate::proxy::application_routing::effective_model(&db, "claude").as_deref(),
             Some("model-two")
@@ -431,7 +588,7 @@ mod tests {
             "worker"
         );
         let live = std::fs::read(crate::config::get_claude_settings_path()).unwrap();
-        let error = select_with_commit(
+        let error = select_legacy_with_commit(
             &state,
             &AppType::Claude,
             &TierSelection {
@@ -462,8 +619,8 @@ mod tests {
         assert_eq!(live["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "worker");
     }
 
-    #[test]
-    fn chatgpt_quit_is_codex_only() {
+    #[cfg_attr(test, test)]
+    pub(super) fn chatgpt_quit_is_codex_only() {
         // 用户同意 + codex ⇒ 退。
         assert!(should_quit_chatgpt(true, &AppType::Codex));
         // 用户同意但切的是别的平台 ⇒ **不退**。ChatGPT 桌面版只读 ~/.codex，
@@ -474,8 +631,8 @@ mod tests {
         assert!(!should_quit_chatgpt(false, &AppType::Codex));
     }
 
-    #[test]
-    fn switch_confirmation_is_decided_before_mutating_the_target() {
+    #[cfg_attr(test, test)]
+    pub(super) fn switch_confirmation_is_decided_before_mutating_the_target() {
         assert!(should_request_switch_confirmation(
             &AppType::Codex,
             None,
@@ -499,8 +656,8 @@ mod tests {
     /// 代管（热切换）态：确认弹窗与退/重开一并跳过 —— 热切换不写 CLI 配置，
     /// 退了重开 codex 也不会加载任何新东西，两样都是纯打断。
     /// 回归背景：v6.26.0 前代管态切档/换模型仍弹「退出并切换」并真的退重开。
-    #[test]
-    fn takeover_hot_switch_skips_confirmation_and_quit() {
+    #[cfg_attr(test, test)]
+    pub(super) fn takeover_hot_switch_skips_confirmation_and_quit() {
         // codex + 用户未选 + ChatGPT 在跑：非代管 ⇒ 弹确认（旧状照旧）。
         assert!(should_request_switch_confirmation(
             &AppType::Codex,
@@ -522,4 +679,75 @@ mod tests {
         assert!(!wants_chatgpt_quit(true, &AppType::Claude, false));
         assert!(!wants_chatgpt_quit(false, &AppType::Codex, false));
     }
+}
+
+/// Existing routing metadata DAOs retain their own atomic updates. This is only
+/// app-scoped admission, never an implicit operation recovery or a second journal.
+fn with_metadata_write<T>(
+    state: &AppState,
+    app: &AppType,
+    write: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    crate::mode::operation::admit_metadata_write(&state.proxy_service, app)?;
+    write()
+}
+
+pub(crate) fn save_order_profile(
+    state: &AppState,
+    app: &AppType,
+    name: &str,
+    ids: &[String],
+) -> Result<(), AppError> {
+    with_metadata_write(state, app, || {
+        crate::services::order_profiles::save(&state.db, app.as_str(), name, ids)
+    })
+}
+pub(crate) fn rename_order_profile(
+    state: &AppState,
+    app: &AppType,
+    from: &str,
+    to: &str,
+) -> Result<(), AppError> {
+    with_metadata_write(state, app, || {
+        crate::services::order_profiles::rename(&state.db, app.as_str(), from, to)
+    })
+}
+pub(crate) fn remove_order_profile(
+    state: &AppState,
+    app: &AppType,
+    name: &str,
+) -> Result<(), AppError> {
+    with_metadata_write(state, app, || {
+        crate::services::order_profiles::remove(&state.db, app.as_str(), name)
+    })
+}
+pub(crate) fn import_order_profiles(
+    state: &AppState,
+    app: &AppType,
+    profiles: Vec<crate::services::order_profiles::OrderProfile>,
+) -> Result<usize, AppError> {
+    with_metadata_write(state, app, || {
+        crate::services::order_profiles::import(&state.db, app.as_str(), profiles)
+    })
+}
+pub(crate) async fn set_tier_blocked(
+    state: &AppState,
+    app: &AppType,
+    id: &str,
+    blocked: bool,
+) -> Result<(), AppError> {
+    let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
+    crate::mode::operation::admit_metadata_write(&state.proxy_service, app)?;
+    crate::proxy::application_routing::set_tier_blocked(&state.db, app.as_str(), id, blocked)
+}
+
+/// Compatibility alias for the retired manual-mode command; no policy routing.
+pub(crate) async fn initialize_manual_routing(
+    state: &AppState,
+    app: &AppType,
+) -> Result<(), AppError> {
+    let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
+    crate::mode::operation::admit_metadata_write(&state.proxy_service, app)?;
+    crate::proxy::application_routing::migrate(&state.db, app.as_str())
 }

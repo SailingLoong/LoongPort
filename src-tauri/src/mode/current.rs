@@ -137,3 +137,82 @@ pub(crate) fn verify_direct_pointer(
     }
     Ok(())
 }
+
+/// Read-only application facts, not a serialized journal or a recovery command.
+/// `publication_started` describes the marker only; it does not claim every file
+/// was written, or that an unpublished target-only operation had no side effects.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingReadView {
+    pub status: &'static str,
+    pub mode: Option<Mode>,
+    pub attached: Option<bool>,
+    pub current_provider_id: Option<String>,
+    pub direct_provider_id: Option<String>,
+    pub publication_started: Option<bool>,
+    pub can_write: bool,
+    pub can_recheck: bool,
+    pub legacy_common_config_writable: bool,
+}
+
+impl RoutingReadView {
+    fn blocked(status: &'static str, publication_started: Option<bool>) -> Self {
+        Self {
+            status,
+            mode: None,
+            attached: None,
+            current_provider_id: None,
+            direct_provider_id: None,
+            publication_started,
+            can_write: false,
+            can_recheck: true,
+            legacy_common_config_writable: false,
+        }
+    }
+}
+
+/// Caller holds the original service app lock for a coherent page snapshot.
+/// Legacy/independent apps retain their existing read contract. All unavailable
+/// modern facts remain explicitly unknown; no read opens a recovery transaction.
+pub(crate) fn read_view(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+) -> Option<RoutingReadView> {
+    if !app.supports_local_proxy() {
+        return None;
+    }
+    let db = service.database();
+    match super::operation::uses_upstream4_schema(db) {
+        Ok(false) => return None,
+        Err(_) => return Some(RoutingReadView::blocked("unknown", None)),
+        Ok(true) => {}
+    }
+    let read = || -> Result<RoutingReadView, AppError> {
+        let mode = {
+            let write = super::operation::AppWrite::open_mode(service, app)?;
+            let mode = validate_known_mode(&write.store, &write.vault, app)?;
+            if let Some(pending) = state::pending(&write.store, &write.vault, app.as_str())? {
+                return Ok(RoutingReadView::blocked(
+                    "pending",
+                    pending.extra.is_empty().then_some(pending.published),
+                ));
+            }
+            mode
+        };
+        crate::proxy::application_routing::blocked_tier_ids_checked(db, app.as_str())?;
+        let direct_provider_id = provider_for(db, app, Purpose::Direct)?;
+        let current_provider_id = provider_for(db, app, Purpose::InUse)?;
+        Ok(RoutingReadView {
+            status: "ready",
+            mode: mode.mode,
+            attached: Some(mode.attached),
+            current_provider_id,
+            direct_provider_id,
+            publication_started: None,
+            can_write: true,
+            can_recheck: true,
+            legacy_common_config_writable: false,
+        })
+    };
+    Some(read().unwrap_or_else(|_| RoutingReadView::blocked("unknown", None)))
+}

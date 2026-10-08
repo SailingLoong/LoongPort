@@ -54,6 +54,7 @@
     "invalidJson": "Invalid JSON format"
   },
   "commonConfig": {
+    "frozenHint": "Legacy common snippets are currently read-only. Saved content remains available for compatibility and recovery.",
     "guideTitle": "What is a Common Config Snippet?",
     "guidePurpose": "It lets you share non-sensitive settings (plugins, environment variables, etc.) across different providers. These settings won't be lost when you switch providers.",
     "guideUsage": "How to use: ① Click \"Extract from Editor\" to save the common parts  ② Check \"Apply Common Config\" when creating a new provider",
@@ -3908,6 +3909,14 @@
     }
   },
   "applications": {
+    "routingModeDirect": "Direct",
+    "routingModeProxy": "Proxy · attached",
+    "routingModeDetached": "Proxy · detached",
+    "operationNeedsVerification": "This application needs verification before changes can be applied.",
+    "operationPublicationStarted": "Configuration publication may have begun. Check the application state before applying again.",
+    "lastSuccessfulRead": "Last successful read: {{time}}",
+    "recheckOperation": "Recheck status",
+    "routingModeUnknown": "Unknown",
     "currentConfiguration": "Current configuration",
     "enabledConfigurations": "Enabled configurations",
     "currentDescription": "Configurations saved to this application.",

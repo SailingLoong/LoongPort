@@ -10,7 +10,7 @@ use crate::{
 use rusqlite::OptionalExtension;
 use std::{collections::HashSet, str::FromStr};
 
-fn priority_key(app: &str) -> String {
+pub(crate) fn priority_key(app: &str) -> String {
     format!("application_priority_{app}")
 }
 
@@ -274,6 +274,11 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
 /// 新档位由 [`note_provider_created`] 在创建时自动垫底；删除时同事务维护链和配置档。
 /// 显式应用拒绝空列表；删除最后一个成员可以让已有链变空。
 pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppError> {
+    if AppType::from_str(app)?.supports_local_proxy()
+        && crate::mode::operation::uses_upstream4_schema(db)?
+    {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
     crate::services::order_profiles::apply_current_order(db, app, ids)
 }
 

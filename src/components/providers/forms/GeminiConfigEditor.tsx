@@ -3,6 +3,7 @@ import { GeminiEnvSection, GeminiConfigSection } from "./GeminiConfigSections";
 import { GeminiCommonConfigModal } from "./GeminiCommonConfigModal";
 
 interface GeminiConfigEditorProps {
+  commonConfigReadOnly?: boolean;
   envValue: string;
   configValue: string;
   onEnvChange: (value: string) => void;
@@ -27,6 +28,7 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
   onConfigChange,
   onEnvBlur,
   useCommonConfig,
+  commonConfigReadOnly = false,
   onCommonConfigToggle,
   commonConfigSnippet,
   onCommonConfigSnippetChange,
@@ -53,6 +55,7 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
         onBlur={onEnvBlur}
         error={envError}
         useCommonConfig={useCommonConfig}
+        commonConfigReadOnly={commonConfigReadOnly}
         onCommonConfigToggle={onCommonConfigToggle}
         onEditCommonConfig={() => setIsCommonConfigModalOpen(true)}
         commonConfigError={commonConfigError}
@@ -67,6 +70,7 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
 
       {/* Common Config Modal */}
       <GeminiCommonConfigModal
+        readOnly={commonConfigReadOnly}
         isOpen={isCommonConfigModalOpen}
         onClose={handleCloseCommonConfigModal}
         value={commonConfigSnippet}

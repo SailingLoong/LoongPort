@@ -15,7 +15,7 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-function setup() {
+function setup(writeBlocked = false) {
   const client = new QueryClient();
   const refresh = vi.spyOn(client, "invalidateQueries");
   const callbacks = {
@@ -25,9 +25,10 @@ function setup() {
     onProfileRenamed: vi.fn(),
     onProfileRemoved: vi.fn(),
   };
-  render(
+  const content = (blocked: boolean) => (
     <QueryClientProvider client={client}>
       <OrderProfilesMenu
+        writeBlocked={blocked}
         appType="codex"
         state={{
           current: "Daily",
@@ -37,9 +38,10 @@ function setup() {
         storedIds={["a", "b", "c"]}
         {...callbacks}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { ...callbacks, refresh };
+  const view = render(content(writeBlocked));
+  return { ...callbacks, refresh, block: () => view.rerender(content(true)) };
 }
 
 async function openMenu() {
@@ -216,4 +218,47 @@ it("reports export write failures and succeeds on retry without mutating the pro
   expect(refresh).not.toHaveBeenCalled();
   expect(onLoadDraft).not.toHaveBeenCalled();
   expect(onSaved).not.toHaveBeenCalled();
+});
+
+it("keeps profile loading and export available while owner blocks writes", async () => {
+  const { onLoadDraft } = setup(true);
+  await openMenu();
+  for (const action of ["orderProfileSaveCurrent", "orderProfileImport"]) {
+    expect(
+      screen.getByRole("menuitem", { name: `applications.${action}` }),
+    ).toHaveAttribute("data-disabled");
+  }
+  expect(
+    screen.getByRole("button", {
+      name: "applications.orderProfileRename Daily",
+    }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("button", {
+      name: "applications.orderProfileDelete Daily",
+    }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("menuitem", { name: "applications.orderProfileExport" }),
+  ).not.toHaveAttribute("data-disabled");
+  await userEvent.click(screen.getByRole("menuitem", { name: /^Daily/ }));
+  expect(onLoadDraft).toHaveBeenCalledWith("Daily", ["b", "a"]);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("locks an open rename after pending appears and still permits cancellation", async () => {
+  const { block } = setup();
+  await openMenu();
+  await userEvent.click(
+    screen.getByRole("button", {
+      name: "applications.orderProfileRename Daily",
+    }),
+  );
+  await userEvent.clear(screen.getByRole("textbox"));
+  await userEvent.type(screen.getByRole("textbox"), "Travel");
+  block();
+  expect(screen.getByRole("button", { name: "common.save" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(invoke).not.toHaveBeenCalled();
 });

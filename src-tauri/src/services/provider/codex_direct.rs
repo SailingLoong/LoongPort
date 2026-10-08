@@ -31,6 +31,8 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 use toml_edit::{Item, Table, Value as TomlValue};
 
+pub(crate) const CATALOG_PRESERVED_WARNING: &str = "保留外部模型目录；LoongPort 模型映射未生效 (External model catalog preserved; LoongPort model mapping was not applied)";
+
 fn app() -> &'static str {
     "codex"
 }
@@ -420,7 +422,7 @@ pub(crate) fn apply_mode(
     desired: Target<'_>,
     operation: &str,
     mut target: PendingTarget,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     {
         let write = AppWrite::begin_mode(service, &AppType::Codex)?;
         read_inputs(&write, &[])?;
@@ -428,16 +430,13 @@ pub(crate) fn apply_mode(
     let prepared = prepare_target(service.codex_manager(), owner, &desired)?;
     let planned = plan_target(service.database(), owner, &desired)?;
     if matches!(desired, Target::Proxy { .. }) {
-        let login = planned
-            .official
-            .then(|| codex_login::official_login_requirement(&planned.auth))
-            .flatten();
-        target.state.as_mut().ok_or_else(invalid)?.contract = Some(contract_of(
+        target.state.as_mut().ok_or_else(invalid)?.contract = Some(contract_for_plan(
             &desired,
-            &planned.config,
-            planned.catalog.as_deref(),
-            &prepared,
-            login.as_deref(),
+            &planned,
+            prepared
+                .target_login
+                .as_ref()
+                .map(|(account, _)| account.as_str()),
         ));
     }
     let ids = prepared
@@ -465,9 +464,40 @@ pub(crate) fn apply_mode(
                     operation,
                     target,
                 )
-                .map(|_| ())
+                .map(|(_, preserved)| preserved)
             }),
     )
+}
+
+fn contract_for_plan(target: &Target<'_>, planned: &Planned, managed: Option<&str>) -> Contract {
+    let login = planned
+        .official
+        .then(|| codex_login::official_login_requirement(&planned.auth))
+        .flatten();
+    contract_of(
+        target,
+        &planned.config,
+        planned.catalog.as_deref(),
+        managed,
+        login.as_deref(),
+    )
+}
+
+/// Pure expected contract for listener repair admission. No live auth read,
+/// token preparation/refresh, vault publication or client file write occurs.
+pub(crate) fn planned_proxy_contract(
+    db: &Database,
+    owner: &Owner<'_>,
+    route: &Provider,
+    base_url: &str,
+) -> Result<Contract, AppError> {
+    let desired = Target::Proxy { route, base_url };
+    let planned = plan_target(db, owner, &desired)?;
+    let managed = desired
+        .provider()
+        .filter(|provider| is_official(provider))
+        .and_then(managed_account);
+    Ok(contract_for_plan(&desired, &planned, managed.as_deref()))
 }
 
 /// Target-only operations share the same publication barrier as file writes.
@@ -498,7 +528,7 @@ fn contract_of(
     target: &Target<'_>,
     config: &CodexConfigPatch,
     catalog: Option<&[u8]>,
-    prepared: &Prepared,
+    managed: Option<&str>,
     official_login: Option<&str>,
 ) -> Contract {
     let base_url = match target {
@@ -541,7 +571,7 @@ fn contract_of(
         "selector": selector,
         "table": table,
         "catalog": digest(catalog),
-        "managed": prepared.target_login.as_ref().map(|(account, _)| account),
+        "managed": managed,
         "login": official_login,
     });
     let key = digest(Some(
@@ -1020,9 +1050,26 @@ pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOu
                         pending.op.as_str(),
                         state::op::ROUTE | state::op::EXIT | state::op::DETACH
                     );
+                let detached_selection = pending.op == state::op::APPLY
+                    && before.is_proxy()
+                    && !before.attached
+                    && pending.target.model_preference.is_some()
+                    && pending
+                        .target
+                        .state
+                        .as_ref()
+                        .is_some_and(|mode| mode.is_proxy() && !mode.attached);
+                let order_only = pending.op == state::op::APPLY
+                    && pending.target.routing_order.is_some()
+                    && pending.target.state.is_none()
+                    && pending.target.saved_row.is_none()
+                    && pending.target.model_preference.is_none();
                 if pending.target.pointer.is_some()
                     || pending.target.written.is_some()
-                    || !(detached_mode || (pending.target.state.is_none() && inactive_save))
+                    || !(detached_mode
+                        || detached_selection
+                        || order_only
+                        || (pending.target.state.is_none() && inactive_save))
                 {
                     return Err(invalid());
                 }

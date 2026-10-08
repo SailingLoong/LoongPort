@@ -379,9 +379,29 @@ pub struct SavedRow {
     pub clear_model_preference: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelPreferenceAction {
+    Clear {},
+    Set { model: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingOrderTarget {
+    pub profile_name: String,
+    pub provider_ids: Vec<String>,
+    pub before: crate::database::order_profiles::OrderSnapshot,
+    pub planned: crate::database::order_profiles::OrderSnapshot,
+}
+
 /// 文件都写完之后要落定的状态。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PendingTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preference: Option<ModelPreferenceAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_order: Option<RoutingOrderTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_row: Option<SavedRow>,
     /// 直连指针：切换成功后当前供应商是谁。
@@ -420,6 +440,8 @@ impl PendingTarget {
 
     pub fn is_empty(&self) -> bool {
         self.pointer.is_none()
+            && self.model_preference.is_none()
+            && self.routing_order.is_none()
             && self.saved_row.is_none()
             && self.state.is_none()
             && self.written.is_none()

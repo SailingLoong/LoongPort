@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import {
   applicationRoutingApi,
   type ApplicationRoutingChange,
+  type ApplicationRouting,
+  type ApplicationModeState,
 } from "@/lib/api/applicationRouting";
 import { failoverApi } from "@/lib/api/failover";
 import { proxyKeys } from "@/lib/query/proxy";
@@ -17,6 +19,23 @@ import {
 } from "@/lib/api/events";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { extractErrorMessage } from "@/utils/errorUtils";
+
+function errorModeState(error: unknown): ApplicationModeState | undefined {
+  if (!error || typeof error !== "object" || !("modeState" in error)) return;
+  const state = error.modeState;
+  if (
+    !state ||
+    typeof state !== "object" ||
+    !("status" in state) ||
+    !("canWrite" in state)
+  )
+    return;
+  if (
+    (state.status === "pending" || state.status === "unknown") &&
+    state.canWrite === false
+  )
+    return state as ApplicationModeState;
+}
 
 export function useApplicationRouting(appId: AppId) {
   const client = useQueryClient();
@@ -33,6 +52,19 @@ export function useApplicationRouting(appId: AppId) {
     queryFn: () => applicationRoutingApi.get(appId),
     refetchInterval: 5000,
   });
+  const modeState = errorModeState(query.error) ?? query.data?.modeState;
+  const writeBlocked =
+    !query.data || Boolean(query.error) || modeState?.canWrite === false;
+  // Read the existing cache at invocation time, including an already-open confirmation.
+  const requireWritable = () => {
+    const current = client.getQueryState<ApplicationRouting>(key);
+    if (
+      !current?.data ||
+      current.error ||
+      current.data.modeState?.canWrite === false
+    )
+      throw new Error("mode.verification_required");
+  };
   const onError = (error: unknown) =>
     toast.error(t("applications.updateFailed"), {
       description: extractErrorMessage(error),
@@ -44,7 +76,10 @@ export function useApplicationRouting(appId: AppId) {
     }: {
       change: ApplicationRoutingChange;
       quitChatgpt?: boolean;
-    }) => applicationRoutingApi.apply(appId, change, quitChatgpt),
+    }) => {
+      requireWritable();
+      return applicationRoutingApi.apply(appId, change, quitChatgpt);
+    },
     onSettled: async (result) => {
       if (result?.status === "confirmationRequired") return;
       await Promise.all([
@@ -58,7 +93,10 @@ export function useApplicationRouting(appId: AppId) {
     onError,
   });
   const order = useMutation({
-    mutationFn: (ids: string[]) => applicationRoutingApi.setOrder(appId, ids),
+    mutationFn: (ids: string[]) => {
+      requireWritable();
+      return applicationRoutingApi.setOrder(appId, ids);
+    },
     onSuccess: refresh,
     onError,
   });
@@ -70,7 +108,10 @@ export function useApplicationRouting(appId: AppId) {
     }: {
       providerId: string;
       blocked: boolean;
-    }) => applicationRoutingApi.setTierBlocked(appId, providerId, blocked),
+    }) => {
+      requireWritable();
+      return applicationRoutingApi.setTierBlocked(appId, providerId, blocked);
+    },
     onSettled: () =>
       Promise.all([
         refresh(),
@@ -81,14 +122,18 @@ export function useApplicationRouting(appId: AppId) {
   // 清除档位错误记录（内存熔断器 + DB 健康行）：用户显式动作，清完立刻
   // 重新参与选路。复用 proxy 侧现成的 reset_circuit_breaker 命令——语义就是「错误置空」。
   const resetTierErrors = useMutation({
-    mutationFn: ({ providerId }: { providerId: string }) =>
-      failoverApi.resetCircuitBreaker(providerId, appId),
+    mutationFn: ({ providerId }: { providerId: string }) => {
+      requireWritable();
+      return failoverApi.resetCircuitBreaker(providerId, appId);
+    },
     onSuccess: refresh,
     onError,
   });
   const failover = useMutation({
-    mutationFn: (enabled: boolean) =>
-      applicationRoutingApi.setFailover(appId, enabled),
+    mutationFn: (enabled: boolean) => {
+      requireWritable();
+      return applicationRoutingApi.setFailover(appId, enabled);
+    },
     onSuccess: (_data, enabled) => {
       // 开启即生效（未初始化的链回落=当前全量显示序，开关同时带起代理与接管）；
       // toast 只报「已生效」——干净视图下没有可应用的挂起，弹「尚未生效」是假话。
@@ -109,17 +154,33 @@ export function useApplicationRouting(appId: AppId) {
   });
   return {
     ...query,
+    modeState,
+    writeBlocked,
     busy:
       apply.isPending ||
       order.isPending ||
       failover.isPending ||
       blockTier.isPending ||
       resetTierErrors.isPending,
-    apply: (change: ApplicationRoutingChange, quitChatgpt?: boolean) =>
-      apply.mutateAsync({ change, quitChatgpt }),
-    setOrder: order.mutateAsync,
-    setFailover: failover.mutateAsync,
-    blockTier: blockTier.mutateAsync,
-    resetTierErrors: resetTierErrors.mutateAsync,
+    apply: async (change: ApplicationRoutingChange, quitChatgpt?: boolean) => {
+      requireWritable();
+      return apply.mutateAsync({ change, quitChatgpt });
+    },
+    setOrder: async (ids: string[]) => {
+      requireWritable();
+      return order.mutateAsync(ids);
+    },
+    setFailover: async (enabled: boolean) => {
+      requireWritable();
+      return failover.mutateAsync(enabled);
+    },
+    blockTier: async (input: { providerId: string; blocked: boolean }) => {
+      requireWritable();
+      return blockTier.mutateAsync(input);
+    },
+    resetTierErrors: async (input: { providerId: string }) => {
+      requireWritable();
+      return resetTierErrors.mutateAsync(input);
+    },
   };
 }

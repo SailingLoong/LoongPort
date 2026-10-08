@@ -24,6 +24,7 @@ interface ConfirmDialogProps {
   checkboxLabel?: string;
   checkboxDefaultChecked?: boolean;
   pending?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: (checkboxChecked: boolean) => void;
   onCancel: () => void;
 }
@@ -39,6 +40,7 @@ export function ConfirmDialog({
   checkboxLabel,
   checkboxDefaultChecked = false,
   pending = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -93,9 +95,11 @@ export function ConfirmDialog({
           </Button>
           <Button
             variant={variant === "info" ? "default" : "destructive"}
-            disabled={pending}
+            disabled={pending || confirmDisabled}
             onClick={() =>
               // 未渲染勾选框时不得回传 defaultChecked 残留值
+              !pending &&
+              !confirmDisabled &&
               onConfirm(checkboxLabel ? checkboxChecked : false)
             }
           >

@@ -25,11 +25,20 @@ impl Fixture {
         Self::for_app(AppType::Claude)
     }
     fn for_app(app: AppType) -> Self {
+        Self::for_app_with_schema(app, true)
+    }
+    fn for_app_with_schema(app: AppType, modern: bool) -> Self {
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(initialize_database().unwrap());
-        crate::database::Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap())
-            .unwrap();
+        let mut settings = crate::settings::get_settings();
+        settings.claude_config_dir =
+            Some(home.path().join(".claude").to_string_lossy().into_owned());
+        crate::settings::update_settings(settings).unwrap();
+        if modern {
+            crate::database::Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap())
+                .unwrap();
+        }
         for id in ["a", "b"] {
             let config = match app {
                 AppType::Claude => {
@@ -1203,9 +1212,12 @@ fn late_same_id_failover_cannot_reattach_direct_or_detached_app() {
             .db
             .set_proxy_flags_sync("claude", true, true)
             .unwrap();
-        let mut manager =
-            crate::proxy::failover_switch::FailoverSwitchManager::new(fixture.state.db.clone());
-        manager.set_service_owner(Arc::downgrade(&fixture.state.proxy_service));
+        let mut manager = fixture.runtime.block_on(
+            fixture
+                .state
+                .proxy_service
+                .active_failover_manager_for_test(),
+        );
         if disposition == "direct" {
             fixture
                 .state
@@ -1229,11 +1241,24 @@ fn late_same_id_failover_cannot_reattach_direct_or_detached_app() {
                 .runtime
                 .block_on(fixture.state.proxy_service.start_for_mode())
                 .unwrap();
+            // Exercise the current listener with a detached app; old-listener
+            // rejection has its separate real HTTP restart regression.
+            manager = fixture.runtime.block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .active_failover_manager_for_test(),
+            );
         }
         assert!(fixture
             .runtime
             .block_on(fixture.state.proxy_service.is_running()));
         let before = read_current(&fixture.path).unwrap();
+        let identity = fixture
+            .state
+            .proxy_service
+            .request_identity("claude")
+            .unwrap();
         let changed = fixture
             .runtime
             .block_on(manager.try_switch(
@@ -1243,6 +1268,7 @@ fn late_same_id_failover_cannot_reattach_direct_or_detached_app() {
                 "b",
                 "synthetic-b",
                 "a",
+                Some(&identity),
             ))
             .unwrap();
         assert_eq!(changed, disposition == "attached");
@@ -1563,4 +1589,2963 @@ fn queued_stop_rechecks_a_new_takeover_instead_of_using_old_hint() {
         .runtime
         .block_on(fixture.state.proxy_service.stop_when_unused())
         .unwrap());
+}
+
+fn selection_fixture() -> Fixture {
+    let fixture = Fixture::claude();
+    let mut row = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"synthetic-model-b"},{"model":"selected-model"}]});
+    fixture.state.db.save_provider("claude", &row).unwrap();
+    fixture
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn selected_model_and_row_wait_for_the_same_live_intent() {
+    let fixture = selection_fixture();
+    let before = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    let files = read_current(&fixture.path).unwrap();
+    let result = {
+        let _fault = Fault::at("pending");
+        crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &AppType::Claude,
+            &crate::services::application_selection::TierSelection {
+                provider_id: "b".into(),
+                model: Some("selected-model".into()),
+            },
+            None,
+        )
+    };
+    assert!(
+        result.is_err(),
+        "actual selection must enter the controlled operation: {result:?}"
+    );
+    assert!(fixture.pending().is_some());
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_provider_by_id("b", "claude")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        before.settings_config
+    );
+    assert!(crate::proxy::auto_strategy::get_model_pref(&fixture.state.db, "claude").is_none());
+    assert_eq!(read_current(&fixture.path).unwrap(), files);
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn selected_model_refuses_existing_pending_without_legacy_write() {
+    let fixture = selection_fixture();
+    {
+        let _fault = Fault::at("published:0");
+        assert!(ProviderService::switch(&fixture.state, AppType::Claude, "b").is_err());
+    }
+    let pending = fixture.pending().unwrap();
+    let files = read_current(&fixture.path).unwrap();
+    let before = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    let result = crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "b".into(),
+            model: Some("selected-model".into()),
+        },
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "pending must block the actual selection service"
+    );
+    assert_eq!(fixture.pending().unwrap(), pending);
+    assert_eq!(read_current(&fixture.path).unwrap(), files);
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_provider_by_id("b", "claude")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        before.settings_config
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn proxy_selection_does_not_restore_old_snapshot_behind_pending() {
+    let fixture = selection_fixture();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    let before = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    let result = {
+        let _fault = Fault::at("published:0");
+        crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &AppType::Claude,
+            &crate::services::application_selection::TierSelection {
+                provider_id: "b".into(),
+                model: Some("selected-model".into()),
+            },
+            None,
+        )
+    };
+    assert!(result.is_err());
+    let pending = fixture.pending().unwrap();
+    assert_eq!(
+        crate::live::engine::digest(read_current(&fixture.path).unwrap().as_deref()),
+        pending.files[0].planned,
+        "legacy snapshot rollback must not overwrite the published pending image"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_provider_by_id("b", "claude")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        before.settings_config
+    );
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_selection() -> Result<(), AppError> {
+    plugin_post_selection_follows_attached_route_and_detached_direct_owner();
+    let normalize =
+        std::panic::catch_unwind(selected_model_survives_legacy_common_snippet_normalization);
+    let plugin =
+        std::panic::catch_unwind(modern_selection_preserves_claude_plugin_post_switch_hook);
+    let order_entry =
+        std::panic::catch_unwind(bare_legacy_order_entry_cannot_write_through_modern_pending);
+    assert!(
+        normalize.is_ok() && plugin.is_ok() && order_entry.is_ok(),
+        "R3 reviewed entry regressions"
+    );
+    let intent = std::panic::catch_unwind(selected_model_and_row_wait_for_the_same_live_intent);
+    let pending =
+        std::panic::catch_unwind(selected_model_refuses_existing_pending_without_legacy_write);
+    let proxy =
+        std::panic::catch_unwind(proxy_selection_does_not_restore_old_snapshot_behind_pending);
+    assert!(
+        intent.is_ok() && pending.is_ok() && proxy.is_ok(),
+        "actual R3 selection journals"
+    );
+    combined_selection_restarts_with_row_model_order_and_mode_together();
+    order_only_changes_use_zero_file_intent_and_recovery_for_all_apps();
+    changed_order_blocks_replay_before_remaining_codex_files();
+    actual_model_or_order_sql_failure_retains_combined_target_until_recovery();
+    explicit_model_actions_round_trip_without_null_collapse();
+    current_priority_service_retains_named_owner_and_refuses_pending();
+    r3_clear_model_action_survives_actual_restart_and_recovery();
+    r3_selection_reports_preserved_external_codex_catalog();
+    r3_target_readback_finishes_with_a_waiting_vault_writer();
+    println!("PASS R3 actual selection, typed model/order recovery, conflicts and SQL failures");
+    Ok(())
+}
+
+fn routing_settings(db: &crate::database::Database, app: &AppType) -> Vec<Option<String>> {
+    [
+        format!("application_order_profiles_{}", app.as_str()),
+        format!("application_order_profile_current_{}", app.as_str()),
+        format!("application_priority_{}", app.as_str()),
+    ]
+    .iter()
+    .map(|key| db.get_setting(key).unwrap())
+    .collect()
+}
+fn selection_fixture_for(app: AppType) -> Fixture {
+    let fixture = Fixture::for_app(app.clone());
+    let mut row = fixture
+        .state
+        .db
+        .get_provider_by_id("b", app.as_str())
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] = json!({"models":[{"model":"selected-model"}]});
+    fixture.state.db.save_provider(app.as_str(), &row).unwrap();
+    fixture
+}
+fn selected_model() -> crate::services::application_selection::TierSelection {
+    crate::services::application_selection::TierSelection {
+        provider_id: "b".into(),
+        model: Some("selected-model".into()),
+    }
+}
+fn selected_order() -> crate::services::application_selection::RoutingOrder {
+    crate::services::application_selection::RoutingOrder {
+        profile_name: "default".into(),
+        provider_ids: vec!["b".into(), "a".into()],
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn combined_selection_restarts_with_row_model_order_and_mode_together() {
+    for app in super::controller::PROXY_APPS {
+        for disposition in ["direct", "proxy", "detached"] {
+            for stage in if disposition == "detached" {
+                vec!["pending", "target"]
+            } else {
+                vec!["pending", "publication", "target"]
+            } {
+                let mut fixture = selection_fixture_for(app.clone());
+                if disposition != "direct" {
+                    fixture
+                        .runtime
+                        .block_on(
+                            fixture
+                                .state
+                                .proxy_service
+                                .set_takeover_for_app(app.as_str(), true),
+                        )
+                        .unwrap();
+                }
+                if disposition == "detached" {
+                    fixture
+                        .runtime
+                        .block_on(fixture.state.proxy_service.stop_with_restore_keep_state())
+                        .unwrap();
+                }
+                let before = fixture
+                    .state
+                    .db
+                    .get_provider_by_id("b", app.as_str())
+                    .unwrap()
+                    .unwrap();
+                let order_before = routing_settings(&fixture.state.db, &app);
+                let model_before = crate::proxy::auto_strategy::get_model_pref_checked(
+                    &fixture.state.db,
+                    app.as_str(),
+                )
+                .unwrap();
+                let files_before = super::controller::files(&app)
+                    .unwrap()
+                    .iter()
+                    .map(|f| read_current(&f.path).unwrap())
+                    .collect::<Vec<_>>();
+                let point = if stage == "publication" {
+                    if app == AppType::Codex || app == AppType::Gemini {
+                        "published:1"
+                    } else {
+                        "published:0"
+                    }
+                } else {
+                    stage
+                };
+                let result = {
+                    let _fault = Fault::at(point);
+                    crate::services::application_selection::select_with_commit(
+                        &fixture.state,
+                        &app,
+                        &selected_model(),
+                        Some(&selected_order()),
+                    )
+                };
+                assert!(result.is_err(), "{app:?}/{disposition}/{point}: {result:?}");
+                let pending = state::pending(
+                    &DeviceStore::for_device(),
+                    &fixture.state.db.secret_session().read().unwrap(),
+                    app.as_str(),
+                )
+                .unwrap()
+                .expect("actual intent");
+                let intended =
+                    super::operation::saved_provider(pending.target.saved_row.as_ref().unwrap())
+                        .unwrap();
+                if stage == "pending" {
+                    assert_eq!(
+                        crate::database::Database::provider_update_digest(
+                            &fixture
+                                .state
+                                .db
+                                .get_provider_by_id("b", app.as_str())
+                                .unwrap()
+                                .unwrap()
+                        )
+                        .unwrap(),
+                        crate::database::Database::provider_update_digest(&before).unwrap()
+                    );
+                    assert_eq!(routing_settings(&fixture.state.db, &app), order_before);
+                    assert_eq!(
+                        crate::proxy::auto_strategy::get_model_pref_checked(
+                            &fixture.state.db,
+                            app.as_str()
+                        )
+                        .unwrap(),
+                        model_before
+                    );
+                    assert_eq!(
+                        files_before,
+                        super::controller::files(&app)
+                            .unwrap()
+                            .iter()
+                            .map(|f| read_current(&f.path).unwrap())
+                            .collect::<Vec<_>>()
+                    );
+                }
+                if fixture
+                    .runtime
+                    .block_on(fixture.state.proxy_service.is_running())
+                {
+                    fixture
+                        .runtime
+                        .block_on(fixture.state.proxy_service.stop())
+                        .unwrap();
+                }
+                fixture.state = AppState::new(fixture.state.db.clone()).unwrap();
+                let recovered =
+                    super::controller::recover_locked(&fixture.state.proxy_service, &app).unwrap();
+                assert_eq!(
+                    recovered,
+                    Some(if stage == "pending" {
+                        super::operation::RecoveryOutcome::Discarded
+                    } else {
+                        super::operation::RecoveryOutcome::RolledForward
+                    }),
+                    "{app:?}/{disposition}/{point}"
+                );
+                assert!(state::pending(
+                    &DeviceStore::for_device(),
+                    &fixture.state.db.secret_session().read().unwrap(),
+                    app.as_str()
+                )
+                .unwrap()
+                .is_none());
+                if stage != "pending" {
+                    assert_eq!(
+                        fixture
+                            .state
+                            .db
+                            .get_provider_by_id("b", app.as_str())
+                            .unwrap()
+                            .unwrap()
+                            .settings_config,
+                        intended.settings_config
+                    );
+                    assert_eq!(
+                        crate::proxy::auto_strategy::get_model_pref_checked(
+                            &fixture.state.db,
+                            app.as_str()
+                        )
+                        .unwrap()
+                        .as_deref(),
+                        Some("selected-model")
+                    );
+                    assert_eq!(
+                        crate::proxy::application_routing::chain_ids(
+                            &fixture.state.db,
+                            app.as_str()
+                        )
+                        .unwrap(),
+                        vec!["b", "a"]
+                    );
+                    assert_eq!(
+                        fixture
+                            .state
+                            .db
+                            .get_current_provider(app.as_str())
+                            .unwrap()
+                            .as_deref(),
+                        Some(if disposition == "direct" { "b" } else { "a" })
+                    );
+                    let mode = super::current::validate_known_mode(
+                        &DeviceStore::for_device(),
+                        &fixture.state.db.secret_session().read().unwrap(),
+                        &app,
+                    )
+                    .unwrap();
+                    assert_eq!(mode.attached, disposition == "proxy");
+                    for file in &pending.files {
+                        assert_eq!(
+                            crate::live::engine::digest(
+                                read_current(&file.path).unwrap().as_deref()
+                            ),
+                            file.planned
+                        );
+                    }
+                }
+            }
+        }
+        println!(
+            "PASS R3 combined row/model/order restart matrix {}",
+            app.as_str()
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn order_only_changes_use_zero_file_intent_and_recovery_for_all_apps() {
+    for app in super::controller::PROXY_APPS {
+        for point in ["pending", "target"] {
+            let fixture = Fixture::for_app(app.clone());
+            crate::proxy::auto_strategy::set_model_pref(
+                &fixture.state.db,
+                app.as_str(),
+                Some("retained-preference"),
+            )
+            .unwrap();
+            let before = super::controller::files(&app)
+                .unwrap()
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>();
+            {
+                let _fault = Fault::at(point);
+                assert!(crate::services::application_selection::apply_order_change(
+                    &fixture.state,
+                    &app,
+                    &selected_order()
+                )
+                .is_err());
+            }
+            let pending = state::pending(
+                &DeviceStore::for_device(),
+                &fixture.state.db.secret_session().read().unwrap(),
+                app.as_str(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(pending.files.is_empty());
+            assert!(
+                pending.target.pointer.is_none()
+                    && pending.target.state.is_none()
+                    && pending.target.written.is_none()
+                    && pending.target.saved_row.is_none()
+                    && pending.target.model_preference.is_none()
+            );
+            assert!(crate::services::application_selection::apply_order_change(
+                &fixture.state,
+                &app,
+                &selected_order()
+            )
+            .is_err());
+            assert_eq!(
+                super::controller::recover_locked(&fixture.state.proxy_service, &app).unwrap(),
+                Some(if point == "pending" {
+                    super::operation::RecoveryOutcome::Discarded
+                } else {
+                    super::operation::RecoveryOutcome::RolledForward
+                })
+            );
+            assert_eq!(
+                before,
+                super::controller::files(&app)
+                    .unwrap()
+                    .iter()
+                    .map(|f| read_current(&f.path).unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                crate::proxy::auto_strategy::get_model_pref_checked(
+                    &fixture.state.db,
+                    app.as_str()
+                )
+                .unwrap()
+                .as_deref(),
+                Some("retained-preference")
+            );
+            if point == "target" {
+                assert_eq!(
+                    crate::proxy::application_routing::chain_ids(&fixture.state.db, app.as_str())
+                        .unwrap(),
+                    vec!["b", "a"]
+                );
+            }
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn changed_order_blocks_replay_before_remaining_codex_files() {
+    let fixture = selection_fixture_for(AppType::Codex);
+    {
+        let _fault = Fault::at("published:1");
+        assert!(crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &AppType::Codex,
+            &selected_model(),
+            Some(&selected_order())
+        )
+        .is_err());
+    }
+    let pending = state::pending(
+        &DeviceStore::for_device(),
+        &fixture.state.db.secret_session().read().unwrap(),
+        "codex",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        pending
+            .files
+            .iter()
+            .skip(2)
+            .any(|file| file.pre != file.planned
+                && crate::live::engine::digest(read_current(&file.path).unwrap().as_deref())
+                    == file.pre),
+        "a real later file must still await replay"
+    );
+    crate::services::order_profiles::apply_order(
+        &fixture.state.db,
+        "codex",
+        "default",
+        &["a".into()],
+    )
+    .unwrap();
+    let before = super::controller::files(&AppType::Codex)
+        .unwrap()
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Codex).is_err()
+    );
+    assert_eq!(
+        before,
+        super::controller::files(&AppType::Codex)
+            .unwrap()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state::pending(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            "codex"
+        )
+        .unwrap()
+        .unwrap(),
+        pending
+    );
+    assert_eq!(
+        crate::proxy::application_routing::chain_ids(&fixture.state.db, "codex").unwrap(),
+        vec!["a"]
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn actual_model_or_order_sql_failure_retains_combined_target_until_recovery() {
+    for key in [
+        "auto_mode_model_claude",
+        "application_order_profile_current_claude",
+    ] {
+        let fixture = selection_fixture();
+        fixture.state.db.conn.lock().unwrap().execute_batch(&format!("CREATE TRIGGER reject_r3 BEFORE INSERT ON settings WHEN NEW.key='{key}' BEGIN SELECT RAISE(ABORT, 'synthetic rejected target'); END;")).unwrap();
+        assert!(crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &AppType::Claude,
+            &selected_model(),
+            Some(&selected_order())
+        )
+        .is_err());
+        assert!(fixture.pending().is_some());
+        fixture
+            .state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_r3")
+            .unwrap();
+        assert_eq!(
+            super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude)
+                .unwrap(),
+            Some(super::operation::RecoveryOutcome::RolledForward)
+        );
+        assert!(fixture.pending().is_none());
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref_checked(&fixture.state.db, "claude")
+                .unwrap()
+                .as_deref(),
+            Some("selected-model")
+        );
+        assert_eq!(
+            crate::proxy::application_routing::chain_ids(&fixture.state.db, "claude").unwrap(),
+            vec!["b", "a"]
+        );
+        crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &AppType::Claude,
+            &crate::services::application_selection::TierSelection {
+                provider_id: "b".into(),
+                model: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref_checked(&fixture.state.db, "claude")
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+fn explicit_model_actions_round_trip_without_null_collapse() {
+    for action in [
+        state::ModelPreferenceAction::Clear {},
+        state::ModelPreferenceAction::Set {
+            model: "selected-model".into(),
+        },
+    ] {
+        let target = state::PendingTarget {
+            model_preference: Some(action),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::from_slice::<state::PendingTarget>(&serde_json::to_vec(&target).unwrap())
+                .unwrap(),
+            target
+        );
+    }
+    assert!(serde_json::from_value::<state::PendingTarget>(
+        json!({"model_preference":{"action":"unknown"}})
+    )
+    .is_err());
+    assert!(serde_json::from_value::<state::PendingTarget>(
+        json!({"model_preference":{"action":"clear","future":true}})
+    )
+    .is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn selected_model_survives_legacy_common_snippet_normalization() {
+    let mut failed = Vec::new();
+    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        let result = std::panic::catch_unwind(|| {
+            let fixture = selection_fixture_for(app.clone());
+            let mut row = fixture
+                .state
+                .db
+                .get_provider_by_id("b", app.as_str())
+                .unwrap()
+                .unwrap();
+            row.meta
+                .get_or_insert_with(Default::default)
+                .common_config_enabled = Some(true);
+            fixture.state.db.save_provider(app.as_str(), &row).unwrap();
+            let snippet = match app {
+                AppType::Claude => r#"{"env":{"ANTHROPIC_MODEL":"selected-model"}}"#.to_string(),
+                AppType::Codex => "model = \"selected-model\"\n".to_string(),
+                AppType::Gemini => r#"{"GEMINI_MODEL":"selected-model"}"#.to_string(),
+                _ => unreachable!(),
+            };
+            fixture
+                .state
+                .db
+                .set_config_snippet(app.as_str(), Some(snippet))
+                .unwrap();
+            crate::services::application_selection::select_with_commit(
+                &fixture.state,
+                &app,
+                &selected_model(),
+                None,
+            )
+            .unwrap();
+            let live = ProviderService::read_live_settings(app.clone()).unwrap();
+            assert_eq!(
+                crate::relay::provider_config::selected_model(&app, &live).as_deref(),
+                Some("selected-model"),
+                "{app:?}: committed model preference must match actual native model"
+            );
+            let mut saved = fixture
+                .state
+                .db
+                .get_provider_by_id("b", app.as_str())
+                .unwrap()
+                .unwrap();
+            saved.name = "edited row".into();
+            ProviderService::update(&fixture.state, app.clone(), None, saved).unwrap();
+            let live = ProviderService::read_live_settings(app.clone()).unwrap();
+            assert_eq!(
+                crate::relay::provider_config::selected_model(&app, &live).as_deref(),
+                Some("selected-model")
+            );
+        });
+        if result.is_err() {
+            failed.push(app);
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "legacy normalization erased selected models: {failed:?}"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn modern_selection_preserves_claude_plugin_post_switch_hook() {
+    let fixture = Fixture::claude();
+    let mut settings = crate::settings::get_settings();
+    settings.enable_claude_plugin_integration = true;
+    crate::settings::update_settings(settings).unwrap();
+    let path = crate::claude_plugin::claude_config_path().unwrap();
+    assert!(path.starts_with(fixture._home.path()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, br#"{"unowned":"keep"}"#).unwrap();
+    crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(config["primaryApiKey"], "any");
+    assert_eq!(config["unowned"], "keep");
+    let mut official = Provider::with_id(
+        "official".into(),
+        "Official".into(),
+        json!({"env":{}}),
+        None,
+    );
+    official.category = Some("official".into());
+    fixture.state.db.save_provider("claude", &official).unwrap();
+    crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "official".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(config.get("primaryApiKey").is_none());
+    assert_eq!(config["unowned"], "keep");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let result = crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("claude_plugin_sync_failed:")));
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn bare_legacy_order_entry_cannot_write_through_modern_pending() {
+    let fixture = Fixture::claude();
+    {
+        let _fault = Fault::at("published:0");
+        assert!(ProviderService::switch(&fixture.state, AppType::Claude, "b").is_err());
+    }
+    let before = routing_settings(&fixture.state.db, &AppType::Claude);
+    let pending = fixture.pending().unwrap();
+    assert!(
+        crate::proxy::application_routing::set_order(
+            &fixture.state.db,
+            "claude",
+            &["b".into(), "a".into()]
+        )
+        .is_err(),
+        "the still-used legacy set-priority entry cannot bypass app intent"
+    );
+    assert_eq!(
+        routing_settings(&fixture.state.db, &AppType::Claude),
+        before
+    );
+    assert_eq!(fixture.pending().unwrap(), pending);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn current_priority_service_retains_named_owner_and_refuses_pending() {
+    let fixture = Fixture::claude();
+    crate::services::order_profiles::save(
+        &fixture.state.db,
+        "claude",
+        "work",
+        &["a".into(), "b".into()],
+    )
+    .unwrap();
+    crate::services::order_profiles::apply_order(
+        &fixture.state.db,
+        "claude",
+        "work",
+        &["a".into(), "b".into()],
+    )
+    .unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert!(
+            crate::services::application_selection::apply_current_order_change(
+                &fixture.state,
+                &AppType::Claude,
+                &["b".into(), "a".into()]
+            )
+            .is_err()
+        );
+    }
+    let pending = fixture.pending().unwrap();
+    assert!(pending.files.is_empty());
+    assert_eq!(
+        pending.target.routing_order.as_ref().unwrap().profile_name,
+        "work"
+    );
+    assert!(
+        crate::services::application_selection::apply_current_order_change(
+            &fixture.state,
+            &AppType::Claude,
+            &["a".into(), "b".into()]
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.pending().unwrap(), pending);
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    crate::services::application_selection::apply_current_order_change(
+        &fixture.state,
+        &AppType::Claude,
+        &["b".into(), "a".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        crate::services::order_profiles::get(&fixture.state.db, "claude")
+            .unwrap()
+            .current,
+        "work"
+    );
+    assert_eq!(
+        crate::proxy::application_routing::chain_ids(&fixture.state.db, "claude").unwrap(),
+        vec!["b", "a"]
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn r3_clear_model_action_survives_actual_restart_and_recovery() {
+    for app in [AppType::Claude, AppType::Codex] {
+        let mut fixture = selection_fixture_for(app.clone());
+        crate::services::application_selection::select_with_commit(
+            &fixture.state,
+            &app,
+            &selected_model(),
+            None,
+        )
+        .unwrap();
+        {
+            let _fault = Fault::at("target");
+            assert!(crate::services::application_selection::select_with_commit(
+                &fixture.state,
+                &app,
+                &crate::services::application_selection::TierSelection {
+                    provider_id: "b".into(),
+                    model: None
+                },
+                None
+            )
+            .is_err());
+        }
+        let pending = state::pending(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            app.as_str(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            pending.target.model_preference,
+            Some(state::ModelPreferenceAction::Clear {})
+        );
+        fixture.state = AppState::new(fixture.state.db.clone()).unwrap();
+        assert_eq!(
+            super::controller::recover_locked(&fixture.state.proxy_service, &app).unwrap(),
+            Some(super::operation::RecoveryOutcome::RolledForward)
+        );
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref_checked(&fixture.state.db, app.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn r3_selection_reports_preserved_external_codex_catalog() {
+    let fixture = selection_fixture_for(AppType::Codex);
+    let text = std::fs::read_to_string(&fixture.path).unwrap();
+    let text = crate::codex_config::update_codex_toml_field(
+        &text,
+        "model_catalog_json",
+        "unclaimed-external.json",
+    )
+    .unwrap();
+    std::fs::write(&fixture.path, text).unwrap();
+    let external = fixture
+        .path
+        .parent()
+        .unwrap()
+        .join("unclaimed-external.json");
+    std::fs::write(&external, b"opaque synthetic external catalog").unwrap();
+    let result = crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Codex,
+        &selected_model(),
+        None,
+    )
+    .unwrap();
+    assert!(result.warnings.iter().any(
+        |warning| warning == crate::services::provider::codex_direct::CATALOG_PRESERVED_WARNING
+    ));
+    let doc = std::fs::read_to_string(&fixture.path)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        doc["model_catalog_json"].as_str(),
+        Some("unclaimed-external.json")
+    );
+    assert_eq!(
+        std::fs::read(&external).unwrap(),
+        b"opaque synthetic external catalog"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn r3_target_readback_finishes_with_a_waiting_vault_writer() {
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let operation = std::thread::spawn(move || {
+        let fixture = selection_fixture();
+        let db = &fixture.state.db;
+        let before = db.get_provider_by_id("b", "claude").unwrap().unwrap();
+        let mut after = before.clone();
+        after.name = "selected synthetic row".into();
+        let order = selected_order();
+        let (order_before, order_planned) = crate::services::order_profiles::prepare_apply(
+            db,
+            "claude",
+            &order.profile_name,
+            &order.provider_ids,
+        )
+        .unwrap();
+        let target = state::PendingTarget {
+            pointer: Some("b".into()),
+            saved_row: Some(state::SavedRow {
+                before: crate::database::Database::provider_update_digest(&before).unwrap(),
+                provider: crate::database::Database::provider_update_value(&after).unwrap(),
+                clear_model_preference: false,
+            }),
+            model_preference: Some(state::ModelPreferenceAction::Set {
+                model: "selected-model".into(),
+            }),
+            routing_order: Some(state::RoutingOrderTarget {
+                profile_name: order.profile_name,
+                provider_ids: order.provider_ids,
+                before: order_before,
+                planned: order_planned,
+            }),
+            ..Default::default()
+        };
+        let vault = db.secret_session().read().unwrap();
+        let session = db.secrets.clone();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            waiting_tx.send(()).unwrap();
+            let _write = session.write().unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+        waiting_rx.recv().unwrap();
+        assert!(acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        super::operation::commit_target(
+            db,
+            db.secret_session(),
+            &DeviceStore::for_device(),
+            &vault,
+            &AppType::Claude,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref_checked(db, "claude")
+                .unwrap()
+                .as_deref(),
+            Some("selected-model")
+        );
+        assert_eq!(
+            crate::proxy::application_routing::chain_ids(db, "claude").unwrap(),
+            vec!["b", "a"]
+        );
+        drop(vault);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        writer.join().unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    finished_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("R3 commit/readback cannot recursively acquire the queued vault guard");
+    operation.join().unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn plugin_post_selection_follows_attached_route_and_detached_direct_owner() {
+    let fixture = Fixture::claude();
+    let mut settings = crate::settings::get_settings();
+    settings.enable_claude_plugin_integration = true;
+    crate::settings::update_settings(settings).unwrap();
+    crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "a".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", false),
+        )
+        .unwrap();
+    let mut official = Provider::with_id(
+        "official".into(),
+        "Official".into(),
+        json!({"env":{}}),
+        None,
+    );
+    official.category = Some("official".into());
+    fixture.state.db.save_provider("claude", &official).unwrap();
+    crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "official".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    crate::services::application_selection::select_with_commit(
+        &fixture.state,
+        &AppType::Claude,
+        &crate::services::application_selection::TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("official")
+    );
+    let path = crate::claude_plugin::claude_config_path().unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        config["primaryApiKey"], "any",
+        "attached third-party route owns native plugin integration"
+    );
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore_keep_state())
+        .unwrap();
+    ProviderService::sync_claude_plugin_integration(&fixture.state).unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        config.get("primaryApiKey").is_none(),
+        "detached mode follows restored official Direct owner"
+    );
+}
+
+/// Same local axum upstream pattern as proxy::auto_mode_e2e_tests, exercised
+/// through the real AppState-owned server and modern mode controller.
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn modern_http_fallback_preserves_direct_and_obeys_applied_chain() {
+    // Match the application bootstrap, which the standalone verifier does not run.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for disposition in [
+        "enabled",
+        "disabled",
+        "excluded",
+        "restart",
+        "pending",
+        "source17",
+        "same-listener",
+    ] {
+        let fixture = Fixture::for_app_with_schema(AppType::Claude, disposition != "source17");
+        let fail_a = Arc::new(AtomicBool::new(false));
+        let a_hits = Arc::new(AtomicUsize::new(0));
+        let b_hits = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mock = fixture.runtime.block_on(async {
+            let failure = fail_a.clone();
+            let hits = b_hits.clone();
+            let first_hits = a_hits.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            let router = axum::Router::new().fallback(move |uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let failure = failure.clone();
+                let hits = hits.clone();
+                let first_hits = first_hits.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    let id = if uri.path().starts_with("/a/") { "a" } else { "b" };
+                    assert_eq!(headers.get("authorization").unwrap(), format!("Bearer synthetic-key-{id}").as_str());
+                    assert_ne!(headers.get("x-api-key").and_then(|v| v.to_str().ok()), Some("client-key-must-not-be-forwarded"));
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert!(request.get("model").and_then(|v| v.as_str()).is_some());
+                    if id == "a" { first_hits.fetch_add(1, Ordering::SeqCst); }
+                    if id == "b" {
+                        let prior_hits = hits.fetch_add(1, Ordering::SeqCst);
+                        if prior_hits == 0 && matches!(disposition, "restart" | "same-listener") { entered.notify_one(); release.notified().await; }
+                    }
+                    if id == "a" && failure.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"type":"error","error":{"type":"api_error","message":"synthetic failure"}})));
+                    }
+                    (axum::http::StatusCode::OK, axum::Json(json!({"id":"msg_synthetic","type":"message","role":"assistant","model":"synthetic-model-a","content":[{"type":"text","text":id}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})))
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+            (port, task)
+        });
+        for id in ["a", "b"] {
+            let mut row = fixture
+                .state
+                .db
+                .get_provider_by_id(id, "claude")
+                .unwrap()
+                .unwrap();
+            row.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+                json!(format!("http://127.0.0.1:{}/{id}", mock.0));
+            fixture.state.db.save_provider("claude", &row).unwrap();
+        }
+        let ids = if disposition == "excluded" {
+            vec!["a".into()]
+        } else {
+            vec!["a".into(), "b".into()]
+        };
+        crate::services::application_selection::apply_current_order_change(
+            &fixture.state,
+            &AppType::Claude,
+            &ids,
+        )
+        .unwrap();
+        ProviderService::switch(&fixture.state, AppType::Claude, "a").unwrap();
+        fixture.runtime.block_on(async {
+            let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+            global.listen_address = "127.0.0.1".into();
+            global.listen_port = 0;
+            fixture.state.db.update_global_proxy_config(global).await.unwrap();
+            fixture.state.proxy_service.set_takeover_for_app("claude", true).await.unwrap();
+            fixture.state.proxy_service.set_failover_for_app("claude", disposition != "disabled").await.unwrap();
+            let mut config = fixture.state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.max_retries = 1;
+            config.circuit_failure_threshold = 1;
+            config.circuit_timeout_seconds = 0;
+            fixture.state.db.update_proxy_config_for_app(config).await.unwrap();
+            let port = fixture.state.proxy_service.start().await.unwrap().port;
+            let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(10)).build().unwrap();
+            let send = || client.post(format!("http://127.0.0.1:{port}/v1/messages"))
+                .header("x-api-key", "client-key-must-not-be-forwarded")
+                .header("anthropic-version", "2023-06-01")
+                .json(&json!({"model":"synthetic-model-a","max_tokens":16,"stream":false,"messages":[{"role":"user","content":"hi"}]})).send();
+            let initial = send().await.unwrap();
+            assert!(initial.status().is_success(), "initial {disposition}: {}", initial.text().await.unwrap());
+            fail_a.store(true, Ordering::SeqCst);
+            if disposition == "pending" {
+                let _fault = Fault::at("pending");
+                assert!(fixture.state.proxy_service.hot_switch_provider("claude", "b").await.is_err());
+                assert!(fixture.pending().is_some());
+            }
+            let journal_before = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+            let live_before = read_current(&fixture.path).unwrap();
+            let response = if matches!(disposition, "restart" | "same-listener") {
+                let request = tokio::spawn(send());
+                tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified()).await.unwrap();
+                let old_manager = fixture.state.proxy_service.active_failover_manager_for_test().await;
+                let old_identity = fixture.state.proxy_service.request_identity("claude").unwrap();
+                if disposition == "same-listener" {
+                    // A second admitted app keeps this listener alive throughout.
+                    let gemini = Provider::with_id("g".into(), "synthetic-gemini".into(), json!({"env":{"GEMINI_API_KEY":"synthetic-key","GOOGLE_GEMINI_BASE_URL":"https://gemini.example.invalid"},"config":{"model":{"name":"synthetic-model"}}}), None);
+                    fixture.state.db.save_provider("gemini", &gemini).unwrap();
+                    let mut other = gemini.clone();
+                    other.id = "g2".into();
+                    fixture.state.db.save_provider("gemini", &other).unwrap();
+                    fixture.state.db.set_current_provider("gemini", "g").unwrap();
+                    crate::settings::set_current_provider(&AppType::Gemini, Some("g")).unwrap();
+                    state::update(&DeviceStore::for_device(), &fixture.state.db.secret_session().read().unwrap(), |live| {
+                        live.apps.entry("gemini".into()).or_default().mode = Some(Mode::Direct);
+                        Ok(())
+                    }).unwrap();
+                    fixture.state.proxy_service.set_takeover_for_app("gemini", true).await.unwrap();
+                    fixture.state.proxy_service.set_failover_for_app("gemini", true).await.unwrap();
+                    let other_identity = fixture.state.proxy_service.request_identity("gemini").unwrap();
+                    fixture.state.proxy_service.set_takeover_for_app("claude", false).await.unwrap();
+                    fixture.state.proxy_service.set_takeover_for_app("claude", true).await.unwrap();
+                    fixture.state.proxy_service.set_failover_for_app("claude", true).await.unwrap();
+                    assert!(old_manager.same_instance(fixture.state.proxy_service.active_failover_manager_for_test().await.as_ref()));
+                    assert!(!fixture.state.proxy_service.request_identity_is_current("claude", Some(&old_identity)).unwrap());
+                    assert!(fixture.state.proxy_service.request_identity_is_current("gemini", Some(&other_identity)).unwrap());
+                    assert!(old_manager.try_switch(#[cfg(feature = "gui")] None, "gemini", "g2", "g2", "g", Some(&other_identity)).await.unwrap());
+                } else {
+                    fixture.state.proxy_service.stop_with_restore_keep_state().await.unwrap();
+                    fixture.state.proxy_service.recover_from_crash().await.unwrap();
+                    assert!(!old_manager.try_switch(#[cfg(feature = "gui")] None, "claude", "b", "b", "a", Some(&old_identity)).await.unwrap());
+                }
+                release.notify_one();
+                request.await.unwrap().unwrap()
+            } else { send().await.unwrap() };
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            if disposition == "enabled" || disposition == "source17" {
+                assert!(status.is_success(), "fallback: {status} {body}");
+                assert!(body.contains("\"text\":\"b\""), "{body}");
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if crate::proxy::application_routing::current_provider_id_checked(&fixture.state.db, "claude").ok().flatten().as_deref() == Some("b") { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await.expect("successful real HTTP fallback commits route");
+                assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+            } else if matches!(disposition, "restart" | "same-listener") {
+                assert!(status.is_success(), "old request may finish: {status} {body}");
+                let stale_commit = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if crate::proxy::application_routing::current_provider_id_checked(&fixture.state.db, "claude").ok().flatten().as_deref() == Some("b") { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await;
+                assert!(stale_commit.is_err(), "old HTTP request must not change reattached same-ID route: {disposition}");
+                if disposition == "same-listener" {
+                    assert_eq!(crate::proxy::application_routing::current_provider_id_checked(&fixture.state.db, "claude").unwrap().as_deref(), Some("a"));
+                    let fresh = send().await.unwrap();
+                    assert!(fresh.status().is_success());
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            if crate::proxy::application_routing::current_provider_id_checked(&fixture.state.db, "claude").ok().flatten().as_deref() == Some("b") { break; }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    }).await.expect("new attachment request can still commit fallback");
+                }
+            } else {
+                assert!(!status.is_success(), "{disposition}: {status} {body}");
+                assert_eq!(b_hits.load(Ordering::SeqCst), 0);
+            }
+            if disposition == "pending" {
+                assert_eq!(a_hits.load(Ordering::SeqCst), 1, "pending request must fail before upstream I/O");
+                assert!(fixture.pending().is_some());
+                assert_eq!(std::fs::read(DeviceStore::for_device().state_path()).unwrap(), journal_before);
+                assert_eq!(read_current(&fixture.path).unwrap(), live_before);
+                tokio::task::block_in_place(|| super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude)).unwrap();
+            }
+            if disposition == "source17" {
+                let mut replacement = fixture.state.proxy_service.get_config().await.unwrap();
+                replacement.listen_port = 0;
+                fixture.state.proxy_service.update_config(&replacement).await.unwrap();
+                assert_eq!(fixture.state.db.get_current_provider("claude").unwrap().as_deref(), Some("b"));
+                assert_eq!(crate::settings::get_current_provider(&AppType::Claude).as_deref(), Some("b"));
+                fixture.state.proxy_service.stop_with_restore().await.unwrap();
+                let restored: serde_json::Value = serde_json::from_slice(&read_current(&fixture.path).unwrap().unwrap()).unwrap();
+                assert_eq!(restored["env"]["ANTHROPIC_BASE_URL"], json!(format!("http://127.0.0.1:{}/b", mock.0)));
+                return;
+            }
+            let mode = super::current::validate_known_mode(&DeviceStore::for_device(), &fixture.state.db.secret_session().read().unwrap(), &AppType::Claude).unwrap();
+            assert!(mode.is_proxy() && mode.attached);
+            assert_eq!(mode.proxy_route.as_deref(), Some(if matches!(disposition, "enabled" | "same-listener") { "b" } else { "a" }));
+            assert_eq!(fixture.state.db.get_current_provider("claude").unwrap().as_deref(), Some("a"));
+            assert_eq!(crate::settings::get_current_provider(&AppType::Claude).as_deref(), Some("a"));
+            assert!(fixture.pending().is_none());
+            fixture.state.proxy_service.stop_with_restore().await.unwrap();
+            let restored: serde_json::Value = serde_json::from_slice(&read_current(&fixture.path).unwrap().unwrap()).unwrap();
+            assert_eq!(restored["env"]["ANTHROPIC_BASE_URL"], json!(format!("http://127.0.0.1:{}/a", mock.0)));
+        });
+        mock.1.abort();
+        println!("PASS actual HTTP {disposition}");
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_http() -> Result<(), AppError> {
+    listener_configuration_restart_waits_for_active_failover_commit();
+    modern_http_fallback_preserves_direct_and_obeys_applied_chain();
+    synchronous_disable_and_partial_recovery_never_revive_old_requests();
+    println!("PASS actual modern HTTP routing/fallback/direct isolation/applied chain");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn listener_configuration_restart_waits_for_active_failover_commit() {
+    let fixture = Fixture::claude();
+    fixture.runtime.block_on(async {
+        let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+        global.listen_address = "127.0.0.1".into();
+        global.listen_port = 0;
+        fixture
+            .state
+            .db
+            .update_global_proxy_config(global)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .proxy_service
+            .set_takeover_for_app("claude", true)
+            .await
+            .unwrap();
+        let service = fixture.state.proxy_service.clone();
+        let manager = service.active_failover_manager_for_test().await;
+        let guard = service
+            .lock_active_failover("claude", &manager)
+            .await
+            .unwrap();
+        let mut config = service.get_config().await.unwrap();
+        let before = config.listen_port;
+        assert_ne!(before, 0);
+        config.listen_port = 0;
+        let update_service = service.clone();
+        let update = tokio::spawn(async move { update_service.update_config(&config).await });
+        let changed_while_commit =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    if service.get_config().await.unwrap().listen_port != before {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok();
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        service.stop_with_restore().await.unwrap();
+        assert!(
+            !changed_while_commit,
+            "configuration restart cannot replace listener facts during admitted failover commit"
+        );
+    });
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn pending_operation_refuses_listener_reconfiguration_before_effects() {
+    let fixture = Fixture::claude();
+    fixture.runtime.block_on(async {
+        let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+        global.listen_address = "127.0.0.1".into();
+        global.listen_port = 0;
+        fixture
+            .state
+            .db
+            .update_global_proxy_config(global)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .proxy_service
+            .set_takeover_for_app("claude", true)
+            .await
+            .unwrap();
+        {
+            let _fault = Fault::at("pending");
+            assert!(fixture
+                .state
+                .proxy_service
+                .hot_switch_provider("claude", "b")
+                .await
+                .is_err());
+        }
+        assert!(fixture.pending().is_some());
+        let before = fixture.state.proxy_service.get_config().await.unwrap();
+        let live = read_current(&fixture.path).unwrap();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let manager = fixture
+            .state
+            .proxy_service
+            .active_failover_manager_for_test()
+            .await;
+        let mut next = before.clone();
+        next.listen_port = 0;
+        let result = fixture.state.proxy_service.update_config(&next).await;
+        assert!(
+            result.is_err(),
+            "pending listener reconfiguration must fail before side effects"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .proxy_service
+                .get_config()
+                .await
+                .unwrap()
+                .listen_port,
+            before.listen_port
+        );
+        assert!(manager.same_instance(
+            fixture
+                .state
+                .proxy_service
+                .active_failover_manager_for_test()
+                .await
+                .as_ref()
+        ));
+        assert_eq!(read_current(&fixture.path).unwrap(), live);
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        tokio::task::block_in_place(|| {
+            super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude)
+        })
+        .unwrap();
+        fixture
+            .state
+            .proxy_service
+            .stop_with_restore()
+            .await
+            .unwrap();
+    });
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_reconfiguration() -> Result<(), AppError> {
+    runtime_only_configuration_does_not_apply_provider_files();
+    let admission =
+        std::panic::catch_unwind(pending_operation_refuses_listener_reconfiguration_before_effects);
+    let projection = std::panic::catch_unwind(
+        listener_reconfiguration_reprojects_through_original_mode_contract,
+    );
+    assert!(
+        admission.is_ok() && projection.is_ok(),
+        "listener reconfiguration admission and mode contract"
+    );
+    listener_reconfiguration_preserves_unattached_and_unknown_modes();
+    failed_listener_reprojection_keeps_pending_and_running_listener();
+    listener_bind_failure_can_retry_saved_configuration();
+    listener_reconfiguration_reports_one_app_failure_without_undoing_another();
+    println!("PASS listener reconfiguration pending, four-app contracts/recovery, runtime-only preservation, independent partial results, saved-config/bind retry, detached/unknown modes");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn listener_reconfiguration_reprojects_through_original_mode_contract() {
+    for app in super::controller::PROXY_APPS {
+        let fixture = Fixture::for_app(app.clone());
+        fixture.runtime.block_on(async {
+            let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+            global.listen_address = "127.0.0.1".into();
+            global.listen_port = 0;
+            fixture
+                .state
+                .db
+                .update_global_proxy_config(global)
+                .await
+                .unwrap();
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app(app.as_str(), true)
+                .await
+                .unwrap();
+            let before = super::current::validate_known_mode(
+                &DeviceStore::for_device(),
+                &fixture.state.db.secret_session().read().unwrap(),
+                &app,
+            )
+            .unwrap();
+            let mut config = fixture.state.proxy_service.get_config().await.unwrap();
+            config.listen_port = 0;
+            fixture
+                .state
+                .proxy_service
+                .update_config(&config)
+                .await
+                .unwrap();
+            let after = super::current::validate_known_mode(
+                &DeviceStore::for_device(),
+                &fixture.state.db.secret_session().read().unwrap(),
+                &app,
+            )
+            .unwrap();
+            assert_ne!(
+                before.contract,
+                after.contract,
+                "{} listener URL must commit its new mode contract",
+                app.as_str()
+            );
+            assert!(after.is_proxy() && after.attached);
+            assert_eq!(after.proxy_route.as_deref(), Some("a"));
+            fixture
+                .state
+                .proxy_service
+                .stop_with_restore()
+                .await
+                .unwrap();
+        });
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn listener_reconfiguration_preserves_unattached_and_unknown_modes() {
+    for disposition in ["direct", "detached", "missing", "unknown"] {
+        let fixture = Fixture::claude();
+        fixture.runtime.block_on(async {
+            let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+            global.listen_address = "127.0.0.1".into();
+            global.listen_port = 0;
+            fixture
+                .state
+                .db
+                .update_global_proxy_config(global)
+                .await
+                .unwrap();
+            if disposition == "detached" {
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("claude", true)
+                    .await
+                    .unwrap();
+                fixture
+                    .state
+                    .proxy_service
+                    .stop_with_restore_keep_state()
+                    .await
+                    .unwrap();
+            }
+            fixture.state.proxy_service.start_for_mode().await.unwrap();
+            let store = DeviceStore::for_device();
+            if disposition == "missing" {
+                std::fs::remove_file(store.state_path()).unwrap();
+            } else if disposition == "unknown" {
+                let file = crate::secrets::owned_file::DeviceFile::registered(
+                    crate::secrets::owned_file::DEVICE_STATE_FILE,
+                )
+                .unwrap();
+                let value = json!({"version":1,"future_mode_owner":true,"apps":{}});
+                let bytes = file
+                    .encode(
+                        &fixture.state.db.secret_session().read().unwrap(),
+                        &serde_json::to_vec(&value).unwrap(),
+                    )
+                    .unwrap();
+                std::fs::write(store.state_path(), bytes).unwrap();
+            }
+            let journal = read_current(&store.state_path()).unwrap();
+            let live = read_current(&fixture.path).unwrap();
+            let before = fixture.state.proxy_service.get_config().await.unwrap();
+            let mut next = before.clone();
+            next.listen_port = 0;
+            let result = fixture.state.proxy_service.update_config(&next).await;
+            assert_eq!(
+                result.is_ok(),
+                matches!(disposition, "direct" | "detached"),
+                "{disposition}: {result:?}"
+            );
+            if result.is_err() {
+                assert_eq!(
+                    fixture
+                        .state
+                        .proxy_service
+                        .get_config()
+                        .await
+                        .unwrap()
+                        .listen_port,
+                    before.listen_port
+                );
+            }
+            assert_eq!(read_current(&store.state_path()).unwrap(), journal);
+            assert_eq!(read_current(&fixture.path).unwrap(), live);
+            fixture.state.proxy_service.stop().await.unwrap();
+        });
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn failed_listener_reprojection_keeps_pending_and_running_listener() {
+    for app in super::controller::PROXY_APPS {
+        let fixture = Fixture::for_app(app.clone());
+        fixture.runtime.block_on(async {
+            let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+            global.listen_address = "127.0.0.1".into();
+            global.listen_port = 0;
+            fixture
+                .state
+                .db
+                .update_global_proxy_config(global)
+                .await
+                .unwrap();
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app(app.as_str(), true)
+                .await
+                .unwrap();
+            let mut next = fixture.state.proxy_service.get_config().await.unwrap();
+            next.listen_port = 0;
+            {
+                let _fault = Fault::at(if app == AppType::Codex {
+                    "published:1"
+                } else {
+                    "published:0"
+                });
+                let error = fixture
+                    .state
+                    .proxy_service
+                    .update_config(&next)
+                    .await
+                    .expect_err(&format!(
+                        "{} must interrupt after changed client file publication",
+                        app.as_str()
+                    ));
+                assert!(error.contains(app.as_str()), "{error}");
+            }
+            assert!(fixture.state.proxy_service.is_running().await);
+            assert!(state::pending(
+                &DeviceStore::for_device(),
+                &fixture.state.db.secret_session().read().unwrap(),
+                app.as_str()
+            )
+            .unwrap()
+            .is_some());
+            assert!(crate::mode::operation::AppWrite::begin_mode(
+                &fixture.state.proxy_service,
+                &app
+            )
+            .is_err());
+            tokio::task::block_in_place(|| {
+                super::controller::recover_locked(&fixture.state.proxy_service, &app)
+            })
+            .unwrap();
+            fixture
+                .state
+                .proxy_service
+                .stop_with_restore()
+                .await
+                .unwrap();
+        });
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn listener_reconfiguration_reports_one_app_failure_without_undoing_another() {
+    let fixture = Fixture::claude();
+    let gemini = Provider::with_id(
+        "g".into(),
+        "synthetic-gemini".into(),
+        json!({"env":{"GEMINI_API_KEY":"synthetic-key","GOOGLE_GEMINI_BASE_URL":"https://gemini.example.invalid"},"config":{"model":{"name":"synthetic-model"}}}),
+        None,
+    );
+    fixture.state.db.save_provider("gemini", &gemini).unwrap();
+    fixture
+        .state
+        .db
+        .set_current_provider("gemini", "g")
+        .unwrap();
+    crate::settings::set_current_provider(&AppType::Gemini, Some("g")).unwrap();
+    state::update(
+        &DeviceStore::for_device(),
+        &fixture.state.db.secret_session().read().unwrap(),
+        |live| {
+            live.apps.entry("gemini".into()).or_default().mode = Some(Mode::Direct);
+            Ok(())
+        },
+    )
+    .unwrap();
+    ProviderService::switch(&fixture.state, AppType::Gemini, "g").unwrap();
+    fixture.runtime.block_on(async {
+        let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+        global.listen_address = "127.0.0.1".into();
+        global.listen_port = 0;
+        fixture
+            .state
+            .db
+            .update_global_proxy_config(global)
+            .await
+            .unwrap();
+        for app in ["claude", "gemini"] {
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app(app, true)
+                .await
+                .unwrap();
+        }
+        let gemini_before = super::current::validate_known_mode(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            &AppType::Gemini,
+        )
+        .unwrap();
+        let claude_before = read_current(&fixture.path).unwrap().unwrap();
+        crate::config_file_io::write_durable(&fixture.path, b"{ invalid synthetic JSON").unwrap();
+        let mut config = fixture.state.proxy_service.get_config().await.unwrap();
+        config.listen_port = 0;
+        let error = fixture
+            .state
+            .proxy_service
+            .update_config(&config)
+            .await
+            .unwrap_err();
+        assert!(error.contains("claude"), "{error}");
+        assert!(fixture.state.proxy_service.is_running().await);
+        let gemini_after = super::current::validate_known_mode(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            &AppType::Gemini,
+        )
+        .unwrap();
+        assert_ne!(gemini_before.contract, gemini_after.contract);
+        assert!(gemini_after.attached);
+        assert_eq!(
+            read_current(&fixture.path).unwrap().unwrap(),
+            b"{ invalid synthetic JSON"
+        );
+        assert!(state::pending(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            "gemini"
+        )
+        .unwrap()
+        .is_none());
+        crate::config_file_io::write_durable(&fixture.path, &claude_before).unwrap();
+        let old_contract = super::current::validate_known_mode(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            &AppType::Claude,
+        )
+        .unwrap()
+        .contract;
+        let committed = fixture.state.proxy_service.get_config().await.unwrap();
+        fixture
+            .state
+            .proxy_service
+            .update_config(&committed)
+            .await
+            .unwrap();
+        let repaired = super::current::validate_known_mode(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            &AppType::Claude,
+        )
+        .unwrap();
+        assert_ne!(
+            old_contract, repaired.contract,
+            "retry of saved configuration must repair the uncommitted app projection"
+        );
+        fixture
+            .state
+            .proxy_service
+            .stop_with_restore()
+            .await
+            .unwrap();
+    });
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn listener_bind_failure_can_retry_saved_configuration() {
+    let fixture = Fixture::claude();
+    fixture.runtime.block_on(async {
+        let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+        global.listen_address = "127.0.0.1".into();
+        global.listen_port = 0;
+        fixture
+            .state
+            .db
+            .update_global_proxy_config(global)
+            .await
+            .unwrap();
+        fixture
+            .state
+            .proxy_service
+            .set_takeover_for_app("claude", true)
+            .await
+            .unwrap();
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut next = fixture.state.proxy_service.get_config().await.unwrap();
+        next.listen_port = occupied.local_addr().unwrap().port();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let live = read_current(&fixture.path).unwrap();
+        assert!(fixture
+            .state
+            .proxy_service
+            .update_config(&next)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        assert_eq!(read_current(&fixture.path).unwrap(), live);
+        assert!(!fixture.state.proxy_service.is_running().await);
+        drop(occupied);
+        fixture
+            .state
+            .proxy_service
+            .update_config(&next)
+            .await
+            .unwrap();
+        assert!(
+            fixture.state.proxy_service.is_running().await,
+            "same saved configuration retry must actually start the replacement listener"
+        );
+        assert_ne!(read_current(&fixture.path).unwrap(), live);
+        fixture
+            .state
+            .proxy_service
+            .stop_with_restore()
+            .await
+            .unwrap();
+    });
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn runtime_only_configuration_does_not_apply_provider_files() {
+    for app in super::controller::PROXY_APPS {
+        let fixture = Fixture::for_app(app.clone());
+        fixture.runtime.block_on(async {
+            let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+            global.listen_address = "127.0.0.1".into();
+            global.listen_port = 0;
+            fixture
+                .state
+                .db
+                .update_global_proxy_config(global)
+                .await
+                .unwrap();
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app(app.as_str(), true)
+                .await
+                .unwrap();
+            let original = read_current(&fixture.path).unwrap().unwrap();
+            crate::config_file_io::write_durable(
+                &fixture.path,
+                b"unrelated external edit [ { invalid",
+            )
+            .unwrap();
+            let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+            let mut config = fixture.state.proxy_service.get_config().await.unwrap();
+            config.enable_logging = !config.enable_logging;
+            fixture
+                .state
+                .proxy_service
+                .update_config(&config)
+                .await
+                .expect("runtime-only preference cannot imply provider application");
+            assert_eq!(
+                read_current(&fixture.path).unwrap().unwrap(),
+                b"unrelated external edit [ { invalid"
+            );
+            assert_eq!(
+                std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+                journal
+            );
+            crate::config_file_io::write_durable(&fixture.path, &original).unwrap();
+            fixture
+                .state
+                .proxy_service
+                .stop_with_restore()
+                .await
+                .unwrap();
+        });
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn synchronous_disable_and_partial_recovery_never_revive_old_requests() {
+    for app in super::controller::PROXY_APPS {
+        for partial in [false, true] {
+            let fixture = Fixture::for_app(app.clone());
+            fixture
+                .runtime
+                .block_on(
+                    fixture
+                        .state
+                        .proxy_service
+                        .set_takeover_for_app(app.as_str(), true),
+                )
+                .unwrap();
+            let manager = fixture.runtime.block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .active_failover_manager_for_test(),
+            );
+            let old = fixture
+                .state
+                .proxy_service
+                .request_identity(app.as_str())
+                .unwrap();
+            if partial {
+                {
+                    let _fault = Fault::at(if app == AppType::Codex {
+                        "published:1"
+                    } else {
+                        "published:0"
+                    });
+                    assert!(fixture
+                        .state
+                        .proxy_service
+                        .disable_takeover_for_app_sync(&app)
+                        .is_err());
+                }
+                assert!(!fixture
+                    .state
+                    .proxy_service
+                    .request_identity_is_current(app.as_str(), Some(&old))
+                    .unwrap());
+                super::controller::recover_locked(&fixture.state.proxy_service, &app).unwrap();
+            } else {
+                fixture
+                    .state
+                    .proxy_service
+                    .disable_takeover_for_app_sync(&app)
+                    .unwrap();
+            }
+            fixture
+                .runtime
+                .block_on(
+                    fixture
+                        .state
+                        .proxy_service
+                        .set_takeover_for_app(app.as_str(), true),
+                )
+                .unwrap();
+            fixture
+                .state
+                .db
+                .set_proxy_flags_sync(app.as_str(), true, true)
+                .unwrap();
+            assert!(!fixture
+                .runtime
+                .block_on(manager.try_switch(
+                    #[cfg(feature = "gui")]
+                    None,
+                    app.as_str(),
+                    "b",
+                    "b",
+                    "a",
+                    Some(&old)
+                ))
+                .unwrap());
+            assert_eq!(
+                crate::proxy::application_routing::current_provider_id_checked(
+                    &fixture.state.db,
+                    app.as_str()
+                )
+                .unwrap()
+                .as_deref(),
+                Some("a")
+            );
+            let fresh = fixture
+                .state
+                .proxy_service
+                .request_identity(app.as_str())
+                .unwrap();
+            assert!(fixture
+                .runtime
+                .block_on(manager.try_switch(
+                    #[cfg(feature = "gui")]
+                    None,
+                    app.as_str(),
+                    "b",
+                    "b",
+                    "a",
+                    Some(&fresh)
+                ))
+                .unwrap());
+            fixture
+                .runtime
+                .block_on(fixture.state.proxy_service.stop_with_restore())
+                .unwrap();
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn routing_read_model_exposes_owner_facts_without_recovery_or_secrets() {
+    let legacy = Fixture::for_app_with_schema(AppType::Claude, false);
+    assert!(super::current::read_view(&legacy.state.proxy_service, &AppType::Claude).is_none());
+    drop(legacy);
+    let fixture = Fixture::claude();
+    let direct = super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    assert_eq!(direct.status, "ready");
+    assert_eq!(direct.mode, Some(Mode::Direct));
+    assert_eq!(direct.attached, Some(false));
+    assert_eq!(direct.current_provider_id.as_deref(), Some("a"));
+    assert!(direct.can_write);
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .hot_switch_provider("claude", "b"),
+        )
+        .unwrap();
+    let proxy = super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    assert_eq!(proxy.current_provider_id.as_deref(), Some("b"));
+    assert_eq!(proxy.direct_provider_id.as_deref(), Some("a"));
+    assert_eq!(proxy.attached, Some(true));
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore_keep_state())
+        .unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.start_for_mode())
+        .unwrap();
+    fixture
+        .state
+        .db
+        .set_proxy_flags_sync("claude", true, true)
+        .unwrap();
+    let detached =
+        super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    assert_eq!(detached.mode, Some(Mode::Proxy));
+    assert_eq!(
+        detached.attached,
+        Some(false),
+        "compatibility flag plus listener is not attachment"
+    );
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.recover_from_crash())
+        .unwrap();
+    {
+        let _fault = Fault::at("published:0");
+        assert!(fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .hot_switch_provider("claude", "a")
+            )
+            .is_err());
+    }
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let live = read_current(&fixture.path).unwrap();
+    for _ in 0..2 {
+        let pending =
+            super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+        assert_eq!(pending.status, "pending");
+        assert!(!pending.can_write);
+        assert_eq!(pending.publication_started, Some(true));
+        assert_eq!(pending.mode, None);
+        assert_eq!(pending.current_provider_id, None);
+        let public = serde_json::to_string(&pending).unwrap();
+        for secret in [
+            "synthetic-key",
+            "auth",
+            "staged",
+            "files",
+            fixture.path.to_str().unwrap(),
+        ] {
+            assert!(
+                !public.contains(secret),
+                "read DTO must not contain {secret}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        assert_eq!(read_current(&fixture.path).unwrap(), live);
+    }
+    assert!(fixture.pending().is_some());
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore())
+        .unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn routing_read_model_unknown_does_not_infer_direct_from_flags() {
+    for missing in [false, true] {
+        let fixture = Fixture::claude();
+        let path = DeviceStore::for_device().state_path();
+        if missing {
+            std::fs::remove_file(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"malformed synthetic state").unwrap();
+        }
+        let before = read_current(&path).unwrap();
+        let view =
+            super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+        assert_eq!(view.status, "unknown");
+        assert_eq!(view.mode, None);
+        assert_eq!(view.attached, None);
+        assert!(!view.can_write);
+        assert_eq!(read_current(&path).unwrap(), before);
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_read_model() -> Result<(), AppError> {
+    routing_read_model_exposes_owner_facts_without_recovery_or_secrets();
+    routing_read_model_unknown_does_not_infer_direct_from_flags();
+    workspace_metadata_actions_cannot_mutate_through_pending();
+    workspace_metadata_actions_preserve_ready_and_legacy_admission();
+    workspace_metadata_actions_refuse_unknown_route();
+    workspace_metadata_admission_preserves_independent_pi_owner();
+    println!("PASS routing owner read model is non-secret, read-only, fail-closed and preserves source17");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn workspace_metadata_actions_cannot_mutate_through_pending() {
+    let fixture = Fixture::claude();
+    crate::services::order_profiles::save(&fixture.state.db, "claude", "Saved", &["a".into()])
+        .unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.db.update_provider_health(
+            "a",
+            "claude",
+            false,
+            Some("synthetic failure".into()),
+        ))
+        .unwrap();
+    ProviderService::update_sort_order(
+        &fixture.state,
+        AppType::Claude,
+        vec![
+            crate::services::provider::ProviderSortUpdate {
+                id: "a".into(),
+                sort_index: 0,
+            },
+            crate::services::provider::ProviderSortUpdate {
+                id: "b".into(),
+                sort_index: 1,
+            },
+        ],
+    )
+    .unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert!(fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("claude", true)
+            )
+            .is_err());
+    }
+    assert!(
+        fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_failover_for_app("claude", false)
+            )
+            .is_err(),
+        "disabling failover must respect pending admission"
+    );
+    let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    let mut created = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    created.id = "new-provider".into();
+    let guarded = [
+        (
+            "sort",
+            ProviderService::update_sort_order(
+                &fixture.state,
+                AppType::Claude,
+                vec![crate::services::provider::ProviderSortUpdate {
+                    id: "a".into(),
+                    sort_index: 99,
+                }],
+            )
+            .is_err(),
+        ),
+        (
+            "add",
+            ProviderService::add(&fixture.state, AppType::Claude, created, false).is_err(),
+        ),
+        (
+            "duplicate",
+            ProviderService::duplicate(&fixture.state, AppType::Claude, "a").is_err(),
+        ),
+        (
+            "delete",
+            ProviderService::delete(&fixture.state, AppType::Claude, "b").is_err(),
+        ),
+    ];
+    assert!(
+        guarded.iter().all(|(_, refused)| *refused),
+        "provider write admission: {guarded:?}"
+    );
+    use crate::services::application_selection as selection;
+    assert!(selection::save_order_profile(
+        &fixture.state,
+        &AppType::Claude,
+        "Another",
+        &["b".into()]
+    )
+    .is_err());
+    assert!(
+        selection::rename_order_profile(&fixture.state, &AppType::Claude, "Saved", "Renamed")
+            .is_err()
+    );
+    assert!(selection::remove_order_profile(&fixture.state, &AppType::Claude, "Saved").is_err());
+    assert!(selection::import_order_profiles(
+        &fixture.state,
+        &AppType::Claude,
+        vec![crate::services::order_profiles::OrderProfile {
+            name: "Incoming".into(),
+            provider_ids: vec!["b".into()]
+        }]
+    )
+    .is_err());
+    assert!(fixture
+        .runtime
+        .block_on(selection::set_tier_blocked(
+            &fixture.state,
+            &AppType::Claude,
+            "a",
+            true
+        ))
+        .is_err());
+    assert!(fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .reset_routing_errors("a", "claude")
+        )
+        .is_err());
+    assert_eq!(
+        crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+        before
+    );
+    assert!(crate::services::order_profiles::get(&fixture.state.db, "claude").is_ok());
+    assert!(crate::services::order_profiles::export_json(&fixture.state.db, "claude").is_ok());
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore())
+        .unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn workspace_metadata_actions_preserve_ready_and_legacy_admission() {
+    for modern in [true, false] {
+        let fixture = Fixture::for_app_with_schema(AppType::Claude, modern);
+        use crate::services::application_selection as selection;
+        selection::save_order_profile(&fixture.state, &AppType::Claude, "Saved", &["a".into()])
+            .unwrap();
+        selection::rename_order_profile(&fixture.state, &AppType::Claude, "Saved", "Renamed")
+            .unwrap();
+        selection::remove_order_profile(&fixture.state, &AppType::Claude, "Renamed").unwrap();
+        selection::import_order_profiles(
+            &fixture.state,
+            &AppType::Claude,
+            vec![crate::services::order_profiles::OrderProfile {
+                name: "Incoming".into(),
+                provider_ids: vec!["b".into()],
+            }],
+        )
+        .unwrap();
+        fixture
+            .runtime
+            .block_on(selection::set_tier_blocked(
+                &fixture.state,
+                &AppType::Claude,
+                "b",
+                true,
+            ))
+            .unwrap();
+        fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .reset_routing_errors("b", "claude"),
+            )
+            .unwrap();
+        ProviderService::update_sort_order(
+            &fixture.state,
+            AppType::Claude,
+            vec![crate::services::provider::ProviderSortUpdate {
+                id: "a".into(),
+                sort_index: 99,
+            }],
+        )
+        .unwrap();
+        let mut created = fixture
+            .state
+            .db
+            .get_provider_by_id("b", "claude")
+            .unwrap()
+            .unwrap();
+        created.id = "new-provider".into();
+        ProviderService::add(&fixture.state, AppType::Claude, created, false).unwrap();
+        ProviderService::duplicate(&fixture.state, AppType::Claude, "a").unwrap();
+        ProviderService::delete(&fixture.state, AppType::Claude, "new-provider").unwrap();
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn workspace_metadata_actions_refuse_unknown_route() {
+    let fixture = Fixture::claude();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    state::update(
+        &DeviceStore::for_device(),
+        &fixture.state.db.secret_session().read().unwrap(),
+        |live| {
+            live.apps.get_mut("claude").unwrap().proxy_route = None;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(
+        !super::current::read_view(&fixture.state.proxy_service, &AppType::Claude)
+            .unwrap()
+            .can_write
+    );
+    let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    assert!(crate::services::application_selection::save_order_profile(
+        &fixture.state,
+        &AppType::Claude,
+        "Unknown",
+        &["a".into()]
+    )
+    .is_err());
+    assert_eq!(
+        crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+        before
+    );
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop())
+        .unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn workspace_metadata_admission_preserves_independent_pi_owner() {
+    let fixture = Fixture::claude();
+    {
+        let _fault = Fault::at("pending");
+        assert!(fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("claude", true)
+            )
+            .is_err());
+    }
+    let provider = crate::provider::Provider::with_id(
+        "synthetic-pi".into(),
+        "Synthetic Pi".into(),
+        json!({
+            "name": "Synthetic Pi", "baseUrl": "https://synthetic.invalid/v1", "apiKey": "synthetic-key", "api": "openai-completions", "models": [{"id":"synthetic-model"}]
+        }),
+        None,
+    );
+    ProviderService::add(&fixture.state, AppType::Pi, provider, false).unwrap();
+    let duplicate =
+        ProviderService::duplicate(&fixture.state, AppType::Pi, "synthetic-pi").unwrap();
+    assert_eq!(duplicate.id, "synthetic-pi-copy");
+    assert!(
+        fixture.pending().is_some(),
+        "independent writes must not recover Claude"
+    );
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore())
+        .unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn modern_legacy_common_snippet_writes_are_frozen() {
+    let fixture = Fixture::claude();
+    fixture
+        .state
+        .db
+        .set_config_snippet("claude", Some("{\"includeCoAuthoredBy\":false}".into()))
+        .unwrap();
+    let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    let live = read_current(&fixture.path).unwrap();
+    let generic = crate::services::config::ConfigService::set_common_config_snippet(
+        &fixture.state,
+        "claude",
+        "{\"includeCoAuthoredBy\":true}".into(),
+    );
+    let legacy = crate::services::config::ConfigService::set_claude_common_config_snippet(
+        &fixture.state,
+        "".into(),
+    );
+    assert!(
+        generic.is_err() && legacy.is_err(),
+        "modern snippet writes: general={generic:?}, legacy={legacy:?}"
+    );
+    assert_eq!(
+        crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(read_current(&fixture.path).unwrap(), live);
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_legacy_snippet_freeze() -> Result<(), AppError> {
+    modern_legacy_common_snippet_writes_are_frozen();
+    modern_manual_import_does_not_mutate_frozen_snippet();
+    legacy_snippet_freeze_preserves_reads_recovery_and_source17();
+    println!("PASS modern legacy snippet mutation is frozen");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn legacy_snippet_freeze_preserves_reads_recovery_and_source17() {
+    use crate::services::config::ConfigService;
+    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        for modern in [false, true] {
+            let fixture = Fixture::for_app_with_schema(app.clone(), modern);
+            let original = if app == AppType::Codex {
+                "[tui]\nnotifications = true\n"
+            } else {
+                "{\"safe_shared_field\":true}"
+            };
+            fixture
+                .state
+                .db
+                .set_config_snippet(app.as_str(), Some(original.into()))
+                .unwrap();
+            if modern {
+                {
+                    let _fault = Fault::at("pending");
+                    assert!(fixture
+                        .runtime
+                        .block_on(
+                            fixture
+                                .state
+                                .proxy_service
+                                .set_takeover_for_app(app.as_str(), true)
+                        )
+                        .is_err());
+                }
+                let before =
+                    crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap())
+                        .unwrap();
+                let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+                let live = read_current(&fixture.path).unwrap();
+                for value in ["", original] {
+                    assert_eq!(
+                        ConfigService::set_common_config_snippet(
+                            &fixture.state,
+                            app.as_str(),
+                            value.into()
+                        )
+                        .unwrap_err(),
+                        "mode.legacy_common_config_frozen"
+                    );
+                }
+                let read = super::current::read_view(&fixture.state.proxy_service, &app).unwrap();
+                assert!(!read.legacy_common_config_writable);
+                assert_eq!(
+                    fixture
+                        .state
+                        .db
+                        .get_config_snippet(app.as_str())
+                        .unwrap()
+                        .as_deref(),
+                    Some(original)
+                );
+                assert_eq!(
+                    crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap())
+                        .unwrap(),
+                    before
+                );
+                assert_eq!(
+                    std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+                    journal
+                );
+                assert_eq!(read_current(&fixture.path).unwrap(), live);
+                super::controller::recover_locked(&fixture.state.proxy_service, &app).unwrap();
+                fixture
+                    .runtime
+                    .block_on(fixture.state.proxy_service.stop_with_restore())
+                    .unwrap();
+                assert_eq!(
+                    fixture
+                        .state
+                        .db
+                        .get_config_snippet(app.as_str())
+                        .unwrap()
+                        .as_deref(),
+                    Some(original)
+                );
+            } else {
+                ConfigService::set_common_config_snippet(
+                    &fixture.state,
+                    app.as_str(),
+                    original.into(),
+                )
+                .unwrap();
+                assert_eq!(
+                    fixture
+                        .state
+                        .db
+                        .get_config_snippet(app.as_str())
+                        .unwrap()
+                        .as_deref(),
+                    Some(original)
+                );
+                ConfigService::set_common_config_snippet(&fixture.state, app.as_str(), "".into())
+                    .unwrap();
+                assert!(fixture
+                    .state
+                    .db
+                    .get_config_snippet(app.as_str())
+                    .unwrap()
+                    .is_none());
+                if app == AppType::Claude {
+                    ConfigService::set_claude_common_config_snippet(
+                        &fixture.state,
+                        original.into(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fixture
+                            .state
+                            .db
+                            .get_config_snippet(app.as_str())
+                            .unwrap()
+                            .as_deref(),
+                        Some(original)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn modern_manual_import_does_not_mutate_frozen_snippet() {
+    for (modern, existing) in [(true, false), (true, true), (false, false), (false, true)] {
+        let fixture = Fixture::for_app_with_schema(AppType::Claude, modern);
+        let mut imported = fixture
+            .state
+            .db
+            .get_provider_by_id("a", "claude")
+            .unwrap()
+            .unwrap();
+        imported.settings_config["unowned"] = json!({"keep":true});
+        fixture.state.db.save_provider("claude", &imported).unwrap();
+        if existing {
+            fixture
+                .state
+                .db
+                .set_config_snippet("claude", Some("{\"unowned\":{\"keep\":true}}".into()))
+                .unwrap();
+        }
+        let before =
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+        ProviderService::finish_import_common_config(&fixture.state, AppType::Claude).unwrap();
+        let after =
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+        if modern {
+            assert_eq!(
+                after, before,
+                "manual import snippet side effects, existing={existing}"
+            );
+        } else {
+            assert_ne!(
+                after, before,
+                "source17 import retains extraction/migration"
+            );
+            assert!(fixture
+                .state
+                .db
+                .get_config_snippet("claude")
+                .unwrap()
+                .is_some());
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn legacy_manual_alias_respects_pending_admission() {
+    let fixture = Fixture::claude();
+    fixture
+        .state
+        .db
+        .set_setting("auto_mode_enabled_claude", "true")
+        .unwrap();
+    fixture
+        .state
+        .db
+        .set_setting("easy_mode_manual_order_claude", "[\"b\",\"a\"]")
+        .unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert!(fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("claude", true)
+            )
+            .is_err());
+    }
+    let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let result = fixture.runtime.block_on(
+        crate::services::application_selection::initialize_manual_routing(
+            &fixture.state,
+            &AppType::Claude,
+        ),
+    );
+    let after = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    assert!(
+        result.is_err() && after == before,
+        "manual alias={result:?}, changed_database={}",
+        after != before
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    fixture
+        .runtime
+        .block_on(
+            crate::services::application_selection::initialize_manual_routing(
+                &fixture.state,
+                &AppType::Pi,
+            ),
+        )
+        .unwrap();
+    assert!(
+        fixture.pending().is_some(),
+        "independent app migration must not recover Claude"
+    );
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore())
+        .unwrap();
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_manual_alias_admission() -> Result<(), AppError> {
+    legacy_manual_alias_respects_pending_admission();
+    legacy_manual_alias_preserves_ready_and_legacy_behavior();
+    println!("PASS legacy manual-mode alias respects existing app admission");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn legacy_manual_alias_preserves_ready_and_legacy_behavior() {
+    use crate::services::application_selection::initialize_manual_routing;
+    for modern in [false, true] {
+        let fixture = Fixture::for_app_with_schema(AppType::Claude, modern);
+        fixture
+            .state
+            .db
+            .set_setting("easy_mode_manual_order_claude", "[\"b\",\"a\"]")
+            .unwrap();
+        fixture
+            .runtime
+            .block_on(initialize_manual_routing(&fixture.state, &AppType::Claude))
+            .unwrap();
+        assert!(fixture
+            .state
+            .db
+            .get_setting("easy_mode_manual_order_claude")
+            .unwrap()
+            .is_none());
+        assert!(fixture
+            .state
+            .db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_some());
+        let before =
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+        fixture
+            .runtime
+            .block_on(initialize_manual_routing(&fixture.state, &AppType::Claude))
+            .unwrap();
+        assert_eq!(
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+            before
+        );
+        if modern {
+            std::fs::write(
+                DeviceStore::for_device().state_path(),
+                b"malformed synthetic state",
+            )
+            .unwrap();
+            assert!(fixture
+                .runtime
+                .block_on(initialize_manual_routing(&fixture.state, &AppType::Claude))
+                .is_err());
+            assert_eq!(
+                crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+                before
+            );
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn modern_service_construction_does_not_migrate_pending_routing() {
+    let fixture = Fixture::claude();
+    fixture
+        .state
+        .db
+        .set_setting("auto_mode_enabled_claude", "true")
+        .unwrap();
+    fixture
+        .state
+        .db
+        .set_setting("easy_mode_manual_order_claude", "[\"b\",\"a\"]")
+        .unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert!(fixture
+            .runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("claude", true)
+            )
+            .is_err());
+    }
+    let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let live = read_current(&fixture.path).unwrap();
+    let rebuilt = AppState::new(fixture.state.db.clone()).unwrap();
+    assert_eq!(
+        crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap(),
+        before,
+        "modern construction must not migrate routing during pending"
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    assert_eq!(read_current(&fixture.path).unwrap(), live);
+    assert!(!fixture.runtime.block_on(rebuilt.proxy_service.is_running()));
+    assert!(fixture.pending().is_some());
+    drop(rebuilt);
+    super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore())
+        .unwrap();
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_constructor_admission() -> Result<(), AppError> {
+    modern_service_construction_does_not_migrate_pending_routing();
+    service_constructor_only_migrates_admitted_legacy_schema();
+    println!("PASS modern service construction is passive and source17 retains legacy migration");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn service_constructor_only_migrates_admitted_legacy_schema() {
+    for version in [17, 18, 20, 21] {
+        let fixture = Fixture::for_app_with_schema(AppType::Claude, version == 20);
+        fixture
+            .state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        fixture
+            .state
+            .db
+            .set_setting("auto_mode_enabled_claude", "true")
+            .unwrap();
+        fixture
+            .state
+            .db
+            .set_setting("easy_mode_manual_order_claude", "[\"b\",\"a\"]")
+            .unwrap();
+        let before =
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let rebuilt = AppState::new(fixture.state.db.clone()).unwrap();
+        let after =
+            crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
+        if version == 17 {
+            assert_ne!(after, before);
+            assert!(fixture
+                .state
+                .db
+                .get_setting("auto_mode_enabled_claude")
+                .unwrap()
+                .is_none());
+            assert!(fixture
+                .state
+                .db
+                .get_setting("application_priority_claude")
+                .unwrap()
+                .is_some());
+        } else {
+            assert_eq!(after, before, "constructor must not write schema {version}");
+        }
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        assert!(!fixture.runtime.block_on(rebuilt.proxy_service.is_running()));
+    }
 }

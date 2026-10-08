@@ -389,7 +389,7 @@ mod tests {
         state.db.update_global_proxy_config(config).await.unwrap();
         state.proxy_service.start().await.unwrap();
         let mirror_during_commit = std::cell::Cell::new(false);
-        let error = crate::services::application_selection::select_with_commit(
+        let error = crate::services::application_selection::select_legacy_with_commit(
             &state,
             &AppType::Claude,
             &crate::services::application_selection::TierSelection {

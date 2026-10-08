@@ -54,6 +54,7 @@
     "invalidJson": "JSON格式错误"
   },
   "commonConfig": {
+    "frozenHint": "旧公共片段当前为只读，已保存内容仍可查看，并保留用于兼容与恢复。",
     "guideTitle": "什么是通用配置片段？",
     "guidePurpose": "用来在不同供应商之间共享插件、环境变量等非敏感配置。切换供应商时不会丢失这些设置。",
     "guideUsage": "用法：① 点击「从编辑内容提取」保存通用部分  ② 新建供应商时勾选「应用通用配置」",
@@ -3908,6 +3909,14 @@
     }
   },
   "applications": {
+    "routingModeDirect": "直连",
+    "routingModeProxy": "代理 · 已接管",
+    "routingModeDetached": "代理 · 未接管",
+    "operationNeedsVerification": "此应用的状态需要核验，暂时不能应用更改。",
+    "operationPublicationStarted": "配置发布可能已经开始。再次应用前，请先核验应用状态。",
+    "lastSuccessfulRead": "上次成功读取：{{time}}",
+    "recheckOperation": "重新核验状态",
+    "routingModeUnknown": "未知",
     "currentConfiguration": "当前配置",
     "enabledConfigurations": "已启用配置",
     "currentDescription": "已写入应用的配置，可在下方切换。",
