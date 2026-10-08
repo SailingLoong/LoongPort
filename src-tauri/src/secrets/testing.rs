@@ -63,18 +63,33 @@ pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
 /// Select a physical isolated home while holding the test's serial guard.
 /// Restore the previous override before deleting the temporary directory.
 pub(crate) struct TestHome {
-    directory: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
+    settings: crate::settings::TestSettingsScope,
+    directory: tempfile::TempDir,
 }
 
 impl TestHome {
     pub(crate) fn new() -> std::io::Result<Self> {
-        let directory = tempdir()?;
+        Self::from_directory(tempdir()?)
+    }
+
+    pub(crate) fn from_directory(directory: tempfile::TempDir) -> std::io::Result<Self> {
         let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
+        let settings = match crate::settings::TestSettingsScope::enter() {
+            Ok(settings) => settings,
+            Err(error) => {
+                match &previous {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+                return Err(std::io::Error::other(error.to_string()));
+            }
+        };
         Ok(Self {
-            directory,
             previous,
+            settings,
+            directory,
         })
     }
 
@@ -89,5 +104,6 @@ impl Drop for TestHome {
             Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
         }
+        self.settings.restore();
     }
 }

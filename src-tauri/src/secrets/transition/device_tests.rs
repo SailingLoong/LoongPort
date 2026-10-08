@@ -2,7 +2,6 @@
 #[serial_test::serial]
 fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
     use crate::secrets::owned_file::DeviceFile;
-    const CANARY: &[u8] = b"device-transition-canary\0\xff";
     for separate in [false, true] {
         let fixture = Fixture::with_separate_data_root(separate);
         let device_root = fixture._temporary.path().join(crate::APP_DIR_NAME);
@@ -18,8 +17,12 @@ fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
             format!("backups/live-first-write/{}.source", "a".repeat(64)),
         ];
         for name in &names {
-            let file = DeviceFile::registered(name).unwrap();
-            write_durable(&device_root.join(name), &file.encode(&old, CANARY).unwrap()).unwrap();
+            let file = DeviceFile::registered(name.as_str()).unwrap();
+            write_durable(
+                &device_root.join(name.as_str()),
+                &file.encode(&old, device_plaintext(name)).unwrap(),
+            )
+            .unwrap();
         }
         rotate(
             &fixture.db,
@@ -30,17 +33,17 @@ fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
         .unwrap();
         let next = fixture.db.secrets.read().unwrap();
         for name in &names {
-            let file = DeviceFile::registered(name).unwrap();
-            let bytes = std::fs::read(device_root.join(name)).unwrap();
+            let file = DeviceFile::registered(name.as_str()).unwrap();
+            let bytes = std::fs::read(device_root.join(name.as_str())).unwrap();
             assert_eq!(
                 &*file
                     .decode(&next, &bytes)
                     .expect("device ciphertext must use the committed generation"),
-                CANARY
+                device_plaintext(name)
             );
             assert!(file.decode(&old, &bytes).is_err());
             if separate {
-                assert!(!fixture.root.join(name).exists());
+                assert!(!fixture.root.join(name.as_str()).exists());
             }
         }
         assert!(fixture
@@ -53,6 +56,16 @@ fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
 
 const DEVICE_CANARY: &[u8] = b"device-transition-canary\0\xff";
 const DEVICE_PASSWORD: &str = "next recovery password";
+
+fn device_plaintext(name: &str) -> &'static [u8] {
+    if name == crate::secrets::owned_file::DEVICE_STATE_FILE {
+        // A completed mode is an admissible source for a new key transition.
+        // Keep a canary in a real field so re-encryption still proves exact bytes.
+        br#"{"version":1,"apps":{"codex":{"mode":"direct","proxy_route":"device-transition-canary"}}}"#
+    } else {
+        DEVICE_CANARY
+    }
+}
 
 fn device_names() -> Vec<String> {
     vec![
@@ -70,11 +83,11 @@ fn seed_device(fixture: &Fixture) -> (PathBuf, VaultContext, Vec<Vec<u8>>) {
     let bytes = device_names()
         .iter()
         .map(|name| {
-            let bytes = crate::secrets::owned_file::DeviceFile::registered(name)
+            let bytes = crate::secrets::owned_file::DeviceFile::registered(name.as_str())
                 .unwrap()
-                .encode(&old, DEVICE_CANARY)
+                .encode(&old, device_plaintext(name))
                 .unwrap();
-            write_durable(&root.join(name), &bytes).unwrap();
+            write_durable(&root.join(name.as_str()), &bytes).unwrap();
             bytes
         })
         .collect();
@@ -175,12 +188,13 @@ fn device_readback_precedes_retirement() {
             let next = VaultContext::from_password(saved.metadata, DEVICE_PASSWORD).unwrap();
             let device = crate::config::get_home_dir().join(crate::APP_DIR_NAME);
             for name in device_names() {
-                let file = crate::secrets::owned_file::DeviceFile::registered(&name).unwrap();
+                let file =
+                    crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
                 assert_eq!(
                     &*file
-                        .decode(&next, &std::fs::read(device.join(name)).unwrap())
+                        .decode(&next, &std::fs::read(device.join(name.as_str())).unwrap())
                         .expect("retirement must follow device readback"),
-                    DEVICE_CANARY
+                    device_plaintext(name.as_str())
                 );
             }
             self.inner.remove(v, k)
@@ -234,7 +248,7 @@ fn device_root_binding_cannot_be_retargeted() {
         b"other-home-canary"
     );
     for (name, bytes) in device_names().iter().zip(original) {
-        assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+        assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
     }
     assert_old_key(&fixture, &old);
 }
@@ -250,7 +264,7 @@ fn same_key_install_preserves_device_ciphertext() {
             .iter()
             .map(|name| {
                 use std::os::unix::fs::MetadataExt;
-                let metadata = std::fs::metadata(root.join(name)).unwrap();
+                let metadata = std::fs::metadata(root.join(name.as_str())).unwrap();
                 (metadata.dev(), metadata.ino())
             })
             .collect::<Vec<_>>();
@@ -279,7 +293,7 @@ fn same_key_install_preserves_device_ciphertext() {
         #[cfg(unix)]
         for (name, identity) in device_names().iter().zip(identities) {
             use std::os::unix::fs::MetadataExt;
-            let metadata = std::fs::metadata(root.join(name)).unwrap();
+            let metadata = std::fs::metadata(root.join(name.as_str())).unwrap();
             assert_eq!(
                 (metadata.dev(), metadata.ino()),
                 identity,
@@ -289,13 +303,13 @@ fn same_key_install_preserves_device_ciphertext() {
         let next = fixture.db.secrets.read().unwrap();
         assert_eq!(next.metadata().key_id, old.metadata().key_id);
         for (name, bytes) in device_names().iter().zip(original) {
-            assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+            assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
             assert_eq!(
-                &*crate::secrets::owned_file::DeviceFile::registered(name)
+                &*crate::secrets::owned_file::DeviceFile::registered(name.as_str())
                     .unwrap()
                     .decode(&next, &bytes)
                     .unwrap(),
-                DEVICE_CANARY
+                device_plaintext(name.as_str())
             );
         }
     }
@@ -353,7 +367,7 @@ fn device_stage_tamper_blocks_all_publication() {
             metadata
         );
         for (name, bytes) in device_names().iter().zip(original) {
-            assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+            assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
         }
         assert!(fixture
             .store
@@ -393,7 +407,7 @@ fn device_transition_recovers_at_every_checkpoint() {
                     .unwrap()
                     .is_some());
                 for (name, bytes) in device_names().iter().zip(original) {
-                    assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+                    assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
                 }
                 continue;
             }
@@ -404,12 +418,16 @@ fn device_transition_recovers_at_every_checkpoint() {
                     .unwrap();
             let next = recovered.read().unwrap();
             for name in device_names() {
-                let file = crate::secrets::owned_file::DeviceFile::registered(&name).unwrap();
-                let bytes = std::fs::read(root.join(&name)).unwrap();
-                assert_eq!(&*file.decode(&next, &bytes).unwrap(), DEVICE_CANARY);
+                let file =
+                    crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
+                let bytes = std::fs::read(root.join(name.as_str())).unwrap();
+                assert_eq!(
+                    &*file.decode(&next, &bytes).unwrap(),
+                    device_plaintext(name.as_str())
+                );
                 assert!(file.decode(&old, &bytes).is_err());
                 if separate {
-                    assert!(!fixture.root.join(name).exists());
+                    assert!(!fixture.root.join(name.as_str()).exists());
                 }
             }
             assert!(!fixture.root.join(INTENT).exists());
@@ -516,13 +534,13 @@ fn rewrap_leaves_device_ciphertext_identical() {
             let next = recovered.read().unwrap();
             assert_eq!(next.metadata().key_id, old.metadata().key_id);
             for (name, bytes) in device_names().iter().zip(original) {
-                assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+                assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
                 assert_eq!(
-                    &*crate::secrets::owned_file::DeviceFile::registered(name)
+                    &*crate::secrets::owned_file::DeviceFile::registered(name.as_str())
                         .unwrap()
                         .decode(&next, &bytes)
                         .unwrap(),
-                    DEVICE_CANARY
+                    device_plaintext(name.as_str())
                 );
             }
             assert!(!fixture.root.join(".vault-rewrap").exists());
@@ -553,12 +571,12 @@ fn device_exact_staged_target_is_valid_interrupted_publication() {
     let recovered =
         SecretSession::open_existing(&fixture.root, &fixture.store, Some(DEVICE_PASSWORD)).unwrap();
     for name in device_names() {
-        let bytes = std::fs::read(root.join(&name)).unwrap();
-        let file = crate::secrets::owned_file::DeviceFile::registered(name).unwrap();
+        let bytes = std::fs::read(root.join(name.as_str())).unwrap();
+        let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
         assert!(file.decode(&old, &bytes).is_err());
         assert_eq!(
             &*file.decode(&recovered.read().unwrap(), &bytes).unwrap(),
-            DEVICE_CANARY
+            device_plaintext(name.as_str())
         );
     }
 }
@@ -710,11 +728,14 @@ fn device_different_vault_generation_install_reseals_local_members() {
     assert_eq!(*next.metadata(), expected);
     assert_ne!(next.metadata().vault_id, old.metadata().vault_id);
     for name in device_names() {
-        let file = crate::secrets::owned_file::DeviceFile::registered(&name).unwrap();
-        let bytes = std::fs::read(root.join(&name)).unwrap();
-        assert_eq!(&*file.decode(&next, &bytes).unwrap(), DEVICE_CANARY);
+        let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
+        let bytes = std::fs::read(root.join(name.as_str())).unwrap();
+        assert_eq!(
+            &*file.decode(&next, &bytes).unwrap(),
+            device_plaintext(name.as_str())
+        );
         assert!(file.decode(&old, &bytes).is_err());
-        assert!(!fixture.root.join(name).exists());
+        assert!(!fixture.root.join(name.as_str()).exists());
     }
 }
 
@@ -728,10 +749,10 @@ fn device_explicit_root_is_pinned_for_interrupted_recovery() {
         VaultContext::from_key(current.metadata().clone(), current.export_key()).unwrap()
     };
     for name in device_names() {
-        let file = crate::secrets::owned_file::DeviceFile::registered(&name).unwrap();
+        let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
         write_durable(
-            &device.join(name),
-            &file.encode(&old, DEVICE_CANARY).unwrap(),
+            &device.join(name.as_str()),
+            &file.encode(&old, device_plaintext(name.as_str())).unwrap(),
         )
         .unwrap();
     }
@@ -812,12 +833,12 @@ fn device_explicit_root_is_pinned_for_interrupted_recovery() {
     )
     .unwrap();
     for name in device_names() {
-        let file = crate::secrets::owned_file::DeviceFile::registered(&name).unwrap();
+        let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
         assert_eq!(
             &*file
-                .decode(&next, &std::fs::read(device.join(name)).unwrap())
+                .decode(&next, &std::fs::read(device.join(name.as_str())).unwrap())
                 .unwrap(),
-            DEVICE_CANARY
+            device_plaintext(name.as_str())
         );
     }
     assert!(!fixture.root.join(INTENT).exists());
@@ -875,7 +896,7 @@ fn device_recovery_rejects_replaced_root_or_backup_ancestor() {
             database
         );
         for (name, bytes) in device_names().iter().zip(original) {
-            assert_eq!(std::fs::read(root.join(name)).unwrap(), bytes);
+            assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
         }
         assert_old_key(&fixture, &old);
     }

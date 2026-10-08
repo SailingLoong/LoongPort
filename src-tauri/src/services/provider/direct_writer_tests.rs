@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 struct Fixture {
-    _home: TestHome,
     state: AppState,
     app: AppType,
     file: PathBuf,
+    _home: TestHome,
 }
 
 fn grok_row(id: &str) -> String {

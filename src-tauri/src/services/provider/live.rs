@@ -2681,7 +2681,9 @@ mod tests {
     /// 这条闸从 `sync_current_to_live` 那一层验，而不是只验 `write_live_with_common_config`
     /// —— 后者是修复所在的位置，前者才是用户实际走的路径。
     #[test]
+    #[serial_test::serial]
     fn syncing_all_apps_to_live_survives_a_current_image_tier() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let state = crate::store::AppState::new(std::sync::Arc::new(
             Database::memory().expect("create memory db"),
         ))

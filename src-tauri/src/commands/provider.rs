@@ -657,7 +657,9 @@ mod managed_guard_tests {
     /// 所以 `ProviderService::update` 自己会因为「provider 不存在 / 缺 auth 配置」
     /// 报错。判据是那条错误**不是**守卫那条指路文案。
     #[test]
+    #[serial_test::serial]
     fn update_provider_allows_editing_a_managed_tier_in_place() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let provider = Provider::with_id(
             id.clone(),
@@ -684,7 +686,9 @@ mod managed_guard_tests {
     /// 只在改过 id 时给 `originalId`）—— 拿 `None` 当「可能改名」来拦，
     /// 等于把最常见的那条编辑路径又堵回去了。
     #[test]
+    #[serial_test::serial]
     fn update_provider_allows_a_managed_tier_when_original_id_is_omitted() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let provider = Provider::with_id(
             id.clone(),
@@ -703,7 +707,9 @@ mod managed_guard_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn managed_tier_edit_preserves_relay_origin_and_api_key() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let state = empty_state();
         let site_origin = "https://bestapi.store";
@@ -778,7 +784,9 @@ mod managed_guard_tests {
     /// 抓不到：它对 `Err` 只断言「文案不含 LoongPort」，而这个失败的文案是
     /// 「生图档位不写入任何 CLI 配置…」。
     #[test]
+    #[serial_test::serial]
     fn editing_the_current_image_tier_saves_without_error() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let state = empty_state();
         let existing = Provider::with_id(

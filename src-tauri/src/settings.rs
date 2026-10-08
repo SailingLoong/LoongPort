@@ -1314,6 +1314,43 @@ pub(crate) fn unlock_settings_for_test(
     Ok(())
 }
 
+/// Scope the existing settings owner to a synthetic home. This never opens a key.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) struct TestSettingsScope(Option<SettingsRuntime>);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestSettingsScope {
+    pub(crate) fn enter() -> Result<Self, AppError> {
+        // Read first: a failed fixture must leave the previous owner untouched.
+        let bootstrap = read_bootstrap_at(&settings_path())?;
+        let mut runtime = settings_store().write()?;
+        let previous = std::mem::replace(
+            &mut *runtime,
+            SettingsRuntime {
+                bootstrap,
+                failure: None,
+                unlocked: None,
+            },
+        );
+        Ok(Self(Some(previous)))
+    }
+
+    pub(crate) fn restore(&mut self) {
+        if let Some(previous) = self.0.take() {
+            *settings_store()
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = previous;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Drop for TestSettingsScope {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify_settings_vault_guard() -> Result<(), AppError> {
     vault_guard_tests::run();

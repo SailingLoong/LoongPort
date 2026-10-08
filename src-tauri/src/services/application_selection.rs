@@ -401,21 +401,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn explicit_model_selection_replaces_old_preference_and_rolls_back_on_commit_failure() {
-        let home = crate::secrets::testing::tempdir().unwrap();
-        let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-                }
-                let _ = crate::settings::reload_settings();
-            }
-        }
-        let _restore = RestoreHome(previous_home);
-        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
-        crate::settings::reload_settings().unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let db = std::sync::Arc::new(crate::secrets::testing::initialize_database().unwrap());
         let settings = serde_json::json!({"env":{"ANTHROPIC_BASE_URL":"https://relay.example", "ANTHROPIC_AUTH_TOKEN":"example-key","ANTHROPIC_MODEL":"model-one","CLAUDE_CODE_SUBAGENT_MODEL":"worker"},"modelCatalog":{"models":[{"model":"model-one"},{"model":"model-two"}]}});
         let provider = crate::provider::Provider::with_id(

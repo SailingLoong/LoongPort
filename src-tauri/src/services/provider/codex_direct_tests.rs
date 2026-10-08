@@ -10,10 +10,10 @@ use serde_json::json;
 use std::sync::Arc;
 
 struct Fixture {
-    _home: TestHome,
     state: AppState,
     config: std::path::PathBuf,
     auth: std::path::PathBuf,
+    _home: TestHome,
 }
 impl Fixture {
     fn new() -> Self {

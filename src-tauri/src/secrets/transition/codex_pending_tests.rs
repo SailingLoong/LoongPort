@@ -79,6 +79,10 @@ pub(crate) fn verify() -> Result<(), AppError> {
     println!("PASS completed mode rotates with separate data/device roots");
     authenticated_started_vault_transition_with_mode_pending_still_recovers();
     println!("PASS existing authenticated vault transition still recovers with mode pending");
+    nested_home_does_not_reuse_failed_settings_owner();
+    println!("PASS isolated homes restore prior settings owner on success and failure");
+    malformed_or_unknown_mode_blocks_new_generation_before_mutation();
+    println!("PASS malformed and unknown mode still block new vault generation");
     Ok(())
 }
 
@@ -183,8 +187,86 @@ fn authenticated_started_vault_transition_with_mode_pending_still_recovers() {
         Some("synthetic recovery password"),
     )
     .unwrap();
+    crate::settings::unlock_settings_for_test(reopened.clone()).unwrap();
     let vault = reopened.read().unwrap();
     assert_ne!(vault.metadata().key_id, old_key);
     assert!(state::pending(&store, &vault, "codex").unwrap().is_some());
     assert!(!root.join(INTENT).exists());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn nested_home_does_not_reuse_failed_settings_owner() {
+    for blocked in [false, true] {
+        let outer = TestHome::new().unwrap();
+        let db = initialize_database().unwrap();
+        if blocked {
+            db.secret_session().set_blocked(true);
+        } else {
+            std::fs::write(
+                crate::settings::settings_path(),
+                b"invalid settings fixture",
+            )
+            .unwrap();
+        }
+        assert!(crate::settings::reload_settings().is_err());
+        // Failed construction must restore both the environment and exact owner.
+        let bad_home = crate::secrets::testing::tempdir().unwrap();
+        let bad_root = bad_home.path().join(crate::APP_DIR_NAME);
+        std::fs::create_dir_all(&bad_root).unwrap();
+        std::fs::write(bad_root.join("settings.json"), b"invalid settings fixture").unwrap();
+        let selected = std::env::var_os("CC_SWITCH_TEST_HOME");
+        assert!(TestHome::from_directory(bad_home).is_err());
+        assert_eq!(std::env::var_os("CC_SWITCH_TEST_HOME"), selected);
+        assert!(crate::settings::reload_settings().is_err());
+        {
+            let inner = TestHome::new().unwrap();
+            assert_ne!(inner.path(), outer.path());
+            // A selected new fixture must bootstrap its own path, not reload a
+            // still-existing corrupt file or blocked session from the outer home.
+            crate::settings::reload_settings()
+                .expect("new home must not reuse prior failed settings owner");
+            let fresh = initialize_database().unwrap();
+            assert!(fresh.secret_session().read().is_ok());
+        }
+        assert!(
+            crate::settings::reload_settings().is_err(),
+            "leaving nested fixture preserves the outer owner's actual failure"
+        );
+        if blocked {
+            db.secret_session().set_blocked(false);
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn malformed_or_unknown_mode_blocks_new_generation_before_mutation() {
+    for plaintext in [
+        b"invalid mode fixture".as_slice(),
+        br#"{"version":1,"unexpected":true}"#.as_slice(),
+    ] {
+        let _home = TestHome::new().unwrap();
+        let db = initialize_database().unwrap();
+        db.secret_session().complete_migration().unwrap();
+        let store = DeviceStore::for_device();
+        let file = DeviceFile::registered(crate::secrets::owned_file::DEVICE_STATE_FILE).unwrap();
+        let vault = db.secret_session().read().unwrap();
+        let before = vault.metadata().clone();
+        let ciphertext = file.encode(&vault, plaintext).unwrap();
+        write_durable(&store.state_path(), &ciphertext).unwrap();
+        drop(vault);
+        let result = rotate(
+            &db,
+            &MemoryKeyStore::default(),
+            "synthetic recovery password",
+            false,
+        );
+        assert!(
+            matches!(result, Err(AppError::Config(ref code)) if code == "mode.verification_required")
+        );
+        assert_eq!(db.secret_session().read().unwrap().metadata(), &before);
+        assert_eq!(std::fs::read(store.state_path()).unwrap(), ciphertext);
+        assert!(!db.secret_session().root().join(INTENT).exists());
+    }
 }
