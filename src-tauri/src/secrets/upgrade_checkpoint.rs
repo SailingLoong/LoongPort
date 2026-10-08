@@ -115,16 +115,20 @@ fn image(bytes: &[u8], root: &Path, device: &Path) -> Result<Connection, AppErro
 }
 
 impl Manifest {
-    fn verify_source(
+    fn validate_identity(
         &self,
         root: &Path,
         device: &DeviceStore,
         vault: &VaultContext,
         id: &str,
     ) -> Result<(), AppError> {
-        if self.published_database.is_some()
-            || self.format != 1
+        if self.format != 1
             || self.id != id
+            || uuid::Uuid::parse_str(id)
+                .map(|id| id.to_string())
+                .ok()
+                .as_deref()
+                != Some(id)
             || self.root != root
             || self.device != device.root()
             || self.metadata != *vault.metadata()
@@ -136,6 +140,28 @@ impl Manifest {
         {
             return Err(invalid());
         }
+        if let Some(target) = &self.published_database {
+            if target.len() != 64
+                || !target
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    fn verify_source(
+        &self,
+        root: &Path,
+        device: &DeviceStore,
+        vault: &VaultContext,
+        id: &str,
+    ) -> Result<(), AppError> {
+        if self.published_database.is_some() {
+            return Err(invalid());
+        }
+        self.validate_identity(root, device, vault, id)?;
         if pending_generation(root)? {
             return Err(AppError::Config("secret.recovery_required".into()));
         }
@@ -323,10 +349,21 @@ pub(super) fn stage_with_source_review<T>(
 
 /// Presence alone pauses both sync directions; corruption cannot lift admission.
 pub(crate) fn ensure_sync_admitted(device: &DeviceStore) -> Result<(), AppError> {
+    ensure_no_pending_checkpoint(device).map_err(|error| match error {
+        AppError::Config(code) if code == "upgrade.checkpoint_pending" => {
+            AppError::Config("upgrade.sync_paused".into())
+        }
+        other => other,
+    })
+}
+
+/// New credential generations would invalidate the checkpoint's authenticated
+/// source vault and nested database. Existing recovery keeps its original path.
+pub(crate) fn ensure_no_pending_checkpoint(device: &DeviceStore) -> Result<(), AppError> {
     crate::secrets::files::device_directory_exists(device.root())?;
     match std::fs::symlink_metadata(path(device)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        _ => Err(AppError::Config("upgrade.sync_paused".into())),
+        _ => Err(AppError::Config("upgrade.checkpoint_pending".into())),
     }
 }
 
@@ -444,27 +481,7 @@ pub(crate) fn validate_publication_payload(
     let plaintext = descriptor()?.decode(vault, bytes)?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     let target = manifest.published_database.as_ref().ok_or_else(invalid)?;
-    if manifest.format != 1
-        || manifest.root != root
-        || manifest.device != device.root()
-        || manifest.metadata != *vault.metadata()
-        || manifest.source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
-        || manifest.source_versions.loongport
-            != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
-        || manifest.target_versions.upstream != database::UPSTREAM4_SCHEMA_VERSION
-        || manifest.target_versions.loongport != manifest.source_versions.loongport
-        || uuid::Uuid::parse_str(&manifest.id)
-            .map(|id| id.to_string())
-            .ok()
-            .as_deref()
-            != Some(manifest.id.as_str())
-        || target.len() != 64
-        || !target
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(invalid());
-    }
+    manifest.validate_identity(root, device, vault, &manifest.id)?;
     manifest.database(vault)?;
     manifest.vault_file.verify()?;
     if device_paths(device)? != manifest.device_paths {
@@ -499,18 +516,66 @@ pub(super) fn published_database_id(
         return Ok(None);
     }
     let (_, target) = validate_publication_payload(root, device, vault, &bytes)?;
-    let conn = Connection::open_with_flags(
-        root.join(crate::config::DB_FILE_NAME),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    database::vault::check_identity(&conn, vault)?;
-    crate::secrets::inventory::validate_database(&conn, vault)?;
-    if Database::get_user_version(&conn)? != manifest.target_versions.upstream
-        || database::loongport_schema::read_stored_version(&conn)?
-            != manifest.target_versions.loongport
-        || Database::content_digest(&conn)? != target
+    verify_current_database(root, vault, manifest.target_versions, Some(&target))?;
+    Ok(Some(manifest.id.clone()))
+}
+
+fn verify_current_database(
+    root: &Path,
+    vault: &VaultContext,
+    versions: SchemaVersions,
+    digest: Option<&str>,
+) -> Result<(), AppError> {
+    let path = root.join(crate::config::DB_FILE_NAME);
+    let captured = inspection::capture(&path)?.ok_or_else(invalid)?;
+    database::vault::check_identity(&captured.image, vault)?;
+    crate::secrets::inventory::validate_database(&captured.image, vault)?;
+    if Database::get_user_version(&captured.image)? != versions.upstream
+        || database::loongport_schema::read_stored_version(&captured.image)? != versions.loongport
     {
         return Err(changed());
+    }
+    if let Some(expected) = digest {
+        if Database::content_digest(&captured.image)? != expected {
+            return Err(changed());
+        }
+    }
+    inspection::verify_unchanged(&path, &captured.revision)
+}
+
+/// The authenticated target checkpoint is installed after the DB. The original
+/// transition removes its intent only after final on-disk target readback. That
+/// completed boundary survives later per-app changes; no second ack is needed.
+/// Per-app admission still needs its own reviewed inputs and operation readback.
+pub(super) fn verified_database_id(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+) -> Result<Option<String>, AppError> {
+    if pending_generation(root)? {
+        return Err(AppError::Config("secret.recovery_required".into()));
+    }
+    let revision = inspection::file_revision(&path(device))?;
+    let Some(bytes) = config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))?
+    else {
+        inspection::verify_unchanged(&path(device), &revision)?;
+        return Ok(None);
+    };
+    let plain = descriptor()?.decode(vault, &bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&plain).map_err(|_| invalid())?;
+    manifest.validate_identity(root, device, vault, &manifest.id)?;
+    manifest.database(vault)?;
+    if manifest.published_database.is_none() {
+        manifest.verify_source(root, device, vault, &manifest.id)?;
+        inspection::verify_unchanged(&path(device), &revision)?;
+        return Ok(None);
+    }
+    manifest.vault_file.verify()?;
+    verify_current_database(root, vault, manifest.target_versions, None)?;
+    inspection::verify_unchanged(&path(device), &revision)?;
+    if pending_generation(root)? {
+        return Err(AppError::Config("secret.recovery_required".into()));
     }
     Ok(Some(manifest.id.clone()))
 }

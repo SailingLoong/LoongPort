@@ -385,6 +385,8 @@ fn startup_upgrade_rejects_existing_incomplete_or_corrupt_checkpoint_without_rep
 
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify() -> Result<(), AppError> {
+    upgrade_database_handoff_is_durable_without_freezing_later_app_changes();
+    upgrade_checkpoint_preserves_credential_generation_until_handoff_finishes();
     upgrade_publication_refuses_memory_target();
     #[cfg(unix)]
     upgrade_publication_keeps_intent_after_atomic_database_replacement();
@@ -1316,4 +1318,134 @@ fn upgrade_publication_keeps_intent_after_atomic_database_replacement() {
         )
         .unwrap();
     assert_eq!(value, "preserve");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_preserves_credential_generation_until_handoff_finishes() {
+    let mut outcomes = Vec::new();
+    for rotate in [false, true] {
+        let f = Fixture::new();
+        checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let before = snapshot(f.home.path());
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        let result = if rotate {
+            crate::secrets::transition::rotate(&db, &f.store, "synthetic-new-password", false)
+        } else {
+            crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-new-password", false)
+        };
+        outcomes.push((rotate, matches!(result, Err(AppError::Config(ref code)) if code == "upgrade.checkpoint_pending"), snapshot(f.home.path()) == before));
+    }
+    assert!(
+        outcomes
+            .iter()
+            .all(|(_, blocked, unchanged)| *blocked && *unchanged),
+        "checkpoint must retain its original generation: (rotate, blocked, unchanged)={outcomes:?}"
+    );
+
+    let f = Fixture::new();
+    let historical = f.root.join("backups/upgrade-checkpoint.json");
+    std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
+    std::fs::write(&historical, b"unrelated historical backup").unwrap();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-new-password", false)
+        .unwrap();
+    assert_ne!(
+        db.secret_session().read().unwrap().metadata(),
+        f.vault.metadata()
+    );
+    assert_eq!(
+        std::fs::read(historical).unwrap(),
+        b"unrelated historical backup"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_handoff_is_durable_without_freezing_later_app_changes() {
+    use crate::secrets::transition::{self, Checkpoint};
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let db_path = f.root.join(crate::config::DB_FILE_NAME);
+    let db = Database::from_connection(
+        rusqlite::Connection::open(&db_path).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault).unwrap(),
+        None
+    );
+    let interrupted =
+        checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+            if at == Checkpoint::Keys {
+                Err(AppError::Config("synthetic.interruption".into()))
+            } else {
+                Ok(())
+            }
+        });
+    assert!(interrupted.is_err());
+    assert!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault).is_err(),
+        "target CP alone is insufficient while original recovery is pending"
+    );
+    drop(db);
+    transition::recover(&f.root, &f.store, None).unwrap();
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault).unwrap(),
+        Some(id.clone())
+    );
+    let committed = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(&db_path).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO settings(key,value) VALUES('synthetic-app-change','preserve')",
+            [],
+        )
+        .unwrap();
+    {
+        let vault = db.secret_session().read().unwrap();
+        crate::mode::state::update(&f.device, &vault, |live| {
+            live.apps.entry("claude".into()).or_default().pending =
+                Some(crate::mode::state::Pending {
+                    op: crate::mode::state::op::APPLY.into(),
+                    files: vec![],
+                    target: Default::default(),
+                    published: false,
+                    extra: Default::default(),
+                });
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault).unwrap(),
+        Some(id)
+    );
+    assert_eq!(
+        std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+        committed,
+        "query must not rewrite the checkpoint"
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    assert!(checkpoint::ensure_no_pending_checkpoint(&f.device).is_err());
+    assert!(
+        crate::settings::get_current_provider_ready(&crate::app_config::AppType::Claude).is_err()
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .pragma_update(None, "user_version", 21)
+        .unwrap();
+    assert!(checkpoint::verified_database_id(&f.root, &f.device, &f.vault).is_err());
 }

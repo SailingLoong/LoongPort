@@ -118,6 +118,9 @@ pub(crate) fn change_password(
     if session.root().join(".vault-transition").exists() || session.root().join(INTENT).exists() {
         return Err(AppError::Config("secret.recovery_required".into()));
     }
+    super::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
     let next = current
         .with_password(password)
         .map_err(super::inventory::secret_error)?;

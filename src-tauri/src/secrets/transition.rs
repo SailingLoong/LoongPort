@@ -452,6 +452,11 @@ where
             return Err(AppError::Config("secret.recovery_required".into()));
         }
     }
+    if upgrade.is_none() {
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+            &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
+        )?;
+    }
     let mut conn = db
         .conn
         .lock()
