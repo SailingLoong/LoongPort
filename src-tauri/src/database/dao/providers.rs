@@ -213,7 +213,7 @@ impl Database {
         ))
     }
 
-    fn get_all_providers_on_connection(
+    pub(crate) fn get_all_providers_on_connection(
         conn: &rusqlite::Connection,
         vault: &VaultContext,
         app_type: &str,

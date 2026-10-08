@@ -1,14 +1,14 @@
 use super::*;
 use crate::secrets::{session::SecretSession, testing::MemoryKeyStore};
 
-struct Fixture {
-    _temporary: tempfile::TempDir,
-    root: std::path::PathBuf,
-    device: DeviceStore,
-    vault: VaultContext,
+pub(super) struct Fixture {
+    pub(super) _temporary: tempfile::TempDir,
+    pub(super) root: std::path::PathBuf,
+    pub(super) device: DeviceStore,
+    pub(super) vault: VaultContext,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let temporary = crate::secrets::testing::tempdir().unwrap();
         let root = temporary.path().join("data");
         let device = DeviceStore::at(temporary.path().join("device"));
@@ -34,7 +34,7 @@ impl Fixture {
     }
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_is_encrypted_roundtrips_and_stages_without_changing_source() {
     let f = Fixture::new();
     let client = f._temporary.path().join("synthetic-client.json");
@@ -67,7 +67,7 @@ fn checkpoint_is_encrypted_roundtrips_and_stages_without_changing_source() {
     assert!(checkpoint::stage(&f.root, &f.device, &f.vault, &id).is_ok());
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_refuses_stale_source_client_wrong_operation_or_key() {
     let f = Fixture::new();
     let client = f._temporary.path().join("synthetic-client.json");
@@ -98,7 +98,7 @@ fn checkpoint_refuses_stale_source_client_wrong_operation_or_key() {
     assert!(f.device.root().join(checkpoint::FILE).exists());
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_refuses_unexpected_existing_artifact_and_corruption() {
     let f = Fixture::new();
     let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
@@ -108,7 +108,7 @@ fn checkpoint_refuses_unexpected_existing_artifact_and_corruption() {
 }
 
 #[cfg(unix)]
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_refuses_symlink_client_and_private_output_is_restricted() {
     use std::os::unix::{fs::symlink, fs::PermissionsExt};
     let f = Fixture::new();
@@ -129,7 +129,7 @@ fn checkpoint_refuses_symlink_client_and_private_output_is_restricted() {
     );
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_pauses_sync_even_when_its_contents_are_corrupt() {
     let f = Fixture::new();
     checkpoint::ensure_sync_admitted(&f.device).unwrap();
@@ -143,7 +143,7 @@ fn checkpoint_pauses_sync_even_when_its_contents_are_corrupt() {
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_staging_builds_missing_tables_before_version_twenty() {
     let f = Fixture::new();
     let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
@@ -160,7 +160,7 @@ fn checkpoint_staging_builds_missing_tables_before_version_twenty() {
         .unwrap();
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_atomic_creation_never_overwrites_existing_file() {
     let f = Fixture::new();
     let path = f._temporary.path().join("checkpoint-output");
@@ -169,9 +169,14 @@ fn checkpoint_atomic_creation_never_overwrites_existing_file() {
     assert_eq!(std::fs::read(path).unwrap(), b"existing");
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn checkpoint_blocks_sync_transports_restore_and_auto_before_side_effects() {
+    checkpoint_blocks_sync_transports_restore_and_auto_before_side_effects_body().await;
+}
+
+async fn checkpoint_blocks_sync_transports_restore_and_auto_before_side_effects_body() {
     struct Home(Option<std::ffi::OsString>);
     impl Drop for Home {
         fn drop(&mut self) {
@@ -225,7 +230,7 @@ async fn checkpoint_blocks_sync_transports_restore_and_auto_before_side_effects(
     assert!(!polled.get());
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_rejects_recapture_after_authenticated_source_changes() {
     for change_vault in [false, true] {
         let f = Fixture::new();
@@ -254,7 +259,7 @@ fn checkpoint_rejects_recapture_after_authenticated_source_changes() {
     }
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn checkpoint_recovers_id_after_post_publication_failure() {
     let f = Fixture::new();
     assert!(
@@ -272,4 +277,173 @@ fn checkpoint_recovers_id_after_post_publication_failure() {
         checkpoint::existing_id(&f.root, &f.device, &VaultContext::generate().unwrap()).is_err()
     );
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[cfg(feature = "test-hooks")]
+pub(super) fn verify_existing_checkpoint_tests() {
+    checkpoint_source_review_precedes_stage_defaults_and_preserves_source();
+    checkpoint_source_review_failure_and_stale_source_never_publish_stage();
+    checkpoint_can_capture_absent_settings_under_its_new_device_directory();
+    checkpoint_reconciliation_requires_the_expected_client_inventory();
+    checkpoint_expected_inventory_is_exact_and_deduplicated();
+    checkpoint_is_encrypted_roundtrips_and_stages_without_changing_source();
+    checkpoint_refuses_stale_source_client_wrong_operation_or_key();
+    checkpoint_refuses_unexpected_existing_artifact_and_corruption();
+    #[cfg(unix)]
+    checkpoint_refuses_symlink_client_and_private_output_is_restricted();
+    checkpoint_pauses_sync_even_when_its_contents_are_corrupt();
+    checkpoint_staging_builds_missing_tables_before_version_twenty();
+    checkpoint_atomic_creation_never_overwrites_existing_file();
+    crate::rt::block_on(
+        checkpoint_blocks_sync_transports_restore_and_auto_before_side_effects_body(),
+    );
+    checkpoint_rejects_recapture_after_authenticated_source_changes();
+    checkpoint_recovers_id_after_post_publication_failure();
+}
+
+#[cfg_attr(test, test)]
+fn checkpoint_can_capture_absent_settings_under_its_new_device_directory() {
+    let f = Fixture::new();
+    assert!(!f.device.root().exists());
+    let settings = f.device.root().join("settings.json");
+    let result = checkpoint::create(
+        &f.root,
+        &f.device,
+        &f.vault,
+        std::slice::from_ref(&settings),
+    );
+    assert!(
+        result.is_ok(),
+        "explicit checkpoint must account for its own directory creation: {result:?}"
+    );
+    assert!(!settings.exists());
+    assert_eq!(
+        checkpoint::existing_id(&f.root, &f.device, &f.vault).unwrap(),
+        result.unwrap()
+    );
+}
+
+#[cfg_attr(test, test)]
+fn checkpoint_reconciliation_requires_the_expected_client_inventory() {
+    let f = Fixture::new();
+    let client = f._temporary.path().join("synthetic-settings.json");
+    std::fs::write(&client, b"captured-only-when-explicit").unwrap();
+    checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    assert!(
+        checkpoint::existing_id(&f.root, &f.device, &f.vault).is_ok(),
+        "raw compatibility reader has no expected inventory"
+    );
+    assert!(
+        checkpoint::existing_id_for_clients(
+            &f.root,
+            &f.device,
+            &f.vault,
+            std::slice::from_ref(&client)
+        )
+        .is_err(),
+        "production readback must refuse an incomplete valid checkpoint"
+    );
+}
+
+#[cfg_attr(test, test)]
+fn checkpoint_expected_inventory_is_exact_and_deduplicated() {
+    let f = Fixture::new();
+    let a = f._temporary.path().join("client-a.json");
+    let b = f._temporary.path().join("client-b.json");
+    std::fs::write(&a, b"a").unwrap();
+    let id = checkpoint::create(
+        &f.root,
+        &f.device,
+        &f.vault,
+        &[a.clone(), b.clone(), a.clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        checkpoint::existing_id_for_clients(&f.root, &f.device, &f.vault, &[b.clone(), a.clone()])
+            .unwrap(),
+        id
+    );
+    assert!(checkpoint::existing_id_for_clients(
+        &f.root,
+        &f.device,
+        &f.vault,
+        std::slice::from_ref(&a)
+    )
+    .is_err());
+    assert!(checkpoint::existing_id_for_clients(
+        &f.root,
+        &f.device,
+        &VaultContext::generate().unwrap(),
+        &[a.clone(), b.clone()]
+    )
+    .is_err());
+    std::fs::write(&b, b"new external file").unwrap();
+    assert!(checkpoint::existing_id_for_clients(&f.root, &f.device, &f.vault, &[a, b]).is_err());
+}
+
+#[cfg_attr(test, test)]
+fn checkpoint_source_review_precedes_stage_defaults_and_preserves_source() {
+    let f = Fixture::new();
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    source
+        .execute("DELETE FROM proxy_config WHERE app_type='claude'", [])
+        .unwrap();
+    drop(source);
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let before = super::review_tests::snapshot(f._temporary.path());
+    let (staged, original) =
+        checkpoint::stage_with_source_review(&f.root, &f.device, &f.vault, &id, |source| {
+            let rows: i64 = source.query_row(
+                "SELECT COUNT(*) FROM proxy_config WHERE app_type='claude'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((Database::get_user_version(source)?, rows))
+        })
+        .unwrap();
+    assert_eq!(
+        original,
+        (17, 0),
+        "review must not claim stage-seeded defaults existed in the source"
+    );
+    assert_eq!(Database::get_user_version(&staged).unwrap(), 20);
+    assert_eq!(
+        staged
+            .query_row(
+                "SELECT enabled FROM proxy_config WHERE app_type='claude'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(super::review_tests::snapshot(f._temporary.path()), before);
+}
+
+#[cfg_attr(test, test)]
+fn checkpoint_source_review_failure_and_stale_source_never_publish_stage() {
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let before = super::review_tests::snapshot(f._temporary.path());
+    let result = checkpoint::stage_with_source_review(
+        &f.root,
+        &f.device,
+        &f.vault,
+        &id,
+        |_| -> Result<(), AppError> { Err(AppError::Config("upgrade.source_changed".into())) },
+    );
+    assert!(result.is_err());
+    assert_eq!(super::review_tests::snapshot(f._temporary.path()), before);
+    let result = checkpoint::stage_with_source_review(&f.root, &f.device, &f.vault, &id, |_| {
+        std::fs::write(f.root.join("vault.json"), b"changed source").unwrap();
+        Ok(())
+    });
+    assert!(
+        result.is_err(),
+        "source changed during private review must invalidate its result"
+    );
+    assert_eq!(
+        std::fs::read(f.root.join("vault.json")).unwrap(),
+        b"changed source"
+    );
 }

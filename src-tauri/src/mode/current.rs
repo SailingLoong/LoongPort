@@ -30,6 +30,13 @@ pub(crate) fn validate_known_mode(
     app: &AppType,
 ) -> Result<ModeState, AppError> {
     let live = state::load(store, vault)?;
+    known_mode_from_state(&live, app)
+}
+
+pub(crate) fn known_mode_from_state(
+    live: &state::LiveState,
+    app: &AppType,
+) -> Result<ModeState, AppError> {
     let entry = live
         .apps
         .get(app.as_str())

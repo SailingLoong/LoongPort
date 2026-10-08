@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,7 +125,7 @@ impl Manifest {
             || self.root != root
             || self.device != device.root()
             || self.metadata != *vault.metadata()
-            || self.source_versions.upstream != database::SCHEMA_VERSION
+            || self.source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
             || self.source_versions.loongport
                 != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
             || self.target_versions.upstream != database::UPSTREAM4_SCHEMA_VERSION
@@ -171,6 +171,7 @@ impl Manifest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Boundary {
     Authenticated,
+    CaptureReady,
     Published,
 }
 
@@ -203,14 +204,27 @@ pub(super) fn create_with_hook(
     let UpgradeInspection::Stable(stable) = inspected else {
         return Err(invalid());
     };
+    let source_versions = stable.source_versions.ok_or_else(invalid)?;
+    if source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        || source_versions.loongport != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        return Err(invalid());
+    }
     hook(Boundary::Authenticated)?;
+    stable.verify_unchanged(root)?;
+    // This explicit backup action owns creating its private output directory.
+    // Capture missing client revisions only after that expected directory exists,
+    // otherwise our own publication changes their recorded ancestor inventory.
+    config_file_io::ensure_private_directory(device.root())?;
+    hook(Boundary::CaptureReady)?;
     let captured =
         inspection::capture(&root.join(crate::config::DB_FILE_NAME))?.ok_or_else(invalid)?;
-    let source_versions = stable.source_versions.ok_or_else(invalid)?;
     let paths = device_paths(device)?;
     let files = paths
         .iter()
         .chain(clients)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .map(|p| CapturedFile::capture(p))
         .collect::<Result<Vec<_>, _>>()?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -273,8 +287,22 @@ pub(crate) fn stage(
     vault: &VaultContext,
     id: &str,
 ) -> Result<Connection, AppError> {
+    Ok(stage_with_source_review(root, device, vault, id, |_| Ok(()))?.0)
+}
+
+/// Inspect the authenticated source image before schema setup can add defaults
+/// or remove compatibility artifacts. Revalidate source after the callback.
+pub(super) fn stage_with_source_review<T>(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+    review: impl FnOnce(&Connection) -> Result<T, AppError>,
+) -> Result<(Connection, T), AppError> {
     let manifest = load(root, device, vault, id)?;
     let conn = manifest.database(vault)?;
+    let source_facts = review(&conn)?;
+    manifest.verify_source(root, device, vault, id)?;
     Database::create_tables_on_conn(&conn)?;
     Database::apply_upstream4_migrations_on_conn(&conn)?;
     database::vault::check_identity(&conn, vault)?;
@@ -286,7 +314,7 @@ pub(crate) fn stage(
         return Err(invalid());
     }
     manifest.verify_source(root, device, vault, id)?;
-    Ok(conn)
+    Ok((conn, source_facts))
 }
 
 /// Presence alone pauses both sync directions; corruption cannot lift admission.
@@ -304,6 +332,49 @@ pub(crate) fn existing_id(
     device: &DeviceStore,
     vault: &VaultContext,
 ) -> Result<String, AppError> {
+    Ok(existing_manifest(root, device, vault)?.0.id.clone())
+}
+
+/// Production readback also binds the caller's current backend-owned inventory.
+/// Presence and authentication alone cannot prove a checkpoint captured its inputs.
+pub(crate) fn existing_id_for_clients(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    clients: &[PathBuf],
+) -> Result<String, AppError> {
+    Ok(verified_checkpoint_for_clients(root, device, vault, clients)?.0)
+}
+
+pub(super) fn verified_checkpoint_for_clients(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    clients: &[PathBuf],
+) -> Result<(String, Vec<u8>), AppError> {
+    let (manifest, bytes) = existing_manifest(root, device, vault)?;
+    let expected: std::collections::BTreeSet<_> = device_paths(device)?
+        .into_iter()
+        .chain(clients.iter().cloned())
+        .collect();
+    let captured: std::collections::BTreeSet<_> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    if expected != captured {
+        return Err(AppError::Config(
+            "upgrade.checkpoint_inventory_changed".into(),
+        ));
+    }
+    Ok((manifest.id.clone(), bytes))
+}
+
+fn existing_manifest(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+) -> Result<(Manifest, Vec<u8>), AppError> {
     let bytes = config_file_io::read_regular_file(&path(device), MAX_BYTES)
         .map_err(|e| AppError::io(path(device), e))?
         .ok_or_else(invalid)?;
@@ -311,5 +382,5 @@ pub(crate) fn existing_id(
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     manifest.verify_source(root, device, vault, &manifest.id)?;
     manifest.database(vault)?;
-    Ok(manifest.id.clone())
+    Ok((manifest, bytes))
 }

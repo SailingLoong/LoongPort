@@ -132,14 +132,77 @@ pub fn entries(text: &str) -> Vec<(String, String)> {
     entries
 }
 
+fn quoted_values() -> &'static regex::Regex {
+    static QUOTED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    QUOTED.get_or_init(|| {
+        regex::Regex::new(r#"(?s)^(?:'(?:\\'|[^'])*'|"(?:\\"|[^"])*"|`(?:\\`|[^`])*`)"#)
+            .expect("constant dotenv quote pattern")
+    })
+}
+
+/// Read only literal values of caller-owned assignments. The editing parser's
+/// broader grouping remains authoritative; unsupported assignment spelling,
+/// escapes or expansion produce an unknown value rather than a false fact.
+pub(crate) fn literal_owned_entries(
+    text: &str,
+    owns: fn(&str) -> bool,
+) -> Option<Vec<(String, Option<String>)>> {
+    let (lines, error) = logical_lines(text);
+    if error.is_some() {
+        return None;
+    }
+    let mut result: Vec<(String, Option<String>)> = Vec::new();
+    for line in lines {
+        let Some((key, offset)) = assignment_parts(&line.raw) else {
+            continue;
+        };
+        if !owns(key) {
+            continue;
+        }
+        let value = if parse_key(&line.raw) == Some(key) {
+            literal_value(&line.raw[offset..])
+        } else {
+            None
+        };
+        if let Some(entry) = result.iter_mut().find(|(existing, _)| existing == key) {
+            entry.1 = value;
+        } else {
+            result.push((key.to_owned(), value));
+        }
+    }
+    Some(result)
+}
+
+fn literal_value(raw: &str) -> Option<String> {
+    if raw
+        .trim_start_matches([' ', '\t'])
+        .starts_with(['\n', '\r'])
+    {
+        return None;
+    }
+    let value = raw.trim();
+    if value.starts_with(['\'', '"', '`']) {
+        let quoted = quoted_values().find(value)?;
+        let tail = value[quoted.end()..].trim();
+        if !tail.is_empty() && !tail.starts_with('#') {
+            return None;
+        }
+        let literal = &value[1..quoted.end() - 1];
+        if literal.contains(['\\', '$']) {
+            return None;
+        }
+        Some(literal.to_owned())
+    } else if value.contains(['\\', '$', '#']) {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
 /// Preserve logical quoted assignments as indivisible blocks. The quote grammar
 /// follows dotenv's single/double/backtick alternatives; raw bytes are never decoded.
 fn logical_lines(text: &str) -> (Vec<Line>, Option<usize>) {
-    static QUOTED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let quoted = QUOTED.get_or_init(|| {
-        regex::Regex::new(r#"(?s)^(?:'(?:\\'|[^'])*'|"(?:\\"|[^"])*"|`(?:\\`|[^`])*`)"#)
-            .expect("constant dotenv quote pattern")
-    });
+    let quoted = quoted_values();
     let mut lines = Vec::new();
     let mut cursor = 0;
     let mut error = None;
@@ -189,6 +252,10 @@ fn logical_lines(text: &str) -> (Vec<Line>, Option<usize>) {
 /// Accept the broader dotenv key spelling for grouping only, so an unowned
 /// dotted/dashed or colon-style assignment cannot expose inner apparent keys.
 fn assignment_value_offset(line: &str) -> Option<usize> {
+    assignment_parts(line).map(|(_, offset)| offset)
+}
+
+fn assignment_parts(line: &str) -> Option<(&str, usize)> {
     let trimmed = line.trim_start();
     if trimmed.starts_with('#') {
         return None;
@@ -211,7 +278,7 @@ fn assignment_value_offset(line: &str) -> Option<usize> {
     if body.as_bytes()[separator] == b':' && !value.starts_with(char::is_whitespace) {
         return None;
     }
-    Some(line.len() - value.len())
+    Some((key, line.len() - value.len()))
 }
 
 /// `KEY=...` 或 `export KEY=...` 里的变量名；认不出的行返回 `None`，原样保留。

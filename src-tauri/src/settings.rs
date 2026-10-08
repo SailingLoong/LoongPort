@@ -1719,6 +1719,14 @@ pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<St
     Ok(current_provider_slot(&mut settings, app_type).and_then(|current| current.clone()))
 }
 
+/// Read a caller-authenticated settings snapshot without unlocking runtime state.
+pub(crate) fn current_provider_from_settings(
+    settings: &mut AppSettings,
+    app: &AppType,
+) -> Option<String> {
+    current_provider_slot(settings, app).and_then(|current| current.clone())
+}
+
 fn current_provider_slot<'a>(
     settings: &'a mut AppSettings,
     app_type: &AppType,

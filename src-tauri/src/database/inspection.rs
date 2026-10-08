@@ -393,6 +393,29 @@ pub(crate) fn file_revision(path: &Path) -> Result<SourceRevision, AppError> {
     observe(path, None)
 }
 
+/// Acknowledge only one directory created by the explicit checkpoint owner.
+/// File evidence is unchanged; this is not a general source refresh.
+pub(crate) fn acknowledge_checkpoint_directory(
+    path: &Path,
+    revision: &SourceRevision,
+    created: &Path,
+) -> Result<SourceRevision, AppError> {
+    let current = observe(path, None)?;
+    if current == *revision {
+        return Ok(current);
+    }
+    if current.path != revision.path
+        || current.files != revision.files
+        || revision.files.iter().any(Option::is_some)
+        || current.directories.len() != revision.directories.len() + 1
+        || !current.directories.starts_with(&revision.directories)
+        || current.directories.last().map(|(path, _)| path.as_path()) != Some(created)
+    {
+        return Err(changed());
+    }
+    Ok(current)
+}
+
 /// Scratch must stay outside both device and synchronized data roots.
 pub(crate) fn private_temp_base(root: &Path, device: &Path) -> Result<PathBuf, AppError> {
     inspection_temp_base(root, device, &std::env::temp_dir())

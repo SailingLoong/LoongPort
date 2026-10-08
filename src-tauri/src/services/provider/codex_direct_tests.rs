@@ -355,30 +355,36 @@ fn codex_external_changes_and_missing_staging_retain_barrier() {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn codex_unclaimed_external_catalog_is_preserved_by_default() {
-    let fixture = Fixture::new();
-    let external = fixture._home.path().join("external-catalog.json");
-    std::fs::write(&external, b"external rich schema, never parse").unwrap();
-    let before = std::fs::read_to_string(&fixture.config).unwrap();
-    let encoded = toml_edit::Value::from(external.to_str().unwrap());
-    std::fs::write(
-        &fixture.config,
-        format!("model_catalog_json = {encoded} # external owner\n{before}"),
-    )
-    .unwrap();
-    let result = ProviderService::switch(&fixture.state, AppType::Codex, "b").unwrap();
-    assert!(result
-        .warnings
-        .iter()
-        .any(|warning| warning.contains("模型映射未生效")));
-    let text = std::fs::read_to_string(&fixture.config).unwrap();
-    assert!(text.contains(&format!(
-        "model_catalog_json = {encoded} # external owner\n"
-    )));
-    assert_eq!(
-        std::fs::read(&external).unwrap(),
-        b"external rich schema, never parse"
-    );
-    fixture.assert_current("b");
+    for filename in [
+        "external-catalog.json",
+        "loongport-model-catalog.json",
+        "cc-switch-model-catalog.json",
+    ] {
+        let fixture = Fixture::new();
+        let external = fixture._home.path().join(filename);
+        std::fs::write(&external, b"external rich schema, never parse").unwrap();
+        let before = std::fs::read_to_string(&fixture.config).unwrap();
+        let encoded = toml_edit::Value::from(external.to_str().unwrap());
+        std::fs::write(
+            &fixture.config,
+            format!("model_catalog_json = {encoded} # external owner\n{before}"),
+        )
+        .unwrap();
+        let result = ProviderService::switch(&fixture.state, AppType::Codex, "b").unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("模型映射未生效")));
+        let text = std::fs::read_to_string(&fixture.config).unwrap();
+        assert!(text.contains(&format!(
+            "model_catalog_json = {encoded} # external owner\n"
+        )));
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"external rich schema, never parse"
+        );
+        fixture.assert_current("b");
+    }
 }
 
 fn managed_provider(id: &str, account: &str) -> Provider {
@@ -1182,53 +1188,79 @@ fn logged_out_managed_marker_is_cleared_by_the_next_nonmanaged_transaction() {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn outgoing_provider_owned_catalog_moves_with_provider_but_unclaimed_pointer_is_preserved() {
-    for claimed in [true, false] {
-        let (fixture, _) = catalog_fixture();
-        let external = fixture
-            .config
-            .parent()
-            .unwrap()
-            .join("unclaimed-external.json");
-        let bytes = std::fs::read(&external).unwrap();
-        let mut owner = fixture
-            .state
-            .db
-            .get_provider_by_id("a", "codex")
-            .unwrap()
-            .unwrap();
-        let config = owner.settings_config["config"].as_str().unwrap().to_owned();
-        owner.settings_config["config"] = json!(format!(
-            "model_catalog_json = \"unclaimed-external.json\"\n{config}"
-        ));
-        if claimed {
-            fixture.state.db.save_provider("codex", &owner).unwrap();
-            ProviderService::switch(&fixture.state, AppType::Codex, "a").unwrap();
-        } else {
-            // A different database row claiming the same pointer is not current ownership.
-            owner.id = "not-current".into();
-            fixture.state.db.save_provider("codex", &owner).unwrap();
-        }
-        ProviderService::switch(&fixture.state, AppType::Codex, "b").unwrap();
-        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(
-            doc["model_catalog_json"].as_str(),
-            Some(if claimed {
-                crate::live::project::codex::CATALOG_FILENAME
+    for filename in [
+        "unclaimed-external.json",
+        "loongport-model-catalog.json",
+        "cc-switch-model-catalog.json",
+    ] {
+        for claimed in [true, false] {
+            let (fixture, _) = catalog_fixture();
+            let relative = filename == "unclaimed-external.json";
+            let external = if relative {
+                fixture.config.parent().unwrap().join(filename)
             } else {
-                "unclaimed-external.json"
-            }),
-            "only the actual outgoing row proves ownership"
-        );
-        assert_eq!(std::fs::read(external).unwrap(), bytes);
-        fixture.assert_current("b");
+                fixture._home.path().join(filename)
+            };
+            let pointer = if relative {
+                filename
+            } else {
+                external.to_str().unwrap()
+            };
+            let encoded = toml_edit::Value::from(pointer);
+            let bytes = b"opaque external content";
+            std::fs::write(&external, bytes).unwrap();
+            let mut live: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .parse()
+                .unwrap();
+            live["model_catalog_json"] = toml_edit::value(pointer);
+            std::fs::write(&fixture.config, live.to_string()).unwrap();
+            let mut owner = fixture
+                .state
+                .db
+                .get_provider_by_id("a", "codex")
+                .unwrap()
+                .unwrap();
+            let config = owner.settings_config["config"].as_str().unwrap().to_owned();
+            owner.settings_config["config"] =
+                json!(format!("model_catalog_json = {encoded}\n{config}"));
+            if claimed {
+                fixture.state.db.save_provider("codex", &owner).unwrap();
+                ProviderService::switch(&fixture.state, AppType::Codex, "a").unwrap();
+                let applied: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(applied["model_catalog_json"].as_str(), Some(pointer));
+            } else {
+                // A different database row claiming the same pointer is not current ownership.
+                owner.id = "not-current".into();
+                fixture.state.db.save_provider("codex", &owner).unwrap();
+            }
+            ProviderService::switch(&fixture.state, AppType::Codex, "b").unwrap();
+            let doc: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                doc["model_catalog_json"].as_str(),
+                Some(if claimed {
+                    crate::live::project::codex::CATALOG_FILENAME
+                } else {
+                    pointer
+                }),
+                "only the actual outgoing row proves ownership"
+            );
+            assert_eq!(std::fs::read(external).unwrap(), bytes);
+            fixture.assert_current("b");
+        }
     }
 }
 
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify_review_cases() -> Result<(), AppError> {
+    codex_unclaimed_external_catalog_is_preserved_by_default();
+    proxy_native_auth_and_no_current_exit_preserve_unowned_bytes();
     let marker = std::panic::catch_unwind(
         logged_out_managed_marker_is_cleared_by_the_next_nonmanaged_transaction,
     );
@@ -1617,72 +1649,114 @@ fn another_apps_pending_does_not_block_codex_refresh() {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn proxy_native_auth_and_no_current_exit_preserve_unowned_bytes() {
-    let fixture = Fixture::new();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let native = read_current(&fixture.auth).unwrap();
-    runtime
-        .block_on(
-            fixture
-                .state
-                .proxy_service
-                .set_takeover_for_app("codex", true),
-        )
-        .unwrap();
-    assert_eq!(
-        read_current(&fixture.auth).unwrap(),
-        native,
-        "third-party proxy must not replace native auth with row key"
-    );
-    runtime
-        .block_on(
-            fixture
-                .state
-                .proxy_service
-                .switch_proxy_target("codex", "b"),
-        )
-        .unwrap();
-    assert_eq!(read_current(&fixture.auth).unwrap(), native);
-    let config = std::fs::read_to_string(&fixture.config).unwrap();
-    let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
-    assert_eq!(doc["model"].as_str(), Some("model-b"));
-    assert_eq!(
-        doc["model_providers"]["custom"]
-            .get("requires_openai_auth")
-            .and_then(toml_edit::Item::as_bool),
-        Some(true),
-        "native login display and refresh must remain enabled beside proxy bearer auth"
-    );
-    assert!(doc["model_providers"]["custom"]["base_url"]
-        .as_str()
-        .unwrap()
-        .starts_with("http://127.0.0.1:"));
-    assert!(config.contains("keep = \"exact\" # untouched"));
-    fixture.assert_current("a");
-    fixture
-        .state
-        .db
-        .conn
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE providers SET is_current=0 WHERE app_type='codex'",
-            [],
-        )
-        .unwrap();
-    crate::settings::set_current_provider(&AppType::Codex, None).unwrap();
-    runtime
-        .block_on(
-            fixture
-                .state
-                .proxy_service
-                .set_takeover_for_app("codex", false),
-        )
-        .unwrap();
-    assert_eq!(read_current(&fixture.auth).unwrap(), native);
-    assert!(std::fs::read_to_string(&fixture.config)
-        .unwrap()
-        .contains("keep = \"exact\" # untouched"));
-    assert!(fixture.pending().is_none());
+    for claimed in [true, false] {
+        let fixture = Fixture::new();
+        let external = fixture._home.path().join("loongport-model-catalog.json");
+        std::fs::write(&external, b"opaque external catalog").unwrap();
+        let pointer = external.to_str().unwrap();
+        let mut route = fixture
+            .state
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        let encoded = toml_edit::Value::from(pointer);
+        if claimed {
+            route.settings_config["config"] = json!(format!(
+                "model_catalog_json = {encoded}\n{}",
+                route.settings_config["config"].as_str().unwrap()
+            ));
+            fixture.state.db.save_provider("codex", &route).unwrap();
+        } else {
+            let original = std::fs::read_to_string(&fixture.config).unwrap();
+            std::fs::write(
+                &fixture.config,
+                format!("model_catalog_json = {encoded}\n{original}"),
+            )
+            .unwrap();
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let native = read_current(&fixture.auth).unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("codex", true),
+            )
+            .unwrap();
+        assert_eq!(
+            read_current(&fixture.auth).unwrap(),
+            native,
+            "third-party proxy must not replace native auth with row key"
+        );
+        runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .switch_proxy_target("codex", "b"),
+            )
+            .unwrap();
+        assert_eq!(read_current(&fixture.auth).unwrap(), native);
+        let config = std::fs::read_to_string(&fixture.config).unwrap();
+        let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(doc["model_catalog_json"].as_str(), Some(pointer));
+        assert_eq!(doc["model"].as_str(), Some("model-b"));
+        assert_eq!(
+            doc["model_providers"]["custom"]
+                .get("requires_openai_auth")
+                .and_then(toml_edit::Item::as_bool),
+            Some(true),
+            "native login display and refresh must remain enabled beside proxy bearer auth"
+        );
+        assert!(doc["model_providers"]["custom"]["base_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
+        assert!(config.contains("keep = \"exact\" # untouched"));
+        fixture.assert_current("a");
+        fixture
+            .state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET is_current=0 WHERE app_type='codex'",
+                [],
+            )
+            .unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, None).unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("codex", false),
+            )
+            .unwrap();
+        assert_eq!(read_current(&fixture.auth).unwrap(), native);
+        assert!(std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .contains("keep = \"exact\" # untouched"));
+        let after: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            after
+                .get("model_catalog_json")
+                .and_then(toml_edit::Item::as_str),
+            if claimed { None } else { Some(pointer) },
+            "only the actual outgoing route owns the catalog pointer without a direct provider"
+        );
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"opaque external catalog"
+        );
+        assert!(fixture.pending().is_none());
+    }
 }
 
 #[cfg_attr(test, test)]

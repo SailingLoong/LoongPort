@@ -11,7 +11,7 @@ pub(crate) mod owned_file;
 pub(crate) mod reset;
 pub(crate) mod rewrap;
 pub(crate) mod session;
-#[cfg(feature = "gui")]
+#[cfg(any(test, feature = "gui", feature = "test-hooks"))]
 pub(crate) mod startup;
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) mod testing;

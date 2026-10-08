@@ -1717,6 +1717,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             secrets::startup::unlock_secret_vault,
             secrets::startup::get_startup_recovery,
+            secrets::startup::get_startup_upgrade_review,
+            secrets::startup::authenticate_startup_upgrade,
+            secrets::startup::prepare_startup_upgrade_checkpoint,
+            secrets::startup::review_startup_upgrade_ownership,
             secrets::startup::recover_startup_operation,
             secrets::startup::preview_secret_reset,
             secrets::startup::reset_secret_vault,

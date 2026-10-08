@@ -15,6 +15,16 @@ const MAX_BACKUPS: usize = 10;
 pub struct ConfigService;
 
 impl ConfigService {
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_startup_upgrade_auth() -> Result<(), AppError> {
+        crate::secrets::upgrade::auth_tests::verify()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_startup_upgrade_review() -> Result<(), AppError> {
+        crate::secrets::upgrade::review_tests::verify()
+    }
+
     /// 为当前 config.json 创建备份，返回备份 ID（若文件不存在则返回空字符串）。
     pub fn create_backup(session: &SecretSession, config_path: &Path) -> Result<String, AppError> {
         let source = OwnedFile::at_path(session, config_path)?;

@@ -111,7 +111,108 @@ pub(crate) struct StableInspection {
     device_files: Vec<(super::owned_file::DeviceFile, std::path::PathBuf, Vec<u8>)>,
 }
 
+/// Safe startup projection only. Captured revisions, roots and vault metadata
+/// stay private to their original owners; checkpoint presence is not verification.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartupUpgradeView {
+    pub(crate) source_versions: Option<SchemaVersions>,
+    pub(crate) target_versions: SchemaVersions,
+    pub(crate) status: &'static str,
+    pub(crate) checkpoint_present: bool,
+    pub(crate) checkpoint_id: Option<String>,
+    pub(crate) review_token: Option<String>,
+    pub(crate) requires_authentication: bool,
+    pub(crate) can_authenticate: bool,
+    pub(crate) can_check_and_backup: bool,
+    pub(crate) can_start_upgrade: bool,
+}
+
+/// Older-binary recovery deliberately has no runtime coordinator. Keep that
+/// permission boundary and return its existing safe error rather than a panic.
+pub(crate) fn startup_upgrade_unavailable(init_error_kind: Option<&str>) -> &'static str {
+    if init_error_kind == Some("db_version_too_new") {
+        "upgrade.future_version"
+    } else {
+        "secret.startup_unavailable"
+    }
+}
+
+impl StartupUpgradeView {
+    pub(crate) fn blocked(status: &'static str) -> Self {
+        Self {
+            source_versions: None,
+            target_versions: SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            },
+            status,
+            checkpoint_present: false,
+            checkpoint_id: None,
+            review_token: None,
+            requires_authentication: false,
+            can_authenticate: false,
+            can_check_and_backup: false,
+            can_start_upgrade: false,
+        }
+    }
+}
+
 impl UpgradeInspection {
+    pub(crate) fn upgrade_view(&self, root: &Path) -> Result<StartupUpgradeView, AppError> {
+        let stable = match self {
+            Self::RecoveryRequired(evidence) => {
+                evidence.verify_unchanged(root, &evidence.token())?;
+                return Ok(StartupUpgradeView::blocked("recovery_required"));
+            }
+            Self::Stable(stable) => stable,
+        };
+        let mut view = StartupUpgradeView::blocked("not_applicable");
+        view.source_versions = stable.source_versions;
+        if stable.future_version().is_some() {
+            // Preserve existing newer-binary precedence: do not parse a vault
+            // format the current binary cannot understand.
+            if pending_generation(root)? {
+                return Err(changed());
+            }
+            if let Some(revision) = &stable.revision {
+                inspection::verify_unchanged(&root.join(crate::config::DB_FILE_NAME), revision)?;
+            }
+            view.status = "newer_binary_required";
+            return Ok(view);
+        }
+        stable.verify_unchanged(root)?;
+        view.checkpoint_present = stable
+            .device_files
+            .iter()
+            .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE));
+        if view.checkpoint_present {
+            if stable.vault.is_none() {
+                return Err(AppError::Config("secret.metadata_missing".into()));
+            }
+            view.status = "checkpoint_requires_verification";
+            view.requires_authentication = true;
+            return Ok(view);
+        }
+        let Some(source) = stable.source_versions else {
+            return Ok(view);
+        };
+        if source.upstream == database::UPSTREAM4_SOURCE_SCHEMA_VERSION && stable.vault.is_none() {
+            view.status = "data_protection_required";
+            return Ok(view);
+        }
+        if source.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+            || source.loongport != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            view.status = "unsupported_source";
+            return Ok(view);
+        }
+        view.requires_authentication = true;
+        view.status = "authentication_required";
+        // Actions remain unavailable until the real coordinator actions exist.
+        Ok(view)
+    }
+
     pub(crate) fn ensure_runtime_admitted(&self) -> Result<(), AppError> {
         let device = match self {
             Self::Stable(stable) => &stable.device,
@@ -187,6 +288,46 @@ impl StableInspection {
         }
         if read_vault(root)? != self.vault || read_device(&self.device)? != self.device_files {
             return Err(changed());
+        }
+        Ok(())
+    }
+
+    /// Adopt only the authenticated checkpoint output after its original owner
+    /// verified it. Every other startup input must retain the old evidence.
+    fn acknowledge_checkpoint(
+        &mut self,
+        root: &Path,
+        checkpoint_bytes: &[u8],
+    ) -> Result<(), AppError> {
+        let path = self.device.root().join(checkpoint::FILE);
+        if self
+            .device_files
+            .iter()
+            .any(|(_, original, _)| original == &path)
+        {
+            return Err(changed());
+        }
+        let current = read_device(&self.device)?;
+        let output = current
+            .iter()
+            .find(|(_, candidate, _)| candidate == &path)
+            .ok_or_else(changed)?;
+        if output.2 != checkpoint_bytes {
+            return Err(changed());
+        }
+        if current
+            .iter()
+            .filter(|(_, candidate, _)| candidate != &path)
+            .cloned()
+            .collect::<Vec<_>>()
+            != self.device_files
+        {
+            return Err(changed());
+        }
+        let original = std::mem::replace(&mut self.device_files, current);
+        if let Err(error) = self.verify_unchanged(root) {
+            self.device_files = original;
+            return Err(error);
         }
         Ok(())
     }
@@ -472,10 +613,32 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "upgrade_checkpoint_tests.rs"]
 mod checkpoint_tests;
 
 #[allow(dead_code)]
 #[path = "upgrade_checkpoint.rs"]
 pub(crate) mod checkpoint;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "upgrade_review_tests.rs"]
+pub(crate) mod review_tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "upgrade_auth_tests.rs"]
+pub(crate) mod auth_tests;
+
+#[path = "upgrade_review_session.rs"]
+mod review_session;
+pub(crate) use review_session::AuthenticatedUpgrade;
+
+#[path = "upgrade_staged_review.rs"]
+mod staged_review;
+pub(crate) use staged_review::StagedUpgradeReview;
+
+#[path = "upgrade_live_review.rs"]
+mod live_review;
+
+#[path = "upgrade_projection_review.rs"]
+mod projection_review;

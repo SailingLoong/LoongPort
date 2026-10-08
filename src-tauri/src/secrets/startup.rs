@@ -1,12 +1,16 @@
 //! Unlock owns runtime publication; credential consumers never start the lifecycle.
 
-use super::{key_store::SystemKeyStore, session::SecretSession};
+#[cfg(feature = "gui")]
+use super::key_store::SystemKeyStore;
+use super::session::SecretSession;
 use std::{path::PathBuf, sync::Mutex};
+#[cfg(feature = "gui")]
 use tauri::{Emitter, Manager};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Locked,
+    UpgradeReview,
     Initializing,
     Ready,
     Failed,
@@ -18,6 +22,7 @@ pub(crate) struct StartupCoordinator {
     inspection: Mutex<super::upgrade::UpgradeInspection>,
     recovery_token: Option<String>,
     phase: Mutex<Phase>,
+    upgrade_review: Mutex<Option<super::upgrade::AuthenticatedUpgrade>>,
 }
 
 impl StartupCoordinator {
@@ -32,9 +37,11 @@ impl StartupCoordinator {
             },
             inspection: Mutex::new(inspection),
             phase: Mutex::new(Phase::Locked),
+            upgrade_review: Mutex::new(None),
         }
     }
 
+    #[cfg(feature = "gui")]
     fn initialize(&self, app: &tauri::AppHandle, password: Option<&str>) -> Result<(), String> {
         self.run_attempt(
             || {
@@ -90,7 +97,7 @@ impl StartupCoordinator {
         match *phase {
             Phase::Ready => return Ok(()),
             Phase::Locked => {}
-            Phase::Initializing => return Err("secret.initializing".into()),
+            Phase::Initializing | Phase::UpgradeReview => return Err("secret.initializing".into()),
             Phase::Failed | Phase::Recovered => return Err("secret.restart_required".into()),
         }
         self.inspection
@@ -111,6 +118,136 @@ impl StartupCoordinator {
             Phase::Failed
         };
         result
+    }
+
+    pub(super) fn upgrade_view(&self) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let blocked = match *phase {
+            Phase::Ready => Some("runtime_active"),
+            Phase::Initializing => Some("busy"),
+            Phase::Failed | Phase::Recovered => Some("restart_required"),
+            Phase::Locked | Phase::UpgradeReview => None,
+        };
+        if let Some(status) = blocked {
+            return Ok(super::upgrade::StartupUpgradeView::blocked(status));
+        }
+        let inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase == Phase::UpgradeReview {
+            return self
+                .upgrade_review
+                .lock()
+                .map_err(|_| "secret.startup_unavailable")?
+                .as_ref()
+                .ok_or("secret.startup_unavailable")?
+                .view(&inspection)
+                .map_err(super::error::public_code);
+        }
+        let mut view = inspection
+            .upgrade_view(&self.root)
+            .map_err(super::error::public_code)?;
+        view.can_authenticate = matches!(
+            view.status,
+            "authentication_required" | "checkpoint_requires_verification"
+        );
+        Ok(view)
+    }
+
+    pub(super) fn authenticate_upgrade(
+        &self,
+        password: Option<&str>,
+        store: &dyn super::key_store::KeyStore,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let mut phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::Locked {
+            return Err("secret.initializing".into());
+        }
+        let inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let review = super::upgrade::AuthenticatedUpgrade::authenticate(
+            &self.root,
+            &crate::live::engine::DeviceStore::for_device(),
+            &inspection,
+            store,
+            password,
+        )
+        .map_err(super::error::public_code)?;
+        let view = review
+            .view(&inspection)
+            .map_err(super::error::public_code)?;
+        *self
+            .upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")? = Some(review);
+        *phase = Phase::UpgradeReview;
+        Ok(view)
+    }
+
+    pub(super) fn prepare_upgrade_checkpoint(
+        &self,
+        token: &str,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::UpgradeReview {
+            return Err("secret.locked".into());
+        }
+        let mut inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        self.upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .as_mut()
+            .ok_or("secret.startup_unavailable")?
+            .prepare_checkpoint(&mut inspection, token)
+            .map_err(super::error::public_code)
+    }
+
+    pub(super) fn review_upgrade_ownership(
+        &self,
+        token: &str,
+    ) -> Result<super::upgrade::StagedUpgradeReview, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::UpgradeReview {
+            return Err("secret.locked".into());
+        }
+        let inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        self.upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .as_ref()
+            .ok_or("secret.startup_unavailable")?
+            .stage_review(&inspection, token)
+            .map_err(super::error::public_code)
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(super) fn verify_runtime_admission_blocked(&self) -> bool {
+        self.run_attempt(
+            || panic!("review must prevent ordinary unlock"),
+            |_| panic!("review must prevent runtime preparation"),
+        )
+        .is_err()
     }
 
     fn restart_required(&self) -> bool {
@@ -222,6 +359,84 @@ pub(crate) struct StartupRecoveryView {
     restart_required: bool,
 }
 
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn get_startup_upgrade_review(
+    app: tauri::AppHandle,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(coordinator) = app.try_state::<StartupCoordinator>() {
+            coordinator.upgrade_view()
+        } else {
+            let initialization = crate::init_status::get_init_error();
+            Err(super::upgrade::startup_upgrade_unavailable(
+                initialization
+                    .as_ref()
+                    .and_then(|error| error.kind.as_deref()),
+            )
+            .to_owned())
+        }
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn authenticate_startup_upgrade(
+    app: tauri::AppHandle,
+    password: Option<String>,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    let password = password.map(zeroize::Zeroizing::new);
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.authenticate_upgrade(
+            password.as_ref().map(|value| value.as_str()),
+            &SystemKeyStore,
+        )
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn prepare_startup_upgrade_checkpoint(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.prepare_upgrade_checkpoint(&expected_review_token)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn review_startup_upgrade_ownership(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+) -> Result<super::upgrade::StagedUpgradeReview, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.review_upgrade_ownership(&expected_review_token)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn get_startup_recovery(
     app: tauri::AppHandle,
@@ -231,6 +446,7 @@ pub(crate) async fn get_startup_recovery(
         .map_err(|_| "secret.operation_failed".to_owned())?
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn recover_startup_operation(
     app: tauri::AppHandle,
@@ -255,6 +471,7 @@ pub(crate) async fn recover_startup_operation(
     })?
 }
 
+#[cfg(feature = "gui")]
 fn prepare_runtime(
     app: &tauri::AppHandle,
     session: std::sync::Arc<SecretSession>,
@@ -265,6 +482,7 @@ fn prepare_runtime(
     Ok(())
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn preview_startup_restore(
     app: tauri::AppHandle,
@@ -293,6 +511,7 @@ pub(crate) async fn preview_startup_restore(
     result
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn restore_startup_vault(
     app: tauri::AppHandle,
@@ -372,6 +591,7 @@ pub(crate) async fn restore_startup_vault(
     result
 }
 
+#[cfg(feature = "gui")]
 fn present_error(app: &tauri::AppHandle, error: &str) {
     log::error!("启动解锁失败（secret startup failed）: {error}");
     crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
@@ -394,6 +614,7 @@ fn present_error(app: &tauri::AppHandle, error: &str) {
     }
 }
 
+#[cfg(feature = "gui")]
 pub(crate) fn try_automatic_unlock(app: &tauri::AppHandle) {
     let coordinator = app.state::<StartupCoordinator>();
     if let Err(error) = coordinator.initialize(app, None) {
@@ -401,6 +622,7 @@ pub(crate) fn try_automatic_unlock(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn unlock_secret_vault(
     app: tauri::AppHandle,
@@ -426,6 +648,7 @@ pub(crate) async fn unlock_secret_vault(
     })?
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn preview_secret_reset(
     app: tauri::AppHandle,
@@ -446,6 +669,7 @@ pub(crate) async fn preview_secret_reset(
     .map_err(|_| "secret.operation_failed".to_owned())?
 }
 
+#[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn reset_secret_vault(
     app: tauri::AppHandle,
@@ -506,13 +730,47 @@ pub(crate) struct StartupError {
     restart_required: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
+
+    #[cfg_attr(test, test)]
+    pub(super) fn upgrade_query_blocks_busy_runtime_and_restart_phases_without_reinspection() {
+        let temporary = super::super::testing::tempdir().unwrap();
+        let root = temporary.path().join("source");
+        crate::config_file_io::ensure_private_directory(&root).unwrap();
+        let device = crate::live::engine::DeviceStore::at(temporary.path().join("device"));
+        let inspection = super::super::upgrade::inspect(&root, &device).unwrap();
+        let coordinator = StartupCoordinator::new(root.clone(), inspection);
+        std::fs::write(
+            root.join(crate::config::DB_FILE_NAME),
+            b"runtime-owned-source",
+        )
+        .unwrap();
+        for (phase, expected) in [
+            (Phase::Ready, "runtime_active"),
+            (Phase::Initializing, "busy"),
+            (Phase::Failed, "restart_required"),
+            (Phase::Recovered, "restart_required"),
+        ] {
+            *coordinator.phase.lock().unwrap() = phase;
+            let view = coordinator.upgrade_view().unwrap();
+            assert_eq!(view.status, expected);
+            assert!(view.source_versions.is_none());
+            assert!(
+                !view.can_authenticate && !view.can_check_and_backup && !view.can_start_upgrade
+            );
+            assert_eq!(
+                std::fs::read(root.join(crate::config::DB_FILE_NAME)).unwrap(),
+                b"runtime-owned-source"
+            );
+        }
+    }
+
     use std::cell::Cell;
 
-    #[test]
-    fn recovery_query_does_not_authenticate_or_mutate_and_stale_action_is_refused() {
+    #[cfg_attr(test, test)]
+    pub(super) fn recovery_query_does_not_authenticate_or_mutate_and_stale_action_is_refused() {
         let dir = super::super::testing::tempdir().unwrap();
         let root = dir.path().join("source");
         crate::config_file_io::ensure_private_directory(&root).unwrap();
@@ -553,8 +811,8 @@ mod tests {
         assert_eq!(std::fs::read(&marker).unwrap(), b"another generation");
     }
 
-    #[test]
-    fn failed_unlock_never_starts_runtime_and_success_is_published_once() {
+    #[cfg_attr(test, test)]
+    pub(super) fn failed_unlock_never_starts_runtime_and_success_is_published_once() {
         let dir = super::super::testing::tempdir().unwrap();
         let root = dir.path().join("source");
         let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
@@ -589,8 +847,8 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    #[test]
-    fn failed_runtime_preparation_is_not_repeated_in_the_same_process() {
+    #[cfg_attr(test, test)]
+    pub(super) fn failed_runtime_preparation_is_not_repeated_in_the_same_process() {
         let dir = super::super::testing::tempdir().unwrap();
         let root = dir.path().join("source");
         let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
@@ -609,11 +867,11 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod checkpoint_admission_tests {
     use super::*;
-    #[test]
-    fn pending_upgrade_stops_unlock_before_any_runtime_callback() {
+    #[cfg_attr(test, test)]
+    pub(super) fn pending_upgrade_stops_unlock_before_any_runtime_callback() {
         let home = crate::secrets::testing::tempdir().unwrap();
         let root = home.path().join("data");
         let device = crate::live::engine::DeviceStore::at(home.path().join("device"));
@@ -636,4 +894,13 @@ mod checkpoint_admission_tests {
         assert_eq!(result, Err("upgrade.sync_paused".into()));
         assert!(!unlocked.get());
     }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_original_startup_admission() {
+    tests::upgrade_query_blocks_busy_runtime_and_restart_phases_without_reinspection();
+    tests::recovery_query_does_not_authenticate_or_mutate_and_stale_action_is_refused();
+    tests::failed_unlock_never_starts_runtime_and_success_is_published_once();
+    tests::failed_runtime_preparation_is_not_repeated_in_the_same_process();
+    checkpoint_admission_tests::pending_upgrade_stops_unlock_before_any_runtime_callback();
 }
