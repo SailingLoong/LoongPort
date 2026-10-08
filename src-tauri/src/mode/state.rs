@@ -1,11 +1,23 @@
-//! Pure mode-state models from cc-switch v4.0.2 (bf2fe0d0).
-//! Persistence is deliberately absent until encrypted dual-root lifecycle and
-//! operation recovery are integrated. Decoding never repairs or discards state.
+//! Device mode state and serialized read-modify-write from cc-switch v4.0.2.
+//! LoongPort persists only authenticated device-file ciphertext with the caller's
+//! existing vault read guard. Corrupt state is never repaired, renamed or reset;
+//! untouched future data remains readable without authorizing destructive edits.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, RwLockReadGuard};
+use zeroize::Zeroizing;
+
+use crate::error::AppError;
+use crate::live::engine::DeviceStore;
+use crate::secrets::owned_file::{DeviceFile, DEVICE_STATE_FILE};
+use crate::secrets::VaultContext;
+
+#[cfg(test)]
+#[path = "state_persistence_tests.rs"]
+mod persistence_tests;
 
 pub const STATE_VERSION: u32 = 1;
 
@@ -80,7 +92,7 @@ pub enum ModeUpdateError {
 }
 
 impl ModeState {
-    fn validate_for_update(&self) -> Result<(), ModeUpdateError> {
+    pub(super) fn validate_for_update(&self) -> Result<(), ModeUpdateError> {
         if !self.extra.is_empty() {
             return Err(ModeUpdateError::UnknownFields);
         }
@@ -234,6 +246,15 @@ pub mod op {
     pub const STACK: &str = "stack";
     /// Codex 改用 CC Switch 生成的模型目录（用户在 Stack 提示上点的）：一律重写客户端。
     pub const CATALOG: &str = "catalog";
+
+    /// Persistence recognizes the upstream vocabulary; operation admission still
+    /// decides which of these transitions the current product supports.
+    pub(super) fn is_known(value: &str) -> bool {
+        matches!(
+            value,
+            SWITCH | APPLY | ENTER | EXIT | DETACH | ATTACH | ROUTE | STACK | CATALOG
+        )
+    }
 }
 
 /// 一次操作的写前意图。
@@ -335,4 +356,231 @@ pub fn decode(bytes: &[u8]) -> Result<LiveState, StateDecodeError> {
         return Err(StateDecodeError::UnsupportedVersion(state.version));
     }
     Ok(state)
+}
+
+/// One device state file contains every app, so all read-modify-write operations
+/// share the upstream lock. The vault guard must be acquired before this lock.
+fn state_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+/// Absence is the only empty-state case. Authentication, parse and version errors
+/// leave the original file untouched for controlled inspection and recovery.
+pub(crate) fn load(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<LiveState, AppError> {
+    let file = DeviceFile::registered(DEVICE_STATE_FILE)?;
+    match store.read_device(vault, &file)? {
+        Some(bytes) => decode(&bytes).map_err(|error| AppError::Config(error.to_string())),
+        None => Ok(LiveState::default()),
+    }
+}
+
+fn save(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    state: &LiveState,
+) -> Result<(), AppError> {
+    let bytes = Zeroizing::new(
+        serde_json::to_vec_pretty(state).map_err(|source| AppError::JsonSerialize { source })?,
+    );
+    store.write_device(vault, &DeviceFile::registered(DEVICE_STATE_FILE)?, &bytes)
+}
+
+fn unsupported_update() -> AppError {
+    AppError::Config("mode.unsupported_state_update".into())
+}
+
+/// Validate only changed app subtrees. A future app cannot be rewritten or
+/// removed, but it must not block a supported operation on an unrelated app.
+fn validate_change(before: &LiveState, after: &LiveState) -> Result<(), AppError> {
+    if after.version != STATE_VERSION || before.extra != after.extra {
+        return Err(unsupported_update());
+    }
+    for (app, old) in &before.apps {
+        if after.apps.get(app) != Some(old) {
+            validate_app_for_update(old)?;
+        }
+    }
+    for (app, new) in &after.apps {
+        if before.apps.get(app) != Some(new) {
+            validate_app_for_update(new)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError> {
+    app.mode_state()
+        .validate_for_update()
+        .map_err(|_| unsupported_update())?;
+    if app
+        .written
+        .as_ref()
+        .is_some_and(|value| !value.extra.is_empty())
+        || !app.stack.extra.is_empty()
+    {
+        return Err(unsupported_update());
+    }
+    if let Some(pending) = &app.pending {
+        if !op::is_known(&pending.op)
+            || !pending.extra.is_empty()
+            || pending
+                .files
+                .iter()
+                .any(|file| !file.extra.is_empty() || file.private.is_none())
+            || !pending.target.extra.is_empty()
+            || pending
+                .target
+                .written
+                .as_ref()
+                .is_some_and(|value| !value.extra.is_empty())
+            || pending
+                .target
+                .stack
+                .as_ref()
+                .is_some_and(|value| !value.extra.is_empty())
+        {
+            return Err(unsupported_update());
+        }
+        if let Some(mode) = &pending.target.state {
+            mode.validate_for_update()
+                .map_err(|_| unsupported_update())?;
+        }
+    }
+    Ok(())
+}
+
+/// Fallible in-memory changes are committed only after compatibility validation.
+/// Callers must keep external effects out of this closure; it owns only state.
+pub(crate) fn update<R>(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    change: impl FnOnce(&mut LiveState) -> Result<R, AppError>,
+) -> Result<R, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let before = load(store, vault)?;
+    let mut state = before.clone();
+    let result = change(&mut state)?;
+    validate_change(&before, &state)?;
+    state.apps.retain(|_, app| !app.is_empty());
+    save(store, vault, &state)?;
+    Ok(result)
+}
+
+pub(crate) fn pending(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<Option<Pending>, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(load(store, vault)?
+        .apps
+        .get(app)
+        .and_then(|state| state.pending.clone()))
+}
+
+pub(crate) fn set_pending(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+    pending: Option<Pending>,
+) -> Result<(), AppError> {
+    update(store, vault, |state| {
+        state.apps.entry(app.to_string()).or_default().pending = pending;
+        Ok(())
+    })
+}
+
+/// Read several app modes from one authenticated snapshot.
+pub(crate) fn mode_states<const N: usize>(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    apps: [&str; N],
+) -> Result<[ModeState; N], AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let state = load(store, vault)?;
+    Ok(apps.map(|app| {
+        state
+            .apps
+            .get(app)
+            .map(AppLiveState::mode_state)
+            .unwrap_or_default()
+    }))
+}
+
+pub(crate) fn mode_state(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<ModeState, AppError> {
+    let [mode] = mode_states(store, vault, [app])?;
+    Ok(mode)
+}
+
+/// None denotes that this version has not written this app's native files.
+pub(crate) fn written(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<Option<Written>, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(load(store, vault)?
+        .apps
+        .get(app)
+        .and_then(|state| state.written.clone()))
+}
+
+pub(crate) fn stack(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<StackState, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(load(store, vault)?
+        .apps
+        .get(app)
+        .map(|state| state.stack.clone())
+        .unwrap_or_default())
+}
+
+pub(crate) fn stack_mode(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<bool, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(load(store, vault)?
+        .apps
+        .get(app)
+        .is_some_and(|state| state.mode == Some(Mode::Proxy) && state.stack.enabled))
+}
+
+pub(crate) fn apps_with_pending(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<Vec<String>, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(load(store, vault)?
+        .apps
+        .into_iter()
+        .filter(|(_, state)| state.pending.is_some())
+        .map(|(app, _)| app)
+        .collect())
 }

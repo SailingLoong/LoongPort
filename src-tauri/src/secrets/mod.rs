@@ -13,7 +13,7 @@ pub(crate) mod rewrap;
 pub(crate) mod session;
 #[cfg(feature = "gui")]
 pub(crate) mod startup;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) mod testing;
 pub(crate) mod transition;
 pub(crate) mod upgrade;

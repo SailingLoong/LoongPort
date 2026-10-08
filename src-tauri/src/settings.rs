@@ -2,11 +2,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::secrets::{session::SecretSession, VaultContext};
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "settings_vault_guard_tests.rs"]
+mod vault_guard_tests;
 
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1155,6 +1160,40 @@ impl SettingsStore {
     {
         // The session read guard pins one key generation through encryption and publication.
         let vault = self.session.read()?;
+        self.mutate_pinned(&vault, mutator, |_, _, _| Ok(()))
+    }
+
+    /// The caller must supply a guard borrowed from `session`, held for the
+    /// whole operation. Never reacquire its read lock: a queued key writer
+    /// would otherwise deadlock this already-admitted operation.
+    fn mutate_with_vault<F, T, V>(
+        &self,
+        session: &SecretSession,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        mutator: F,
+        verify: V,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(&mut AppSettings) -> T,
+        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+    {
+        if !std::ptr::eq(session, self.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
+        self.mutate_pinned(vault, mutator, verify)
+    }
+
+    fn mutate_pinned<F, T, V>(
+        &self,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        mutator: F,
+        verify: V,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(&mut AppSettings) -> T,
+        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+    {
         let mut state = self.state.write()?;
         if let Some(error) = &state.failure {
             return Err(AppError::Config(error.clone()));
@@ -1162,10 +1201,31 @@ impl SettingsStore {
         let mut next = state.settings.clone();
         let result = mutator(&mut next);
         next.normalize_paths();
-        let bytes = encode_settings_with_vault(&next, &vault)?;
+        let bytes = encode_settings_with_vault(&next, vault)?;
         crate::config::atomic_write_private(&self.path, &bytes)?;
+        verify(&self.path, vault, &result)?;
         state.settings = next;
         Ok(result)
+    }
+
+    fn set_current_provider_with_vault(
+        &self,
+        app_type: &AppType,
+        id: Option<&str>,
+        session: &SecretSession,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<(), AppError> {
+        self.mutate_with_vault(
+            session,
+            vault,
+            |settings| {
+                let current = current_provider_slot(settings, app_type)?;
+                *current = id.map(str::to_owned);
+                current.clone()
+            },
+            |path, vault, expected| verify_current_provider_at(path, vault, app_type, expected),
+        )?;
+        Ok(())
     }
 
     fn reload(&self) -> Result<(), AppError> {
@@ -1241,7 +1301,7 @@ pub fn unlock_settings(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn unlock_settings_for_test(
     session: Arc<crate::secrets::session::SecretSession>,
 ) -> Result<(), AppError> {
@@ -1251,6 +1311,12 @@ pub(crate) fn unlock_settings_for_test(
     runtime.bootstrap = bootstrap;
     runtime.failure = None;
     runtime.unlocked = Some(store);
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_settings_vault_guard() -> Result<(), AppError> {
+    vault_guard_tests::run();
     Ok(())
 }
 
@@ -1605,19 +1671,43 @@ pub fn unify_codex_session_history() -> bool {
 /// 这是设备级别的设置，不随数据库同步。
 /// 如果本地没有设置，调用者应该 fallback 到数据库的 `is_current` 字段。
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
-    let settings = get_settings();
+    current_provider_slot(&mut get_settings(), app_type).and_then(|current| current.clone())
+}
+
+fn current_provider_slot<'a>(
+    settings: &'a mut AppSettings,
+    app_type: &AppType,
+) -> Option<&'a mut Option<String>> {
     match app_type {
-        AppType::Claude => settings.current_provider_claude.clone(),
-        AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
-        AppType::Codex => settings.current_provider_codex.clone(),
-        AppType::CodexImage => settings.current_provider_codex_image.clone(),
-        AppType::Gemini => settings.current_provider_gemini.clone(),
-        AppType::GrokBuild => settings.current_provider_grokbuild.clone(),
-        AppType::OpenCode => settings.current_provider_opencode.clone(),
-        AppType::OpenClaw => settings.current_provider_openclaw.clone(),
-        AppType::Hermes => settings.current_provider_hermes.clone(),
+        AppType::Claude => Some(&mut settings.current_provider_claude),
+        AppType::ClaudeDesktop => Some(&mut settings.current_provider_claude_desktop),
+        AppType::Codex => Some(&mut settings.current_provider_codex),
+        AppType::CodexImage => Some(&mut settings.current_provider_codex_image),
+        AppType::Gemini => Some(&mut settings.current_provider_gemini),
+        AppType::GrokBuild => Some(&mut settings.current_provider_grokbuild),
+        AppType::OpenCode => Some(&mut settings.current_provider_opencode),
+        AppType::OpenClaw => Some(&mut settings.current_provider_openclaw),
+        AppType::Hermes => Some(&mut settings.current_provider_hermes),
         AppType::Pi => None,
     }
+}
+
+fn verify_current_provider_at(
+    path: &Path,
+    vault: &VaultContext,
+    app_type: &AppType,
+    expected: &Option<String>,
+) -> Result<(), AppError> {
+    let bytes = fs::read(path).map_err(|error| AppError::io(path, error))?;
+    let mut persisted = decode_settings_with_vault(&bytes, vault)?;
+    let actual =
+        current_provider_slot(&mut persisted, app_type).and_then(|current| current.clone());
+    if actual != *expected {
+        return Err(AppError::Config(
+            "settings.current_provider_readback_mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 生图工具是否注册进 codex / claude / gemini（MCP）。缺省 = 开：
@@ -1648,19 +1738,27 @@ pub fn set_imagegen_output_dir(dir: String) -> Result<(), AppError> {
 /// 这是设备级别的设置，不随数据库同步。
 /// 传入 `None` 会清除当前供应商设置。
 pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
-    let id_owned = id.map(|s| s.to_string());
-    mutate_settings(|settings| match app_type {
-        AppType::Claude => settings.current_provider_claude = id_owned.clone(),
-        AppType::ClaudeDesktop => settings.current_provider_claude_desktop = id_owned.clone(),
-        AppType::Codex => settings.current_provider_codex = id_owned.clone(),
-        AppType::CodexImage => settings.current_provider_codex_image = id_owned.clone(),
-        AppType::Gemini => settings.current_provider_gemini = id_owned.clone(),
-        AppType::GrokBuild => settings.current_provider_grokbuild = id_owned.clone(),
-        AppType::OpenCode => settings.current_provider_opencode = id_owned.clone(),
-        AppType::OpenClaw => settings.current_provider_openclaw = id_owned.clone(),
-        AppType::Hermes => settings.current_provider_hermes = id_owned.clone(),
-        AppType::Pi => {}
+    mutate_settings(|settings| {
+        if let Some(current) = current_provider_slot(settings, app_type) {
+            *current = id.map(str::to_owned);
+        }
     })
+}
+
+/// Commit the device pointer inside an operation that already pins its vault.
+/// `vault` must have been obtained from `session`; this trusted internal seam
+/// verifies that session belongs to the unlocked store without taking another
+/// key lock. Readback failure leaves the previous cache and returns an error;
+/// the operation journal, not settings, owns recovery of published bytes.
+pub(crate) fn set_current_provider_with_vault(
+    app_type: &AppType,
+    id: Option<&str>,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<(), AppError> {
+    let store = unlocked_settings_store()?;
+    store.set_current_provider_with_vault(app_type, id, session, vault)?;
+    refresh_bootstrap_from(&store)
 }
 
 /// Resolve presentation state without cleaning stale local selections. Reads of

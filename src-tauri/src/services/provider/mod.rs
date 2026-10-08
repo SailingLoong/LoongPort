@@ -4,6 +4,9 @@
 
 mod endpoints;
 mod gemini_auth;
+mod gemini_direct;
+#[cfg(any(test, feature = "test-hooks"))]
+mod gemini_direct_tests;
 mod live;
 mod native;
 pub(crate) use native::service_configuration_revision;
@@ -11,6 +14,21 @@ mod pi;
 mod transaction;
 mod usage;
 pub(crate) use transaction::with_provider_config_transaction;
+
+#[cfg(feature = "test-hooks")]
+impl ProviderService {
+    /// Synthetic headless verification only; omitted from ordinary builds.
+    #[doc(hidden)]
+    pub fn verify_settings_vault_guard() -> Result<(), AppError> {
+        crate::settings::verify_settings_vault_guard()
+    }
+
+    /// Calls the ordinary service with isolated synthetic files and credentials.
+    #[doc(hidden)]
+    pub fn verify_upstream4_gemini_flow() -> Result<(), AppError> {
+        gemini_direct_tests::verify()
+    }
+}
 
 /// 给 `--add-site` CLI 用的落盘入口：不经过 DB/切换流程，直接把一份
 /// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档共用内部 app 分派）。
@@ -5970,6 +5988,19 @@ impl ProviderService {
         } else {
             None
         };
+
+        // Schema20 direct writes use the upstream forward-recovery owner. Do not
+        // wrap them in the legacy snapshot rollback, which would undo published
+        // files behind a retained mode journal. Normal schema17 startup is unchanged.
+        if matches!(app_type, AppType::Gemini) && gemini_direct::uses_upstream4_schema(&state.db)? {
+            let provider = state
+                .db
+                .get_provider_by_id(id, app_type.as_str())?
+                .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            validate_provider_selection(&state.db, &app_type, id)?;
+            gemini_direct::switch_to(state, &provider)?;
+            return Ok(SwitchResult::default());
+        }
 
         if app_type.supports_local_proxy() {
             let provider = state
