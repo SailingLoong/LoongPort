@@ -1286,7 +1286,7 @@ fn initialize_runtime(
             if let Err(error) =
                 crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
                     &state.db,
-                    &state.proxy_service,
+                    state.proxy_service.as_ref(),
                 )
                 .await
             {

@@ -1,5 +1,6 @@
 //! Actual service/controller fixtures. No live accounts or user directories.
 use crate::app_config::AppType;
+#[cfg(feature = "test-hooks")]
 use crate::error::AppError;
 use crate::live::engine::{read_current, DeviceStore};
 use crate::mode::{
