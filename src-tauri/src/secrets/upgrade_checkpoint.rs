@@ -63,6 +63,8 @@ struct Manifest {
     vault_file: CapturedFile,
     files: Vec<CapturedFile>,
     device_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_database: Option<String>,
 }
 impl Drop for Manifest {
     fn drop(&mut self) {
@@ -120,7 +122,8 @@ impl Manifest {
         vault: &VaultContext,
         id: &str,
     ) -> Result<(), AppError> {
-        if self.format != 1
+        if self.published_database.is_some()
+            || self.format != 1
             || self.id != id
             || self.root != root
             || self.device != device.root()
@@ -245,6 +248,7 @@ pub(super) fn create_with_hook(
         vault_file: CapturedFile::capture(&root.join("vault.json"))?,
         files,
         device_paths: paths,
+        published_database: None,
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(&manifest).map_err(|_| invalid())?);
     if plaintext.len() as u64 > MAX_BYTES / 2 {
@@ -383,4 +387,130 @@ fn existing_manifest(
     manifest.verify_source(root, device, vault, &manifest.id)?;
     manifest.database(vault)?;
     Ok((manifest, bytes))
+}
+
+/// Prepare the target handoff inside the original generation transaction. This
+/// private seam does not publish runtime settings, establish mode or enable apps.
+pub(super) fn publish_database_with_hook(
+    db: &Database,
+    device: &DeviceStore,
+    store: &dyn crate::secrets::key_store::KeyStore,
+    id: &str,
+    hook: &mut dyn FnMut(crate::secrets::transition::Checkpoint) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let root = db.secret_session().root();
+    crate::secrets::transition::install_upgrade_database(
+        db,
+        store,
+        device.root(),
+        |source, current, _| {
+            let manifest = load(root, device, current, id)?;
+            if Database::content_digest(source)? != manifest.database_digest {
+                return Err(changed());
+            }
+            stage(root, device, current, id)
+        },
+        &mut |target, current| {
+            let (mut manifest, source_bytes) = existing_manifest(root, device, current)?;
+            if manifest.id != id {
+                return Err(changed());
+            }
+            if Database::get_user_version(target)? != manifest.target_versions.upstream
+                || database::loongport_schema::read_stored_version(target)?
+                    != manifest.target_versions.loongport
+            {
+                return Err(invalid());
+            }
+            manifest.published_database = Some(Database::content_digest(target)?);
+            let plaintext = Zeroizing::new(serde_json::to_vec(&manifest).map_err(|_| invalid())?);
+            Ok(crate::secrets::transition::UpgradeCheckpointReplacement {
+                source_digest: crate::live::engine::digest(Some(&source_bytes))
+                    .ok_or_else(invalid)?,
+                ciphertext: descriptor()?.encode(current, &plaintext)?,
+            })
+        },
+        hook,
+    )
+}
+
+/// Authenticate original checkpoint provenance and unchanged non-DB inputs on
+/// either side of DB publication. The transition separately pins source/target DB.
+pub(crate) fn validate_publication_payload(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    bytes: &[u8],
+) -> Result<(String, String), AppError> {
+    let plaintext = descriptor()?.decode(vault, bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    let target = manifest.published_database.as_ref().ok_or_else(invalid)?;
+    if manifest.format != 1
+        || manifest.root != root
+        || manifest.device != device.root()
+        || manifest.metadata != *vault.metadata()
+        || manifest.source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        || manifest.source_versions.loongport
+            != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        || manifest.target_versions.upstream != database::UPSTREAM4_SCHEMA_VERSION
+        || manifest.target_versions.loongport != manifest.source_versions.loongport
+        || uuid::Uuid::parse_str(&manifest.id)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(manifest.id.as_str())
+        || target.len() != 64
+        || !target
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(invalid());
+    }
+    manifest.database(vault)?;
+    manifest.vault_file.verify()?;
+    if device_paths(device)? != manifest.device_paths {
+        return Err(changed());
+    }
+    for file in &manifest.files {
+        file.verify()?;
+    }
+    Ok((manifest.database_digest.clone(), target.clone()))
+}
+
+/// DB-complete/app-not-started recognition only. This is not global completion,
+/// and cannot authorize writes after apps have begun changing reviewed inputs.
+pub(super) fn published_database_id(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+) -> Result<Option<String>, AppError> {
+    if pending_generation(root)? {
+        return Err(AppError::Config("secret.recovery_required".into()));
+    }
+    let Some(bytes) = config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))?
+    else {
+        return Ok(None);
+    };
+    let plaintext = descriptor()?.decode(vault, &bytes)?;
+    let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    if manifest.published_database.is_none() {
+        manifest.verify_source(root, device, vault, &manifest.id)?;
+        manifest.database(vault)?;
+        return Ok(None);
+    }
+    let (_, target) = validate_publication_payload(root, device, vault, &bytes)?;
+    let conn = Connection::open_with_flags(
+        root.join(crate::config::DB_FILE_NAME),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    database::vault::check_identity(&conn, vault)?;
+    crate::secrets::inventory::validate_database(&conn, vault)?;
+    if Database::get_user_version(&conn)? != manifest.target_versions.upstream
+        || database::loongport_schema::read_stored_version(&conn)?
+            != manifest.target_versions.loongport
+        || Database::content_digest(&conn)? != target
+    {
+        return Err(changed());
+    }
+    Ok(Some(manifest.id.clone()))
 }

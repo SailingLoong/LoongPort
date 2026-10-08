@@ -385,6 +385,14 @@ fn startup_upgrade_rejects_existing_incomplete_or_corrupt_checkpoint_without_rep
 
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify() -> Result<(), AppError> {
+    upgrade_publication_refuses_memory_target();
+    #[cfg(unix)]
+    upgrade_publication_keeps_intent_after_atomic_database_replacement();
+    upgrade_recovery_rejects_missing_or_inconsistent_stage();
+    upgrade_checkpoint_replacement_is_bound_to_the_authenticated_ciphertext();
+    upgrade_publication_keeps_intent_when_late_inputs_change();
+    upgrade_database_publication_recovers_through_original_generation_boundaries();
+    println!("PASS bounded DB/checkpoint publication, original generation recovery, late conflicts, stage integrity and checkpoint CAS");
     codex_declared_field_review_does_not_call_quote_style_a_conflict();
     dotenv_review_literal_matrix_does_not_claim_unknown_values();
     #[cfg(unix)]
@@ -956,4 +964,356 @@ fn codex_declared_field_review_does_not_call_quote_style_a_conflict() {
         ),
         None
     );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_publication_recovers_through_original_generation_boundaries() {
+    use crate::secrets::transition::{self, Checkpoint};
+    for boundary in [
+        Checkpoint::Staged,
+        Checkpoint::Intent,
+        Checkpoint::Database,
+        Checkpoint::Artifact(1),
+        Checkpoint::Artifact(2),
+        Checkpoint::Metadata,
+        Checkpoint::Keys,
+    ] {
+        let f = Fixture::with_custom_root(true, boundary == Checkpoint::Database);
+        let vault = std::sync::RwLock::new(f.vault.clone());
+        crate::mode::state::update(&f.device, &vault.read().unwrap(), |live| {
+            live.apps.entry("grok-build".into()).or_default().mode =
+                Some(crate::mode::state::Mode::Direct);
+            Ok(())
+        })
+        .unwrap();
+        let state_bytes = std::fs::read(f.device.state_path()).unwrap();
+        let keys = ExistingKeysOnly(&f.store);
+        let client = crate::config::get_claude_settings_path();
+        crate::config_file_io::ensure_private_directory(client.parent().unwrap()).unwrap();
+        std::fs::write(&client, br#"{"userOwned":"preserve"}"#).unwrap();
+        let unrelated = f.root.join("backups/unrelated.db");
+        std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+        std::fs::write(&unrelated, b"opaque unrelated backup").unwrap();
+        let id = checkpoint::create(&f.root, &f.device, &f.vault, std::slice::from_ref(&client))
+            .unwrap();
+        let vault_bytes = std::fs::read(f.root.join("vault.json")).unwrap();
+        let source_checkpoint = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session,
+        );
+        let result =
+            checkpoint::publish_database_with_hook(&db, &f.device, &keys, &id, &mut |at| {
+                if at == boundary {
+                    Err(AppError::Config("synthetic.interruption".into()))
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(
+            matches!(result, Err(AppError::Config(ref code)) if code == "synthetic.interruption"),
+            "must reach original {boundary:?} boundary: {result:?}"
+        );
+        if boundary == Checkpoint::Staged {
+            assert!(!f.root.join(transition::INTENT).exists());
+            assert_eq!(
+                std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+                source_checkpoint
+            );
+            checkpoint::publish_database_with_hook(&db, &f.device, &keys, &id, &mut |_| Ok(()))
+                .unwrap();
+        } else {
+            assert!(f.root.join(transition::INTENT).exists());
+            drop(db);
+            transition::recover(&f.root, &keys, None).unwrap();
+        }
+        assert_eq!(
+            checkpoint::published_database_id(&f.root, &f.device, &f.vault).unwrap(),
+            Some(id)
+        );
+        assert_eq!(
+            std::fs::read(f.root.join("vault.json")).unwrap(),
+            vault_bytes
+        );
+        assert_eq!(
+            std::fs::read(&client).unwrap(),
+            br#"{"userOwned":"preserve"}"#
+        );
+        assert_eq!(
+            std::fs::read(&unrelated).unwrap(),
+            b"opaque unrelated backup"
+        );
+        assert_eq!(std::fs::read(f.device.state_path()).unwrap(), state_bytes);
+        assert!(!f.root.join(transition::INTENT).exists());
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        assert!(
+            crate::settings::get_current_provider_ready(&crate::app_config::AppType::Claude)
+                .is_err()
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_publication_keeps_intent_when_late_inputs_change() {
+    use crate::secrets::transition::{self, Checkpoint};
+    for database_changed in [false, true] {
+        let f = Fixture::new();
+        let client = crate::config::get_claude_settings_path();
+        crate::config_file_io::ensure_private_directory(client.parent().unwrap()).unwrap();
+        std::fs::write(&client, b"{}").unwrap();
+        let id = checkpoint::create(&f.root, &f.device, &f.vault, std::slice::from_ref(&client))
+            .unwrap();
+        let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        let db_path = f.root.join(crate::config::DB_FILE_NAME);
+        let db = Database::from_connection(rusqlite::Connection::open(&db_path).unwrap(), session);
+        let result =
+            checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+                if database_changed && at == Checkpoint::Keys {
+                    let conn = rusqlite::Connection::open(&db_path).unwrap();
+                    conn.execute(
+                        "INSERT INTO settings(key,value) VALUES('synthetic-later','preserve')",
+                        [],
+                    )
+                    .unwrap();
+                } else if !database_changed && at == Checkpoint::Database {
+                    std::fs::write(&client, br#"{"later":"preserve"}"#).unwrap();
+                }
+                Ok(())
+            });
+        assert!(
+            result.is_err(),
+            "late changes cannot erase the original publication intent"
+        );
+        assert!(f.root.join(transition::INTENT).exists());
+        drop(db);
+        assert!(transition::recover(&f.root, &f.store, None).is_err());
+        assert!(f.root.join(transition::INTENT).exists());
+        if database_changed {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let value: String = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key='synthetic-later'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "preserve");
+        } else {
+            assert_eq!(std::fs::read(&client).unwrap(), br#"{"later":"preserve"}"#);
+        }
+    }
+}
+
+struct ExistingKeysOnly<'a>(&'a MemoryKeyStore);
+impl crate::secrets::key_store::KeyStore for ExistingKeysOnly<'_> {
+    fn load(
+        &self,
+        vault: &str,
+        key: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, crate::secrets::key_store::KeyStoreError> {
+        crate::secrets::key_store::KeyStore::load(self.0, vault, key)
+    }
+    fn save(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+    ) -> Result<(), crate::secrets::key_store::KeyStoreError> {
+        panic!("schema publication must not write the key store")
+    }
+    fn remove(&self, _: &str, _: &str) -> Result<(), crate::secrets::key_store::KeyStoreError> {
+        panic!("schema publication must not remove keys")
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_recovery_rejects_missing_or_inconsistent_stage() {
+    use crate::secrets::transition::{self, Checkpoint};
+    for missing in [true, false] {
+        let f = Fixture::new();
+        let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let db_path = f.root.join(crate::config::DB_FILE_NAME);
+        let source_cp = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        let db = Database::from_connection(rusqlite::Connection::open(&db_path).unwrap(), session);
+        assert!(
+            checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+                if at == Checkpoint::Intent {
+                    Err(AppError::Config("synthetic.interruption".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        drop(db);
+        let intent_path = f.root.join(transition::INTENT);
+        let mut intent: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intent_path).unwrap()).unwrap();
+        let operation = intent["id"].as_str().unwrap().to_owned();
+        let stage = f
+            .root
+            .join(format!(".vault-transition-{operation}/0.stage"));
+        if missing {
+            std::fs::remove_file(&stage).unwrap();
+        } else {
+            // Authenticate an internally inconsistent target to exercise the
+            // semantic target binding, independently of the stage-byte hash.
+            let conn = rusqlite::Connection::open(&stage).unwrap();
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('synthetic-stage','different')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            let plain = f
+                .vault
+                .open(
+                    &["local", "generation-transition", &operation],
+                    intent["manifest"].as_str().unwrap(),
+                )
+                .unwrap();
+            let mut manifest: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+            manifest["artifacts"][0]["digest"] = serde_json::json!(crate::live::engine::digest(
+                Some(&std::fs::read(&stage).unwrap())
+            )
+            .unwrap());
+            intent["manifest"] = serde_json::json!(f
+                .vault
+                .seal(
+                    &["local", "generation-transition", &operation],
+                    &serde_json::to_vec(&manifest).unwrap()
+                )
+                .unwrap());
+            std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        }
+        assert!(transition::recover(&f.root, &f.store, None).is_err());
+        assert!(intent_path.exists());
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(Database::get_user_version(&conn).unwrap(), 17);
+        assert_eq!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+            source_cp
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_replacement_is_bound_to_the_authenticated_ciphertext() {
+    use crate::secrets::{owned_file::DeviceFile, transition};
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let file = DeviceFile::registered(checkpoint::FILE).unwrap();
+    let cp_path = f.device.root().join(checkpoint::FILE);
+    let source_bytes = std::fs::read(&cp_path).unwrap();
+    let source_plain = file.decode(&f.vault, &source_bytes).unwrap();
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session,
+    );
+    let mut later_bytes = Vec::new();
+    let result = transition::install_upgrade_database(
+        &db,
+        &f.store,
+        f.device.root(),
+        |_, current, _| checkpoint::stage(&f.root, &f.device, current, &id),
+        &mut |target, current| {
+            let mut payload: serde_json::Value = serde_json::from_slice(&source_plain).unwrap();
+            payload["published_database"] = serde_json::json!(Database::content_digest(target)?);
+            let ciphertext = file.encode(current, &serde_json::to_vec(&payload).unwrap())?;
+            later_bytes = file.encode(current, &source_plain)?;
+            std::fs::write(&cp_path, &later_bytes).unwrap();
+            Ok(transition::UpgradeCheckpointReplacement {
+                source_digest: crate::live::engine::digest(Some(&source_bytes)).unwrap(),
+                ciphertext,
+            })
+        },
+        &mut |_| Ok(()),
+    );
+    assert!(matches!(result, Err(AppError::Config(ref code)) if code == "upgrade.source_changed"));
+    assert_eq!(std::fs::read(&cp_path).unwrap(), later_bytes);
+    assert!(!f.root.join(transition::INTENT).exists());
+    assert_eq!(
+        Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
+        17
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_publication_refuses_memory_target() {
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let source_cp = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    let mut memory = rusqlite::Connection::open_in_memory().unwrap();
+    database::vault::copy(&source, &mut memory).unwrap();
+    let db = Database::from_connection(
+        memory,
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    assert!(
+        checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(()))
+            .is_err()
+    );
+    assert!(!f.root.join(crate::secrets::transition::INTENT).exists());
+    assert_eq!(
+        std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+        source_cp
+    );
+    assert_eq!(Database::get_user_version(&source).unwrap(), 17);
+}
+
+#[cfg(unix)]
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_publication_keeps_intent_after_atomic_database_replacement() {
+    use crate::secrets::transition::{self, Checkpoint};
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let path = f.root.join(crate::config::DB_FILE_NAME);
+    let db = Database::from_connection(
+        rusqlite::Connection::open(&path).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    let result = checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+        if at == Checkpoint::Keys {
+            let replacement = f.root.join("synthetic-replacement.db");
+            let source = rusqlite::Connection::open(&path).unwrap();
+            let mut target = rusqlite::Connection::open(&replacement).unwrap();
+            database::vault::copy(&source, &mut target).unwrap();
+            target
+                .execute(
+                    "INSERT INTO settings(key,value) VALUES('synthetic-replaced','preserve')",
+                    [],
+                )
+                .unwrap();
+            drop(target);
+            drop(source);
+            std::fs::rename(replacement, &path).unwrap();
+        }
+        Ok(())
+    });
+    assert!(
+        result.is_err(),
+        "publication must read back the current path, not an obsolete SQLite handle"
+    );
+    assert!(f.root.join(transition::INTENT).exists());
+    drop(db);
+    assert!(transition::recover(&f.root, &f.store, None).is_err());
+    let current = rusqlite::Connection::open(&path).unwrap();
+    let value: String = current
+        .query_row(
+            "SELECT value FROM settings WHERE key='synthetic-replaced'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, "preserve");
 }
