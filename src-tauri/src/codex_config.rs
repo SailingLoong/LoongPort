@@ -1494,6 +1494,8 @@ fn codex_catalog_model_entry(
         .or_else(|| parse_codex_positive_u64(template.get("context_window")))
         .or_else(|| parse_codex_positive_u64(template.get("max_context_window")));
     entry_obj.insert("slug".to_string(), json!(spec.model));
+    // Explicitly configured models must be listed even when the cached template is hidden.
+    entry_obj.insert("visibility".to_string(), json!("list"));
     entry_obj.insert("display_name".to_string(), json!(display_name));
     entry_obj.insert("description".to_string(), json!(display_name));
     if let Some(context_window) = context_window {
@@ -7588,6 +7590,32 @@ wire_api = "responses"
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
         );
+    }
+
+    /// 显式配置的模型必须出现在列表里，即使缓存的模板条目被隐藏（#7925 适配版）。
+    #[test]
+    fn provider_catalog_models_do_not_inherit_hidden_template_visibility() {
+        let template = json!({ "slug": "gpt-5.5", "visibility": "hide" });
+        let settings = json!({
+            "modelCatalog": { "models": [
+                { "model": "glm-5.3-flash" },
+                { "model": "glm-5.3" }
+            ] }
+        });
+        let specs = codex_catalog_model_specs(&settings);
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            Some(128_000),
+            &[],
+        );
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        for model in models {
+            assert_eq!(model["visibility"], "list");
+        }
+        assert_eq!(template["visibility"], "hide");
     }
 
     #[test]
