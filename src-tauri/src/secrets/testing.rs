@@ -59,3 +59,35 @@ pub(crate) fn initialize_database() -> Result<Database, AppError> {
 pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
 }
+
+/// Select a physical isolated home while holding the test's serial guard.
+/// Restore the previous override before deleting the temporary directory.
+pub(crate) struct TestHome {
+    directory: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TestHome {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        let directory = tempdir()?;
+        let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
+        Ok(Self {
+            directory,
+            previous,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+}
+
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+    }
+}

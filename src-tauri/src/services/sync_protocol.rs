@@ -1336,18 +1336,7 @@ mod publication_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn encrypted_sync_losing_cas_keeps_local_database_skills_and_receipt() {
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-                }
-            }
-        }
-        let home = tempfile::tempdir().unwrap();
-        let _restore = RestoreHome(std::env::var_os("CC_SWITCH_TEST_HOME"));
-        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         std::fs::create_dir_all(home.path().join(".cc-switch")).unwrap();
         let skills = crate::services::skill::SkillService::get_ssot_dir().unwrap();
         assert!(skills.starts_with(home.path()));
