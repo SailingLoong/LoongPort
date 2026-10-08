@@ -134,7 +134,7 @@ const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy B
 )}`;
 
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
+${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
@@ -151,7 +151,7 @@ ${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/herm
 npm i -g @earendil-works/pi-coding-agent@latest`;
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-npm i -g @anthropic-ai/claude-code@latest
+npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
