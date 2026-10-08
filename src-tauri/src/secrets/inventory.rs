@@ -3,7 +3,10 @@
 pub(crate) fn is_protected_setting(key: &str) -> bool {
     matches!(
         key,
-        "universal_providers" | "global_proxy_url" | "claude_desktop_gateway_token"
+        "universal_providers"
+            | "global_proxy_url"
+            | "claude_desktop_gateway_token"
+            | "zcode_claim_v1"
     ) || key
         .strip_prefix("common_config_")
         .is_some_and(|app| crate::app_config::AppType::all().any(|kind| kind.as_str() == app))
@@ -398,6 +401,7 @@ mod tests {
             "universal_providers",
             "global_proxy_url",
             "claude_desktop_gateway_token",
+            "zcode_claim_v1",
             "common_config_claude",
             "common_config_codex",
             "common_config_gemini",

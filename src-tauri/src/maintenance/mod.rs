@@ -9,6 +9,7 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
 #[cfg(feature = "gui")]
 pub fn start(app: tauri::AppHandle) {
+    start_zcode_claim(app.clone());
     start_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
@@ -167,6 +168,24 @@ fn start_models_dev_pricing_refresh(app: tauri::AppHandle) {
             Ok(())
         }
     });
+}
+
+#[cfg(feature = "gui")]
+fn start_zcode_claim(app: tauri::AppHandle) {
+    let interval = crate::zcode_accounts::claim_runtime::INTERVAL;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "zcode-claim",
+        scheduler::TaskSchedule::new(interval, interval, interval),
+        move || {
+            let app = app.clone();
+            let db = db.clone();
+            async move {
+                crate::zcode_accounts::claim_runtime::tick(app, db).await;
+                Ok(())
+            }
+        },
+    );
 }
 
 #[cfg(test)]

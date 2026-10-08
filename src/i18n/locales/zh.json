@@ -4511,6 +4511,68 @@
       "viewTabs": "ZCode 功能",
       "signInTab": "登录账号",
       "apiTab": "API 配置"
+    },
+    "claim": {
+      "title": "套餐领取",
+      "checkSelected": "检查所选账号",
+      "claimSelected": "领取所选账号",
+      "busy": "正在处理领取…",
+      "cancel": "取消",
+      "auto": "自动领取",
+      "applyAuto": "应用自动参与设置",
+      "autoHelp": "应用后为所选账号保存自动领取设置。默认关闭自动领取。",
+      "error": "无法更新领取状态，请重试。",
+      "loading": "正在读取领取状态…",
+      "select": "选择 {{account}}",
+      "check": "检查",
+      "claim": "领取",
+      "unknown": "未知",
+      "plan": "套餐：{{value}}",
+      "starts": "开始：{{value}}",
+      "expires": "到期：{{value}}",
+      "checked": "检查时间：{{value}}",
+      "units": "额度：{{value}}",
+      "status": {
+        "unknown": "未知",
+        "claimable": "可领取",
+        "claimed": "已领取",
+        "noClaim": "无符合条件的套餐",
+        "verificationRequired": "需要用户验证",
+        "loginExpired": "登录已过期",
+        "resultPending": "结果待确认",
+        "cancelled": "已取消"
+      },
+      "reason": {
+        "openOfficialClient": "打开官方 ZCode 后重新查询",
+        "notDue": "套餐仍有效，请到期后重新查询"
+      }
+    }
+  },
+  "workbuddy": {
+    "title": "WorkBuddy 国内版",
+    "add": "添加 WorkBuddy 账号",
+    "refreshAll": "刷新全部",
+    "claim": "签到领取今日积分",
+    "total": "总余量",
+    "expiry": "最近到期",
+    "updated": "更新时间",
+    "packages": "查看资源包",
+    "package": "资源包",
+    "remaining": "余量",
+    "expires": "到期",
+    "empty": "添加账号后可查看积分余量。",
+    "failed": "操作未完成，请稍后重试。",
+    "authorize": "打开官方授权页面",
+    "finishAuthorization": "我已完成授权",
+    "authorizationWaiting": "等待官方授权完成",
+    "credited": "已到账 {{amount}} 积分",
+    "state": {
+      "unconfirmed": "未确认",
+      "available": "今日可领取",
+      "claimed": "已领",
+      "alreadyClaimed": "已领过",
+      "unavailable": "暂不可领",
+      "needsVerification": "需验证"
     }
   }
 }

@@ -39,6 +39,8 @@ pub(crate) const RECOVERY_FILE: &str = "zcode_account_recovery.json";
 pub(crate) const OPERATION_FILE: &str = "zcode_account_operations.json";
 pub(crate) const KEY_INTENT_FILE: &str = "zcode_oauth_key_intents.json";
 pub(crate) const BUNDLE_EXPORT_FILE: &str = "zcode_bundle_exports.json";
+pub(crate) const WORKBUDDY_FILE: &str = "workbuddy_accounts.json";
+const ENCRYPTED_FILES: [&str; 1] = [WORKBUDDY_FILE];
 const ZCODE_FILES: [&str; 6] = [
     PROFILE_FILE,
     JOURNAL_FILE,
@@ -76,6 +78,7 @@ impl OwnedFile {
         let valid = (parent.is_empty()
             && (LEGACY_CONFIG_FILES.contains(&name)
                 || ZCODE_FILES.contains(&name)
+                || ENCRYPTED_FILES.contains(&name)
                 || AUTH_FILES.iter().any(|file| file.filename() == name)))
             || BACKUP_PATTERNS.iter().any(|(directory, prefix, suffix)| {
                 parent == *directory && matches_backup_name(name, prefix, suffix)
@@ -91,6 +94,7 @@ impl OwnedFile {
     pub(crate) fn allows_legacy_plaintext(&self) -> bool {
         !ZCODE_FILES
             .iter()
+            .chain(ENCRYPTED_FILES.iter())
             .any(|name| self.relative == std::path::Path::new(name))
     }
 
@@ -174,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn zcode_files_are_registered_with_distinct_authenticated_identities() {
+    fn account_files_are_registered_with_distinct_authenticated_identities() {
         let vault = VaultContext::generate().unwrap();
         let names = [
             "zcode_account_profiles.json",
@@ -183,6 +187,7 @@ mod tests {
             "zcode_account_operations.json",
             KEY_INTENT_FILE,
             BUNDLE_EXPORT_FILE,
+            WORKBUDDY_FILE,
         ];
         for name in names {
             let file = OwnedFile::registered(name).expect("new account file must be protected");

@@ -49,6 +49,8 @@ mod relay;
 mod rt;
 mod secrets;
 mod services;
+#[cfg(any(feature = "gui", test))]
+mod workbuddy;
 // Native account commands remain gated by the reviewed platform manifest.
 #[cfg(any(feature = "gui", test))]
 mod zcode_accounts;
@@ -1720,7 +1722,12 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            if !zcode_accounts::claim::allowed_command(invoke.message.webview().label(), invoke.message.command()) {
+                invoke.resolver.reject("blocked");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             secrets::startup::unlock_secret_vault,
             secrets::startup::preview_secret_reset,
             secrets::startup::reset_secret_vault,
@@ -1902,9 +1909,22 @@ pub fn run() {
             commands::delete_pi_prompt_template,
             // Pi native provider and session views
             commands::get_pi_current_state,
+            commands::list_workbuddy_accounts,
+            commands::refresh_workbuddy_account,
+            commands::refresh_all_workbuddy_accounts,
+            commands::claim_workbuddy_today,
+            commands::begin_workbuddy_authorization,
+            commands::finish_workbuddy_authorization,
             commands::get_zcode_config,
             commands::save_zcode_provider,
             commands::remove_zcode_provider,
+            commands::get_zcode_claim_state,
+            commands::set_zcode_claim_auto,
+            commands::start_zcode_claim,
+            commands::cancel_zcode_claim,
+            commands::get_zcode_claim_captcha,
+            commands::submit_zcode_claim_captcha,
+            commands::show_zcode_claim_captcha,
             commands::query_zcode_latest_version,
             commands::discover_zcode_metadata,
             commands::inspect_zcode_account_context,
@@ -2219,7 +2239,9 @@ pub fn run() {
             commands::enter_lightweight_mode,
             commands::exit_lightweight_mode,
             commands::is_lightweight_mode,
-        ]);
+        ];
+            handler(invoke)
+        });
 
     let app = builder
         .build(tauri::generate_context!())
@@ -2228,6 +2250,9 @@ pub fn run() {
     app.run(|app_handle, event| {
         // 处理退出请求（所有平台）
         if let RunEvent::ExitRequested { api, code, .. } = &event {
+            if code.is_some() {
+                zcode_accounts::claim_runtime::shutdown();
+            }
             match classify_exit_request(*code) {
                 // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
                 // 此时应仅阻止退出、保持托盘后台运行。
@@ -2391,6 +2416,7 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    zcode_accounts::claim_runtime::shutdown();
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 
@@ -2786,6 +2812,7 @@ pub fn destroy_single_instance_lock(app_handle: &tauri::AppHandle) {
 /// 图标，而 macOS 的 NSStatusItem 操作要求主线程；`set_visible(false)` 走
 /// `run_item_main_thread` 代理，跨线程安全（见 `remove_tray_icon_before_exit`）。
 pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
+    zcode_accounts::claim_runtime::shutdown();
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);
     let env = app_handle.env();

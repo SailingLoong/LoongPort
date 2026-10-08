@@ -13,6 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ZCodeBundleImport } from "./ZCodeBundleImport";
+import { ZCodeClaimControls } from "./ZCodeClaimControls";
 import { ZCodeAccountEvidence } from "./ZCodeAccountEvidence";
 import { ZCodeOAuthAdd } from "./ZCodeOAuthAdd";
 import { ZCodeBackupDialog } from "./ZCodeBackupDialog";
@@ -1332,6 +1333,13 @@ export function ZCodeAccountPanel({
             "Recovery storage is full. Confirm an older record, or sign in again through official ZCode, quit normally and explicitly recapture that old record. Then review and permanently delete that individually selected record to free space for switching. Preserving pending recovery can still be attempted.",
           )}
         </p>
+      )}
+      {shownCatalog && (
+        <ZCodeClaimControls
+          dataRoot={libraryRoot}
+          profiles={shownCatalog.profiles}
+          disabled={disabled || busy}
+        />
       )}
       {shownCatalog &&
         (["zai", "bigmodel"] as const).map((family) => (

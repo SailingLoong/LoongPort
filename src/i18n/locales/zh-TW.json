@@ -4512,6 +4512,68 @@
       "viewTabs": "ZCode 檢視",
       "signInTab": "登入帳號",
       "apiTab": "API 設定"
+    },
+    "claim": {
+      "title": "套餐領取",
+      "checkSelected": "檢查所選帳號",
+      "claimSelected": "領取所選帳號",
+      "busy": "正在處理領取…",
+      "cancel": "取消",
+      "auto": "自動領取",
+      "applyAuto": "套用自動參與設定",
+      "autoHelp": "套用後為所選帳號儲存自動領取設定。預設關閉自動領取。",
+      "error": "無法更新領取狀態，請重試。",
+      "loading": "正在讀取領取狀態…",
+      "select": "選擇 {{account}}",
+      "check": "檢查",
+      "claim": "領取",
+      "unknown": "未知",
+      "plan": "套餐：{{value}}",
+      "starts": "開始：{{value}}",
+      "expires": "到期：{{value}}",
+      "checked": "檢查時間：{{value}}",
+      "units": "額度：{{value}}",
+      "status": {
+        "unknown": "未知",
+        "claimable": "可領取",
+        "claimed": "已領取",
+        "noClaim": "無符合條件的套餐",
+        "verificationRequired": "需要使用者驗證",
+        "loginExpired": "登入已過期",
+        "resultPending": "結果待確認",
+        "cancelled": "已取消"
+      },
+      "reason": {
+        "openOfficialClient": "開啟官方 ZCode 後重新查詢",
+        "notDue": "套餐仍有效，請到期後重新查詢"
+      }
+    }
+  },
+  "workbuddy": {
+    "title": "WorkBuddy 國內版",
+    "add": "新增 WorkBuddy 帳號",
+    "refreshAll": "全部重新整理",
+    "claim": "簽到領取今日積分",
+    "total": "總餘量",
+    "expiry": "最近到期",
+    "updated": "更新時間",
+    "packages": "查看資源包",
+    "package": "資源包",
+    "remaining": "餘量",
+    "expires": "到期",
+    "empty": "新增帳號後可查看積分餘量。",
+    "failed": "操作未完成，請稍後重試。",
+    "authorize": "開啟官方授權頁面",
+    "finishAuthorization": "我已完成授權",
+    "authorizationWaiting": "等待官方授權完成",
+    "credited": "已到帳 {{amount}} 積分",
+    "state": {
+      "unconfirmed": "未確認",
+      "available": "今日可領取",
+      "claimed": "已領",
+      "alreadyClaimed": "已領過",
+      "unavailable": "暫不可領",
+      "needsVerification": "需驗證"
     }
   }
 }

@@ -1,3 +1,4 @@
+import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -220,6 +221,7 @@ export function ServicesPage({
               {t("loongport.accounts.add")}
             </Button>
           </header>
+          <WorkBuddyAccounts />
           {isPending && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("common.loading")}

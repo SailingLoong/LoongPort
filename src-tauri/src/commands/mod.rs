@@ -123,3 +123,10 @@ pub use webdav_sync::*;
 pub use workspace::*;
 pub mod codex_reset;
 pub use codex_reset::*;
+
+mod zcode_claim;
+pub(crate) use zcode_claim::*;
+#[cfg(feature = "gui")]
+mod workbuddy;
+#[cfg(feature = "gui")]
+pub(crate) use workbuddy::*;
