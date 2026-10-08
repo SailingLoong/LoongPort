@@ -49,7 +49,9 @@ it("preserves each backend's nullable data and does not retry failed claims", as
     credits: { totalRemaining: null },
   };
   const zcode = { enabled: false, participants: [], records: {}, busy: false };
-  vi.mocked(invoke).mockResolvedValueOnce(workbuddy).mockResolvedValueOnce(zcode);
+  vi.mocked(invoke)
+    .mockResolvedValueOnce(workbuddy)
+    .mockResolvedValueOnce(zcode);
   expect(await workbuddyApi.refresh("workbuddy-a")).toBe(workbuddy);
   expect(await zcodeClaimApi.state("/synthetic/zcode")).toBe(zcode);
   vi.mocked(invoke).mockRejectedValueOnce(new Error("synthetic failure"));
