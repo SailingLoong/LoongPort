@@ -520,7 +520,9 @@ enum LifecycleCommandShell {
 
 fn npm_install_command_for(tool: &str) -> Option<&'static str> {
     match tool {
-        "claude" => Some("npm i -g @anthropic-ai/claude-code@latest"),
+        "claude" => Some(
+            "npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code",
+        ),
         "codex" => Some("npm i -g @openai/codex@latest"),
         "gemini" => Some("npm i -g @google/gemini-cli@latest"),
         "grok" => Some("npm i -g @xai-official/grok@latest"),
@@ -5543,7 +5545,7 @@ mod tests {
                 wsl_tool_action_shell_command("claude", ToolLifecycleAction::Install).unwrap();
             assert!(
                 claude.starts_with("bash -c 'tmp=$(mktemp) && curl -fsSL https://claude.ai/install.sh ")
-                    && claude.contains(" || npm i -g @anthropic-ai/claude-code@latest"),
+                    && claude.ends_with(" || npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code"),
                 "WSL claude install should prefer native POSIX installer with npm fallback: {claude}"
             );
             assert!(!claude.contains("| bash"));
@@ -5579,7 +5581,7 @@ mod tests {
             let cmd = wsl_tool_action_shell_command("claude", ToolLifecycleAction::Update).unwrap();
             assert_eq!(
                 cmd,
-                "claude update || npm i -g @anthropic-ai/claude-code@latest"
+                "claude update || npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code"
             );
         }
     }
@@ -6491,7 +6493,7 @@ mod tests {
         fn update_fallbacks_use_official_cli_only_when_supported() {
             assert_eq!(
                 static_fallback_command("claude"),
-                "claude update || npm i -g @anthropic-ai/claude-code@latest"
+                "claude update || npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code"
             );
             assert_eq!(
                 static_fallback_command("codex"),
