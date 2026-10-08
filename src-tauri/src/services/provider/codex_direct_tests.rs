@@ -230,7 +230,9 @@ fn codex_native_login_roundtrip_honors_preserve_off_and_auth_placement() {
         .parse()
         .unwrap();
     assert_eq!(
-        doc["model_providers"]["custom"]["requires_openai_auth"].as_bool(),
+        doc["model_providers"]["custom"]
+            .get("requires_openai_auth")
+            .and_then(toml_edit::Item::as_bool),
         Some(true)
     );
     assert!(doc["model_providers"]["custom"]
@@ -533,12 +535,8 @@ fn unproven_new_live_auth_without_cache_retains_verification_barrier() {
             ),
     )
     .unwrap();
-    fixture.state.codex_oauth_manager = Arc::new(
-        crate::proxy::providers::codex_oauth_auth::CodexOAuthManager::new(
-            fixture.state.db.secrets.clone(),
-        )
-        .unwrap(),
-    );
+    // A restart rebuilds AppState and ProxyService around the same new manager Arc.
+    fixture.state = AppState::new(fixture.state.db.clone()).unwrap();
     let before = std::fs::read(&fixture.auth).unwrap();
     let outcome = super::codex_direct::recover_pending(&fixture.state).unwrap();
     assert!(
@@ -694,12 +692,8 @@ fn manager_known_newer_complete_bundle_can_finish_without_stale_replay() {
     }
     assert!(fixture.pending().is_some());
     assert_eq!(std::fs::read(&fixture.auth).unwrap(), before);
-    fixture.state.codex_oauth_manager = Arc::new(
-        crate::proxy::providers::codex_oauth_auth::CodexOAuthManager::new(
-            fixture.state.db.secrets.clone(),
-        )
-        .unwrap(),
-    );
+    // A restart rebuilds AppState and ProxyService around the same new manager Arc.
+    fixture.state = AppState::new(fixture.state.db.clone()).unwrap();
     let outcome = super::codex_direct::recover_pending(&fixture.state).unwrap();
     assert_eq!(
         outcome,
@@ -1372,5 +1366,727 @@ fn recovery_rejects_unowned_stage_name_before_reading_its_bytes() {
             before
         );
         fixture.assert_current("a");
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn ordinary_refresh_waits_for_pending_operation_then_resumes() {
+    for point in ["published:1", "pending", "target"] {
+        let fixture = Fixture::new();
+        let account = "synthetic-account";
+        seed_managed(&fixture, "managed-a", account, "access-old");
+        crate::rt::block_on(
+            fixture
+                .state
+                .codex_oauth_manager
+                .test_set_bundle_time(account, chrono::Utc::now().timestamp_millis() - 10_000),
+        );
+        ProviderService::switch(&fixture.state, AppType::Codex, "managed-a").unwrap();
+        let mut target = managed_provider("managed-b", account);
+        target.settings_config["config"] =
+            json!("model = \"gpt-5.5\"\nmodel_reasoning_effort = \"low\"\n");
+        fixture.state.db.save_provider("codex", &target).unwrap();
+        {
+            let _fault = Fault::at(point);
+            assert!(ProviderService::switch(&fixture.state, AppType::Codex, "managed-b").is_err());
+        }
+        let pending = fixture
+            .pending()
+            .expect("the requested real fault must leave an intent");
+        let config = pending
+            .files
+            .iter()
+            .find(|f| f.path == fixture.config)
+            .unwrap();
+        assert_ne!(
+            config.pre, config.planned,
+            "this is a real configuration change"
+        );
+        assert_eq!(
+            crate::live::engine::digest(read_current(&fixture.config).unwrap().as_deref()),
+            if point == "pending" {
+                config.pre.clone()
+            } else {
+                config.planned.clone()
+            }
+        );
+        let before = super::codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>();
+        let journal = read_current(&DeviceStore::for_device().state_path()).unwrap();
+        assert_eq!(
+            crate::rt::block_on(
+                fixture
+                    .state
+                    .codex_oauth_manager
+                    .get_valid_token_for_account(account)
+            )
+            .unwrap(),
+            "access-old"
+        );
+        assert_eq!(
+            read_current(&DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        crate::rt::block_on(fixture.state.codex_oauth_manager.test_refresh_next(
+            account,
+            "access-refreshed",
+            "refresh-refreshed",
+        ));
+        let result = crate::rt::block_on(
+            fixture
+                .state
+                .codex_oauth_manager
+                .get_valid_token_for_account(account),
+        );
+        assert!(
+            super::codex_direct::files()
+                .iter()
+                .zip(&before)
+                .all(|(file, bytes)| read_current(&file.path).unwrap() == *bytes),
+            "ordinary refresh must not publish through a pending operation ({point}): {result:?}"
+        );
+        assert_eq!(
+            read_current(&DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        assert!(
+            result.is_err(),
+            "an expired generation waits for explicit operation recovery"
+        );
+        assert!(
+            fixture.state.codex_oauth_manager.test_refresh_is_queued(),
+            "pending admission precedes network refresh"
+        );
+        super::codex_direct::recover_pending(&fixture.state).unwrap();
+        assert!(
+            fixture.pending().is_none(),
+            "the retained original generation remains recoverable"
+        );
+        assert_eq!(
+            crate::rt::block_on(
+                fixture
+                    .state
+                    .codex_oauth_manager
+                    .get_valid_token_for_account(account)
+            )
+            .unwrap(),
+            "access-refreshed"
+        );
+        assert!(!fixture.state.codex_oauth_manager.test_refresh_is_queued());
+        let auth: Value = serde_json::from_slice(&std::fs::read(&fixture.auth).unwrap()).unwrap();
+        assert_eq!(auth["tokens"]["access_token"], "access-refreshed");
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_pending_refresh() -> Result<(), AppError> {
+    automatic_live_preparation_cannot_adopt_through_pending();
+    catalog_and_target_only_intents_wait_for_inflight_refresh();
+    ordinary_refresh_waits_for_pending_operation_then_resumes();
+    new_live_intent_waits_for_every_in_flight_manager_refresh();
+    another_apps_pending_does_not_block_codex_refresh();
+    println!("PASS ordinary Codex refresh waits for pending recovery and resumes");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn new_live_intent_waits_for_every_in_flight_manager_refresh() {
+    let fixture = Fixture::new();
+    let account = "unselected-synthetic-account";
+    seed_managed(&fixture, "unselected", account, "access-old");
+    crate::rt::block_on(fixture.state.codex_oauth_manager.test_refresh_next(
+        account,
+        "access-refreshed",
+        "refresh-refreshed",
+    ));
+    let manager = fixture.state.codex_oauth_manager.clone();
+    let (started, release) = manager.test_pause_next_refresh();
+    crate::rt::block_on(async {
+        let refreshing = manager.clone();
+        let task =
+            tokio::spawn(async move { refreshing.get_valid_token_for_account(account).await });
+        started.await.unwrap();
+        // A non-managed target has no selected account ids. Its intent must still
+        // wait for a refresh already in flight under the same existing manager.
+        let guard = manager.with_live_auth_guard(&[], |_| {
+            let _fault = Fault::at("pending");
+            let vault = fixture.state.db.secret_session().read().unwrap();
+            let app_guard = crate::live::engine::lock_app("codex");
+            let patch =
+                crate::live::patch::WholeFile::Write(b"model = \"synthetic-next\"\n".to_vec());
+            assert!(crate::mode::operation::run(
+                &DeviceStore::for_device(),
+                &vault,
+                &app_guard,
+                state::op::APPLY,
+                &[crate::mode::operation::FileChange {
+                    file: crate::live::engine::LiveFile::private(&fixture.config),
+                    patch: &patch
+                }],
+                Default::default(),
+                &|_| Ok(()),
+            )
+            .is_err());
+            Ok(())
+        });
+        futures::pin_mut!(guard);
+        let first = futures::poll!(&mut guard);
+        let intent_before_refresh = fixture.pending().is_some();
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "access-refreshed");
+        assert!(
+            !intent_before_refresh,
+            "intent must wait until the in-flight generation settles"
+        );
+        match first {
+            std::task::Poll::Pending => guard.await.unwrap(),
+            std::task::Poll::Ready(result) => {
+                result.unwrap();
+                panic!("new live intent passed an already in-flight account refresh");
+            }
+        }
+        assert!(
+            fixture.pending().is_some(),
+            "the real operation starts after refresh has settled"
+        );
+    });
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn another_apps_pending_does_not_block_codex_refresh() {
+    let fixture = Fixture::new();
+    let account = "synthetic-account";
+    seed_managed(&fixture, "managed", account, "access-old");
+    ProviderService::switch(&fixture.state, AppType::Codex, "managed").unwrap();
+    let store = DeviceStore::for_device();
+    {
+        let _fault = Fault::at("pending");
+        let vault = fixture.state.db.secret_session().read().unwrap();
+        let guard = crate::live::engine::lock_app("claude");
+        let patch = crate::live::patch::WholeFile::Write(b"{}".to_vec());
+        assert!(crate::mode::operation::run(
+            &store,
+            &vault,
+            &guard,
+            state::op::APPLY,
+            &[crate::mode::operation::FileChange {
+                file: crate::live::engine::LiveFile::private(
+                    crate::config::get_claude_settings_path()
+                ),
+                patch: &patch
+            }],
+            Default::default(),
+            &|_| Ok(()),
+        )
+        .is_err());
+    }
+    let journal = read_current(&store.state_path()).unwrap();
+    assert!(state::pending(
+        &store,
+        &fixture.state.db.secret_session().read().unwrap(),
+        "claude"
+    )
+    .unwrap()
+    .is_some());
+    crate::rt::block_on(fixture.state.codex_oauth_manager.test_refresh_next(
+        account,
+        "access-refreshed",
+        "refresh-refreshed",
+    ));
+    assert_eq!(
+        crate::rt::block_on(
+            fixture
+                .state
+                .codex_oauth_manager
+                .get_valid_token_for_account(account)
+        )
+        .unwrap(),
+        "access-refreshed"
+    );
+    assert!(!fixture.state.codex_oauth_manager.test_refresh_is_queued());
+    assert_eq!(read_current(&store.state_path()).unwrap(), journal);
+    let auth: Value = serde_json::from_slice(&std::fs::read(&fixture.auth).unwrap()).unwrap();
+    assert_eq!(auth["tokens"]["access_token"], "access-refreshed");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn proxy_native_auth_and_no_current_exit_preserve_unowned_bytes() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let native = read_current(&fixture.auth).unwrap();
+    runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("codex", true),
+        )
+        .unwrap();
+    assert_eq!(
+        read_current(&fixture.auth).unwrap(),
+        native,
+        "third-party proxy must not replace native auth with row key"
+    );
+    runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .switch_proxy_target("codex", "b"),
+        )
+        .unwrap();
+    assert_eq!(read_current(&fixture.auth).unwrap(), native);
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    let doc = config.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(doc["model"].as_str(), Some("model-b"));
+    assert_eq!(
+        doc["model_providers"]["custom"]
+            .get("requires_openai_auth")
+            .and_then(toml_edit::Item::as_bool),
+        Some(true),
+        "native login display and refresh must remain enabled beside proxy bearer auth"
+    );
+    assert!(doc["model_providers"]["custom"]["base_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("http://127.0.0.1:"));
+    assert!(config.contains("keep = \"exact\" # untouched"));
+    fixture.assert_current("a");
+    fixture
+        .state
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE providers SET is_current=0 WHERE app_type='codex'",
+            [],
+        )
+        .unwrap();
+    crate::settings::set_current_provider(&AppType::Codex, None).unwrap();
+    runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("codex", false),
+        )
+        .unwrap();
+    assert_eq!(read_current(&fixture.auth).unwrap(), native);
+    assert!(std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .contains("keep = \"exact\" # untouched"));
+    assert!(fixture.pending().is_none());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn proxy_recovery_checks_managed_generation_before_committing_route() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("codex", true),
+        )
+        .unwrap();
+    seed_managed(&fixture, "managed", "synthetic-proxy-account", "access-old");
+    {
+        let _fault = Fault::at("published:1");
+        assert!(runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .switch_proxy_target("codex", "managed")
+            )
+            .is_err());
+    }
+    assert!(fixture.pending().is_some());
+    seed_managed(
+        &fixture,
+        "managed",
+        "synthetic-proxy-account",
+        "access-new-generation",
+    );
+    let before = super::codex_direct::files()
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    let outcome =
+        crate::mode::controller::recover_locked(&fixture.state.proxy_service, &AppType::Codex)
+            .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Some(crate::mode::operation::RecoveryOutcome::VerificationRequired { .. })
+        ),
+        "generic recovery must not authorize an obsolete managed generation: {outcome:?}"
+    );
+    assert!(fixture.pending().is_some());
+    assert_eq!(
+        before,
+        super::codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>()
+    );
+    fixture.assert_current("a");
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_proxy_mode() -> Result<(), AppError> {
+    proxy_native_auth_store_modes_follow_original_lookup_semantics();
+    proxy_native_auth_and_no_current_exit_preserve_unowned_bytes();
+    managed_proxy_faults_restart_through_original_recovery();
+    codex_target_only_recovery_needs_no_managed_account_or_auth_journal();
+    println!("PASS Codex managed proxy enter/route/save/exit restart fault matrix and zero-file recovery");
+    println!("PASS Codex proxy preserves native auth and no-current exit");
+    proxy_recovery_checks_managed_generation_before_committing_route();
+    println!("PASS Codex proxy recovery checks managed generation");
+    Ok(())
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn automatic_live_preparation_cannot_adopt_through_pending() {
+    for switch_away in [true, false] {
+        let fixture = Fixture::new();
+        let account = "synthetic-pending-adoption";
+        seed_managed(&fixture, "managed", account, "access-old");
+        crate::rt::block_on(
+            fixture
+                .state
+                .codex_oauth_manager
+                .test_set_bundle_time(account, chrono::Utc::now().timestamp_millis() - 10_000),
+        );
+        ProviderService::switch(&fixture.state, AppType::Codex, "managed").unwrap();
+        let old: Value = serde_json::from_slice(&std::fs::read(&fixture.auth).unwrap()).unwrap();
+        {
+            let _fault = Fault::at("pending");
+            assert!(ProviderService::switch(&fixture.state, AppType::Codex, "managed").is_err());
+        }
+        let mut external = old.clone();
+        external["tokens"]["refresh_token"] = json!("newer-native-refresh");
+        external["last_refresh"] = json!(chrono::Utc::now().to_rfc3339());
+        std::fs::write(&fixture.auth, serde_json::to_vec(&external).unwrap()).unwrap();
+        if switch_away {
+            let _ = super::live::prepare_codex_managed_oauth_live_auth_switch_away(
+                fixture.state.codex_oauth_manager.clone(),
+                account.into(),
+            );
+        } else {
+            let _ = super::live::get_codex_managed_oauth_live_auth_value(
+                fixture.state.codex_oauth_manager.clone(),
+                account.into(),
+            );
+        }
+        crate::rt::block_on(fixture.state.codex_oauth_manager.with_live_auth_guard(&[account.into()], |generation| {
+            assert!(generation.matches_live_generation(account, &old), "automatic helper must not adopt native generation through pending (switch_away={switch_away})");
+            Ok(())
+        })).unwrap();
+        assert!(fixture.pending().is_some());
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn catalog_and_target_only_intents_wait_for_inflight_refresh() {
+    for restore in [false, true] {
+        let (fixture, revision) = if restore {
+            let (fixture, revision) = catalog_fixture();
+            super::codex_direct::manage_catalog(&fixture.state, &revision).unwrap();
+            let revision = super::codex_direct::CatalogRevision {
+                config_digest: crate::live::engine::digest(
+                    read_current(&fixture.config).unwrap().as_deref(),
+                ),
+                ..revision
+            };
+            (fixture, Some(revision))
+        } else {
+            (Fixture::new(), None)
+        };
+        let account = "synthetic-unselected-refresh";
+        seed_managed(&fixture, "unselected", account, "access-old");
+        let manager = fixture.state.codex_oauth_manager.clone();
+        crate::rt::block_on(manager.test_refresh_next(account, "access-new", "refresh-new"));
+        let (started, release) = manager.test_pause_next_refresh();
+        crate::rt::block_on(async {
+            let refreshing = manager.clone();
+            let refresh =
+                tokio::spawn(async move { refreshing.get_valid_token_for_account(account).await });
+            started.await.unwrap();
+            let (early, pending) = std::thread::scope(|scope| {
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let fixture = &fixture;
+                let operation = scope.spawn(move || {
+                    let _fault = Fault::at("pending");
+                    started_tx.send(()).unwrap();
+                    let result = if let Some(revision) = revision {
+                        super::codex_direct::restore_catalog(&fixture.state, &revision)
+                    } else {
+                        let mut row = fixture
+                            .state
+                            .db
+                            .get_provider_by_id("b", "codex")
+                            .unwrap()
+                            .unwrap();
+                        row.name = "updated inactive row".into();
+                        ProviderService::update(&fixture.state, AppType::Codex, None, row)
+                            .map(|_| ())
+                    };
+                    done_tx.send(()).unwrap();
+                    assert!(result.is_err(), "fault should retain the real operation");
+                });
+                started_rx.recv().unwrap();
+                let early = done_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_ok();
+                let pending = fixture.pending().is_some();
+                release.send(()).unwrap();
+                operation.join().unwrap();
+                (early, pending)
+            });
+            assert_eq!(refresh.await.unwrap().unwrap(), "access-new");
+            assert!(
+                !early && !pending,
+                "actual intent passed an in-flight refresh (restore={restore})"
+            );
+            assert!(fixture.pending().is_some());
+        });
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn managed_proxy_faults_restart_through_original_recovery() {
+    for action in ["enter", "route", "save", "exit"] {
+        for point in ["pending", "published:1", "target"] {
+            let point = if action == "route" && point == "published:1" {
+                "published:0"
+            } else {
+                point
+            };
+            let mut fixture = Fixture::new();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            seed_managed(&fixture, "managed-a", "synthetic-account-a", "access-a");
+            seed_managed(&fixture, "managed-b", "synthetic-account-b", "access-b");
+            // The test helper creates its cached token before inserting the
+            // account. Pin one coherent synthetic generation after both inserts.
+            let observed = chrono::Utc::now().timestamp_millis();
+            for account in ["synthetic-account-a", "synthetic-account-b"] {
+                crate::rt::block_on(
+                    fixture
+                        .state
+                        .codex_oauth_manager
+                        .test_set_bundle_time(account, observed),
+                );
+            }
+            ProviderService::switch(&fixture.state, AppType::Codex, "managed-a").unwrap();
+            if action != "enter" {
+                runtime
+                    .block_on(
+                        fixture
+                            .state
+                            .proxy_service
+                            .set_takeover_for_app("codex", true),
+                    )
+                    .unwrap();
+            }
+            if action == "exit" {
+                runtime
+                    .block_on(
+                        fixture
+                            .state
+                            .proxy_service
+                            .switch_proxy_target("codex", "managed-b"),
+                    )
+                    .unwrap();
+            }
+            let result = {
+                let _fault = Fault::at(point);
+                match action {
+                    "enter" => runtime.block_on(
+                        fixture
+                            .state
+                            .proxy_service
+                            .set_takeover_for_app("codex", true),
+                    ),
+                    "route" => runtime.block_on(
+                        fixture
+                            .state
+                            .proxy_service
+                            .switch_proxy_target("codex", "managed-b"),
+                    ),
+                    "exit" => runtime.block_on(
+                        fixture
+                            .state
+                            .proxy_service
+                            .set_takeover_for_app("codex", false),
+                    ),
+                    "save" => {
+                        let mut edited = managed_provider("managed-a", "synthetic-account-b");
+                        edited.settings_config["config"] = json!(
+                            "model = \"changed-route-model\"\nmodel_reasoning_effort = \"low\"\n"
+                        );
+                        ProviderService::update(&fixture.state, AppType::Codex, None, edited)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            assert!(result.is_err(), "{action}/{point}");
+            let pending = fixture.pending().expect("real fault must retain intent");
+            assert_eq!(pending.files.len(), 5);
+            // Stop only the test listener, then recreate original AppState/service
+            // and manager together, as a real process restart does.
+            runtime
+                .block_on(fixture.state.proxy_service.stop())
+                .unwrap();
+            fixture.state = AppState::new(fixture.state.db.clone()).unwrap();
+            let outcome = crate::mode::controller::recover_locked(
+                &fixture.state.proxy_service,
+                &AppType::Codex,
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                Some(if point == "pending" {
+                    crate::mode::operation::RecoveryOutcome::Discarded
+                } else {
+                    crate::mode::operation::RecoveryOutcome::RolledForward
+                }),
+                "{action}/{point}"
+            );
+            assert!(fixture.pending().is_none(), "{action}/{point}");
+            fixture.assert_current("managed-a");
+            if point != "pending" {
+                let auth: Value =
+                    serde_json::from_slice(&std::fs::read(&fixture.auth).unwrap()).unwrap();
+                let expected = if action == "route" || action == "save" {
+                    "synthetic-account-b"
+                } else {
+                    "synthetic-account-a"
+                };
+                assert_eq!(auth["tokens"]["account_id"], expected, "{action}/{point}");
+                let mode = state::load(
+                    &DeviceStore::for_device(),
+                    &fixture.state.db.secret_session().read().unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    mode.apps["codex"].mode,
+                    Some(if action == "exit" {
+                        Mode::Direct
+                    } else {
+                        Mode::Proxy
+                    })
+                );
+            }
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_target_only_recovery_needs_no_managed_account_or_auth_journal() {
+    for point in ["pending", "target"] {
+        let fixture = Fixture::new();
+        // No manager account exists: this is an inactive row save, not auth work.
+        fixture
+            .state
+            .db
+            .save_provider("codex", &managed_provider("a", "missing-account"))
+            .unwrap();
+        let files = super::codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>();
+        {
+            let mut row = fixture
+                .state
+                .db
+                .get_provider_by_id("b", "codex")
+                .unwrap()
+                .unwrap();
+            row.name = "saved while inactive".into();
+            let _fault = Fault::at(point);
+            assert!(ProviderService::update(&fixture.state, AppType::Codex, None, row).is_err());
+        }
+        assert!(fixture.pending().unwrap().files.is_empty());
+        let outcome =
+            crate::mode::controller::recover_locked(&fixture.state.proxy_service, &AppType::Codex)
+                .unwrap();
+        assert_eq!(
+            outcome,
+            Some(if point == "pending" {
+                crate::mode::operation::RecoveryOutcome::Discarded
+            } else {
+                crate::mode::operation::RecoveryOutcome::RolledForward
+            })
+        );
+        assert!(fixture.pending().is_none());
+        assert_eq!(
+            files,
+            super::codex_direct::files()
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn proxy_native_auth_store_modes_follow_original_lookup_semantics() {
+    for (mode, present, expected) in [
+        ("keyring", false, true),
+        ("auto", false, true),
+        ("future-store", false, true),
+        ("ephemeral", true, false),
+    ] {
+        let fixture = Fixture::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        if !present {
+            std::fs::remove_file(&fixture.auth).unwrap();
+        }
+        let auth = read_current(&fixture.auth).unwrap();
+        let before = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            format!("cli_auth_credentials_store = \"{mode}\"\n{before}"),
+        )
+        .unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .state
+                    .proxy_service
+                    .set_takeover_for_app("codex", true),
+            )
+            .unwrap();
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            config["model_providers"]["custom"]
+                .get("requires_openai_auth")
+                .and_then(toml_edit::Item::as_bool),
+            Some(expected),
+            "{mode}"
+        );
+        assert_eq!(read_current(&fixture.auth).unwrap(), auth);
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some(mode));
     }
 }

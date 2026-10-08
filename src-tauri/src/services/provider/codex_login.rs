@@ -93,6 +93,15 @@ fn oauth_identity(auth: &Value) -> Option<String> {
 }
 
 /// 官方卡的行里存的是 API Key（直连 OpenAI API）：静态凭据，不会过期，照写。
+pub(crate) fn official_login_requirement(row_auth: &Value) -> Option<String> {
+    if is_api_key_credential(row_auth) {
+        return extract_codex_auth_api_key(row_auth)
+            .and_then(|key| crate::live::engine::digest(Some(key.as_bytes())))
+            .map(|key| format!("api-key:{key}"));
+    }
+    oauth_identity(row_auth)
+}
+
 fn is_api_key_credential(auth: &Value) -> bool {
     extract_codex_auth_api_key(auth).is_some() && !codex_auth_has_credential_login_material(auth)
 }
@@ -111,7 +120,6 @@ pub(crate) enum AuthTarget<'a> {
     /// 直连的第三方：保留登录开关关闭时删掉 `auth.json`。
     ThirdParty { preserve: bool },
     /// 代理的第三方路由：不动用户的原生登录（请求凭据由代理注入）。
-    #[cfg(any(test, feature = "test-hooks"))]
     ProxyThirdParty,
     /// 没绑托管账号的官方卡（直连，或代理的官方路由）。
     Official { row_auth: &'a Value },
@@ -179,7 +187,6 @@ pub(crate) fn plan(input: AuthInput<'_>) -> AuthPlan {
             // 保留登录关闭时第三方路由旁边不留任何 auth.json（写 `{}` 不等于登出）。
             (managed || residue || (!preserve && input.live.is_some())).then_some(None)
         }
-        #[cfg(any(test, feature = "test-hooks"))]
         AuthTarget::ProxyThirdParty => managed.then_some(None),
         AuthTarget::Managed { auth } => {
             if let Some(live) = native {

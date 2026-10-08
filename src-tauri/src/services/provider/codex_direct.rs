@@ -1,6 +1,6 @@
-//! Fixed upstream v4.0.2 Codex direct writer: prepare → plan → run.
+//! Fixed upstream v4.0.2 Codex direct/proxy writer: prepare → plan → run.
 //! LoongPort adapts native auth placement, encrypted device stash and conservative
-//! recovery. Only the direct ProviderService switch is adopted at this checkpoint.
+//! recovery. Direct and route-mode callers borrow the same five-file writer.
 use super::{
     codex_login::{self, AuthInput, AuthTarget, LoginStash, STASH_FILENAME},
     ProviderService,
@@ -8,26 +8,28 @@ use super::{
 use crate::config::serialize_json_bytes as sorted_json_bytes;
 use crate::live::{
     engine::{digest, read_current, DeviceStore, LiveFile},
-    patch::toml::TomlSteps,
+    patch::toml::{value_text, TomlSteps},
     patch::{Guarded, LivePatch, WholeFile},
     project::codex::{
-        foreign_catalog, row_catalog_pointer, CodexConfigPatch, CodexProjection, KnownTable, Route,
-        RouteAuth, RouteWrite, RowInput, MODEL_CATALOG_JSON, ROUTE_ID, WEB_SEARCH_DISABLED,
+        foreign_catalog, official_mirror_table, proxy_route_table, row_catalog_pointer,
+        CodexConfigPatch, CodexProjection, KnownTable, Route, RouteAuth, RouteWrite, RowInput,
+        MODEL_CATALOG_JSON, ROUTE_ID, WEB_SEARCH_DISABLED,
     },
 };
 use crate::mode::{
+    contract::CONTRACT_VERSION,
     operation::{self, AppWrite, FileChange, OperationReport, RecoveryOutcome},
-    state::{self, PendingTarget},
+    state::{self, Contract, PendingTarget},
 };
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::secrets::owned_file::DeviceFile;
 use crate::{
     app_config::AppType, codex_config::*, database::Database, error::AppError, provider::Provider,
-    store::AppState,
+    services::ProxyService, store::AppState,
 };
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use toml_edit::{Item, Value as TomlValue};
+use toml_edit::{Item, Table, Value as TomlValue};
 
 fn app() -> &'static str {
     "codex"
@@ -44,14 +46,36 @@ fn managed_account(provider: &Provider) -> Option<String> {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum Target<'a> {
+    Direct(Option<&'a Provider>),
+    Proxy {
+        route: &'a Provider,
+        base_url: &'a str,
+    },
+}
+impl<'a> Target<'a> {
+    fn provider(&self) -> Option<&'a Provider> {
+        match self {
+            Self::Direct(provider) => *provider,
+            Self::Proxy { route, .. } => Some(route),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) enum Owner<'a> {
     Provider(&'a Provider),
+    Contract {
+        contract: &'a Contract,
+        route: Option<&'a Provider>,
+    },
     None,
 }
 impl<'a> Owner<'a> {
     fn provider(&self) -> Option<&'a Provider> {
         match self {
             Self::Provider(p) => Some(p),
+            Self::Contract { route, .. } => *route,
             Self::None => None,
         }
     }
@@ -67,6 +91,13 @@ pub(crate) fn prepare(
     owner: &Owner<'_>,
     target: &Provider,
 ) -> Result<Prepared, AppError> {
+    prepare_target(manager, owner, &Target::Direct(Some(target)))
+}
+fn prepare_target(
+    manager: &Arc<CodexOAuthManager>,
+    owner: &Owner<'_>,
+    target: &Target<'_>,
+) -> Result<Prepared, AppError> {
     let auth_before = read_current(&get_codex_auth_path())?;
     if let Some(bytes) = &auth_before {
         let auth: Value = parse_json(bytes)?;
@@ -74,9 +105,10 @@ pub(crate) fn prepare(
             return Err(invalid());
         }
     }
-    let target_account = is_official(target)
-        .then(|| managed_account(target))
-        .flatten();
+    let target_account = target
+        .provider()
+        .filter(|p| is_official(p))
+        .and_then(managed_account);
     let target_login = target_account
         .as_ref()
         .map(|account| {
@@ -147,6 +179,13 @@ pub(crate) fn outgoing_exclusive(owner: &Owner<'_>) -> Vec<(String, TomlValue)> 
                 Vec::new()
             }
         },
+        Owner::Contract { contract, .. } => contract
+            .exclusive
+            .iter()
+            .filter_map(|(key, value)| {
+                Some((key.clone(), value.as_str()?.parse::<TomlValue>().ok()?))
+            })
+            .collect(),
         Owner::None => Vec::new(),
     }
 }
@@ -235,6 +274,7 @@ pub(crate) struct Planned {
     catalog: Option<Vec<u8>>,
     auth: Value,
     official: bool,
+    keep_native: bool,
     stamp: Option<RouteAuth>,
     leaving_official: Option<Value>,
     outgoing_catalog: Option<String>,
@@ -309,6 +349,7 @@ pub(crate) fn plan(
         catalog,
         auth: row_auth(provider),
         official,
+        keep_native: false,
         stamp,
         facts,
         outgoing_catalog,
@@ -317,6 +358,206 @@ pub(crate) fn plan(
             .filter(|p| is_official(p) && managed_account(p).is_none())
             .map(row_auth),
     })
+}
+
+fn plan_target(db: &Database, owner: &Owner<'_>, target: &Target<'_>) -> Result<Planned, AppError> {
+    let mut planned = match target.provider() {
+        Some(provider) => plan(db, owner, provider)?,
+        None => {
+            let facts = row_facts(db)?;
+            Planned {
+                config: CodexConfigPatch {
+                    top: Vec::new(),
+                    nested: Vec::new(),
+                    exclusive: Vec::new(),
+                    outgoing: outgoing_exclusive(owner),
+                    route: RouteWrite::Default,
+                    catalog: false,
+                    retired: facts.retired.clone(),
+                },
+                catalog: None,
+                auth: Value::Object(Map::new()),
+                official: false,
+                keep_native: true,
+                stamp: None,
+                leaving_official: owner
+                    .provider()
+                    .filter(|p| is_official(p) && managed_account(p).is_none())
+                    .map(row_auth),
+                outgoing_catalog: owner
+                    .provider()
+                    .and_then(|p| project(p).ok())
+                    .and_then(|p| {
+                        row_catalog_pointer(&p.top)
+                            .and_then(|(_, v)| v.as_str())
+                            .map(str::to_owned)
+                    }),
+                facts,
+            }
+        }
+    };
+    if let Target::Proxy { base_url, .. } = target {
+        if planned.official {
+            planned.config.route = RouteWrite::OfficialProxy {
+                base_url: (*base_url).into(),
+                unified: crate::settings::unify_codex_session_history(),
+            };
+            planned.stamp = None;
+        } else {
+            planned.config.route = RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false));
+            planned.stamp = Some(RouteAuth::Bearer);
+            planned.keep_native = true;
+        }
+    }
+    Ok(planned)
+}
+
+/// The controller borrows the existing manager and five-file writer. Preparation
+/// precedes the pinned vault, and the manager guard encloses intent publication.
+pub(crate) fn apply_mode(
+    service: &ProxyService,
+    owner: &Owner<'_>,
+    desired: Target<'_>,
+    operation: &str,
+    mut target: PendingTarget,
+) -> Result<(), AppError> {
+    {
+        let write = AppWrite::begin_mode(service, &AppType::Codex)?;
+        read_inputs(&write, &[])?;
+    }
+    let prepared = prepare_target(service.codex_manager(), owner, &desired)?;
+    let planned = plan_target(service.database(), owner, &desired)?;
+    if matches!(desired, Target::Proxy { .. }) {
+        let login = planned
+            .official
+            .then(|| codex_login::official_login_requirement(&planned.auth))
+            .flatten();
+        target.state.as_mut().ok_or_else(invalid)?.contract = Some(contract_of(
+            &desired,
+            &planned.config,
+            planned.catalog.as_deref(),
+            &prepared,
+            login.as_deref(),
+        ));
+    }
+    let ids = prepared
+        .target_login
+        .iter()
+        .map(|(id, _)| id.clone())
+        .chain(prepared.outgoing.iter().map(|(id, _)| id.clone()))
+        .collect::<Vec<_>>();
+    crate::rt::block_on(
+        service
+            .codex_manager()
+            .with_live_auth_guard(&ids, |generation| {
+                if let Some((account, auth)) = &prepared.target_login {
+                    if !generation.matches_prepared(account, auth) {
+                        return Err(invalid());
+                    }
+                }
+                let write = AppWrite::begin_mode(service, &AppType::Codex)?;
+                run_pinned(
+                    &write,
+                    planned,
+                    &prepared,
+                    desired.provider(),
+                    None,
+                    operation,
+                    target,
+                )
+                .map(|_| ())
+            }),
+    )
+}
+
+/// Target-only operations share the same publication barrier as file writes.
+pub(crate) fn apply_target_only(
+    service: &ProxyService,
+    operation: &str,
+    target: PendingTarget,
+) -> Result<(), AppError> {
+    crate::rt::block_on(service.codex_manager().with_live_auth_guard(&[], |_| {
+        AppWrite::begin_mode(service, &AppType::Codex)?
+            .run(operation, &[], target)
+            .map(|_| ())
+    }))
+}
+
+fn table_text(table: &Table) -> String {
+    let mut table = table.clone();
+    table.remove("requires_openai_auth");
+    let mut doc = toml_edit::DocumentMut::new();
+    doc.insert("t", Item::Table(table));
+    doc.to_string()
+}
+
+/// 代理契约：路由供应商在客户端那一侧的全部要求。摘要用于记录模式契约；实际操作
+/// 仍读取客户端文件并保留 no-op witnesses，不能用摘要跳过回读。`requires_openai_auth` 跟着盘上的登录走，不算进契约；官方路由要的是谁的登录
+/// （托管账号，或 `official_login`：没绑托管账号的官方卡行里的账号）算进去。
+fn contract_of(
+    target: &Target<'_>,
+    config: &CodexConfigPatch,
+    catalog: Option<&[u8]>,
+    prepared: &Prepared,
+    official_login: Option<&str>,
+) -> Contract {
+    let base_url = match target {
+        Target::Proxy { base_url, .. } => *base_url,
+        Target::Direct(_) => "",
+    };
+    let (selector, table) = match &config.route {
+        RouteWrite::Custom(table) => (ROUTE_ID, table_text(table)),
+        RouteWrite::OfficialProxy {
+            base_url,
+            unified: true,
+        } => (
+            ROUTE_ID,
+            table_text(&official_mirror_table(Some(base_url), false)),
+        ),
+        // 不写选路，改道写在顶层（地址已经在 `url` 里）。
+        RouteWrite::OfficialProxy { unified: false, .. } => ("", "openai_base_url".to_string()),
+        _ => ("", String::new()),
+    };
+    let pairs = |entries: &[(String, TomlValue)]| -> Vec<Value> {
+        let mut pairs: Vec<Value> = entries
+            .iter()
+            .map(|(key, value)| serde_json::json!([key, value_text(value)]))
+            .collect();
+        pairs.sort_by_key(|pair| pair[0].as_str().unwrap_or_default().to_string());
+        pairs
+    };
+    let nested: Vec<Value> = config
+        .nested
+        .iter()
+        .map(|(path, value)| serde_json::json!([path.join("."), value_text(value)]))
+        .collect();
+    let parts = serde_json::json!({
+        "app": "codex",
+        "version": CONTRACT_VERSION,
+        "url": base_url,
+        "top": pairs(&config.top),
+        "nested": nested,
+        "exclusive": pairs(&config.exclusive),
+        "selector": selector,
+        "table": table,
+        "catalog": digest(catalog),
+        "managed": prepared.target_login.as_ref().map(|(account, _)| account),
+        "login": official_login,
+    });
+    let key = digest(Some(
+        &serde_json::to_vec(&parts).expect("contract parts serialize"),
+    ))
+    .expect("digest");
+    Contract {
+        version: CONTRACT_VERSION,
+        extra: Default::default(),
+        key,
+        exclusive: config
+            .exclusive
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value_text(value))))
+            .collect(),
+    }
 }
 
 fn invalid() -> AppError {
@@ -379,7 +620,16 @@ fn run_with_catalog(
                         return Err(invalid());
                     }
                 }
-                run_pinned(state, planned, prepared, provider, revision)
+                let write = AppWrite::begin(state, &AppType::Codex)?;
+                run_pinned(
+                    &write,
+                    planned,
+                    prepared,
+                    Some(provider),
+                    revision,
+                    state::op::SWITCH,
+                    PendingTarget::pointer(Some(provider.id.clone())),
+                )
             }),
     )
 }
@@ -452,13 +702,14 @@ fn read_inputs(write: &AppWrite<'_>, official_logins: &[Value]) -> Result<Inputs
 }
 
 fn run_pinned(
-    state: &AppState,
+    write: &AppWrite<'_>,
     mut planned: Planned,
     prepared: &Prepared,
-    provider: &Provider,
+    provider: Option<&Provider>,
     revision: Option<&CatalogRevision>,
+    operation: &str,
+    mut target: PendingTarget,
 ) -> Result<(OperationReport, bool), AppError> {
-    let write = AppWrite::begin(state, &AppType::Codex)?;
     if let Some((account, Some(expected))) = &prepared.outgoing {
         ensure_codex_live_auth_unchanged_for_managed_account(account, expected)?;
     }
@@ -469,9 +720,9 @@ fn run_pinned(
         config_doc,
         live_managed,
         stash,
-    } = read_inputs(&write, &planned.facts.official_logins)?;
+    } = read_inputs(write, &planned.facts.official_logins)?;
     if let Some(revision) = revision {
-        revision.verify(provider, pre[1].as_deref())?;
+        revision.verify(provider.ok_or_else(invalid)?, pre[1].as_deref())?;
     }
     if digest(pre[0].as_deref()) != prepared.auth_pre {
         return Err(invalid());
@@ -500,9 +751,12 @@ fn run_pinned(
     let config_text =
         std::str::from_utf8(pre[1].as_deref().unwrap_or_default()).map_err(|_| invalid())?;
     let stash_file = DeviceFile::registered(STASH_FILENAME)?;
-    let replaces = codex_live_write_replaces_auth(provider.category.as_deref(), &planned.auth);
+    let replaces = !planned.keep_native
+        && provider
+            .is_some_and(|p| codex_live_write_replaces_auth(p.category.as_deref(), &planned.auth));
     let auth_target = match &prepared.target_login {
         Some((_, auth)) => AuthTarget::Managed { auth },
+        None if planned.keep_native => AuthTarget::ProxyThirdParty,
         None if planned.official => AuthTarget::Official {
             row_auth: &planned.auth,
         },
@@ -528,7 +782,26 @@ fn run_pinned(
         return Err(AppError::Config("codex.auth_store_unavailable".into()));
     }
     if let RouteWrite::Custom(table) = &mut planned.config.route {
-        if !planned.official && replaces && extract_codex_auth_api_key(&planned.auth).is_some() {
+        if planned.keep_native {
+            if let Some(kind) = planned.stamp {
+                let login = match codex_config_auth_store_mode(config_text) {
+                    CodexAuthStoreMode::File => auth_plan.login_on_disk,
+                    CodexAuthStoreMode::Ephemeral => false,
+                    CodexAuthStoreMode::Keyring
+                    | CodexAuthStoreMode::Auto
+                    | CodexAuthStoreMode::Unknown => true,
+                };
+                table.insert(
+                    "requires_openai_auth",
+                    toml_edit::value(crate::live::project::codex::requires_openai_auth(
+                        kind, login,
+                    )),
+                );
+            }
+        } else if !planned.official
+            && replaces
+            && extract_codex_auth_api_key(&planned.auth).is_some()
+        {
             table.remove("experimental_bearer_token");
             table.insert("requires_openai_auth", toml_edit::value(true));
         } else if matches!(planned.stamp, Some(RouteAuth::Bearer | RouteAuth::EnvKey)) {
@@ -559,7 +832,7 @@ fn run_pinned(
             external.ok_or_else(|| AppError::Config("codex.catalog_source_changed".into()))?;
         catalog_evidence = Some(state::CatalogTakeover {
             version: 1,
-            provider_id: provider.id.clone(),
+            provider_id: provider.ok_or_else(invalid)?.id.clone(),
             config_pre: revision.config_digest.clone().ok_or_else(invalid)?,
             previous_pointer: previous_pointer.into(),
             managed_pointer: crate::live::project::codex::CATALOG_FILENAME.into(),
@@ -628,7 +901,6 @@ fn run_pinned(
             })
         })
         .transpose()?;
-    let mut target = PendingTarget::pointer(Some(provider.id.clone()));
     target.written = Some(state::Written {
         codex: Some(state::CodexWritten {
             version: 1,
@@ -638,7 +910,7 @@ fn run_pinned(
         }),
         ..Default::default()
     });
-    let report = write.run(state::op::SWITCH, &changes, target)?;
+    let report = write.run(operation, &changes, target)?;
     Ok((report, preserved))
 }
 
@@ -669,26 +941,99 @@ fn auth_time(auth: &Value) -> Option<i64> {
 #[allow(dead_code)] // Controlled backend entry; UI/runtime registration follows migration admission.
 pub(crate) fn recover_pending(state: &AppState) -> Result<Option<RecoveryOutcome>, AppError> {
     let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app(app()));
-    let pending = {
-        let vault = state.db.secret_session().read()?;
-        state::pending(&DeviceStore::for_device(), &vault, app())?
+    recover_locked(&state.proxy_service)
+}
+
+/// Caller owns the service switch lock. Account preparation remains outside the
+/// pinned vault; the original manager guard covers verification and replay.
+pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOutcome>, AppError> {
+    let db = service.database();
+    let (pending, before) = {
+        let vault = db.secret_session().read()?;
+        let store = DeviceStore::for_device();
+        (
+            state::pending(&store, &vault, app())?,
+            crate::mode::current::validate_known_mode(&store, &vault, &AppType::Codex)?,
+        )
     };
     let Some(pending) = pending else {
         return Ok(None);
     };
-    let target = match pending.target.pointer.as_ref() {
-        Some(id) => state.db.get_provider_by_id(id, app())?,
-        None => crate::mode::current::direct_provider(&state.db, &AppType::Codex)?,
-    };
-    let account = target
+    let saved = pending
+        .target
+        .saved_row
         .as_ref()
-        .filter(|p| is_official(p))
-        .and_then(managed_account);
+        .map(operation::saved_provider)
+        .transpose()?;
+    let live_mode = pending.target.state.as_ref().unwrap_or(&before);
+    let live_id = if live_mode.is_proxy() && live_mode.attached {
+        live_mode.proxy_route.clone()
+    } else {
+        pending
+            .target
+            .pointer
+            .clone()
+            .or(crate::mode::current::provider_for(
+                db,
+                &AppType::Codex,
+                crate::mode::current::Purpose::Direct,
+            )?)
+    };
+    let account = if pending.files.is_empty() {
+        None
+    } else {
+        let provider = match &live_id {
+            Some(id) if saved.as_ref().is_some_and(|p| &p.id == id) => saved.clone(),
+            Some(id) => db.get_provider_by_id(id, app())?,
+            None => None,
+        };
+        provider
+            .as_ref()
+            .filter(|p| is_official(p))
+            .and_then(managed_account)
+    };
     let ids = account.iter().cloned().collect::<Vec<_>>();
-    let result = crate::rt::block_on(state.codex_oauth_manager.with_live_auth_guard(
+    let result = crate::rt::block_on(service.codex_manager().with_live_auth_guard(
         &ids,
         |generation| {
-            let write = AppWrite::open(state, &AppType::Codex)?;
+            let write = AppWrite::open_mode(service, &AppType::Codex)?;
+            if state::pending(&write.store, &write.vault, app())?.as_ref() != Some(&pending) {
+                return Err(invalid());
+            }
+            operation::verify_saved_row(
+                db,
+                db.secret_session(),
+                &write.vault,
+                &AppType::Codex,
+                &pending.target,
+            )?;
+            if pending.files.is_empty() {
+                let inactive_save = saved.as_ref().is_some_and(|saved| {
+                    (before.is_proxy() && !before.attached) || live_id.as_ref() != Some(&saved.id)
+                });
+                let detached_mode = pending
+                    .target
+                    .state
+                    .as_ref()
+                    .is_some_and(|mode| !mode.attached)
+                    && matches!(
+                        pending.op.as_str(),
+                        state::op::ROUTE | state::op::EXIT | state::op::DETACH
+                    );
+                if pending.target.pointer.is_some()
+                    || pending.target.written.is_some()
+                    || !(detached_mode || (pending.target.state.is_none() && inactive_save))
+                {
+                    return Err(invalid());
+                }
+                return operation::recover(
+                    &write.store,
+                    &write.vault,
+                    &write.guard,
+                    &[],
+                    &|target| write.commit(target),
+                );
+            }
             let admitted = files();
             operation::recover_checked(
                 &write.store,
@@ -898,6 +1243,18 @@ pub(crate) fn restore_catalog(
     let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app(app()));
     let provider =
         crate::mode::current::direct_provider(&state.db, &AppType::Codex)?.ok_or_else(invalid)?;
+    crate::rt::block_on(
+        state
+            .codex_oauth_manager
+            .with_live_auth_guard(&[], |_| restore_catalog_pinned(state, revision, &provider)),
+    )
+}
+
+fn restore_catalog_pinned(
+    state: &AppState,
+    revision: &CatalogRevision,
+    provider: &Provider,
+) -> Result<(), AppError> {
     let write = AppWrite::begin(state, &AppType::Codex)?;
     let Inputs {
         files,
@@ -905,7 +1262,7 @@ pub(crate) fn restore_catalog(
         config_doc,
         ..
     } = read_inputs(&write, &[])?;
-    revision.verify(&provider, pre[1].as_deref())?;
+    revision.verify(provider, pre[1].as_deref())?;
     let mut written = state::written(&write.store, &write.vault, app())?.ok_or_else(invalid)?;
     written.validate()?;
     let codex = written.codex.as_mut().ok_or_else(invalid)?;

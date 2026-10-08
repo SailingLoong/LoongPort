@@ -2,8 +2,8 @@
 //!
 //! Handles provider CRUD operations, switching, and configuration management.
 
-mod claude_direct;
-mod codex_direct;
+pub(crate) mod claude_direct;
+pub(crate) mod codex_direct;
 #[cfg(any(test, feature = "test-hooks"))]
 mod codex_direct_tests;
 mod codex_login;
@@ -11,10 +11,10 @@ mod codex_login;
 mod direct_writer_tests;
 mod endpoints;
 mod gemini_auth;
-mod gemini_direct;
+pub(crate) mod gemini_direct;
 #[cfg(any(test, feature = "test-hooks"))]
 mod gemini_direct_tests;
-mod grok_direct;
+pub(crate) mod grok_direct;
 mod live;
 mod native;
 pub(crate) use native::service_configuration_revision;
@@ -25,6 +25,37 @@ pub(crate) use transaction::with_provider_config_transaction;
 
 #[cfg(feature = "test-hooks")]
 impl ProviderService {
+    #[doc(hidden)]
+    pub fn verify_proxy_all_apps() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_all_apps()?;
+        codex_direct_tests::verify_proxy_mode()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_lifecycle() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_lifecycle()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_pending_refresh() -> Result<(), AppError> {
+        codex_direct_tests::verify_pending_refresh()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_recovery() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_recovery()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_runtime() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_runtime()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_controller_flow() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify()
+    }
+
     #[doc(hidden)]
     pub fn verify_codex_review_cases() -> Result<(), AppError> {
         codex_direct_tests::verify_review_cases()
@@ -5420,6 +5451,23 @@ impl ProviderService {
             .db
             .get_provider_by_id(id, app_type.as_str())?
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        if crate::mode::operation::uses_upstream4_schema(&state.db)? {
+            let provider = Self::prepare_provider_update(state, &app_type, provider)?;
+            let changed =
+                crate::relay::provider_config::selected_model(&app_type, &existing.settings_config)
+                    != crate::relay::provider_config::selected_model(
+                        &app_type,
+                        &provider.settings_config,
+                    );
+            crate::mode::controller::save_row_locked(
+                &state.proxy_service,
+                &app_type,
+                &existing,
+                &provider,
+                changed,
+            )?;
+            return Ok(true);
+        }
         let current =
             crate::proxy::application_routing::current_provider_id(&state.db, app_type.as_str());
         if current.as_deref() != Some(existing.id.as_str()) {
@@ -5440,6 +5488,25 @@ impl ProviderService {
         })
     }
 
+    fn prepare_provider_update(
+        state: &AppState,
+        app_type: &AppType,
+        mut provider: Provider,
+    ) -> Result<Provider, AppError> {
+        // Normalize Claude model keys
+        Self::normalize_provider_if_claude(app_type, &mut provider);
+        Self::validate_provider_settings(app_type, &provider)?;
+        normalize_provider_common_config_for_storage(state.db.as_ref(), app_type, &mut provider)?;
+        if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                &mut provider.settings_config,
+            )?;
+        }
+        Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
+
+        Ok(provider)
+    }
+
     fn update_locked(
         state: &AppState,
         app_type: AppType,
@@ -5456,16 +5523,7 @@ impl ProviderService {
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
-        // Normalize Claude model keys
-        Self::normalize_provider_if_claude(&app_type, &mut provider);
-        Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
-        if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {
-            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
-                &mut provider.settings_config,
-            )?;
-        }
-        Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        provider = Self::prepare_provider_update(state, &app_type, provider)?;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -6050,6 +6108,23 @@ impl ProviderService {
                 .get_provider_by_id(id, app_type.as_str())?
                 .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
             validate_provider_selection(&state.db, &app_type, id)?;
+            let mode = {
+                let vault = state.db.secret_session().read()?;
+                crate::mode::current::validate_known_mode(
+                    &crate::live::engine::DeviceStore::for_device(),
+                    &vault,
+                    &app_type,
+                )?
+            };
+            if mode.is_proxy() {
+                crate::rt::block_on(
+                    state
+                        .proxy_service
+                        .hot_switch_provider_inner(app_type.as_str(), id),
+                )
+                .map_err(AppError::Message)?;
+                return Ok(SwitchResult::default());
+            }
             let previous = match app_type {
                 AppType::Claude | AppType::Codex | AppType::GrokBuild => {
                     crate::mode::current::direct_provider(&state.db, &app_type)?

@@ -1218,7 +1218,9 @@ mod tests {
             codex_tool_carriers: std::sync::Arc::new(
                 crate::proxy::providers::codex_tool_carriers::CodexToolCarrierStore::default(),
             ),
+            #[cfg(feature = "gui")]
             app_handle: None,
+            service_owner: std::sync::Weak::new(),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             passive_ingress: crate::relay::model_verification::passive::PassiveIngress::channel(1)
                 .0,

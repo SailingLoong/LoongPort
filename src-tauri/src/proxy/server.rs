@@ -51,7 +51,9 @@ pub struct ProxyState {
     /// [`providers::codex_tool_carriers`]。
     pub codex_tool_carriers: Arc<CodexToolCarrierStore>,
     /// AppHandle，用于发射事件和更新托盘菜单
+    #[cfg(feature = "gui")]
     pub app_handle: Option<tauri::AppHandle>,
+    pub service_owner: std::sync::Weak<crate::services::ProxyService>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
     /// 被动模型监控入口：响应路径顺路观察托管档流量，满即丢不阻塞转发。
@@ -73,7 +75,7 @@ impl ProxyServer {
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,
-        app_handle: Option<tauri::AppHandle>,
+        #[cfg(feature = "gui")] app_handle: Option<tauri::AppHandle>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
         model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
     ) -> Self {
@@ -92,7 +94,9 @@ impl ProxyServer {
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             codex_tool_carriers: Arc::new(CodexToolCarrierStore::default()),
+            #[cfg(feature = "gui")]
             app_handle,
+            service_owner: std::sync::Weak::new(),
             failover_manager,
             passive_ingress,
             model_alignment,
@@ -104,6 +108,17 @@ impl ProxyServer {
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub(crate) fn with_service_owner(
+        mut self,
+        owner: std::sync::Weak<crate::services::ProxyService>,
+    ) -> Self {
+        self.state.service_owner = owner.clone();
+        Arc::get_mut(&mut self.state.failover_manager)
+            .expect("unpublished failover owner")
+            .set_service_owner(owner);
+        self
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, ProxyError> {

@@ -134,11 +134,22 @@ pub(crate) fn run_with_edits(
     op: &str,
     live_owner: Option<&Provider>,
     projection: Option<&GrokProjection>,
-    mut target: PendingTarget,
+    target: PendingTarget,
     edits: Option<&dyn TomlDocPatch>,
 ) -> Result<OperationReport, AppError> {
     // 阻止未完成操作：恢复完成后按最新的写入记录和指针删表。
     let app_write = AppWrite::begin(state, &AppType::GrokBuild)?;
+    run_with_write(&app_write, op, live_owner, projection, target, edits)
+}
+
+pub(crate) fn run_with_write(
+    app_write: &AppWrite<'_>,
+    op: &str,
+    live_owner: Option<&Provider>,
+    projection: Option<&GrokProjection>,
+    mut target: PendingTarget,
+    edits: Option<&dyn TomlDocPatch>,
+) -> Result<OperationReport, AppError> {
     let patch = match projection {
         Some(projection) => {
             target.written = Some(Written {

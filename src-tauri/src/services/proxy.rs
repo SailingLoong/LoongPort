@@ -11,7 +11,7 @@ use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
@@ -22,7 +22,7 @@ use crate::services::provider::{
 };
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 #[cfg(feature = "gui")]
 use tauri::Emitter;
 use tokio::sync::RwLock;
@@ -387,11 +387,13 @@ impl Drop for CodexAuthFileTransaction {
     }
 }
 
-#[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
-    #[cfg(feature = "gui")]
-    #[cfg(feature = "gui")]
+    owner: Weak<ProxyService>,
+    copilot_auth: OnceLock<Arc<RwLock<crate::proxy::providers::copilot_auth::CopilotAuthManager>>>,
+    xai_auth: OnceLock<Arc<RwLock<crate::proxy::providers::xai_oauth_auth::XaiOAuthManager>>>,
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     #[cfg(feature = "gui")]
@@ -421,7 +423,7 @@ impl ProxyService {
     pub fn new(
         db: Arc<Database>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
-    ) -> Result<Self, AppError> {
+    ) -> Result<Arc<Self>, AppError> {
         let codex_oauth_manager = Arc::new(
             CodexOAuthManager::new(db.secrets.clone())
                 .map_err(|e| AppError::Config(e.to_string()))?,
@@ -438,7 +440,7 @@ impl ProxyService {
         db: Arc<Database>,
         codex_oauth_manager: Arc<CodexOAuthManager>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
-    ) -> Self {
+    ) -> Arc<Self> {
         for app in AppType::all() {
             if let Err(error) = crate::proxy::application_routing::migrate(&db, app.as_str()) {
                 log::error!(
@@ -447,18 +449,58 @@ impl ProxyService {
                 );
             }
         }
-        Self {
+        Arc::new_cyclic(|owner| Self {
             db,
+            owner: owner.clone(),
+            copilot_auth: OnceLock::new(),
+            xai_auth: OnceLock::new(),
             passive_ingress,
             model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
             codex_oauth_manager,
-            #[cfg(feature = "gui")]
+            #[cfg(any(feature = "gui", feature = "test-hooks"))]
             server: Arc::new(RwLock::new(None)),
             #[cfg(feature = "gui")]
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
             takeover_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
+    pub(crate) fn database(&self) -> &Arc<Database> {
+        &self.db
+    }
+    pub(crate) fn codex_manager(&self) -> &Arc<CodexOAuthManager> {
+        &self.codex_oauth_manager
+    }
+    pub(crate) fn owner(&self) -> Result<Arc<Self>, String> {
+        self.owner
+            .upgrade()
+            .ok_or_else(|| "proxy.owner_unavailable".into())
+    }
+    pub(crate) fn copilot_manager(
+        &self,
+    ) -> Option<Arc<RwLock<crate::proxy::providers::copilot_auth::CopilotAuthManager>>> {
+        self.copilot_auth.get().cloned()
+    }
+    pub(crate) fn xai_manager(
+        &self,
+    ) -> Option<Arc<RwLock<crate::proxy::providers::xai_oauth_auth::XaiOAuthManager>>> {
+        self.xai_auth.get().cloned()
+    }
+    pub(crate) fn set_managed_auth(
+        &self,
+        copilot: Arc<RwLock<crate::proxy::providers::copilot_auth::CopilotAuthManager>>,
+        xai: Arc<RwLock<crate::proxy::providers::xai_oauth_auth::XaiOAuthManager>>,
+    ) -> Result<(), AppError> {
+        if self.copilot_auth.get().is_some() || self.xai_auth.get().is_some() {
+            return Err(AppError::Config("proxy.managers_already_set".into()));
         }
+        self.copilot_auth
+            .set(copilot)
+            .map_err(|_| AppError::Config("proxy.managers_already_set".into()))?;
+        self.xai_auth
+            .set(xai)
+            .map_err(|_| AppError::Config("proxy.managers_already_set".into()))
     }
 
     /// 模型对齐告警状态（命令层入口；转发层经 `ProxyState` 持有同一份）。
@@ -907,7 +949,7 @@ impl ProxyService {
         let Ok(provider) = self.get_current_provider_for_app(app_type) else {
             return;
         };
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         if let Some(server) = self.server.read().await.as_ref() {
             server
                 .set_active_target(
@@ -1011,7 +1053,7 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         let mut server_slot = self.server.write().await;
@@ -1034,14 +1076,17 @@ impl ProxyService {
         }
 
         // 4. 创建并启动服务器
+        #[cfg(feature = "gui")]
         let app_handle = self.app_handle.read().await.clone();
         let server = ProxyServer::new(
             config.clone(),
             self.db.clone(),
+            #[cfg(feature = "gui")]
             app_handle,
             self.passive_ingress.clone(),
             self.model_alignment.clone(),
-        );
+        )
+        .with_service_owner(self.owner.clone());
         let info = server
             .start()
             .await
@@ -1071,6 +1116,17 @@ impl ProxyService {
         Ok(info)
     }
 
+    pub(crate) async fn start_for_mode(&self) -> Result<(), String> {
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
+        {
+            self.start().await.map(|_| ())
+        }
+        #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
+        {
+            Err("proxy.runtime_unavailable".into())
+        }
+    }
+
     async fn persist_ephemeral_listen_port_if_needed(
         &self,
         config: &ProxyConfig,
@@ -1094,7 +1150,7 @@ impl ProxyService {
     }
 
     async fn start_before_takeover_if_ephemeral_port(&self) -> Result<bool, String> {
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         {
             let config = self
                 .db
@@ -1108,14 +1164,14 @@ impl ProxyService {
             self.start().await?;
             Ok(true)
         }
-        #[cfg(not(feature = "gui"))]
+        #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
         {
             // 无 GUI 构建没有代理服务器可启动（loongport-cli 不做路由）。
             Ok(false)
         }
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 启动代理服务器（带 Live 配置接管）
     pub async fn start_with_takeover(&self) -> Result<ProxyServerInfo, String> {
         let _lifecycle = self.takeover_lock.lock().await;
@@ -1269,12 +1325,22 @@ impl ProxyService {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
         let _guard = self.switch_locks.lock_for_app(app.as_str()).await;
+        let modern =
+            crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())?;
         let was_running = self.is_running().await;
         let was_taken_over =
             crate::proxy::application_routing::takeover_enabled(&self.db, app.as_str())
                 .map_err(|error| error.to_string())?;
         if enabled {
             if let Err(error) = self.set_takeover_for_app_inner(&app, true).await {
+                if modern {
+                    if !was_running && self.is_running().await {
+                        if let Err(cleanup) = crate::mode::controller::stop_if_unused(self).await {
+                            return Err(format!("{error}; cleanup failed: {cleanup}"));
+                        }
+                    }
+                    return Err(error);
+                }
                 if !was_running
                     && self.is_running().await
                     && !self
@@ -1295,6 +1361,9 @@ impl ProxyService {
                 .await
                 .map_err(|error| error.to_string());
         if let Err(error) = result {
+            if modern {
+                return Err(error);
+            }
             if enabled && !was_taken_over {
                 if let Err(cleanup) = self.set_takeover_for_app_inner(&app, false).await {
                     return Err(format!("{error}; restore failed: {cleanup}"));
@@ -1320,6 +1389,28 @@ impl ProxyService {
     }
 
     async fn set_takeover_for_app_inner(&self, app: &AppType, enabled: bool) -> Result<(), String> {
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            if enabled {
+                return crate::mode::controller::enter_locked(
+                    self,
+                    app,
+                    crate::mode::state::op::ENTER,
+                )
+                .await;
+            }
+            let service = self.owner()?;
+            let app = app.clone();
+            let crash = crate::mode::operation::failpoint::current_crash();
+            tokio::task::spawn_blocking(move || {
+                crate::mode::operation::failpoint::in_worker(crash, || {
+                    crate::mode::controller::exit_locked(&service, &app, false)
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+            return crate::mode::controller::stop_if_unused(self).await;
+        }
         let app_type_str = app.as_str();
         if enabled {
             let external_codex =
@@ -1333,7 +1424,7 @@ impl ProxyService {
                 .map_err(|error| error.to_string())?;
             }
             // 1) 代理服务未运行则自动启动
-            #[cfg(feature = "gui")]
+            #[cfg(any(feature = "gui", feature = "test-hooks"))]
             if !self.is_running().await {
                 self.start().await?;
             }
@@ -1596,6 +1687,16 @@ impl ProxyService {
     pub fn disable_takeover_for_app_sync(&self, app_type: &AppType) -> Result<(), String> {
         let _lifecycle = futures::executor::block_on(self.takeover_lock.lock());
         let _guard = futures::executor::block_on(self.switch_locks.lock_for_app(app_type.as_str()));
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            if !app_type.supports_local_proxy() {
+                return Ok(());
+            }
+            crate::mode::controller::exit_locked(self, app_type, false)
+                .map_err(|e| e.to_string())?;
+            futures::executor::block_on(self.db.clear_provider_health_for_app(app_type.as_str()))
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         let app_type_str = app_type.as_str();
 
         // 1) 恢复原始 Live 配置（备份 → SSOT → 清理占位符 三层兜底）
@@ -1888,7 +1989,7 @@ impl ProxyService {
 
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
@@ -1905,11 +2006,30 @@ impl ProxyService {
         Err("代理服务器未运行".to_string())
     }
 
+    /// Recheck mode when a queued UI/profile stop actually runs. The legacy
+    /// branch retains the original low-level stop behavior.
+    pub async fn stop_when_unused(&self) -> Result<bool, String> {
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            let _lifecycle = self.takeover_lock.lock().await;
+            crate::mode::controller::stop_if_unused(self).await?;
+            return Ok(!self.is_running().await);
+        }
+        self.stop().await.map(|_| true)
+    }
+
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
     ///
     /// 会清除 settings 表中的代理状态，下次启动不会自动恢复。
     pub async fn stop_with_restore(&self) -> Result<(), String> {
         let _lifecycle = self.takeover_lock.lock().await;
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            crate::mode::controller::restore_all_locked(self, false).await?;
+            self.db
+                .clear_all_provider_health()
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         // 1. 停止代理服务器（即使未运行也继续执行恢复逻辑）
         if let Err(e) = self.stop().await {
             log::warn!("停止代理服务器失败（将继续恢复 Live 配置）: {e}");
@@ -1959,6 +2079,14 @@ impl ProxyService {
     /// 用于程序正常退出时，保留代理状态以便下次启动时自动恢复
     pub async fn stop_with_restore_keep_state(&self) -> Result<(), String> {
         let _lifecycle = self.takeover_lock.lock().await;
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            crate::mode::controller::restore_all_locked(self, true).await?;
+            self.db
+                .clear_all_provider_health()
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         // 1. 停止代理服务器（即使未运行也继续执行恢复逻辑）
         if let Err(e) = self.stop().await {
             log::warn!("停止代理服务器失败（将继续恢复 Live 配置）: {e}");
@@ -2088,7 +2216,7 @@ impl ProxyService {
     }
 
     /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
-    async fn build_proxy_urls(&self) -> Result<(String, String), String> {
+    pub(crate) async fn build_proxy_urls(&self) -> Result<(String, String), String> {
         let config = self
             .db
             .get_proxy_config()
@@ -2109,7 +2237,7 @@ impl ProxyService {
         };
 
         let mut listen_port = config.listen_port;
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         if let Some(server) = self.server.read().await.as_ref() {
             let status = server.get_status().await;
             if status.running {
@@ -2856,6 +2984,10 @@ impl ProxyService {
     /// 检测到 Live 备份残留时调用此方法。
     /// 会恢复 Live 配置、清除接管标志、删除备份。
     pub async fn recover_from_crash(&self) -> Result<(), String> {
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            let _lifecycle = self.takeover_lock.lock().await;
+            return crate::mode::controller::startup_locked(self).await;
+        }
         // 1. 恢复 Live 配置
         self.restore_live_configs().await?;
 
@@ -3155,6 +3287,27 @@ impl ProxyService {
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
         let app = AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            let previous = crate::mode::current::provider_for(
+                &self.db,
+                &app,
+                crate::mode::current::Purpose::InUse,
+            )
+            .map_err(|e| e.to_string())?;
+            let provider = self
+                .db
+                .get_provider_by_id(provider_id, app_type)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+            let provider = crate::services::ProviderService::provider_for_native_projection(
+                &self.db, &app, &provider,
+            )
+            .map_err(|e| e.to_string())?;
+            crate::mode::controller::switch_route_locked(self, &app, provider).await?;
+            return Ok(HotSwitchOutcome {
+                logical_target_changed: previous.as_deref() != Some(provider_id),
+            });
+        }
         let previous_id = crate::settings::get_effective_current_provider(&self.db, &app)
             .map_err(|error| error.to_string())?;
         let previous = previous_id
@@ -3401,7 +3554,7 @@ impl ProxyService {
             return Err(format!("更新当前供应商失败: {error}"));
         }
 
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         if let Some(server) = self.server.read().await.as_ref() {
             server
                 .set_active_target(app_type_enum.as_str(), Some((&provider.id, &provider.name)))
@@ -4063,7 +4216,7 @@ impl ProxyService {
 
     /// 获取服务器状态
     pub async fn get_status(&self) -> Result<ProxyStatus, String> {
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         if let Some(server) = self.server.read().await.as_ref() {
             return Ok(server.get_status().await);
         }
@@ -4082,7 +4235,7 @@ impl ProxyService {
             .map_err(|e| format!("获取代理配置失败: {e}"))
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
         // 记录旧配置用于判定是否需要重启
@@ -4119,14 +4272,17 @@ impl ProxyService {
                     .map_err(|e| format!("重启前停止代理服务器失败: {e}"))?;
             }
 
+            #[cfg(feature = "gui")]
             let app_handle = self.app_handle.read().await.clone();
             let new_server = ProxyServer::new(
                 new_config.clone(),
                 self.db.clone(),
+                #[cfg(feature = "gui")]
                 app_handle,
                 self.passive_ingress.clone(),
                 self.model_alignment.clone(),
-            );
+            )
+            .with_service_owner(self.owner.clone());
             let info = new_server
                 .start()
                 .await
@@ -4176,17 +4332,17 @@ impl ProxyService {
 
     /// 检查服务器是否正在运行
     pub async fn is_running(&self) -> bool {
-        #[cfg(feature = "gui")]
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
         {
             self.server.read().await.is_some()
         }
-        #[cfg(not(feature = "gui"))]
+        #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
         {
             false
         }
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 热更新熔断器配置
     ///
     /// 如果代理服务器正在运行，将新配置应用到所有已创建的熔断器实例
@@ -4203,7 +4359,7 @@ impl ProxyService {
         Ok(())
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 热更新指定应用的熔断器配置
     pub async fn update_circuit_breaker_config_for_app(
         &self,
@@ -4221,7 +4377,7 @@ impl ProxyService {
         Ok(())
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 重置指定 Provider 的熔断器
     ///
     /// 如果代理服务器正在运行，立即重置内存中的熔断器状态
@@ -4239,7 +4395,7 @@ impl ProxyService {
         result
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     pub async fn reset_provider_circuit_breaker(
         &self,
         provider_id: &str,

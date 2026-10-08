@@ -500,10 +500,12 @@ fn initialize_runtime(
     let db = Arc::new(crate::database::Database::init_with_secrets(
         session.clone(),
     )?);
-    let copilot_auth_manager =
-        crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())?;
-    let xai_oauth_manager =
-        crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())?;
+    let copilot_auth_manager = Arc::new(tokio::sync::RwLock::new(
+        crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())?,
+    ));
+    let xai_oauth_manager = Arc::new(tokio::sync::RwLock::new(
+        crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())?,
+    ));
     // 数据库可用后立即应用持久化日志级别，避免后续服务初始化
     // 继续使用启动阶段的 Info 回退。损坏配置显式 fail-closed 到 Info。
     match db.get_log_config() {
@@ -531,6 +533,9 @@ fn initialize_runtime(
     }
 
     let app_state = AppState::new(db)?;
+    app_state
+        .proxy_service
+        .set_managed_auth(copilot_auth_manager.clone(), xai_oauth_manager.clone())?;
     session.complete_migration()?;
 
     // 设置 AppHandle 用于代理故障转移时的 UI 更新
@@ -1097,11 +1102,7 @@ fn initialize_runtime(
     // 初始化 CopilotAuthManager
     {
         use commands::CopilotAuthState;
-        use tokio::sync::RwLock;
-
-        app.manage(CopilotAuthState(Arc::new(RwLock::new(
-            copilot_auth_manager,
-        ))));
+        app.manage(CopilotAuthState(copilot_auth_manager));
         log::info!("✓ CopilotAuthManager initialized");
     }
 
@@ -1117,9 +1118,7 @@ fn initialize_runtime(
     // 初始化 xAI OAuthManager (Grok API 反代)
     {
         use commands::XaiOAuthState;
-        use tokio::sync::RwLock;
-
-        app.manage(XaiOAuthState(Arc::new(RwLock::new(xai_oauth_manager))));
+        app.manage(XaiOAuthState(xai_oauth_manager));
         log::info!("✓ XaiOAuthManager initialized");
     }
 
@@ -1247,52 +1246,69 @@ fn initialize_runtime(
     tauri::async_runtime::spawn(async move {
         let state = app_handle.state::<AppState>();
 
-        // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
-        let has_backups = match state.db.has_any_live_backup().await {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("检查 Live 备份失败: {e}");
-                false
+        let modern = match crate::mode::operation::uses_upstream4_schema(&state.db) {
+            Ok(modern) => modern,
+            Err(error) => {
+                log::error!("启动时代理模式准入失败: {error}");
+                return;
             }
         };
-        // 检查 Live 配置是否仍处于被接管状态（包含占位符）
-        let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
-
-        if has_backups || live_taken_over {
-            log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
-            if let Err(e) = state.proxy_service.recover_from_crash().await {
-                log::error!("恢复 Live 配置失败: {e}");
-            } else {
-                log::info!("Live 配置已恢复");
+        if modern {
+            // Modern mode owns recovery/attachment. Do not run legacy backups,
+            // lease cleanup, shared-fragment extraction or disable-on-failure.
+            if let Err(error) = state.proxy_service.recover_from_crash().await {
+                log::error!("启动时代理模式需要核对: {error}");
             }
-        }
+        } else {
+            // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
+            let has_backups = match state.db.has_any_live_backup().await {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("检查 Live 备份失败: {e}");
+                    false
+                }
+            };
+            // 检查 Live 配置是否仍处于被接管状态（包含占位符）
+            let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
 
-        // 旧版被动模型验证可能留下自己的 Codex / Claude 接管租约。只恢复有租约
-        // 的应用，成功后再删租约；失败保留，供下次启动重试。必须先于普通代理
-        // 状态恢复，避免把旧版自动接管误当成用户主动开启的代理。
-        if let Err(error) =
-            crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
-                &state.db,
-                &state.proxy_service,
-            )
-            .await
-        {
-            log::warn!("清理旧版被动模型验证代理接管失败（下次启动会重试）: {error}");
-        }
+            if has_backups || live_taken_over {
+                log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
+                if let Err(e) = state.proxy_service.recover_from_crash().await {
+                    log::error!("恢复 Live 配置失败: {e}");
+                } else {
+                    log::info!("Live 配置已恢复");
+                }
+            }
 
-        // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
-        // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
-        if let Err(e) =
-            crate::services::provider::ProviderService::scrub_leaked_gemini_common_config(&state)
+            // 旧版被动模型验证可能留下自己的 Codex / Claude 接管租约。只恢复有租约
+            // 的应用，成功后再删租约；失败保留，供下次启动重试。必须先于普通代理
+            // 状态恢复，避免把旧版自动接管误当成用户主动开启的代理。
+            if let Err(error) =
+                crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
+                    &state.db,
+                    &state.proxy_service,
+                )
                 .await
-        {
-            log::warn!("清理 Gemini 通用配置泄漏凭据失败: {e}");
+            {
+                log::warn!("清理旧版被动模型验证代理接管失败（下次启动会重试）: {error}");
+            }
+
+            // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
+            // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
+            if let Err(e) =
+                crate::services::provider::ProviderService::scrub_leaked_gemini_common_config(
+                    &state,
+                )
+                .await
+            {
+                log::warn!("清理 Gemini 通用配置泄漏凭据失败: {e}");
+            }
+
+            initialize_common_config_snippets(&state);
+
+            // 检查 settings 表中的代理状态，自动恢复代理服务
+            restore_proxy_state_on_startup(&state).await;
         }
-
-        initialize_common_config_snippets(&state);
-
-        // 检查 settings 表中的代理状态，自动恢复代理服务
-        restore_proxy_state_on_startup(&state).await;
 
         // Periodic backup check (on startup)
         if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -2372,6 +2388,20 @@ pub fn run() {
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
+
+        match crate::mode::operation::uses_upstream4_schema(&state.db) {
+            Ok(true) => {
+                if let Err(error) = proxy_service.stop_with_restore_keep_state().await {
+                    log::error!("退出时代理模式分离失败，保留操作证据: {error}");
+                }
+                return;
+            }
+            Err(error) => {
+                log::error!("退出时代理模式准入失败: {error}");
+                return;
+            }
+            Ok(false) => {}
+        }
 
         // 退出时也需要兜底：代理可能已崩溃/未运行，但 Live 接管残留仍在（占位符/备份）。
         let has_backups = match state.db.has_any_live_backup().await {

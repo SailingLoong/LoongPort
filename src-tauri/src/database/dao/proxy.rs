@@ -930,6 +930,16 @@ impl Database {
     ///
     /// 用于托盘菜单构建等同步场景
     /// 返回 (enabled, auto_failover_enabled)
+    pub(crate) fn get_proxy_flags_checked(&self, app_type: &str) -> Result<(bool, bool), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT enabled, auto_failover_enabled FROM proxy_config WHERE app_type=?1",
+            [app_type],
+            |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+        )
+        .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub fn get_proxy_flags_sync(&self, app_type: &str) -> (bool, bool) {
         let conn = match self.conn.lock() {
             Ok(c) => c,

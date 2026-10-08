@@ -133,7 +133,8 @@ impl RequestContext {
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
         let current_provider_id =
-            super::application_routing::current_provider_id(&state.db, app_type_str)
+            super::application_routing::current_provider_id_checked(&state.db, app_type_str)
+                .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
                 .unwrap_or_default();
 
         // 从请求体提取模型名称
@@ -264,7 +265,9 @@ impl RequestContext {
             state.codex_chat_history.clone(),
             state.codex_tool_carriers.clone(),
             state.failover_manager.clone(),
+            #[cfg(feature = "gui")]
             state.app_handle.clone(),
+            state.service_owner.clone(),
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,

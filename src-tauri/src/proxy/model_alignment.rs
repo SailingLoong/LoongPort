@@ -147,7 +147,7 @@ impl ModelAlignmentAlerts {
 
 /// 从请求体读客户端点名的模型（无模型字段 / 空串 ⇒ `None`，不参与检测）。
 /// 消费者（forwarder）是 gui-gated 模块，这里同 gate。
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub(crate) fn client_requested_model(body: &serde_json::Value) -> Option<String> {
     body.get("model")
         .and_then(|model| model.as_str())
@@ -162,15 +162,16 @@ pub(crate) fn client_requested_model(body: &serde_json::Value) -> Option<String>
 /// claude 的默认兜底）在**改写发生处**调用这里——对齐点天然知道差异。
 /// 事件与通知依赖 tauri 运行时，与 forwarder 一起 gui-gate（headless 构建
 /// 不参与转发）。
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub(crate) fn observe_alignment(
     alerts: &ModelAlignmentAlerts,
-    app_handle: Option<&tauri::AppHandle>,
+    #[cfg(feature = "gui")] app_handle: Option<&tauri::AppHandle>,
     app_type: &str,
     provider: &Provider,
     requested: &str,
     sent: &str,
 ) {
+    #[cfg(feature = "gui")]
     use tauri::Emitter;
     let Some(mismatch) = alerts.observe_request(app_type, provider, requested, sent) else {
         return;
@@ -179,16 +180,21 @@ pub(crate) fn observe_alignment(
         "[ModelAlignment] {app_type} 档位「{}」：客户端模型 {requested} ≠ 出站 {sent}（已按档位对齐）",
         provider.name
     );
-    let Some(handle) = app_handle else {
-        return;
-    };
-    if let Err(error) = handle.emit(crate::events::MODEL_MISMATCH, &mismatch) {
-        log::warn!(
-            "[ModelAlignment] 发射 {} 事件失败: {error}",
-            crate::events::MODEL_MISMATCH
-        );
+    #[cfg(feature = "gui")]
+    {
+        let Some(handle) = app_handle else {
+            return;
+        };
+        if let Err(error) = handle.emit(crate::events::MODEL_MISMATCH, &mismatch) {
+            log::warn!(
+                "[ModelAlignment] 发射 {} 事件失败: {error}",
+                crate::events::MODEL_MISMATCH
+            );
+        }
+        notify_os(handle, &mismatch);
     }
-    notify_os(handle, &mismatch);
+    #[cfg(not(feature = "gui"))]
+    let _ = mismatch;
 }
 
 /// 每对不符只发一次的系统通知（活跃集节流之外的第二道节流由调用侧的

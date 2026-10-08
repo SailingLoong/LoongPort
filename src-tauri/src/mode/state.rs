@@ -369,9 +369,21 @@ pub struct PendingFile {
     pub extra: Map<String, Value>,
 }
 
+/// R3 row publication belongs to the same encrypted file intent, not a rollback snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedRow {
+    pub before: String,
+    pub provider: Value,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_model_preference: bool,
+}
+
 /// 文件都写完之后要落定的状态。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PendingTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_row: Option<SavedRow>,
     /// 直连指针：切换成功后当前供应商是谁。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
@@ -408,6 +420,7 @@ impl PendingTarget {
 
     pub fn is_empty(&self) -> bool {
         self.pointer.is_none()
+            && self.saved_row.is_none()
             && self.state.is_none()
             && self.written.is_none()
             && self.stack.is_none()

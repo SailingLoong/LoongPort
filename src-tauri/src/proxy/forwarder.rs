@@ -26,7 +26,6 @@ use super::{
     types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
     ProxyError,
 };
-use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
@@ -39,7 +38,6 @@ use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
 use std::sync::Arc;
-use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
@@ -159,7 +157,9 @@ pub struct RequestForwarder {
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
+    #[cfg(feature = "gui")]
     app_handle: Option<tauri::AppHandle>,
+    service_owner: std::sync::Weak<crate::services::ProxyService>,
     /// 请求开始时的"当前供应商 ID"（用于判断是否需要同步 UI/托盘）
     current_provider_id_at_start: String,
     /// 代理会话 ID（用于 Gemini Native shadow replay）
@@ -311,7 +311,8 @@ impl RequestForwarder {
         codex_chat_history: Arc<CodexChatHistoryStore>,
         codex_tool_carriers: Arc<CodexToolCarrierStore>,
         failover_manager: Arc<FailoverSwitchManager>,
-        app_handle: Option<tauri::AppHandle>,
+        #[cfg(feature = "gui")] app_handle: Option<tauri::AppHandle>,
+        service_owner: std::sync::Weak<crate::services::ProxyService>,
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
@@ -334,7 +335,9 @@ impl RequestForwarder {
             gemini_shadow,
             codex_chat_history,
             failover_manager,
+            #[cfg(feature = "gui")]
             app_handle,
+            service_owner,
             current_provider_id_at_start,
             session_id,
             session_client_provided,
@@ -386,6 +389,7 @@ impl RequestForwarder {
 
     fn spawn_failover_switch(&self, app_type: &str, provider: &Provider) {
         let manager = self.failover_manager.clone();
+        #[cfg(feature = "gui")]
         let app_handle = self.app_handle.clone();
         let app_type = app_type.to_string();
         let provider_id = provider.id.clone();
@@ -395,6 +399,7 @@ impl RequestForwarder {
         tokio::spawn(async move {
             manager
                 .try_switch(
+                    #[cfg(feature = "gui")]
                     app_handle.as_ref(),
                     &app_type,
                     &provider_id,
@@ -1414,6 +1419,8 @@ impl RequestForwarder {
                 if let Some(requested) = super::model_alignment::client_requested_model(body) {
                     super::model_alignment::observe_alignment(
                         &self.model_alignment,
+                        #[cfg(feature = "gui")]
+                        #[cfg(feature = "gui")]
                         self.app_handle.as_ref(),
                         app_type.as_str(),
                         provider,
@@ -1432,6 +1439,8 @@ impl RequestForwarder {
                 if let Some(requested) = super::model_alignment::client_requested_model(body) {
                     super::model_alignment::observe_alignment(
                         &self.model_alignment,
+                        #[cfg(feature = "gui")]
+                        #[cfg(feature = "gui")]
                         self.app_handle.as_ref(),
                         app_type.as_str(),
                         provider,
@@ -1454,6 +1463,7 @@ impl RequestForwarder {
             ) {
                 super::model_alignment::observe_alignment(
                     &self.model_alignment,
+                    #[cfg(feature = "gui")]
                     self.app_handle.as_ref(),
                     app_type.as_str(),
                     provider,
@@ -1608,9 +1618,12 @@ impl RequestForwarder {
         // GitHub Copilot 动态 endpoint 路由
         // 从 CopilotAuthManager 获取缓存的 API endpoint（支持企业版等非默认 endpoint）
         if is_copilot && !is_full_url {
-            if let Some(app_handle) = &self.app_handle {
-                let copilot_state = app_handle.state::<CopilotAuthState>();
-                let copilot_auth = copilot_state.0.read().await;
+            if let Some(manager) = self
+                .service_owner
+                .upgrade()
+                .and_then(|service| service.copilot_manager())
+            {
+                let copilot_auth = manager.read().await;
 
                 // 从 provider.meta 获取关联的 GitHub 账号 ID
                 let account_id = provider
@@ -1946,10 +1959,13 @@ impl RequestForwarder {
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
-                if let Some(app_handle) = &self.app_handle {
-                    let copilot_state = app_handle.state::<CopilotAuthState>();
+                if let Some(manager) = self
+                    .service_owner
+                    .upgrade()
+                    .and_then(|service| service.copilot_manager())
+                {
                     let copilot_auth: tokio::sync::RwLockReadGuard<'_, CopilotAuthManager> =
-                        copilot_state.0.read().await;
+                        manager.read().await;
 
                     // 从 provider.meta 获取关联的 GitHub 账号 ID（多账号支持）
                     let account_id = provider
@@ -1997,9 +2013,8 @@ impl RequestForwarder {
 
             // Codex OAuth 特殊处理：从 CodexOAuthManager 获取真实 access_token
             if auth.strategy == AuthStrategy::CodexOAuth {
-                if let Some(app_handle) = &self.app_handle {
-                    let codex_state = app_handle.state::<CodexOAuthState>();
-                    let codex_auth = &codex_state.0;
+                if let Some(service) = self.service_owner.upgrade() {
+                    let codex_auth = service.codex_manager();
 
                     // 从 provider.meta 获取关联的 ChatGPT 账号 ID
                     let account_id = provider
@@ -2051,10 +2066,13 @@ impl RequestForwarder {
             // sending the request. Invalid refresh credentials are persisted as
             // requiring re-authentication by the manager.
             if auth.strategy == AuthStrategy::XaiOAuth {
-                if let Some(app_handle) = &self.app_handle {
-                    let xai_state = app_handle.state::<XaiOAuthState>();
+                if let Some(manager) = self
+                    .service_owner
+                    .upgrade()
+                    .and_then(|service| service.xai_manager())
+                {
                     let xai_auth: tokio::sync::RwLockReadGuard<'_, XaiOAuthManager> =
-                        xai_state.0.read().await;
+                        manager.read().await;
                     let account_id = provider
                         .meta
                         .as_ref()
@@ -2904,11 +2922,14 @@ impl RequestForwarder {
         };
         let model_id = model_id.to_string();
 
-        let Some(app_handle) = &self.app_handle else {
+        let Some(manager) = self
+            .service_owner
+            .upgrade()
+            .and_then(|service| service.copilot_manager())
+        else {
             return;
         };
-        let copilot_state = app_handle.state::<CopilotAuthState>();
-        let copilot_auth = copilot_state.0.read().await;
+        let copilot_auth = manager.read().await;
         let account_id = provider
             .meta
             .as_ref()
@@ -2936,13 +2957,14 @@ impl RequestForwarder {
     }
 
     async fn is_copilot_openai_vendor_model(&self, provider: &Provider, model_id: &str) -> bool {
-        let Some(app_handle) = &self.app_handle else {
-            log::debug!("[Copilot] AppHandle unavailable, fallback to chat/completions");
+        let Some(manager) = self
+            .service_owner
+            .upgrade()
+            .and_then(|service| service.copilot_manager())
+        else {
             return false;
         };
-
-        let copilot_state = app_handle.state::<CopilotAuthState>();
-        let copilot_auth = copilot_state.0.read().await;
+        let copilot_auth = manager.read().await;
         let account_id = provider
             .meta
             .as_ref()
@@ -4032,7 +4054,9 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             codex_tool_carriers: Arc::new(CodexToolCarrierStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            #[cfg(feature = "gui")]
             app_handle: None,
+            service_owner: std::sync::Weak::new(),
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,

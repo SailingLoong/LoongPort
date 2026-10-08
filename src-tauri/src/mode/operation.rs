@@ -572,6 +572,39 @@ pub(crate) mod failpoint {
         BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = hook);
     }
 
+    pub(crate) fn current_crash() -> Option<String> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            CRASH_AT.with(|slot| slot.borrow().clone())
+        }
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        {
+            None
+        }
+    }
+
+    /// Keep thread-local test injection scoped when the real controller uses a
+    /// blocking worker. Ordinary builds never expose a configurable failpoint.
+    pub(crate) fn in_worker<R>(point: Option<String>, work: impl FnOnce() -> R) -> R {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            struct Reset(Option<String>);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    CRASH_AT.with(|slot| *slot.borrow_mut() = self.0.take());
+                }
+            }
+            let previous = CRASH_AT.with(|slot| slot.replace(point));
+            let _reset = Reset(previous);
+            work()
+        }
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        {
+            let _ = point;
+            work()
+        }
+    }
+
     pub(crate) fn hit(point: &str) -> Result<(), AppError> {
         #[cfg(any(test, feature = "test-hooks"))]
         if CRASH_AT.with(|slot| slot.borrow().as_deref() == Some(point)) {
@@ -608,6 +641,12 @@ fn valid_digest(value: &Option<String>) -> bool {
 }
 
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
+    if let Some(row) = &target.saved_row {
+        if op != state::op::APPLY {
+            return Err(invalid_pending());
+        }
+        saved_provider(row)?;
+    }
     if !matches!(
         op,
         state::op::SWITCH
@@ -739,16 +778,34 @@ pub(crate) fn uses_upstream4_version(version: i32, supported: i32) -> Result<boo
     Err(AppError::Config("upgrade.future_version".into()))
 }
 
-fn ensure_no_legacy_takeover(state: &AppState, app: &AppType) -> Result<(), AppError> {
-    // This DAO pins its own guard. It must run before the operation pins one;
-    // errors cannot be projected to the presentation helper's false fallback.
-    let backup = futures::executor::block_on(state.db.get_live_backup(app.as_str()))?;
-    if backup.is_some()
-        || state
-            .proxy_service
-            .detect_takeover_in_live_config_for_app(app)
-    {
-        return Err(AppError::Config("mode.verification_required".into()));
+pub(crate) fn saved_provider(row: &state::SavedRow) -> Result<crate::provider::Provider, AppError> {
+    if !valid_digest(&Some(row.before.clone())) {
+        return Err(invalid_pending());
+    }
+    let provider: crate::provider::Provider =
+        serde_json::from_value(row.provider.clone()).map_err(|_| invalid_pending())?;
+    if provider.id.is_empty() || Database::provider_update_value(&provider)? != row.provider {
+        return Err(invalid_pending());
+    }
+    Ok(provider)
+}
+
+pub(crate) fn verify_saved_row(
+    db: &Database,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+    target: &PendingTarget,
+) -> Result<(), AppError> {
+    if let Some(row) = &target.saved_row {
+        let planned = saved_provider(row)?;
+        let current = db
+            .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
+            .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
+        let digest = Database::provider_update_digest(&current)?;
+        if digest != row.before && digest != Database::provider_update_digest(&planned)? {
+            return Err(AppError::Config("mode.provider_changed".into()));
+        }
     }
     Ok(())
 }
@@ -763,8 +820,7 @@ pub(crate) fn commit_target(
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
-    if target.state.is_some()
-        || target.stack.is_some()
+    if target.stack.is_some()
         || !target.extra.is_empty()
         || (target.written.is_some() && !matches!(app, AppType::GrokBuild | AppType::Codex))
         || target.written.as_ref().is_some_and(|w| {
@@ -775,7 +831,23 @@ pub(crate) fn commit_target(
     {
         return Err(AppError::Config("mode.verification_required".into()));
     }
-    super::current::validate_direct_mode(store, vault, app)?;
+    super::current::validate_known_mode(store, vault, app)?;
+    verify_saved_row(db, session, vault, app, target)?;
+    if let Some(row) = &target.saved_row {
+        let provider = saved_provider(row)?;
+        db.save_provider_with_vault(app.as_str(), &provider, Some(&row.before), session, vault)?;
+        let current = db
+            .get_provider_by_id_with_vault(&provider.id, app.as_str(), session, vault)?
+            .ok_or_else(invalid_pending)?;
+        if Database::provider_update_digest(&current)?
+            != Database::provider_update_digest(&provider)?
+        {
+            return Err(verification_required());
+        }
+        if row.clear_model_preference {
+            crate::proxy::auto_strategy::set_model_pref(db, app.as_str(), None)?;
+        }
+    }
     if let Some(id) = target.pointer.as_deref() {
         if !super::current::provider_exists(db, app, id)? {
             return Err(AppError::Config("mode.verification_required".into()));
@@ -797,7 +869,32 @@ pub(crate) fn commit_target(
             return Err(AppError::Config("mode.verification_required".into()));
         }
     }
-    super::current::validate_direct_mode(store, vault, app)
+    if let Some(mode) = &target.state {
+        mode.validate_for_update().map_err(|_| invalid_pending())?;
+        if mode.mode.is_none() {
+            return Err(invalid_pending());
+        }
+        if let Some(id) = &mode.proxy_route {
+            if !super::current::provider_exists(db, app, id)? {
+                return Err(verification_required());
+            }
+        }
+        state::update(store, vault, |live| {
+            live.apps
+                .entry(app.as_str().to_owned())
+                .or_default()
+                .set_mode_state(mode.clone())
+                .map_err(|_| invalid_pending())
+        })?;
+        let (_, failover) = db.get_proxy_flags_checked(app.as_str())?;
+        db.set_proxy_flags_sync(app.as_str(), mode.is_proxy(), failover)?;
+        if state::mode_state(store, vault, app.as_str())? != *mode
+            || db.get_proxy_flags_checked(app.as_str())? != (mode.is_proxy(), failover)
+        {
+            return Err(verification_required());
+        }
+    }
+    super::current::validate_known_mode(store, vault, app).map(|_| ())
 }
 
 /// Upstream per-app transaction context, borrowing the existing session guard.
@@ -813,27 +910,53 @@ pub(crate) struct AppWrite<'a> {
 }
 impl<'a> AppWrite<'a> {
     pub(crate) fn open(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
-        if !uses_upstream4_schema(&state.db)? {
+        let write = Self::open_mode(&state.proxy_service, app)?;
+        super::current::validate_direct_mode(&write.store, &write.vault, app)?;
+        Ok(write)
+    }
+    pub(crate) fn open_mode(
+        service: &'a crate::services::ProxyService,
+        app: &AppType,
+    ) -> Result<Self, AppError> {
+        let db = service.database();
+        if !uses_upstream4_schema(db)? {
             return Err(AppError::Config("upgrade.migration_required".into()));
         }
-        // Gemini does not need the previous row, so admission itself must check
-        // readiness for every adopted app before pinning/planning/publication.
         crate::settings::get_current_provider_ready(app)?;
-        ensure_no_legacy_takeover(state, app)?;
+        if futures::executor::block_on(db.get_live_backup(app.as_str()))?.is_some() {
+            return Err(verification_required());
+        }
+        let placeholder = service.detect_takeover_in_live_config_for_app(app);
         let store = DeviceStore::for_device();
         let guard = crate::live::engine::lock_app(app.as_str());
-        let session = state.db.secret_session();
+        let session = db.secret_session();
         let vault = session.read()?;
         crate::secrets::upgrade::checkpoint::ensure_sync_admitted(&store)?;
-        super::current::validate_direct_mode(&store, &vault, app)?;
+        let mode = super::current::validate_known_mode(&store, &vault, app)?;
+        if placeholder
+            && !(mode.is_proxy() && mode.attached)
+            && state::pending(&store, &vault, app.as_str())?.is_none()
+        {
+            return Err(verification_required());
+        }
         Ok(Self {
-            db: &state.db,
+            db,
             session,
             app: app.clone(),
             store,
             guard,
             vault,
         })
+    }
+    pub(crate) fn begin_mode(
+        service: &'a crate::services::ProxyService,
+        app: &AppType,
+    ) -> Result<Self, AppError> {
+        let write = Self::open_mode(service, app)?;
+        if state::pending(&write.store, &write.vault, app.as_str())?.is_some() {
+            return Err(verification_required());
+        }
+        Ok(write)
     }
     pub(crate) fn begin(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
         let write = Self::open(state, app)?;
@@ -858,6 +981,7 @@ impl<'a> AppWrite<'a> {
         changes: &[FileChange<'_>],
         target: PendingTarget,
     ) -> Result<OperationReport, AppError> {
+        verify_saved_row(self.db, self.session, &self.vault, &self.app, &target)?;
         run(
             &self.store,
             &self.vault,

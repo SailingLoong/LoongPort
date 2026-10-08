@@ -862,24 +862,8 @@ fn codex_managed_auth_value(
 ) -> Result<Value, AppError> {
     std::thread::spawn(move || {
         crate::rt::block_on(async move {
-            if let Some((refresh_token, id_token, last_refresh_ms)) =
-                crate::codex_config::read_codex_live_auth_refresh_for_account(&account_id)
-            {
-                if let Err(err) = manager
-                    .adopt_account_refresh_token(
-                        &account_id,
-                        refresh_token,
-                        id_token,
-                        last_refresh_ms,
-                    )
-                    .await
-                {
-                    log::warn!(
-                        "读回 Codex CLI 轮换后的 refresh_token 失败（account={account_id}）: {err}"
-                    );
-                }
-            }
-
+            // The manager resolves/adopts under its account lock and pending
+            // admission; a separate pre-adoption would bypass that barrier.
             let bundle = if sync_live {
                 manager
                     .get_valid_token_bundle_for_account(&account_id)

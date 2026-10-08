@@ -77,6 +77,15 @@ pub(crate) fn run(
 ) -> Result<OperationReport, AppError> {
     // 补丁是按调用方读到的指针算的（要删上一家的独有字段）：未完成操作须先走显式恢复。
     let write = AppWrite::begin(state, &AppType::Claude)?;
+    run_with_write(&write, op, patch, target)
+}
+
+pub(crate) fn run_with_write(
+    write: &AppWrite<'_>,
+    op: &str,
+    patch: Option<&JsonPatch>,
+    target: PendingTarget,
+) -> Result<OperationReport, AppError> {
     let changes: Vec<FileChange<'_>> = patch
         .into_iter()
         .map(|patch| FileChange {

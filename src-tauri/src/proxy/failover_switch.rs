@@ -7,9 +7,11 @@
 
 use crate::database::Database;
 use crate::error::AppError;
+#[cfg(feature = "gui")]
 use crate::events::PROVIDER_SWITCHED;
 use std::collections::HashSet;
 use std::sync::Arc;
+#[cfg(feature = "gui")]
 use tauri::{Emitter, Manager};
 use tokio::sync::RwLock;
 
@@ -21,6 +23,7 @@ pub struct FailoverSwitchManager {
     /// 正在处理中的切换（key = "app_type:provider_id"）
     pending_switches: Arc<RwLock<HashSet<String>>>,
     db: Arc<Database>,
+    service_owner: std::sync::Weak<crate::services::ProxyService>,
 }
 
 impl FailoverSwitchManager {
@@ -28,7 +31,15 @@ impl FailoverSwitchManager {
         Self {
             pending_switches: Arc::new(RwLock::new(HashSet::new())),
             db,
+            service_owner: std::sync::Weak::new(),
         }
+    }
+
+    pub(crate) fn set_service_owner(
+        &mut self,
+        owner: std::sync::Weak<crate::services::ProxyService>,
+    ) {
+        self.service_owner = owner;
     }
 
     /// 尝试执行故障转移切换
@@ -41,7 +52,7 @@ impl FailoverSwitchManager {
     /// - `Err(e)` - 切换过程中发生错误
     pub async fn try_switch(
         &self,
-        app_handle: Option<&tauri::AppHandle>,
+        #[cfg(feature = "gui")] app_handle: Option<&tauri::AppHandle>,
         app_type: &str,
         provider_id: &str,
         provider_name: &str,
@@ -62,6 +73,7 @@ impl FailoverSwitchManager {
         // 执行切换（确保最后清理 pending 标记）
         let result = self
             .do_switch(
+                #[cfg(feature = "gui")]
                 app_handle,
                 app_type,
                 provider_id,
@@ -81,7 +93,7 @@ impl FailoverSwitchManager {
 
     async fn do_switch(
         &self,
-        app_handle: Option<&tauri::AppHandle>,
+        #[cfg(feature = "gui")] app_handle: Option<&tauri::AppHandle>,
         app_type: &str,
         provider_id: &str,
         provider_name: &str,
@@ -104,57 +116,53 @@ impl FailoverSwitchManager {
 
         log::info!("[FO-001] 切换: {app_type} → {provider_name}");
 
-        let mut switched = false;
-
-        if let Some(app) = app_handle {
-            if let Some(app_state) = app.try_state::<crate::store::AppState>() {
-                let guard = app_state.proxy_service.lock_switch_for_app(app_type).await;
-                // A completed request must not overwrite a newer explicit selection:
-                // expected_current 与库里的当前档不一致（别的请求/用户已切走）就放弃。
-                let current = super::application_routing::current_provider_id(&self.db, app_type);
-                if current.as_deref().unwrap_or_default() != expected_current {
-                    return Ok(false);
-                }
-                // 目标必须在链内（链外档位不是切换候选——用户应用的列表才是全集）。
-                // 不再比较链内位置：重新路由从链头扫，切回用户排位更靠前的健康
-                // 档位正是本义（2026-09-19 用户定调，废除「只沿链前进」）。
-                let chain = super::application_routing::chain_providers(&self.db, app_type)?;
-                if !chain.iter().any(|p| p.id == provider_id) {
-                    return Ok(false);
-                }
-
-                if !super::application_routing::failover_enabled(&self.db, app_type)? {
-                    return Ok(false);
-                }
-                switched = app_state
-                    .proxy_service
-                    .hot_switch_provider_inner(app_type, provider_id)
-                    .await
-                    .map_err(AppError::Message)?
-                    .logical_target_changed;
-                drop(guard);
-
-                if !switched {
-                    return Ok(false);
-                }
-
-                if let Ok(new_menu) = crate::tray::create_tray_menu(app, app_state.inner()) {
-                    if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
-                        if let Err(e) = tray.set_menu(Some(new_menu)) {
-                            log::error!("[Failover] 更新托盘菜单失败: {e}");
+        let Some(service) = self.service_owner.upgrade() else {
+            return Err(AppError::Config("proxy.owner_unavailable".into()));
+        };
+        let guard = service.lock_switch_for_app(app_type).await;
+        if crate::mode::operation::uses_upstream4_schema(&self.db)? {
+            let app: crate::app_config::AppType = app_type.parse()?;
+            let mode = {
+                let vault = self.db.secret_session().read()?;
+                crate::mode::current::validate_known_mode(
+                    &crate::live::engine::DeviceStore::for_device(),
+                    &vault,
+                    &app,
+                )?
+            };
+            if !mode.is_proxy() || !mode.attached || !service.is_running().await {
+                return Ok(false);
+            }
+        }
+        let current = super::application_routing::current_provider_id_checked(&self.db, app_type)?;
+        if current.as_deref().unwrap_or_default() != expected_current {
+            return Ok(false);
+        }
+        let chain = super::application_routing::chain_providers(&self.db, app_type)?;
+        if !chain.iter().any(|p| p.id == provider_id)
+            || !super::application_routing::failover_enabled(&self.db, app_type)?
+        {
+            return Ok(false);
+        }
+        let switched = service
+            .hot_switch_provider_inner(app_type, provider_id)
+            .await
+            .map_err(AppError::Message)?
+            .logical_target_changed;
+        drop(guard);
+        #[cfg(feature = "gui")]
+        if switched {
+            if let Some(app) = app_handle {
+                if let Some(app_state) = app.try_state::<crate::store::AppState>() {
+                    if let Ok(menu) = crate::tray::create_tray_menu(app, app_state.inner()) {
+                        if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
+                            if let Err(error) = tray.set_menu(Some(menu)) {
+                                log::error!("[Failover] 更新托盘菜单失败: {error}");
+                            }
                         }
                     }
                 }
-            }
-
-            // 发射事件到前端
-            let event_data = serde_json::json!({
-                "appType": app_type,
-                "providerId": provider_id,
-                "source": "failover"  // 标识来源是故障转移
-            });
-            if let Err(e) = app.emit(PROVIDER_SWITCHED, event_data) {
-                log::error!("[Failover] 发射 {PROVIDER_SWITCHED} 事件失败: {e}");
+                if let Err(error) = app.emit(PROVIDER_SWITCHED, serde_json::json!({"appType": app_type, "providerId": provider_id, "source": "failover"})) { log::error!("[Failover] 发射事件失败: {error}"); }
             }
         }
 

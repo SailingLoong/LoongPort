@@ -38,10 +38,27 @@ pub(crate) fn projection(provider: &Provider) -> Result<GeminiProjection, AppErr
 pub(crate) fn switch_to(state: &AppState, target: &Provider) -> Result<OperationReport, AppError> {
     let projection = projection(target)?;
     let write = AppWrite::begin(state, &AppType::Gemini)?;
+    run_with_write(
+        &write,
+        op::SWITCH,
+        Some(&projection),
+        PendingTarget::pointer(Some(target.id.clone())),
+    )
+}
+
+pub(crate) fn run_with_write(
+    write: &AppWrite<'_>,
+    op: &str,
+    projection: Option<&GeminiProjection>,
+    target: PendingTarget,
+) -> Result<OperationReport, AppError> {
+    let Some(projection) = projection else {
+        return write.run(op, &[], target);
+    };
     let env = projection.env_patch();
     let settings = projection.settings_patch();
     write.run(
-        op::SWITCH,
+        op,
         &[
             FileChange {
                 file: env_file(),
@@ -52,7 +69,7 @@ pub(crate) fn switch_to(state: &AppState, target: &Provider) -> Result<Operation
                 patch: &settings,
             },
         ],
-        PendingTarget::pointer(Some(target.id.clone())),
+        target,
     )
 }
 

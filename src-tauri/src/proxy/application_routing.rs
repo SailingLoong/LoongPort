@@ -28,6 +28,19 @@ pub fn blocked_tier_ids(db: &Database, app: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Operational admission cannot treat unavailable/corrupt blocked facts as empty.
+pub(crate) fn blocked_tier_ids_checked(
+    db: &Database,
+    app: &str,
+) -> Result<HashSet<String>, AppError> {
+    match db.get_setting(&blocked_key(app))? {
+        None => Ok(HashSet::new()),
+        Some(raw) => serde_json::from_str::<Vec<String>>(&raw)
+            .map(|ids| ids.into_iter().collect())
+            .map_err(|_| AppError::Config("routing.invalid_blocked_inventory".into())),
+    }
+}
+
 /// 屏蔽是用户显式意图：写入即生效（选路侧每次现读，无需失效通知）。
 pub fn set_tier_blocked(
     db: &Database,
@@ -159,10 +172,25 @@ pub fn note_provider_created(db: &Database, app: &str, id: &str) -> Result<(), A
 
 /// Read local selection without the legacy getter's stale-setting cleanup.
 pub fn current_provider_id(db: &Database, app: &str) -> Option<String> {
-    let app_type = AppType::from_str(app).ok()?;
-    crate::settings::get_current_provider(&app_type)
+    current_provider_id_checked(db, app).ok().flatten()
+}
+
+/// Requests and failover retain unknown/corrupt mode as a visible barrier.
+pub(crate) fn current_provider_id_checked(
+    db: &Database,
+    app: &str,
+) -> Result<Option<String>, AppError> {
+    let app_type = AppType::from_str(app)?;
+    if app_type.supports_local_proxy() && crate::mode::operation::uses_upstream4_schema(db)? {
+        return crate::mode::current::provider_for(
+            db,
+            &app_type,
+            crate::mode::current::Purpose::InUse,
+        );
+    }
+    Ok(crate::settings::get_current_provider(&app_type)
         .filter(|id| db.get_provider_by_id(id, app).ok().flatten().is_some())
-        .or_else(|| db.get_current_provider(app).ok().flatten())
+        .or_else(|| db.get_current_provider(app).ok().flatten()))
 }
 
 /// A static exclusion shared by route selection and its presentation.

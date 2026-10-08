@@ -24,6 +24,25 @@ pub(crate) fn mode_state(
     state::mode_state(store, vault, app.as_str())
 }
 
+pub(crate) fn validate_known_mode(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+) -> Result<ModeState, AppError> {
+    let live = state::load(store, vault)?;
+    let entry = live
+        .apps
+        .get(app.as_str())
+        .ok_or_else(|| AppError::Config("mode.verification_required".into()))?;
+    let mode = entry.mode_state();
+    mode.validate_for_update()
+        .map_err(|_| AppError::Config("mode.verification_required".into()))?;
+    if mode.mode.is_none() || entry.stack.enabled || !live.extra.is_empty() {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    Ok(mode)
+}
+
 pub(crate) fn validate_direct_mode(
     store: &DeviceStore,
     vault: &RwLockReadGuard<'_, VaultContext>,
@@ -60,7 +79,11 @@ pub(crate) fn provider_for(
 ) -> Result<Option<String>, AppError> {
     if purpose == Purpose::InUse && app.supports_local_proxy() {
         let vault = db.secret_session().read()?;
-        let mode = mode_state(&DeviceStore::for_device(), &vault, app)?;
+        let store = DeviceStore::for_device();
+        let mode = validate_known_mode(&store, &vault, app)?;
+        if state::pending(&store, &vault, app.as_str())?.is_some() {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
         match mode.mode {
             Some(Mode::Proxy) => {
                 let id = mode
