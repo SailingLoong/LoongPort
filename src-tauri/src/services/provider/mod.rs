@@ -633,7 +633,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
+            let dir = crate::secrets::testing::tempdir().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             #[cfg(windows)]
             let original_local_app_data = env::var("LOCALAPPDATA").ok();
@@ -734,7 +734,7 @@ mod tests {
 
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
         let _guard = test_guard();
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let old_home = std::env::var_os("HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
