@@ -267,6 +267,8 @@ fn checkpoint_and_unknown_mode_block_the_new_service_before_client_writes() {
 
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify() -> Result<(), AppError> {
+    failed_settings_reload_blocks_gemini_before_publication();
+    println!("PASS Gemini retained settings failure blocks before publication");
     target_schema_stays_on_the_new_writer_after_startup_support_is_activated();
     println!("PASS schema20 keeps the new writer when ordinary support reaches20");
     corrupt_legacy_recovery_material_blocks_switch_and_explicit_recovery();
@@ -382,8 +384,37 @@ fn corrupt_legacy_recovery_material_blocks_switch_and_explicit_recovery() {
 
 #[cfg_attr(test, test)]
 fn target_schema_stays_on_the_new_writer_after_startup_support_is_activated() {
-    assert!(super::gemini_direct::uses_upstream4_version(20, 20).unwrap());
-    assert!(super::gemini_direct::uses_upstream4_version(20, 17).unwrap());
-    assert!(!super::gemini_direct::uses_upstream4_version(17, 17).unwrap());
-    assert!(super::gemini_direct::uses_upstream4_version(21, 20).is_err());
+    assert!(crate::mode::operation::uses_upstream4_version(20, 20).unwrap());
+    assert!(crate::mode::operation::uses_upstream4_version(20, 17).unwrap());
+    assert!(!crate::mode::operation::uses_upstream4_version(17, 17).unwrap());
+    assert!(crate::mode::operation::uses_upstream4_version(21, 20).is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn failed_settings_reload_blocks_gemini_before_publication() {
+    let fixture = Fixture::new();
+    let settings_path = crate::settings::settings_path();
+    let verified_settings = std::fs::read(&settings_path).unwrap();
+    let env_before = std::fs::read(&fixture.env).unwrap();
+    let settings_before = std::fs::read(&fixture.settings).unwrap();
+    let journal_before = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    std::fs::write(&settings_path, b"corrupt settings envelope").unwrap();
+    assert!(crate::settings::reload_settings().is_err());
+    assert!(ProviderService::switch(&fixture.state, AppType::Gemini, "b").is_err());
+    assert_eq!(
+        std::fs::read(&fixture.env).unwrap(),
+        env_before,
+        "known-unavailable settings must block before client publication"
+    );
+    assert_eq!(std::fs::read(&fixture.settings).unwrap(), settings_before);
+    fixture.assert_current("a");
+    assert!(fixture.pending().is_none());
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal_before
+    );
+    assert!(!DeviceStore::for_device().first_write_backup_dir().exists());
+    std::fs::write(&settings_path, verified_settings).unwrap();
+    crate::settings::reload_settings().unwrap();
 }

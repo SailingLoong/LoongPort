@@ -1674,6 +1674,14 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     current_provider_slot(&mut get_settings(), app_type).and_then(|current| current.clone())
 }
 
+/// Fallible pointer read for write admission. Presentation can retain the last
+/// good snapshot, but a known settings failure must not authorize publication.
+/// This reads the existing store only and never reacquires its vault guard.
+pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<String>, AppError> {
+    let mut settings = unlocked_settings_store()?.ready_snapshot()?;
+    Ok(current_provider_slot(&mut settings, app_type).and_then(|current| current.clone()))
+}
+
 fn current_provider_slot<'a>(
     settings: &'a mut AppSettings,
     app_type: &AppType,

@@ -2311,13 +2311,35 @@ const CODEX_CLI_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_mil
 #[cfg(not(test))]
 const CODEX_CLI_SCAN_LIMIT: std::time::Duration = std::time::Duration::from_secs(6);
 
-#[cfg(any(not(test), unix))]
+#[cfg(not(test))]
 fn probe_codex_cli_sources(
     candidates: &[PathBuf],
     per_candidate: std::time::Duration,
     total: std::time::Duration,
 ) -> Vec<CodexReasoningSource> {
-    let scan_deadline = std::time::Instant::now() + total;
+    probe_codex_cli_sources_with(
+        candidates,
+        per_candidate,
+        total,
+        std::time::Instant::now,
+        crate::process::run_tool_at_path_with_timeout,
+    )
+}
+
+// The production loop and budgets are shared with deterministic scheduling tests.
+#[cfg(any(not(test), unix))]
+fn probe_codex_cli_sources_with(
+    candidates: &[PathBuf],
+    per_candidate: std::time::Duration,
+    total: std::time::Duration,
+    now: impl Fn() -> std::time::Instant,
+    mut run_tool: impl FnMut(
+        &Path,
+        &[&str],
+        std::time::Duration,
+    ) -> Result<std::process::Output, String>,
+) -> Vec<CodexReasoningSource> {
+    let scan_deadline = now() + total;
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
     for candidate in candidates {
@@ -2325,17 +2347,18 @@ fn probe_codex_cli_sources(
         if !seen.insert(identity.clone()) {
             continue;
         }
-        let now = std::time::Instant::now();
-        if now >= scan_deadline {
+        let candidate_started = now();
+        if candidate_started >= scan_deadline {
             log::warn!("Codex metadata scan budget exhausted; only a partial installation scan is available until LoongPort restarts");
             break;
         }
-        let deadline = std::cmp::min(now + per_candidate, scan_deadline);
-        let run = |args: &[&str]| {
+        let deadline = std::cmp::min(candidate_started + per_candidate, scan_deadline);
+        let mut run = |args: &[&str]| {
             let remaining = deadline
-                .checked_duration_since(std::time::Instant::now())
+                .checked_duration_since(now())
+                .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| "Codex metadata probe deadline expired".to_string())?;
-            crate::process::run_tool_at_path_with_timeout(candidate, args, remaining)
+            run_tool(candidate, args, remaining)
         };
         let version = run(&["--version"])
             .ok()
@@ -10458,73 +10481,204 @@ base_url = "https://idle.example/v1"
     }
 
     #[cfg(unix)]
+    fn probe_output(status: i32, stdout: impl Into<Vec<u8>>) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(status << 8),
+            stdout: stdout.into(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn generic_sources_probe_all_installations_and_bound_failures_and_hangs() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let script = |name: &str, version: &str, models: &[Value], hang: bool| {
-            let path = dir.path().join(name);
-            let body = if hang {
-                "sleep 10".to_string()
-            } else {
-                format!("if [ \"$1\" = --version ]; then printf '%s\\n' 'codex-cli {version}'; else cat <<'MODELS'\n{}\nMODELS\nfi", json!({"models":models}))
-            };
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            path
-        };
+    fn generic_sources_probe_all_successful_installations_deterministically() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
         let old =
             reasoning_source_fixture("old", Some("0.155.0"), &[("gpt-7", &["low"], Some("low"))]);
         let new = reasoning_source_fixture(
             "new",
             Some("0.170.0"),
-            &[
-                ("gpt-7", &["high"], Some("high")),
-                ("gpt-100", &["low", "high"], Some("high")),
-            ],
+            &[("gpt-7", &["high"], Some("high"))],
         );
-        let hanging = script("hung", "0.180.0", &[], true);
-        let old_path = script("old-path", "0.155.0", &old.models, false);
-        let plugin = script("new-plugin", "0.170.0", &new.models, false);
-        let candidates = vec![
-            dir.path().join("missing"),
-            hanging.clone(),
-            old_path,
-            plugin,
-        ];
-        let direct = crate::process::run_tool_at_path_with_timeout(
-            &candidates[3],
-            &["--version"],
-            std::time::Duration::from_secs(1),
-        )
-        .expect("fake CLI version must run");
-        assert!(direct.status.success(), "fake CLI error: {:?}", direct);
-        println!(
-            "FAKE_CLI_VERSION={}",
-            String::from_utf8_lossy(&direct.stdout)
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[PathBuf::from("old-install"), PathBuf::from("new-install")],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    remaining,
+                ));
+                elapsed.set(elapsed.get() + Duration::from_millis(50));
+                let source = if path == Path::new("old-install") {
+                    &old
+                } else {
+                    &new
+                };
+                Ok(if args == ["--version"] {
+                    probe_output(
+                        0,
+                        format!("codex-cli {}\n", source.version.as_deref().unwrap()).into_bytes(),
+                    )
+                } else {
+                    probe_output(
+                        0,
+                        serde_json::to_vec(&json!({"models":source.models})).unwrap(),
+                    )
+                })
+            },
         );
-        let start = std::time::Instant::now();
-        let sources = probe_codex_cli_sources(
-            &candidates,
-            std::time::Duration::from_millis(500),
-            std::time::Duration::from_secs(2),
-        );
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
         assert_eq!(sources.len(), 2);
         assert_eq!(
-            select_codex_reasoning_sources(&sources)[1]["default_reasoning_level"],
+            select_codex_reasoning_sources(&sources)[0]["default_reasoning_level"],
             "high"
         );
-        let another_hang = script("also-hung", "0.180.0", &[], true);
-        let start = std::time::Instant::now();
-        assert!(probe_codex_cli_sources(
-            &[hanging, another_hang],
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_millis(150)
-        )
-        .is_empty());
-        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(calls.borrow().len(), 4);
+        assert_eq!(calls.borrow()[0].2, Duration::from_millis(500));
+        assert_eq!(calls.borrow()[1].2, Duration::from_millis(450));
+        assert_eq!(elapsed.get(), Duration::from_millis(200));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_exhausted_version_budget_skips_models_but_keeps_later_candidate() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[PathBuf::from("slow-version"), PathBuf::from("healthy")],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                assert!(
+                    !remaining.is_zero(),
+                    "must not launch a command with exhausted budget"
+                );
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                ));
+                if path == Path::new("slow-version") {
+                    assert_eq!(args, ["--version"]);
+                    elapsed.set(elapsed.get() + Duration::from_millis(500));
+                    Ok(probe_output(0, b"codex-cli 0.155.0\n".to_vec()))
+                } else if args == ["--version"] {
+                    Ok(probe_output(0, b"codex-cli 0.170.0\n".to_vec()))
+                } else {
+                    Ok(probe_output(
+                        0,
+                        br#"{"models":[{"slug":"healthy"}]}"#.to_vec(),
+                    ))
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].models[0]["slug"], "healthy");
+        assert_eq!(calls.borrow().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_total_deadline_preserves_partial_result_without_next_launch() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[
+                PathBuf::from("first"),
+                PathBuf::from("budget-end"),
+                PathBuf::from("must-not-start"),
+            ],
+            Duration::from_secs(1),
+            Duration::from_millis(150),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                assert_ne!(path, Path::new("must-not-start"));
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    remaining,
+                ));
+                if path == Path::new("first") {
+                    elapsed.set(elapsed.get() + Duration::from_millis(25));
+                    Ok(if args == ["--version"] {
+                        probe_output(0, b"codex-cli 0.170.0\n".to_vec())
+                    } else {
+                        probe_output(0, br#"{"models":[{"slug":"kept"}]}"#.to_vec())
+                    })
+                } else {
+                    elapsed.set(elapsed.get() + remaining);
+                    Err("synthetic deadline".to_owned())
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].models[0]["slug"], "kept");
+        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(calls.borrow()[2].2, Duration::from_millis(100));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_missing_failed_malformed_and_duplicate_paths_do_not_hide_success() {
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good");
+        fs::write(&good, b"synthetic identity only").unwrap();
+        let alias = dir.path().join("same-installation");
+        std::os::unix::fs::symlink(&good, &alias).unwrap();
+        let calls = RefCell::new(Vec::new());
+        let start = Instant::now();
+        let sources = probe_codex_cli_sources_with(
+            &[
+                dir.path().join("missing"),
+                dir.path().join("nonzero"),
+                dir.path().join("malformed"),
+                good.clone(),
+                alias,
+            ],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start,
+            |path, args, _| {
+                calls.borrow_mut().push(path.to_owned());
+                match path.file_name().unwrap().to_str().unwrap() {
+                    "missing" => Err("synthetic missing executable".into()),
+                    "nonzero" => Ok(probe_output(1, Vec::new())),
+                    "malformed" => Ok(probe_output(0, b"not valid version or catalog".to_vec())),
+                    "good" if args == ["--version"] => {
+                        Ok(probe_output(0, b"codex-cli 0.170.0\n".to_vec()))
+                    }
+                    "good" => Ok(probe_output(0, br#"{"models":[{"slug":"good"}]}"#.to_vec())),
+                    _ => panic!("canonical duplicate must not launch"),
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].identity,
+            fs::canonicalize(&good).unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            calls.borrow().iter().filter(|path| **path == good).count(),
+            2
+        );
+        assert_eq!(calls.borrow().len(), 8);
+    }
+
     #[test]
     fn generic_sources_optional_default_and_required_description_are_validated() {
         let mut valid =

@@ -2,11 +2,15 @@
 //!
 //! Handles provider CRUD operations, switching, and configuration management.
 
+mod claude_direct;
+#[cfg(any(test, feature = "test-hooks"))]
+mod direct_writer_tests;
 mod endpoints;
 mod gemini_auth;
 mod gemini_direct;
 #[cfg(any(test, feature = "test-hooks"))]
 mod gemini_direct_tests;
+mod grok_direct;
 mod live;
 mod native;
 pub(crate) use native::service_configuration_revision;
@@ -27,6 +31,11 @@ impl ProviderService {
     #[doc(hidden)]
     pub fn verify_upstream4_gemini_flow() -> Result<(), AppError> {
         gemini_direct_tests::verify()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_upstream4_direct_flows() -> Result<(), AppError> {
+        direct_writer_tests::verify()
     }
 }
 
@@ -5992,14 +6001,37 @@ impl ProviderService {
         // Schema20 direct writes use the upstream forward-recovery owner. Do not
         // wrap them in the legacy snapshot rollback, which would undo published
         // files behind a retained mode journal. Normal schema17 startup is unchanged.
-        if matches!(app_type, AppType::Gemini) && gemini_direct::uses_upstream4_schema(&state.db)? {
+        if matches!(
+            app_type,
+            AppType::Claude | AppType::Gemini | AppType::GrokBuild
+        ) && crate::mode::operation::uses_upstream4_schema(&state.db)?
+        {
             let provider = state
                 .db
                 .get_provider_by_id(id, app_type.as_str())?
                 .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
             validate_provider_selection(&state.db, &app_type, id)?;
-            gemini_direct::switch_to(state, &provider)?;
-            return Ok(SwitchResult::default());
+            let previous = match app_type {
+                AppType::Claude | AppType::GrokBuild => {
+                    crate::mode::current::direct_provider(&state.db, &app_type)?
+                }
+                _ => None,
+            };
+            match app_type {
+                AppType::Claude => {
+                    claude_direct::switch_to(state, previous.as_ref(), &provider)?;
+                }
+                AppType::Gemini => {
+                    gemini_direct::switch_to(state, &provider)?;
+                }
+                AppType::GrokBuild => {
+                    grok_direct::switch_to(state, previous.as_ref(), &provider)?;
+                }
+                _ => unreachable!("admitted direct writer"),
+            }
+            let mut result = SwitchResult::default();
+            Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);
+            return Ok(result);
         }
 
         if app_type.supports_local_proxy() {

@@ -339,7 +339,23 @@ fn invalid_path() -> AppError {
 }
 
 fn validate_path(path: &Path, directory: bool) -> Result<(), AppError> {
-    if !path.is_absolute() || path.to_str().is_none() {
+    validate_path_with_metadata(path, directory, |path| fs::symlink_metadata(path))
+}
+
+fn validate_path_with_metadata(
+    path: &Path,
+    directory: bool,
+    mut metadata: impl FnMut(&Path) -> std::io::Result<fs::Metadata>,
+) -> Result<(), AppError> {
+    if !path.is_absolute()
+        || path.to_str().is_none()
+        || !path
+            .components()
+            .any(|part| matches!(part, Component::RootDir))
+    {
+        // Some Windows verbatim prefixes are classified as absolute even when
+        // no RootDir is present. Skipping a Prefix must never admit such a path
+        // without inspecting a complete root.
         return Err(invalid_path());
     }
     let mut walked = PathBuf::new();
@@ -348,7 +364,25 @@ fn validate_path(path: &Path, directory: bool) -> Result<(), AppError> {
             return Err(invalid_path());
         }
         walked.push(part);
-        match fs::symlink_metadata(&walked) {
+        // A Windows Prefix (for example \\?\C:) is not the complete root.
+        // Keep it verbatim, then inspect after RootDir is joined; every root
+        // and normal component still passes the same link/reparse/type checks.
+        if let Component::Prefix(prefix) = part {
+            // The client-file contract accepts disk/UNC paths, not arbitrary
+            // Windows device namespaces. Skipping an incomplete prefix must
+            // not broaden admission to those namespaces.
+            if !matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_)
+                    | std::path::Prefix::VerbatimDisk(_)
+                    | std::path::Prefix::UNC(_, _)
+                    | std::path::Prefix::VerbatimUNC(_, _)
+            ) {
+                return Err(invalid_path());
+            }
+            continue;
+        }
+        match metadata(&walked) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
                     return Err(invalid_path());

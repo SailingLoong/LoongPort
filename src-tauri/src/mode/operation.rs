@@ -5,6 +5,10 @@
 //! The caller holds the app lock and existing SecretSession read guard throughout.
 //! Target callbacks are idempotent and must reuse that guard (no nested session read).
 
+use crate::app_config::AppType;
+use crate::database::{lock_conn, Database};
+use crate::secrets::session::SecretSession;
+use crate::store::AppState;
 use std::fs;
 use std::path::PathBuf;
 
@@ -668,6 +672,175 @@ fn unverified_files(pending: &Pending) -> Result<Vec<PathBuf>, AppError> {
             }
         })
         .collect()
+}
+
+// Application bindings of upstream AppWrite/commit_target. These remain in the
+// original operation owner, sharing the generic transaction above.
+
+/// The persisted schema is the existing migration fact, not a second feature flag.
+pub(crate) fn uses_upstream4_schema(db: &Database) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    let version = Database::get_user_version(&conn)?;
+    let modern = uses_upstream4_version(version, crate::database::SCHEMA_VERSION)?;
+    if modern
+        && crate::database::loongport_schema::read_stored_version(&conn)?
+            != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        return Err(AppError::Config("upgrade.future_version".into()));
+    }
+    Ok(modern)
+}
+
+// Pure comparison keeps the active startup ceiling distinct from the target
+// migration version so the transition can be tested before ordinary activation.
+pub(crate) fn uses_upstream4_version(version: i32, supported: i32) -> Result<bool, AppError> {
+    if version == crate::database::UPSTREAM4_SCHEMA_VERSION {
+        return Ok(true);
+    }
+    if version <= supported && version < crate::database::UPSTREAM4_SCHEMA_VERSION {
+        return Ok(false);
+    }
+    Err(AppError::Config("upgrade.future_version".into()))
+}
+
+fn ensure_no_legacy_takeover(state: &AppState, app: &AppType) -> Result<(), AppError> {
+    // This DAO pins its own guard. It must run before the operation pins one;
+    // errors cannot be projected to the presentation helper's false fallback.
+    let backup = futures::executor::block_on(state.db.get_live_backup(app.as_str()))?;
+    if backup.is_some()
+        || state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(app)
+    {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    Ok(())
+}
+
+/// Idempotent upstream target owner, retaining LoongPort's existing settings/DB
+/// pointer and model preference owners. Mode transitions/Stack are not enabled.
+pub(crate) fn commit_target(
+    db: &Database,
+    session: &SecretSession,
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+    target: &PendingTarget,
+) -> Result<(), AppError> {
+    if target.state.is_some()
+        || target.stack.is_some()
+        || !target.extra.is_empty()
+        || (target.written.is_some() && *app != AppType::GrokBuild)
+    {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    super::current::validate_direct_mode(store, vault, app)?;
+    if let Some(id) = target.pointer.as_deref() {
+        if !super::current::provider_exists(db, app, id)? {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+        crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)?;
+        db.set_current_provider(app.as_str(), id)?;
+        crate::proxy::auto_strategy::set_model_pref(db, app.as_str(), None)?;
+        super::current::verify_direct_pointer(db, app, id)?;
+    }
+    if let Some(written) = &target.written {
+        state::update(store, vault, |live| {
+            live.apps
+                .entry(app.as_str().to_owned())
+                .or_default()
+                .written = Some(written.clone());
+            Ok(())
+        })?;
+        if state::written(store, vault, app.as_str())?.as_ref() != Some(written) {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+    }
+    super::current::validate_direct_mode(store, vault, app)
+}
+
+/// Upstream per-app transaction context, borrowing the existing session guard.
+/// Caller owns the existing application switch lock. Recovery is explicit, so
+/// begin refuses any old intent instead of silently finishing a different action.
+pub(crate) struct AppWrite<'a> {
+    db: &'a Database,
+    session: &'a SecretSession,
+    app: AppType,
+    pub(crate) store: DeviceStore,
+    pub(crate) guard: AppWriteGuard,
+    pub(crate) vault: RwLockReadGuard<'a, VaultContext>,
+}
+impl<'a> AppWrite<'a> {
+    fn open(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
+        if !uses_upstream4_schema(&state.db)? {
+            return Err(AppError::Config("upgrade.migration_required".into()));
+        }
+        // Gemini does not need the previous row, so admission itself must check
+        // readiness for every adopted app before pinning/planning/publication.
+        crate::settings::get_current_provider_ready(app)?;
+        ensure_no_legacy_takeover(state, app)?;
+        let store = DeviceStore::for_device();
+        let guard = crate::live::engine::lock_app(app.as_str());
+        let session = state.db.secret_session();
+        let vault = session.read()?;
+        crate::secrets::upgrade::checkpoint::ensure_sync_admitted(&store)?;
+        super::current::validate_direct_mode(&store, &vault, app)?;
+        Ok(Self {
+            db: &state.db,
+            session,
+            app: app.clone(),
+            store,
+            guard,
+            vault,
+        })
+    }
+    pub(crate) fn begin(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
+        let write = Self::open(state, app)?;
+        if state::pending(&write.store, &write.vault, app.as_str())?.is_some() {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+        Ok(write)
+    }
+    fn commit(&self, target: &PendingTarget) -> Result<(), AppError> {
+        commit_target(
+            self.db,
+            self.session,
+            &self.store,
+            &self.vault,
+            &self.app,
+            target,
+        )
+    }
+    pub(crate) fn run(
+        &self,
+        op: &str,
+        changes: &[FileChange<'_>],
+        target: PendingTarget,
+    ) -> Result<OperationReport, AppError> {
+        run(
+            &self.store,
+            &self.vault,
+            &self.guard,
+            op,
+            changes,
+            target,
+            &|target| self.commit(target),
+        )
+    }
+}
+
+/// Explicit recovery only. No read/startup/GUI caller is registered here.
+pub(crate) fn recover_pending(
+    state: &AppState,
+    app: &AppType,
+    files: &[LiveFile],
+) -> Result<Option<RecoveryOutcome>, AppError> {
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    let write = AppWrite::open(state, app)?;
+    recover(&write.store, &write.vault, &write.guard, files, &|target| {
+        write.commit(target)
+    })
 }
 
 #[cfg(test)]
