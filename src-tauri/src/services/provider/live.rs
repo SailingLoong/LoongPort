@@ -841,9 +841,24 @@ fn apply_codex_official_auth(
 ///
 /// 不再持有外层锁：manager 内部按账号加锁刷新，网络阻塞不会波及其他账号操作或
 /// token 读取。
-fn get_codex_managed_oauth_live_auth_value(
+pub(super) fn get_codex_managed_oauth_live_auth_value(
     manager: Arc<CodexOAuthManager>,
     account_id: String,
+) -> Result<Value, AppError> {
+    codex_managed_auth_value(manager, account_id, true)
+}
+
+pub(super) fn prepare_codex_managed_oauth_live_auth_value(
+    manager: Arc<CodexOAuthManager>,
+    account_id: String,
+) -> Result<Value, AppError> {
+    codex_managed_auth_value(manager, account_id, false)
+}
+
+fn codex_managed_auth_value(
+    manager: Arc<CodexOAuthManager>,
+    account_id: String,
+    sync_live: bool,
 ) -> Result<Value, AppError> {
     std::thread::spawn(move || {
         crate::rt::block_on(async move {
@@ -865,14 +880,16 @@ fn get_codex_managed_oauth_live_auth_value(
                 }
             }
 
-            let bundle = manager
-                .get_valid_token_bundle_for_account(&account_id)
-                .await
-                .map_err(|err| {
-                    format!(
-                        "Codex OAuth 账号 {account_id} 认证失败，请重新登录 ChatGPT 账号: {err}"
-                    )
-                })?;
+            let bundle = if sync_live {
+                manager
+                    .get_valid_token_bundle_for_account(&account_id)
+                    .await
+            } else {
+                manager.prepare_live_token_bundle(&account_id).await
+            }
+            .map_err(|err| {
+                format!("Codex OAuth 账号 {account_id} 认证失败，请重新登录 ChatGPT 账号: {err}")
+            })?;
             let id_token = bundle
                 .id_token
                 .as_deref()

@@ -37,6 +37,10 @@ pub(crate) struct FileChange<'a> {
 /// 文件都写完之后落定状态（比如改指针）。必须可以重复执行：崩溃恢复可能再跑一次。
 pub(crate) type CommitTarget<'a> = &'a dyn Fn(&PendingTarget) -> Result<(), AppError>;
 
+/// Existing credential owner may admit one exact current digest before replay.
+pub(crate) type VerifyReplay<'a> =
+    &'a dyn Fn(&Pending) -> Result<Option<(usize, String)>, AppError>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecoveryOutcome {
     /// 还没开始发布，丢弃了。
@@ -84,7 +88,7 @@ pub(crate) fn run(
     ) {
         return Err(verification_required());
     }
-    validate_operation(op, &target)?;
+    validate_operation(guard.app(), op, &target)?;
     validate_admitted(&changes.iter().map(|c| c.file.clone()).collect::<Vec<_>>())?;
 
     // 1. 在内存里算好每个文件；任何一个解析失败都不写。
@@ -243,11 +247,24 @@ pub(crate) fn recover(
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
+    recover_checked(store, vault, guard, admitted_files, commit_target, &|_| {
+        Ok(None)
+    })
+}
+
+pub(crate) fn recover_checked(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    guard: &AppWriteGuard,
+    admitted_files: &[LiveFile],
+    commit_target: CommitTarget<'_>,
+    verify_replay: VerifyReplay<'_>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
     let Some(mut pending) = state::pending(store, vault, guard.app())? else {
         return Ok(None);
     };
 
-    validate_pending(&pending, admitted_files)?;
+    validate_pending(guard.app(), &pending, admitted_files)?;
 
     enum At {
         Pre,
@@ -265,11 +282,11 @@ pub(crate) fn recover(
             At::Elsewhere
         });
     }
-    let elsewhere = || -> Vec<PathBuf> {
+    let elsewhere = |pending: &Pending, positions: &[At]| -> Vec<PathBuf> {
         pending
             .files
             .iter()
-            .zip(&positions)
+            .zip(positions)
             .filter(|(_, at)| matches!(at, At::Elsewhere))
             .map(|(file, _)| file.path.clone())
             .collect()
@@ -283,7 +300,7 @@ pub(crate) fn recover(
     if !pending.published && !changed_file_published {
         discard_pending_files(&pending)?;
         state::set_pending(store, vault, guard.app(), None)?;
-        let paths = elsewhere();
+        let paths = elsewhere(&pending, &positions);
         if paths.is_empty() {
             log::info!("[{}] 丢弃未开始发布的操作 {}", guard.app(), pending.op);
             return Ok(Some(RecoveryOutcome::Discarded));
@@ -296,7 +313,38 @@ pub(crate) fn recover(
         return Ok(Some(RecoveryOutcome::Abandoned { paths }));
     }
 
-    let mut skipped = elsewhere();
+    // A client-specific owner may prove a newer credential generation while
+    // retaining the exact original target. Accept only that observed digest as
+    // a no-op, and only when every other original file is already planned.
+    if let Some((index, observed)) = verify_replay(&pending)? {
+        if !valid_digest(&Some(observed.clone()))
+            || index >= pending.files.len()
+            || pending.files[index].private != Some(true)
+        {
+            return Err(invalid_pending());
+        }
+        for (i, file) in pending.files.iter().enumerate() {
+            let actual = digest(read_current(&file.path)?.as_deref());
+            let expected = if i == index {
+                Some(observed.clone())
+            } else {
+                file.planned.clone()
+            };
+            if actual != expected {
+                return Err(verification_required());
+            }
+        }
+        // Delete only validated old staging. If persistence fails, the old
+        // journal stays blocked and the same current-generation proof can retry.
+        discard_staged(&pending.files[index])?;
+        pending.files[index].pre = Some(observed.clone());
+        pending.files[index].planned = Some(observed);
+        pending.files[index].staged = None;
+        state::set_pending(store, vault, guard.app(), Some(pending.clone()))?;
+        failpoint::hit("recover:adopted")?;
+        positions[index] = At::Planned;
+    }
+    let mut skipped = elsewhere(&pending, &positions);
     // A planned hash can come from an external writer before run recorded its
     // publication marker. Recovery must make the forward decision durable before
     // publishing anything or invoking a potentially partial target callback.
@@ -559,7 +607,7 @@ fn valid_digest(value: &Option<String>) -> bool {
     })
 }
 
-fn validate_operation(op: &str, target: &PendingTarget) -> Result<(), AppError> {
+fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
     if !matches!(
         op,
         state::op::SWITCH
@@ -572,10 +620,9 @@ fn validate_operation(op: &str, target: &PendingTarget) -> Result<(), AppError> 
             | state::op::CATALOG
     ) || !target.extra.is_empty()
         || target.stack.is_some()
-        || target
-            .written
-            .as_ref()
-            .is_some_and(|written| !written.extra.is_empty())
+        || target.written.as_ref().is_some_and(|written| {
+            written.validate().is_err() || (written.codex.is_some() && app != "codex")
+        })
     {
         return Err(invalid_pending());
     }
@@ -598,8 +645,8 @@ fn validate_admitted(files: &[LiveFile]) -> Result<(), AppError> {
 
 /// Validate the complete journal before reading a target or deleting any staging.
 /// A path recovered from disk cannot enlarge the trusted caller's affected files.
-fn validate_pending(pending: &Pending, admitted: &[LiveFile]) -> Result<(), AppError> {
-    validate_operation(&pending.op, &pending.target)?;
+fn validate_pending(app: &str, pending: &Pending, admitted: &[LiveFile]) -> Result<(), AppError> {
+    validate_operation(app, &pending.op, &pending.target)?;
     validate_admitted(admitted)?;
     if !pending.extra.is_empty() {
         return Err(invalid_pending());
@@ -620,34 +667,23 @@ fn validate_pending(pending: &Pending, admitted: &[LiveFile]) -> Result<(), AppE
         }
         if let Some(staged) = &file.staged {
             validate_file_path(staged)?;
-            let prefix = format!(
-                "{}.tmp.",
-                file.path
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .ok_or_else(invalid_pending)?
-            );
-            let suffix = staged
+            let staged_target = staged
                 .file_name()
-                .and_then(|v| v.to_str())
-                .and_then(|v| v.strip_prefix(&prefix))
-                .ok_or_else(invalid_pending)?;
-            let parts: Vec<_> = suffix.split('.').collect();
-            if let Some(bytes) = read_current(staged)? {
-                if digest(Some(&bytes)) != file.planned {
-                    return Err(invalid_pending());
-                }
-            }
+                .and_then(|name| name.to_str())
+                .and_then(crate::config_file_io::staging_target_name);
             if staged.parent() != file.path.parent()
                 || file.planned.is_none()
-                || parts.len() != 3
-                || parts
-                    .iter()
-                    .any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()))
+                || staged_target.is_none()
+                || staged_target != file.path.file_name().and_then(|name| name.to_str())
                 || !staging.insert(staged)
                 || admitted.iter().any(|allowed| allowed.path == *staged)
             {
                 return Err(invalid_pending());
+            }
+            if let Some(bytes) = read_current(staged)? {
+                if digest(Some(&bytes)) != file.planned {
+                    return Err(invalid_pending());
+                }
             }
         } else if file.planned.is_some() && file.pre != file.planned {
             // A published file keeps its original staged name in the journal even
@@ -730,7 +766,12 @@ pub(crate) fn commit_target(
     if target.state.is_some()
         || target.stack.is_some()
         || !target.extra.is_empty()
-        || (target.written.is_some() && *app != AppType::GrokBuild)
+        || (target.written.is_some() && !matches!(app, AppType::GrokBuild | AppType::Codex))
+        || target.written.as_ref().is_some_and(|w| {
+            w.validate().is_err()
+                || (w.codex.is_some() && *app != AppType::Codex)
+                || (*app == AppType::Codex && (w.codex.is_none() || !w.tables.is_empty()))
+        })
     {
         return Err(AppError::Config("mode.verification_required".into()));
     }
@@ -771,7 +812,7 @@ pub(crate) struct AppWrite<'a> {
     pub(crate) vault: RwLockReadGuard<'a, VaultContext>,
 }
 impl<'a> AppWrite<'a> {
-    fn open(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
+    pub(crate) fn open(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {
         if !uses_upstream4_schema(&state.db)? {
             return Err(AppError::Config("upgrade.migration_required".into()));
         }
@@ -801,7 +842,7 @@ impl<'a> AppWrite<'a> {
         }
         Ok(write)
     }
-    fn commit(&self, target: &PendingTarget) -> Result<(), AppError> {
+    pub(crate) fn commit(&self, target: &PendingTarget) -> Result<(), AppError> {
         commit_target(
             self.db,
             self.session,

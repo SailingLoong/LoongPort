@@ -126,11 +126,89 @@ impl ModeState {
 /// 内置模型 ID，留下的表会覆盖内置模型，把官方请求连同第三方 Key 发到第三方地址。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Written {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexWritten>,
     /// Grok Build `config.toml` 里 CC Switch 写的 `[model."<名称>"]` 表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Original-operation identity evidence, not a token cache or a new epoch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManagedAuthIntent {
+    pub account_id: String,
+    pub last_refresh_ms: i64,
+    pub digest: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexWritten {
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogTakeover>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ManagedAuthIntent>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+/// R5 evidence for the current explicitly chosen catalog takeover. Stored in
+/// the same encrypted intent/Written owner, never in client staleness history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogTakeover {
+    pub version: u32,
+    pub provider_id: String,
+    pub config_pre: String,
+    pub previous_pointer: String,
+    pub managed_pointer: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Written {
+    pub(crate) fn validate(&self) -> Result<(), AppError> {
+        let invalid = || AppError::Config("mode.verification_required".into());
+        if !self.extra.is_empty() {
+            return Err(invalid());
+        }
+        if let Some(codex) = &self.codex {
+            if !self.tables.is_empty() || codex.version != 1 || !codex.extra.is_empty() {
+                return Err(invalid());
+            }
+            if let Some(catalog) = &codex.catalog {
+                if catalog.version != 1
+                    || !catalog.extra.is_empty()
+                    || catalog.provider_id.trim().is_empty()
+                    || catalog.previous_pointer.trim().is_empty()
+                    || !crate::codex_config::is_our_model_catalog_filename(&catalog.managed_pointer)
+                    || catalog.config_pre.len() != 64
+                    || !catalog
+                        .config_pre
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid());
+                }
+            }
+            if let Some(auth) = &codex.auth {
+                if auth.account_id.trim().is_empty()
+                    || auth.last_refresh_ms <= 0
+                    || !auth.extra.is_empty()
+                    || auth.digest.len() != 64
+                    || !auth
+                        .digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 代理模式的 Stack 模型：这些供应商的模型以带前缀的 id 发布给客户端，选中后请求直达那一家
@@ -419,7 +497,7 @@ fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError> {
     if app
         .written
         .as_ref()
-        .is_some_and(|value| !value.extra.is_empty())
+        .is_some_and(|value| value.validate().is_err())
         || !app.stack.extra.is_empty()
     {
         return Err(unsupported_update());
@@ -436,7 +514,7 @@ fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError> {
                 .target
                 .written
                 .as_ref()
-                .is_some_and(|value| !value.extra.is_empty())
+                .is_some_and(|value| value.validate().is_err())
             || pending
                 .target
                 .stack

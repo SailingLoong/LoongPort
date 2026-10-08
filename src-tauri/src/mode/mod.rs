@@ -5,4 +5,4 @@ pub(crate) mod current;
 mod loongport_tests;
 pub(crate) mod operation;
 pub mod state;
-mod unique_keys;
+pub(crate) mod unique_keys;

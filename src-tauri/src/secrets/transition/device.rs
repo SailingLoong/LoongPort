@@ -215,3 +215,30 @@ mod tests {
         }
     }
 }
+
+/// A new generation must not strand ciphertext staged by a client transaction.
+/// Called only by installation, under its existing session write guard. An
+/// already-started vault transition keeps its own authenticated recovery path.
+pub(super) fn ensure_no_pending_mode_operation(
+    roots: Roots<'_>,
+    vault: &VaultContext,
+) -> Result<(), AppError> {
+    let file = DeviceFile::registered(crate::secrets::owned_file::DEVICE_STATE_FILE)?;
+    let path = roots.device.join(file.relative_path());
+    let Some(bytes) = crate::config_file_io::read_regular_file(&path, 64 * 1024 * 1024)
+        .map_err(|e| AppError::io(&path, e))?
+    else {
+        return Ok(());
+    };
+    let live = crate::mode::state::decode(&file.decode(vault, &bytes)?)
+        .map_err(|_| AppError::Config("mode.verification_required".into()))?;
+    if !live.extra.is_empty()
+        || live
+            .apps
+            .values()
+            .any(|app| app.pending.is_some() || !app.extra.is_empty())
+    {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    Ok(())
+}

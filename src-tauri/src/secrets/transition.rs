@@ -21,7 +21,11 @@ pub(crate) const INTENT: &str = ".vault-transition";
 const FORMAT: u32 = 2;
 const LEGACY_FORMAT: u32 = 1;
 
+#[cfg(any(test, feature = "test-hooks"))]
+mod codex_pending_tests;
 mod device;
+#[cfg(feature = "test-hooks")]
+pub(crate) use codex_pending_tests::verify as verify_codex_pending;
 use device::{RootBindings, Roots};
 
 pub(crate) struct SkillsReplacement {
@@ -366,6 +370,7 @@ where
         device: device_root,
     };
     roots.validate()?;
+    device::ensure_no_pending_mode_operation(roots, &current)?;
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
         if regular_file(&root.join(name))? {

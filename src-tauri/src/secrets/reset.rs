@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const MAX_INTENT_BYTES: usize = 128 * 1024;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResetPreview {
@@ -32,6 +34,8 @@ enum ResetPhase {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<DeviceSnapshot>,
     phase: ResetPhase,
     fingerprint: String,
     archive_hash: String,
@@ -45,6 +49,215 @@ struct RecoveryArchive {
     metadata: VaultMetadata,
     content: String,
 }
+/// Fixed-device membership is authenticated inside the existing reset intent.
+/// Values are original ciphertext hashes; no old vault key is needed to archive
+/// an unknown operation disposition after an explicit credential-loss reset.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceSnapshot {
+    root: PathBuf,
+    data_root: PathBuf,
+    relative_in_data: Option<PathBuf>,
+    files: std::collections::BTreeMap<String, String>,
+}
+impl DeviceSnapshot {
+    fn capture(data_root: &Path) -> Result<Self, AppError> {
+        crate::live::engine::validate_file_path(&data_root.join(crate::config::DB_FILE_NAME))?;
+        let root = crate::live::engine::DeviceStore::for_device()
+            .root()
+            .to_path_buf();
+        crate::live::engine::validate_file_path(&root.join(super::owned_file::DEVICE_STATE_FILE))?;
+        let relative_in_data = if directory(&root)? {
+            let device = root.canonicalize().map_err(|e| AppError::io(&root, e))?;
+            let data = data_root
+                .canonicalize()
+                .map_err(|e| AppError::io(data_root, e))?;
+            device.strip_prefix(data).ok().map(Path::to_path_buf)
+        } else {
+            root.strip_prefix(data_root).ok().map(Path::to_path_buf)
+        };
+        Ok(Self {
+            files: Self::collect(&root)?,
+            root,
+            data_root: data_root.to_owned(),
+            relative_in_data,
+        })
+    }
+    fn collect(root: &Path) -> Result<std::collections::BTreeMap<String, String>, AppError> {
+        crate::live::engine::validate_file_path(&root.join(super::owned_file::DEVICE_STATE_FILE))?;
+        super::files::device_reset_paths(root)?
+            .into_iter()
+            .map(|(_, path)| {
+                crate::live::engine::validate_file_path(&path)?;
+                let name = path
+                    .strip_prefix(root)
+                    .map_err(|_| invalid())?
+                    .to_str()
+                    .ok_or_else(invalid)?
+                    .replace('\\', "/");
+                let bytes = crate::config_file_io::read_regular_file(&path, 64 * 1024 * 1024)
+                    .map_err(|e| AppError::io(&path, e))?
+                    .ok_or_else(invalid)?;
+                Ok((name, hash(&bytes)))
+            })
+            .collect()
+    }
+    fn validate_binding(&self, root: &Path) -> Result<(), AppError> {
+        if self.data_root.as_os_str() != root.as_os_str()
+            || self.root.as_os_str()
+                != crate::live::engine::DeviceStore::for_device()
+                    .root()
+                    .as_os_str()
+            || self.relative_in_data.as_ref().is_some_and(|relative| {
+                relative
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            })
+        {
+            return Err(invalid());
+        }
+        crate::live::engine::validate_file_path(
+            &self.root.join(super::owned_file::DEVICE_STATE_FILE),
+        )?;
+        for (name, digest) in &self.files {
+            super::files::device_reset_file(name)?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid());
+            }
+        }
+        // During a directory commit either root may be temporarily absent. Its
+        // already-authenticated relationship remains bound to both caller roots.
+        if directory(root)? && directory(&self.root)? {
+            let data = root.canonicalize().map_err(|e| AppError::io(root, e))?;
+            let device = self
+                .root
+                .canonicalize()
+                .map_err(|e| AppError::io(&self.root, e))?;
+            if device.strip_prefix(data).ok() != self.relative_in_data.as_deref() {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    fn at_source(&self, source_root: &Path) -> Result<Self, AppError> {
+        let location = self
+            .relative_in_data
+            .as_ref()
+            .map(|relative| source_root.join(relative))
+            .unwrap_or_else(|| self.root.clone());
+        let mut observed = self.clone();
+        observed.files = Self::collect(&location)?;
+        Ok(observed)
+    }
+    fn validate_archive(&self, zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Result<(), AppError> {
+        let names = zip
+            .file_names()
+            .filter_map(|name| name.strip_prefix("device/").map(str::to_owned))
+            .collect::<Vec<_>>();
+        let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
+        if names.len() != self.files.len()
+            || unique.len() != names.len()
+            || names.iter().any(|name| !self.files.contains_key(name))
+        {
+            return Err(invalid());
+        }
+        for (name, expected) in &self.files {
+            let mut bytes = Vec::new();
+            let file = zip
+                .by_name(&format!("device/{name}"))
+                .map_err(|_| invalid())?;
+            if file.size() > 64 * 1024 * 1024 {
+                return Err(invalid());
+            }
+            file.take(64 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| invalid())?;
+            if hash(&bytes) != *expected {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    fn clear_after_commit(
+        &self,
+        hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let current = Self::collect(&self.root)?;
+        if self.relative_in_data.is_some() {
+            // These files moved into the archived previous tree. None may have
+            // been copied into, or newly created in, the clean replacement.
+            return if current.is_empty() {
+                Ok(())
+            } else {
+                Err(AppError::Config("secret.reset_source_changed".into()))
+            };
+        }
+        if current
+            .iter()
+            .any(|(name, digest)| self.files.get(name) != Some(digest))
+        {
+            return Err(AppError::Config("secret.reset_source_changed".into()));
+        }
+        for (index, (name, expected)) in self.files.iter().enumerate() {
+            super::files::device_reset_file(name)?;
+            let path = self.root.join(name);
+            crate::live::engine::validate_file_path(&path)?;
+            if let Some(bytes) = crate::config_file_io::read_regular_file(&path, 64 * 1024 * 1024)
+                .map_err(|e| AppError::io(&path, e))?
+            {
+                if hash(&bytes) != *expected {
+                    return Err(AppError::Config("secret.reset_source_changed".into()));
+                }
+                std::fs::remove_file(&path).map_err(|e| AppError::io(&path, e))?;
+                sync_dir(path.parent().ok_or_else(invalid)?)?;
+                hook(Checkpoint::Device(index))?;
+            }
+        }
+        // A concurrent writer may add a member or recreate one already removed
+        // during this same cleanup attempt. Keep the authenticated barrier.
+        if !Self::collect(&self.root)?.is_empty() {
+            return Err(AppError::Config("secret.reset_source_changed".into()));
+        }
+        Ok(())
+    }
+}
+
+fn legacy_archive_has_device(root: &Path, zip: &zip::ZipArchive<Cursor<&[u8]>>) -> bool {
+    let device = crate::live::engine::DeviceStore::for_device();
+    let relative = device.root().strip_prefix(root).ok();
+    zip.file_names().any(|name| {
+        let Some(name) = name.strip_prefix("data/") else {
+            return false;
+        };
+        // The old copy owner also copied a device root nested under a custom
+        // data root. Recognize its trusted relative location even after rename.
+        super::files::device_reset_file(name).is_ok()
+            || relative.is_some_and(|relative| {
+                Path::new(name)
+                    .strip_prefix(relative)
+                    .ok()
+                    .is_some_and(|name| {
+                        super::files::device_reset_file(&name.to_string_lossy().replace('\\', "/"))
+                            .is_ok()
+                    })
+            })
+    })
+}
+
+fn fingerprint_source(
+    root: &Path,
+    conn: &Connection,
+    settings: &[u8],
+    device: Option<&DeviceSnapshot>,
+) -> Result<String, AppError> {
+    let observed = device.map(|device| device.at_source(root)).transpose()?;
+    fingerprint_with_device(root, conn, settings, observed.as_ref())
+}
+
 fn invalid() -> AppError {
     AppError::Config("secret.invalid_reset".into())
 }
@@ -169,6 +382,14 @@ fn tree_hash(root: &Path) -> Result<Vec<u8>, AppError> {
     Ok(digest.finalize().to_vec())
 }
 fn fingerprint(root: &Path, conn: &Connection, settings: &[u8]) -> Result<String, AppError> {
+    fingerprint_with_device(root, conn, settings, Some(&DeviceSnapshot::capture(root)?))
+}
+fn fingerprint_with_device(
+    root: &Path,
+    conn: &Connection,
+    settings: &[u8],
+    device: Option<&DeviceSnapshot>,
+) -> Result<String, AppError> {
     let mut digest = Sha256::new();
     for bytes in [
         conn.serialize(rusqlite::MAIN_DB)?.to_vec(),
@@ -176,6 +397,11 @@ fn fingerprint(root: &Path, conn: &Connection, settings: &[u8]) -> Result<String
         settings.to_vec(),
         tree_hash(root)?,
     ] {
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    if let Some(device) = device {
+        let bytes = serde_json::to_vec(device).map_err(|_| invalid())?;
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
@@ -189,7 +415,8 @@ pub(crate) fn preview(root: &Path) -> Result<ResetPreview, AppError> {
     let settings = read_optional(&crate::settings::settings_path())?;
     let fingerprint = fingerprint(root, &conn, &settings)?;
     let temporary = VaultContext::generate().map_err(inventory::secret_error)?;
-    let protected_values = inventory::reset_database(&conn, &temporary)?;
+    let protected_values =
+        inventory::reset_database(&conn, &temporary)? + DeviceSnapshot::capture(root)?.files.len();
     Ok(ResetPreview {
         fingerprint,
         protected_values,
@@ -201,7 +428,16 @@ fn copy_and_archive(
     vault: &VaultContext,
     id: &str,
     settings: &[u8],
+    device: &DeviceSnapshot,
 ) -> Result<Vec<u8>, AppError> {
+    let owned_paths = device
+        .files
+        .keys()
+        .map(|name| {
+            let path = device.root.join(name);
+            path.canonicalize().map_err(|e| AppError::io(&path, e))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, AppError>>()?;
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default().unix_permissions(0o600);
     if directory(root)? {
@@ -218,6 +454,13 @@ fn copy_and_archive(
             }
             if !entry.file_type().is_file() {
                 return Err(invalid());
+            }
+            let canonical = entry
+                .path()
+                .canonicalize()
+                .map_err(|e| AppError::io(entry.path(), e))?;
+            if owned_paths.contains(&canonical) {
+                continue;
             }
             let relative = entry.path().strip_prefix(root).map_err(|_| invalid())?;
             let relative_name = relative.to_string_lossy().replace('\\', "/");
@@ -245,6 +488,20 @@ fn copy_and_archive(
             session::write_durable(&stage.join(relative), &bytes)?;
         }
     }
+    for (name, expected) in &device.files {
+        let path = device.root.join(name);
+        crate::live::engine::validate_file_path(&path)?;
+        let bytes = crate::config_file_io::read_regular_file(&path, 64 * 1024 * 1024)
+            .map_err(|e| AppError::io(&path, e))?
+            .ok_or_else(invalid)?;
+        if hash(&bytes) != *expected {
+            return Err(AppError::Config("secret.reset_source_changed".into()));
+        }
+        archive
+            .start_file(format!("device/{name}"), options)
+            .map_err(|_| invalid())?;
+        archive.write_all(&bytes).map_err(|_| invalid())?;
+    }
     archive
         .start_file("device-settings.json", options)
         .map_err(|_| invalid())?;
@@ -268,6 +525,7 @@ enum Checkpoint {
     Installed,
     Settings,
     CleanupCommitted,
+    Device(usize),
 }
 pub(crate) fn pending(root: &Path) -> Result<bool, AppError> {
     regular(&intent_path(root)?)
@@ -288,7 +546,8 @@ fn reset_with_hook(
     }
     let conn = snapshot(root)?;
     let settings = read_optional(&crate::settings::settings_path())?;
-    let original = fingerprint(root, &conn, &settings)?;
+    let device = DeviceSnapshot::capture(root)?;
+    let original = fingerprint_with_device(root, &conn, &settings, Some(&device))?;
     if original != expected {
         return Err(AppError::Config("secret.reset_source_changed".into()));
     }
@@ -298,7 +557,7 @@ fn reset_with_hook(
     let id = uuid::Uuid::new_v4().to_string();
     let (stage, _, archive_path) = locations(root, &id)?;
     crate::config::ensure_private_directory(&stage)?;
-    let archive = copy_and_archive(root, &stage, &next, &id, &settings)?;
+    let archive = copy_and_archive(root, &stage, &next, &id, &settings, &device)?;
     session::write_durable(&archive_path, &archive)?;
     inventory::reset_database(&conn, &next)?;
     // Only the isolated image now contains values encrypted by the new key.
@@ -319,6 +578,7 @@ fn reset_with_hook(
     session::write_durable(&stage.join(".reset-settings"), &settings)?;
     session::write_metadata(&stage, &session::completed_metadata(&next, false)?)?;
     let manifest = Manifest {
+        device: Some(device),
         phase: ResetPhase::Prepared,
         fingerprint: original,
         archive_hash: hash(&archive),
@@ -347,21 +607,33 @@ fn publish_intent(
     manifest: &Manifest,
     next: &VaultContext,
 ) -> Result<Intent, AppError> {
-    let body = next
-        .seal(
-            &["local", "reset-intent", id],
-            &serde_json::to_vec(manifest).map_err(|_| invalid())?,
-        )
-        .map_err(inventory::secret_error)?;
-    let intent = Intent {
-        id: id.to_owned(),
-        metadata: next.metadata().clone(),
-        body,
+    let encode = |manifest: &Manifest| -> Result<(Intent, Vec<u8>), AppError> {
+        let body = next
+            .seal(
+                &["local", "reset-intent", id],
+                &serde_json::to_vec(manifest).map_err(|_| invalid())?,
+            )
+            .map_err(inventory::secret_error)?;
+        let intent = Intent {
+            id: id.to_owned(),
+            metadata: next.metadata().clone(),
+            body,
+        };
+        let bytes = serde_json::to_vec(&intent).map_err(|_| invalid())?;
+        if bytes.len() > MAX_INTENT_BYTES {
+            return Err(AppError::Config("secret.resource_limit".into()));
+        }
+        Ok((intent, bytes))
     };
-    session::write_durable(
-        &intent_path(root)?,
-        &serde_json::to_vec(&intent).map_err(|_| invalid())?,
-    )?;
+    if manifest.phase == ResetPhase::Prepared {
+        // The eventual phase label is longer. Verify both encodings before the
+        // first intent can authorize a directory replacement.
+        let mut committed = manifest.clone();
+        committed.phase = ResetPhase::CleanupCommitted;
+        encode(&committed)?;
+    }
+    let (intent, bytes) = encode(manifest)?;
+    session::write_durable(&intent_path(root)?, &bytes)?;
     Ok(intent)
 }
 
@@ -399,6 +671,9 @@ fn finish(
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     super::owned_file::ensure_zcode_reset_allowed(root)?;
+    if let Some(device) = &manifest.device {
+        device.validate_binding(root)?;
+    }
     let (stage, previous, archive_path) = locations(root, &intent.id)?;
     let archive_bytes = read_optional(&archive_path)?;
     if hash(&archive_bytes) != manifest.archive_hash {
@@ -421,6 +696,15 @@ fn finish(
     {
         return Err(AppError::Config("secret.zcode_recovery_required".into()));
     }
+    if let Some(device) = &manifest.device {
+        device.validate_archive(&mut zip)?;
+    } else if !DeviceSnapshot::collect(crate::live::engine::DeviceStore::for_device().root())?
+        .is_empty()
+        || legacy_archive_has_device(root, &zip)
+    {
+        // A legacy reset did not bind/archive the fixed-device disposition.
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
     let mut original_settings = zeroize::Zeroizing::new(Vec::new());
     zip.by_name("device-settings.json")
         .map_err(|_| invalid())?
@@ -436,10 +720,11 @@ fn finish(
                 return Err(invalid());
             }
             let source = snapshot(root)?;
-            if fingerprint(
+            if fingerprint_source(
                 root,
                 &source,
                 &read_optional(&crate::settings::settings_path())?,
+                manifest.device.as_ref(),
             )? != manifest.fingerprint
             {
                 return Err(AppError::Config("secret.reset_source_changed".into()));
@@ -461,7 +746,13 @@ fn finish(
             return Err(invalid());
         }
         let source = snapshot(&previous)?;
-        if fingerprint(&previous, &source, &original_settings)? != manifest.fingerprint {
+        if fingerprint_source(
+            &previous,
+            &source,
+            &original_settings,
+            manifest.device.as_ref(),
+        )? != manifest.fingerprint
+        {
             return Err(AppError::Config("secret.reset_source_changed".into()));
         }
         drop(source);
@@ -490,6 +781,9 @@ fn finish(
         committed.phase = ResetPhase::CleanupCommitted;
         publish_intent(root, &intent.id, &committed, next)?;
         hook(Checkpoint::CleanupCommitted)?;
+    }
+    if let Some(device) = &manifest.device {
+        device.clear_after_commit(hook)?;
     }
     // Only the authenticated committed phase permits removing a partial tree.
     // Its complete source, replacement and recovery archive were all verified
@@ -541,6 +835,8 @@ fn recover_record(
     let plaintext = next
         .open(&["local", "reset-intent", &intent.id], &intent.body)
         .map_err(inventory::secret_error)?;
+    serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(&plaintext)
+        .map_err(|_| invalid())?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     finish(root, &intent, &manifest, &next, &mut |_| Ok(()))
 }
@@ -548,7 +844,7 @@ fn recover_record(
 /// Passive journal bytes; authentication and recovery remain with this owner.
 pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
     let path = intent_path(root)?;
-    crate::config_file_io::read_regular_file(&path, 128 * 1024).map_err(|error| {
+    crate::config_file_io::read_regular_file(&path, MAX_INTENT_BYTES as u64).map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidData {
             invalid()
         } else {
@@ -920,6 +1216,7 @@ mod tests {
             let archive_bytes = serde_json::to_vec(&archive).unwrap();
             session::write_durable(&archive_path, &archive_bytes).unwrap();
             let manifest = Manifest {
+                device: None,
                 phase: ResetPhase::Prepared,
                 fingerprint: "synthetic prior source".into(),
                 archive_hash: hash(&archive_bytes),
@@ -950,3 +1247,15 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "reset/device_tests.rs"]
+mod device_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) use device_tests::verify as verify_device_reset;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) use device_tests::verify_review_cases as verify_device_reset_review;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) use device_tests::verify_pending_stage as verify_device_reset_staging;

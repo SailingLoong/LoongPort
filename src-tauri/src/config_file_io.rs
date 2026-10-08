@@ -237,6 +237,24 @@ impl StagedWrite {
     }
 }
 
+/// Recognize only the adjacent staging names emitted by `stage_write`.
+/// Callers still bind the returned target to their own admitted path/registry.
+pub(crate) fn staging_target_name(name: &str) -> Option<&str> {
+    let (target, suffix) = name.rsplit_once(".tmp.")?;
+    let mut parts = suffix.split('.');
+    if target.is_empty()
+        || !(0..3).all(|_| {
+            parts.next().is_some_and(|part| {
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        || parts.next().is_some()
+    {
+        return None;
+    }
+    Some(target)
+}
+
 /// Prepare bytes without replacing the destination. `durable` syncs the staged
 /// file after its permissions are set; directory/journal durability belongs to the caller.
 /// Adapted from cc-switch v4.0.2 `config::stage_write`, retaining LoongPort private I/O.

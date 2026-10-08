@@ -7,7 +7,7 @@ use std::fmt;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-pub(super) struct UniqueKeys;
+pub(crate) struct UniqueKeys;
 
 impl<'de> Deserialize<'de> for UniqueKeys {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

@@ -168,6 +168,29 @@ pub(crate) fn stage_device_files_with_vault(
 pub(super) fn device_file_paths(
     device_root: &std::path::Path,
 ) -> Result<Vec<(DeviceFile, PathBuf)>, AppError> {
+    device_paths(device_root, false)
+}
+
+/// Key-loss reset archives opaque bytes, including interrupted adjacent writes.
+/// Only registered targets in the fixed device root grant staging membership.
+pub(super) fn device_reset_paths(
+    device_root: &std::path::Path,
+) -> Result<Vec<(DeviceFile, PathBuf)>, AppError> {
+    device_paths(device_root, true)
+}
+
+pub(super) fn device_reset_file(relative: &str) -> Result<DeviceFile, AppError> {
+    DeviceFile::registered(relative).or_else(|_| {
+        crate::config_file_io::staging_target_name(relative)
+            .ok_or_else(|| AppError::Config("secret.unregistered_file".into()))
+            .and_then(DeviceFile::registered)
+    })
+}
+
+fn device_paths(
+    device_root: &std::path::Path,
+    include_staging: bool,
+) -> Result<Vec<(DeviceFile, PathBuf)>, AppError> {
     if !device_directory_exists(device_root)? {
         return Ok(Vec::new());
     }
@@ -183,12 +206,45 @@ pub(super) fn device_file_paths(
             Ok(_) => paths.push((DeviceFile::registered(name)?, source)),
         }
     }
+    if include_staging {
+        for entry in
+            std::fs::read_dir(device_root).map_err(|error| AppError::io(device_root, error))?
+        {
+            let entry = entry.map_err(|error| AppError::io(device_root, error))?;
+            let name = entry.file_name();
+            let Some(target) = name
+                .to_str()
+                .and_then(crate::config_file_io::staging_target_name)
+            else {
+                continue;
+            };
+            if !DEVICE_FILES.contains(&target) {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|error| AppError::io(entry.path(), error))?
+                .is_file()
+            {
+                return Err(AppError::Config("secret.invalid_storage_path".into()));
+            }
+            paths.push((DeviceFile::registered(target)?, entry.path()));
+        }
+    }
     let backup = device_root.join(DEVICE_BACKUP_DIR);
     if device_directory_exists(&backup)? {
         for entry in std::fs::read_dir(&backup).map_err(|error| AppError::io(&backup, error))? {
             let entry = entry.map_err(|error| AppError::io(&backup, error))?;
             // This dedicated directory has no unrelated members to silently skip.
-            let file = device_backup_file(&entry.file_name())?;
+            let name = entry.file_name();
+            let file = if include_staging {
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| AppError::Config("secret.unregistered_file".into()))?;
+                device_reset_file(&format!("{DEVICE_BACKUP_DIR}/{name}"))?
+            } else {
+                device_backup_file(&name)?
+            };
             if !entry
                 .file_type()
                 .map_err(|error| AppError::io(entry.path(), error))?

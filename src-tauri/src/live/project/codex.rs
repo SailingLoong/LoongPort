@@ -710,7 +710,7 @@ impl CodexConfigPatch {
             if let Some((id, table)) = owned {
                 let mut providers = Table::new();
                 providers.set_implicit(true);
-                providers.insert(id, Item::Table(table));
+                providers.insert(id, Item::Table(projected_table(table, None)));
                 root.insert("model_providers", Item::Table(providers));
             }
             return Ok(());
@@ -873,7 +873,7 @@ fn put_table(providers: &mut dyn TableLike, id: &str, table: Table, container_in
         }
         return;
     }
-    let mut table = table;
+    let mut table = projected_table(table, providers.get(id).and_then(Item::as_table));
     match providers.get_mut(id) {
         Some(slot) => {
             if let Item::Table(old) = slot {
@@ -888,6 +888,30 @@ fn put_table(providers: &mut dyn TableLike, id: &str, table: Table, container_in
             providers.insert(id, Item::Table(table));
         }
     }
+}
+
+/// Tables projected from a provider row are new content, not moves of a table
+/// from the live document. Drop the row parser's positions and retain only
+/// matching live table positions, so the byte-layout owner has honest provenance.
+fn projected_table(mut table: Table, live: Option<&Table>) -> Table {
+    table.set_position(live.and_then(Table::position));
+    for (key, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                let old = live
+                    .and_then(|old| old.get(key.get()))
+                    .and_then(Item::as_table);
+                *child = projected_table(child.clone(), old);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    *child = projected_table(child.clone(), None);
+                }
+            }
+            _ => {}
+        }
+    }
+    table
 }
 
 /// `[profiles.*]` 里 `model_provider` 引用的表 id。

@@ -300,6 +300,75 @@ pub(crate) struct ManagedTokenBundle {
     pub last_refresh: String,
 }
 
+/// Borrowed facts under the manager's existing lifecycle/account/maps guards.
+/// This is one bounded publication/recovery read, never a second token cache.
+pub(crate) struct CodexLiveAuthGuard<'a> {
+    accounts: &'a HashMap<String, CodexAccountData>,
+    access_tokens: &'a HashMap<String, CachedAccessToken>,
+}
+impl CodexLiveAuthGuard<'_> {
+    pub(crate) fn matches_prepared(&self, account: &str, auth: &serde_json::Value) -> bool {
+        let Some(stored) = self.accounts.get(account) else {
+            return false;
+        };
+        let Some(cached) = self.access_tokens.get(account) else {
+            return false;
+        };
+        let Some(time) =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(cached.obtained_at_ms)
+        else {
+            return false;
+        };
+        !cached.is_expiring_soon()
+            && *auth
+                == crate::codex_config::codex_managed_oauth_auth_value(
+                    account,
+                    &cached.token,
+                    stored.id_token.as_deref(),
+                    &stored.refresh_token,
+                    &time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                )
+    }
+
+    pub(crate) fn matches_live_generation(&self, account: &str, auth: &serde_json::Value) -> bool {
+        if self.matches_prepared(account, auth) {
+            return true;
+        }
+        let Some(stored) = self.accounts.get(account) else {
+            return false;
+        };
+        let Some(observed) = auth
+            .get("last_refresh")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp_millis())
+        else {
+            return false;
+        };
+        crate::codex_config::codex_live_auth_is_managed_chatgpt_login(auth, account)
+            && auth
+                .pointer("/tokens/refresh_token")
+                .and_then(serde_json::Value::as_str)
+                == Some(stored.refresh_token.as_str())
+            && auth
+                .pointer("/tokens/id_token")
+                .and_then(serde_json::Value::as_str)
+                == stored.id_token.as_deref()
+            && auth
+                .pointer("/tokens/access_token")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+            && observed >= stored.token_updated_at_ms
+            && self.access_tokens.get(account).is_none_or(|cache| {
+                observed >= cache.obtained_at_ms
+                    && auth
+                        .pointer("/tokens/access_token")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(cache.token.as_str())
+            })
+    }
+}
+
 /// Codex OAuth 认证管理器（多账号）
 pub struct CodexOAuthManager {
     accounts: Arc<RwLock<HashMap<String, CodexAccountData>>>,
@@ -321,6 +390,8 @@ pub struct CodexOAuthManager {
     /// 完成。此前由外层 `RwLock<CodexOAuthManager>` 的写锁隐式串行化；去掉外层锁后
     /// 需要它防止并发保存/清除交错，导致已删账号被旧快照复活。
     storage_lock: Arc<Mutex<()>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_refresh_response: std::sync::Mutex<Option<OAuthTokenResponse>>,
 }
 
 impl CodexOAuthManager {
@@ -335,6 +406,8 @@ impl CodexOAuthManager {
             login_epoch: AtomicU64::new(0),
             secrets,
             storage_lock: Arc::new(Mutex::new(())),
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_refresh_response: std::sync::Mutex::new(None),
         };
 
         manager.load_from_disk_sync()?;
@@ -567,6 +640,16 @@ impl CodexOAuthManager {
         &self,
         refresh_token: &str,
     ) -> Result<OAuthTokenResponse, CodexOAuthError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(response) = self.test_refresh_response.lock().unwrap().take() {
+            return Ok(response);
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() {
+            return Err(CodexOAuthError::TokenFetchFailed(
+                "synthetic refresh response missing".into(),
+            ));
+        }
         let response = crate::proxy::http_client::get()
             .post(OAUTH_TOKEN_URL)
             .timeout(OAUTH_HTTP_TIMEOUT)
@@ -651,7 +734,8 @@ impl CodexOAuthManager {
 
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _guard = refresh_lock.lock().await;
-        self.resolve_valid_cached_token_under_lock(account_id).await
+        self.resolve_valid_cached_token_under_lock(account_id, true)
+            .await
     }
 
     /// Resolve a token while the caller owns this account's refresh mutex.
@@ -660,6 +744,7 @@ impl CodexOAuthManager {
     async fn resolve_valid_cached_token_under_lock(
         &self,
         account_id: &str,
+        sync_live: bool,
     ) -> Result<CachedAccessToken, CodexOAuthError> {
         // Codex CLI may have advanced the shared refresh-token generation since
         // this manager last used the account. Reload it under the same per-account
@@ -793,16 +878,18 @@ impl CodexOAuthManager {
             &stored_refresh_token,
             &last_refresh,
         );
-        if let Err(err) = crate::codex_config::sync_codex_managed_oauth_live_auth_after_refresh(
-            account_id,
-            &refresh_token,
-            &refreshed_auth,
-        ) {
-            // The manager token remains valid; a later provider write will
-            // retry the live synchronization without rolling it back.
-            log::warn!(
-                "[CodexOAuth] 同步刷新后的 Codex live auth 失败（account={account_id}）: {err}"
-            );
+        if sync_live {
+            if let Err(err) = crate::codex_config::sync_codex_managed_oauth_live_auth_after_refresh(
+                account_id,
+                &refresh_token,
+                &refreshed_auth,
+            ) {
+                // The manager token remains valid; a later provider write will
+                // retry the live synchronization without rolling it back.
+                log::warn!(
+                    "[CodexOAuth] 同步刷新后的 Codex live auth 失败（account={account_id}）: {err}"
+                );
+            }
         }
 
         // 在 accounts 读锁下确认账号仍存在，再写缓存：与 remove/clear（持 accounts
@@ -842,6 +929,23 @@ impl CodexOAuthManager {
         &self,
         account_id: &str,
     ) -> Result<ManagedTokenBundle, CodexOAuthError> {
+        self.token_bundle_for_account(account_id, true).await
+    }
+
+    /// Resolve using the existing refresh owner, but leave native publication
+    /// to the direct transaction's durable intent.
+    pub(crate) async fn prepare_live_token_bundle(
+        &self,
+        account_id: &str,
+    ) -> Result<ManagedTokenBundle, CodexOAuthError> {
+        self.token_bundle_for_account(account_id, false).await
+    }
+
+    async fn token_bundle_for_account(
+        &self,
+        account_id: &str,
+        sync_live: bool,
+    ) -> Result<ManagedTokenBundle, CodexOAuthError> {
         let _lifecycle = self.lifecycle_lock.read().await;
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _refresh_guard = refresh_lock.lock().await;
@@ -850,7 +954,7 @@ impl CodexOAuthManager {
         // account generation lock. Otherwise an adoption between these reads
         // can create an invalid A0 + R1/ID1 mixed bundle.
         let cached = self
-            .resolve_valid_cached_token_under_lock(account_id)
+            .resolve_valid_cached_token_under_lock(account_id, sync_live)
             .await?;
 
         // A managed bundle is about to overwrite auth.json. Re-read under the
@@ -1285,7 +1389,7 @@ impl CodexOAuthManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn add_test_account_with_access_token(
         &self,
         account_id: &str,
@@ -1310,7 +1414,7 @@ impl CodexOAuthManager {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn test_refresh_token_for_account(&self, account_id: &str) -> Option<String> {
         self.accounts
             .read()
@@ -1319,7 +1423,7 @@ impl CodexOAuthManager {
             .map(|account| account.refresh_token.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn test_set_token_updated_at_ms(
         &self,
         account_id: &str,
@@ -1331,6 +1435,69 @@ impl CodexOAuthManager {
             .get_mut(account_id)
             .expect("test account present")
             .token_updated_at_ms = token_updated_at_ms;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) async fn test_set_bundle_time(&self, account: &str, time: i64) {
+        self.accounts
+            .write()
+            .await
+            .get_mut(account)
+            .expect("fixture account")
+            .token_updated_at_ms = time;
+        let mut tokens = self.access_tokens.write().await;
+        let cached = tokens.get_mut(account).expect("fixture cache");
+        cached.obtained_at_ms = time;
+        cached.expires_at_ms = time + 3_600_000;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn test_refresh_is_queued(&self) -> bool {
+        self.test_refresh_response.lock().unwrap().is_some()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) async fn test_refresh_next(&self, account: &str, access: &str, refresh: &str) {
+        self.access_tokens
+            .write()
+            .await
+            .get_mut(account)
+            .expect("fixture account")
+            .expires_at_ms = 0;
+        *self.test_refresh_response.lock().unwrap() = Some(OAuthTokenResponse {
+            access_token: access.into(),
+            refresh_token: Some(refresh.into()),
+            id_token: Some("synthetic-id-token".into()),
+            expires_in: Some(3600),
+        });
+    }
+
+    /// Order is switch owner → lifecycle → sorted account generations → vault.
+    /// The action is synchronous and performs no refresh/network/keychain work.
+    pub(crate) async fn with_live_auth_guard<T>(
+        &self,
+        ids: &[String],
+        action: impl FnOnce(&CodexLiveAuthGuard<'_>) -> Result<T, crate::error::AppError>,
+    ) -> Result<T, crate::error::AppError> {
+        let _lifecycle = self.lifecycle_lock.read().await;
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let mut locks = Vec::new();
+        for id in &ids {
+            locks.push(self.get_refresh_lock(id).await.lock_owned().await);
+        }
+        let accounts = self.accounts.read().await;
+        if ids.iter().any(|id| !accounts.contains_key(id)) {
+            return Err(crate::error::AppError::Config(
+                "codex.managed_account_missing".into(),
+            ));
+        }
+        let tokens = self.access_tokens.read().await;
+        action(&CodexLiveAuthGuard {
+            accounts: &accounts,
+            access_tokens: &tokens,
+        })
     }
 
     // ==================== 内部方法 ====================

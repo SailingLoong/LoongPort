@@ -3,6 +3,10 @@
 //! Handles provider CRUD operations, switching, and configuration management.
 
 mod claude_direct;
+mod codex_direct;
+#[cfg(any(test, feature = "test-hooks"))]
+mod codex_direct_tests;
+mod codex_login;
 #[cfg(any(test, feature = "test-hooks"))]
 mod direct_writer_tests;
 mod endpoints;
@@ -21,6 +25,41 @@ pub(crate) use transaction::with_provider_config_transaction;
 
 #[cfg(feature = "test-hooks")]
 impl ProviderService {
+    #[doc(hidden)]
+    pub fn verify_codex_review_cases() -> Result<(), AppError> {
+        codex_direct_tests::verify_review_cases()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_generation_proof() -> Result<(), AppError> {
+        codex_direct_tests::verify_generation_proof()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_upstream4_codex_flow() -> Result<(), AppError> {
+        codex_direct_tests::verify()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_device_reset_staging() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset_staging()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_codex_device_reset_review() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset_review()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_device_reset() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_pending_vault() -> Result<(), AppError> {
+        crate::secrets::transition::verify_codex_pending()
+    }
+
     /// Synthetic headless verification only; omitted from ordinary builds.
     #[doc(hidden)]
     pub fn verify_settings_vault_guard() -> Result<(), AppError> {
@@ -6003,7 +6042,7 @@ impl ProviderService {
         // files behind a retained mode journal. Normal schema17 startup is unchanged.
         if matches!(
             app_type,
-            AppType::Claude | AppType::Gemini | AppType::GrokBuild
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
         ) && crate::mode::operation::uses_upstream4_schema(&state.db)?
         {
             let provider = state
@@ -6012,12 +6051,18 @@ impl ProviderService {
                 .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
             validate_provider_selection(&state.db, &app_type, id)?;
             let previous = match app_type {
-                AppType::Claude | AppType::GrokBuild => {
+                AppType::Claude | AppType::Codex | AppType::GrokBuild => {
                     crate::mode::current::direct_provider(&state.db, &app_type)?
                 }
                 _ => None,
             };
+            let mut result = SwitchResult::default();
             match app_type {
+                AppType::Codex => {
+                    if codex_direct::switch_to(state, previous.as_ref(), &provider)? {
+                        result.warnings.push("保留外部模型目录；LoongPort 模型映射未生效 (External model catalog preserved; LoongPort model mapping was not applied)".into());
+                    }
+                }
                 AppType::Claude => {
                     claude_direct::switch_to(state, previous.as_ref(), &provider)?;
                 }
@@ -6029,7 +6074,6 @@ impl ProviderService {
                 }
                 _ => unreachable!("admitted direct writer"),
             }
-            let mut result = SwitchResult::default();
             Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);
             return Ok(result);
         }

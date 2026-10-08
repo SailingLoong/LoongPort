@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -467,7 +468,7 @@ pub fn write_codex_auth_file(auth: &Value) -> Result<(), AppError> {
     write_json_file_private(&get_codex_auth_path(), auth)
 }
 
-fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
+pub(crate) fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
     crate::config::get_app_config_dir().join(CODEX_MANAGED_OAUTH_LIVE_AUTH_MARKER_FILENAME)
 }
 
@@ -2385,7 +2386,7 @@ fn probe_codex_cli_sources_with(
     sources
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
     CODEX_CLI_SOURCES
         .get_or_init(|| {
@@ -2398,7 +2399,7 @@ fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
     // Host executables never enter synthetic CODEX_HOME unit fixtures.
     Vec::new()
@@ -10800,5 +10801,229 @@ base_url = "https://idle.example/v1"
             "0.180.0"
         );
         assert_eq!(read_codex_config_text().unwrap(), prepared);
+    }
+}
+
+// Pure native-login predicates retained from fixed upstream v4.0.2.
+pub(crate) fn extract_codex_auth_user_identity(auth: &Value) -> Option<String> {
+    let id_token = auth.pointer("/tokens/id_token")?.as_str()?;
+    extract_codex_id_token_user_identity(id_token)
+}
+
+pub(crate) fn extract_codex_id_token_user_identity(id_token: &str) -> Option<String> {
+    extract_codex_id_token_subject(id_token).map(|subject| format!("sub:{subject}"))
+}
+
+pub(crate) fn extract_codex_id_token_subject(id_token: &str) -> Option<String> {
+    let mut segments = id_token.split('.');
+    let header = segments.next()?;
+    let payload = segments.next()?;
+    segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+
+    let header: Value = URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()
+        .and_then(|decoded| serde_json::from_slice(&decoded).ok())?;
+    header
+        .get("alg")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let claims: Value = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|decoded| serde_json::from_slice(&decoded).ok())?;
+    claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The auth mode Codex resolves for an `auth.json` payload
+/// (`AuthDotJson::resolved_mode`, `codex-rs/login/src/auth/manager.rs`,
+/// 0.153.2): an explicit `auth_mode` wins outright; otherwise presence
+/// decides in this order — `personal_access_token`, `bedrock_api_key`,
+/// `bedrock_access_keys`, `OPENAI_API_KEY` — and everything else is
+/// ChatGPT. Presence is `Option::is_some`, i.e. any non-null value, even an
+/// empty one; the material itself is checked afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexResolvedAuthMode {
+    ApiKey,
+    Chatgpt,
+    ChatgptAuthTokens,
+    Headers,
+    AgentIdentity,
+    PersonalAccessToken,
+    BedrockApiKey,
+    BedrockAccessKeys,
+    /// An `auth_mode` string Codex's serde rejects (`rename_all =
+    /// "lowercase"` plus explicit camelCase renames, exact match): the whole
+    /// file fails to load, which Codex reports as signed out.
+    Unrecognized,
+}
+
+fn codex_auth_resolved_mode(auth: &serde_json::Map<String, Value>) -> CodexResolvedAuthMode {
+    let present = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
+
+    // `auth_mode: null` deserializes to `None` (serde default) and falls
+    // through to the implicit precedence below.
+    if let Some(mode) = auth.get("auth_mode").filter(|value| !value.is_null()) {
+        return match mode.as_str() {
+            Some("apikey") => CodexResolvedAuthMode::ApiKey,
+            Some("chatgpt") => CodexResolvedAuthMode::Chatgpt,
+            Some("chatgptAuthTokens") => CodexResolvedAuthMode::ChatgptAuthTokens,
+            Some("headers") => CodexResolvedAuthMode::Headers,
+            Some("agentIdentity") => CodexResolvedAuthMode::AgentIdentity,
+            Some("personalAccessToken") => CodexResolvedAuthMode::PersonalAccessToken,
+            Some("bedrockApiKey") => CodexResolvedAuthMode::BedrockApiKey,
+            Some("bedrockAccessKeys") => CodexResolvedAuthMode::BedrockAccessKeys,
+            _ => CodexResolvedAuthMode::Unrecognized,
+        };
+    }
+    if present("personal_access_token") {
+        return CodexResolvedAuthMode::PersonalAccessToken;
+    }
+    if present("bedrock_api_key") {
+        return CodexResolvedAuthMode::BedrockApiKey;
+    }
+    if present("bedrock_access_keys") {
+        return CodexResolvedAuthMode::BedrockAccessKeys;
+    }
+    if present("OPENAI_API_KEY") {
+        return CodexResolvedAuthMode::ApiKey;
+    }
+    CodexResolvedAuthMode::Chatgpt
+}
+
+/// True when Codex would load `auth` as a signed-in OpenAI account for a
+/// `requires_openai_auth` provider — the state its login screen and
+/// `ConfiguredModelProvider::account_state` (0.149+) go by. The auth mode is
+/// resolved exactly as Codex does (`codex_auth_resolved_mode`) and only then
+/// is the matching credential checked, so a Bedrock credential outranks a
+/// stale `OPENAI_API_KEY` sitting next to it just as it does in Codex, where
+/// that probe returns `UnsupportedBedrockApiKeyAuth` and fails TUI startup.
+/// Modes Codex cannot load from storage (`headers`, unrecognized) are signed
+/// out. The credential must be non-blank (stricter than Codex's `is_some`,
+/// erring toward "signed out"); metadata such as `last_refresh` never counts.
+pub fn codex_auth_has_openai_account_material(auth: &Value) -> bool {
+    let Some(obj) = auth.as_object() else {
+        return false;
+    };
+
+    let value_present = |value: &Value| match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    let has = |key: &str| obj.get(key).is_some_and(value_present);
+
+    match codex_auth_resolved_mode(obj) {
+        CodexResolvedAuthMode::ApiKey => extract_codex_auth_api_key(auth).is_some(),
+        CodexResolvedAuthMode::PersonalAccessToken => has("personal_access_token"),
+        CodexResolvedAuthMode::AgentIdentity => has("agent_identity"),
+        CodexResolvedAuthMode::Chatgpt | CodexResolvedAuthMode::ChatgptAuthTokens => obj
+            .get("tokens")
+            .and_then(Value::as_object)
+            .is_some_and(|tokens| {
+                ["id_token", "access_token", "refresh_token"]
+                    .iter()
+                    .any(|key| tokens.get(*key).is_some_and(value_present))
+            }),
+        CodexResolvedAuthMode::Headers
+        | CodexResolvedAuthMode::BedrockApiKey
+        | CodexResolvedAuthMode::BedrockAccessKeys
+        | CodexResolvedAuthMode::Unrecognized => false,
+    }
+}
+
+/// Where Codex keeps CLI auth, per the top-level `cli_auth_credentials_store`
+/// key (`codex-rs/config/src/types.rs`, serde lowercase; unset = `file`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexAuthStoreMode {
+    /// `auth.json` is the only store — the file decides login state.
+    File,
+    /// Keyring only; `auth.json` is never read and is deleted after a save.
+    Keyring,
+    /// Keyring first, `auth.json` as fallback for both load and save.
+    Auto,
+    /// In-process only; nothing on disk is ever a login.
+    Ephemeral,
+    /// Unparsable config or a value Codex would reject.
+    Unknown,
+}
+
+pub(crate) fn codex_config_auth_store_mode(config_text: &str) -> CodexAuthStoreMode {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        return CodexAuthStoreMode::Unknown;
+    };
+    let Some(item) = doc.get("cli_auth_credentials_store") else {
+        return CodexAuthStoreMode::File;
+    };
+    match item.as_str() {
+        Some("file") => CodexAuthStoreMode::File,
+        Some("keyring") => CodexAuthStoreMode::Keyring,
+        Some("auto") => CodexAuthStoreMode::Auto,
+        Some("ephemeral") => CodexAuthStoreMode::Ephemeral,
+        Some(_) | None => CodexAuthStoreMode::Unknown,
+    }
+}
+
+/// Pure serialization for the existing LoongPort marker identity/version.
+pub(crate) fn codex_managed_oauth_marker_bytes(
+    auth: &Value,
+    account: &str,
+) -> Result<Vec<u8>, AppError> {
+    if extract_codex_managed_oauth_account_id(auth).as_deref() != Some(account) {
+        return Err(AppError::Config("codex.managed_identity_mismatch".into()));
+    }
+    crate::config::serialize_json_bytes(&CodexManagedOAuthLiveAuthMarker {
+        version: 2,
+        account_id: account.into(),
+    })
+}
+
+/// Upstream planner boundary, using LoongPort's existing capability projection.
+/// No catalog/config file is written here.
+pub(crate) fn plan_codex_model_catalog(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider: &crate::provider::Provider,
+) -> Result<Option<Value>, AppError> {
+    if codex_catalog_model_specs(settings).is_empty() {
+        return Ok(None);
+    }
+    Ok(
+        match codex_catalog_projection_from_settings(
+            settings,
+            config_text,
+            profile,
+            Some(provider),
+        )? {
+            CodexCatalogProjection::Generated(catalog) => Some(catalog),
+            CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => None,
+        },
+    )
+}
+
+pub(crate) fn codex_disables_web_search(
+    _settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> bool {
+    match profile {
+        CodexCatalogToolProfile::Anthropic => true,
+        CodexCatalogToolProfile::NativeResponses => {
+            codex_native_gateway_rejects_web_search(config_text)
+        }
+        CodexCatalogToolProfile::ProxyChat => false,
     }
 }
