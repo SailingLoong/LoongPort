@@ -4657,6 +4657,24 @@ mod tests {
         assert!(out.status.success());
     }
 
+    /// Exercise the real path adapter as well as its shared process helpers.
+    #[cfg(unix)]
+    #[test]
+    fn path_probe_adapter_captures_stdout_and_stderr() {
+        let output = crate::process::run_tool_at_path_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "printf 'synthetic stdout'; printf 'synthetic stderr' >&2",
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .expect("healthy path probe must complete within its deadline");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"synthetic stdout");
+        assert_eq!(output.stderr, b"synthetic stderr");
+    }
+
     /// 超时击杀路径：挂死的子进程到点被整组击杀、wait 返回超时错误而非永等。
     /// 同时锚定 setsid 改造后的语义——child 是新会话/新进程组组长，
     /// terminate_child_tree 的 kill(-pid) 仍能命中（回归红线：改回 process_group

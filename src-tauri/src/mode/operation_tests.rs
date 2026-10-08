@@ -698,10 +698,16 @@ fn every_file_is_backed_up_once_before_its_first_write() {
         .map(|entry| entry.unwrap().path())
         .filter(|path| !path.to_string_lossy().ends_with(".source"))
         .map(|path| {
-            let file = crate::secrets::owned_file::DeviceFile::registered(
-                path.strip_prefix(fx.store.root()).unwrap(),
-            )
+            // Device identities use portable '/' spelling even when read_dir
+            // returns a native Windows path. The registry still validates the
+            // backup filename and full digest; do not normalize its namespace.
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            let file = crate::secrets::owned_file::DeviceFile::registered(format!(
+                "{}/{filename}",
+                crate::secrets::owned_file::DEVICE_BACKUP_DIR,
+            ))
             .unwrap();
+            assert_eq!(fx.store.path_for(&file), path);
             fx.store
                 .read_device(&fx.key.read().unwrap(), &file)
                 .unwrap()
