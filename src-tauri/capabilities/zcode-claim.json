@@ -1,0 +1,7 @@
+{
+ "$schema":"../gen/schemas/desktop-schema.json",
+ "identifier":"zcode-claim",
+ "description":"Verification has no plugin permissions; application IPC is restricted to the selected claim.",
+ "windows":["zcode-claim-captcha"],
+ "permissions":[]
+}

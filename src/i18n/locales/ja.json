@@ -4511,6 +4511,68 @@
       "viewTabs": "ZCode の表示",
       "signInTab": "ログインアカウント",
       "apiTab": "API 設定"
+    },
+    "claim": {
+      "title": "プランの受け取り",
+      "checkSelected": "選択したアカウントを確認",
+      "claimSelected": "選択したアカウントで受け取る",
+      "busy": "受け取りを処理中…",
+      "cancel": "キャンセル",
+      "auto": "自動受け取り",
+      "applyAuto": "自動参加の設定を適用",
+      "autoHelp": "適用すると選択したアカウントの自動受け取り設定を保存します。初期設定はオフです。",
+      "error": "受け取り状況を更新できませんでした。再試行してください。",
+      "loading": "受け取り状況を読み込み中…",
+      "select": "{{account}} を選択",
+      "check": "確認",
+      "claim": "受け取る",
+      "unknown": "不明",
+      "plan": "プラン：{{value}}",
+      "starts": "開始：{{value}}",
+      "expires": "有効期限：{{value}}",
+      "checked": "確認日時：{{value}}",
+      "units": "利用枠：{{value}}",
+      "status": {
+        "unknown": "不明",
+        "claimable": "受け取り可能",
+        "claimed": "受け取り済み",
+        "noClaim": "対象プランなし",
+        "verificationRequired": "ユーザーによる確認が必要",
+        "loginExpired": "ログイン期限切れ",
+        "resultPending": "結果の確認待ち",
+        "cancelled": "キャンセル済み"
+      },
+      "reason": {
+        "openOfficialClient": "公式 ZCode を開いてから再確認してください",
+        "notDue": "プランはまだ有効です。有効期限後に再確認してください"
+      }
+    }
+  },
+  "workbuddy": {
+    "title": "WorkBuddy 中国版",
+    "add": "WorkBuddy アカウントを追加",
+    "refreshAll": "すべて更新",
+    "claim": "今日のチェックインポイントを受け取る",
+    "total": "残りポイント",
+    "expiry": "次の有効期限",
+    "updated": "更新日時",
+    "packages": "リソースパックを表示",
+    "package": "リソースパック",
+    "remaining": "残量",
+    "expires": "有効期限",
+    "empty": "アカウントを追加すると残りポイントを確認できます。",
+    "failed": "操作を完了できませんでした。もう一度お試しください。",
+    "authorize": "公式の認証ページを開く",
+    "finishAuthorization": "認証を完了しました",
+    "authorizationWaiting": "公式の認証を待っています",
+    "credited": "{{amount}} ポイントを確認",
+    "state": {
+      "unconfirmed": "未確認",
+      "available": "本日受取可能",
+      "claimed": "受取済み",
+      "alreadyClaimed": "すでに受取済み",
+      "unavailable": "現在受取不可",
+      "needsVerification": "認証が必要"
     }
   }
 }

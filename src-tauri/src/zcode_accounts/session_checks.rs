@@ -494,6 +494,19 @@ pub(crate) async fn check_session<T: OfficialTransport>(
     Ok(report)
 }
 
+/// The same credential precedence as official Start status checks; no coding-key creation.
+pub(super) fn claim_jwt(
+    native: &NativeCipher,
+    snapshot: &AccountSnapshot,
+) -> Result<StartJwt, OfficialError> {
+    let credentials = Credentials::load(native, snapshot);
+    StartJwt::new(
+        credentials
+            .secret(credentials.start_index)
+            .ok_or(OfficialError::Unauthorized)?,
+    )
+}
+
 struct Credentials {
     values: Vec<Option<Zeroizing<String>>>,
     present: Vec<bool>,

@@ -4511,6 +4511,68 @@
       "viewTabs": "ZCode views",
       "signInTab": "Login accounts",
       "apiTab": "API configuration"
+    },
+    "claim": {
+      "title": "Plan claims",
+      "checkSelected": "Check selected",
+      "claimSelected": "Claim selected",
+      "busy": "Checking claims…",
+      "cancel": "Cancel",
+      "auto": "Automatic claims",
+      "applyAuto": "Apply automatic participation",
+      "autoHelp": "Apply to save automatic claims for the selected accounts. Automatic claims are off by default.",
+      "error": "Claim status could not be updated. Try again.",
+      "loading": "Loading claim status…",
+      "select": "Select {{account}}",
+      "check": "Check",
+      "claim": "Claim",
+      "unknown": "Unknown",
+      "plan": "Plan: {{value}}",
+      "starts": "Starts: {{value}}",
+      "expires": "Expires: {{value}}",
+      "checked": "Checked: {{value}}",
+      "units": "Units: {{value}}",
+      "status": {
+        "unknown": "Unknown",
+        "claimable": "Claimable",
+        "claimed": "Claimed",
+        "noClaim": "No eligible plan",
+        "verificationRequired": "User verification required",
+        "loginExpired": "Login expired",
+        "resultPending": "Result pending",
+        "cancelled": "Cancelled"
+      },
+      "reason": {
+        "openOfficialClient": "Open official ZCode, then check again",
+        "notDue": "Plan is still valid; check after expiry"
+      }
+    }
+  },
+  "workbuddy": {
+    "title": "WorkBuddy China",
+    "add": "Add WorkBuddy account",
+    "refreshAll": "Refresh all",
+    "claim": "Claim today's check-in credits",
+    "total": "Remaining credits",
+    "expiry": "Next expiry",
+    "updated": "Updated",
+    "packages": "View packages",
+    "package": "Package",
+    "remaining": "Remaining",
+    "expires": "Expires",
+    "empty": "Add an account to view remaining credits.",
+    "failed": "The operation could not be completed. Please try again.",
+    "authorize": "Open official authorization",
+    "finishAuthorization": "I have authorized this account",
+    "authorizationWaiting": "Waiting for official authorization",
+    "credited": "{{amount}} credits received",
+    "state": {
+      "unconfirmed": "Unconfirmed",
+      "available": "Available today",
+      "claimed": "Claimed",
+      "alreadyClaimed": "Already claimed",
+      "unavailable": "Currently unavailable",
+      "needsVerification": "Verification required"
     }
   }
 }

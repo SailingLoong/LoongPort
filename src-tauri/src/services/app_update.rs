@@ -523,7 +523,7 @@ async fn install_bytes_and_restart(
         crate::destroy_single_instance_lock(app);
         update.install(bytes).map_err(|e| {
             format!(
-                "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停；请重启应用或重新开启代理后再试。"
+                "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停，套餐领取已暂停至重启；请重启应用后再试。"
             )
         })?;
         Ok(true)

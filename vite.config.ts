@@ -16,6 +16,15 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: "../dist",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "src/index.html"),
+        zcodeClaimCaptcha: path.resolve(
+          __dirname,
+          "src/zcode-claim-captcha.html",
+        ),
+      },
+    },
   },
   server: {
     port: 3000,
@@ -29,4 +38,3 @@ export default defineConfig(({ command }) => ({
   clearScreen: false,
   envPrefix: ["VITE_", "TAURI_"],
 }));
-

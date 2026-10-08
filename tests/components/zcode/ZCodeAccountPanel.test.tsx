@@ -18,6 +18,19 @@ import {
   type SessionCheckDisplay,
 } from "@/lib/api/zcodeAccounts";
 
+vi.mock("@/lib/api/zcodeClaim", () => ({
+  zcodeClaimApi: {
+    state: vi.fn().mockResolvedValue({
+      enabled: false,
+      participants: [],
+      records: {},
+      busy: false,
+    }),
+    start: vi.fn(),
+    setAuto: vi.fn(),
+    cancel: vi.fn(),
+  },
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@/lib/api/zcodeAccounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/zcodeAccounts")>()),

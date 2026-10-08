@@ -67,3 +67,14 @@ fn synthetic_test_path(relative: &str) -> std::path::PathBuf {
     assert!(path.is_absolute());
     path
 }
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod claim;
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod claim_protocol;
+#[cfg(feature = "gui")]
+pub(crate) mod claim_runtime;
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod claim_queue;
