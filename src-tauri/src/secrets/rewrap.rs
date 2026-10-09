@@ -362,8 +362,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn pending_zcode_transaction_blocks_password_change_before_mutation() {
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let pending = dir.path().join("zcode_account_transaction.json");
@@ -414,8 +416,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn password_only_mode_removes_auto_unlock_key_without_changing_ciphertext() {
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = raw_secret(&db);
@@ -441,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn password_only_password_change_does_not_require_system_store() {
         struct UnavailableStore;
         impl KeyStore for UnavailableStore {
@@ -454,7 +459,8 @@ mod tests {
                 Err(KeyStoreError::Unavailable)
             }
         }
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         change_password(&db, &store, "original protection password", false).unwrap();
@@ -474,8 +480,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn interrupted_key_removal_blocks_old_session_and_recovers_with_password() {
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = FailingStore::default();
         let db = fixture(dir.path(), &store);
         store.fail_remove.store(true, Ordering::SeqCst);
@@ -498,8 +506,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn new_password_recovers_before_active_metadata_was_replaced() {
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         change_password(&db, &store, "original protection password", true).unwrap();
@@ -555,8 +565,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn invalid_password_does_not_start_a_transition() {
-        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();
@@ -567,5 +579,31 @@ mod tests {
             metadata
         );
         assert!(db.secrets.read().is_ok());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn invalid_device_home_blocks_password_change_before_mutation() {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let store = MemoryKeyStore::default();
+        let db = fixture(dir.path(), &store);
+        let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+        let original = db.secrets.read().unwrap().metadata().clone();
+        let ciphertext = raw_secret(&db);
+        let invalid_home = home.path().join("synthetic-not-a-directory");
+        std::fs::write(&invalid_home, b"synthetic").unwrap();
+        std::env::set_var("CC_SWITCH_TEST_HOME", &invalid_home);
+
+        let error =
+            change_password(&db, &store, "replacement protection password", false).unwrap_err();
+
+        assert!(matches!(error, AppError::Config(code) if code == "secret.invalid_storage_path"));
+        assert_eq!(
+            std::fs::read(dir.path().join("vault.json")).unwrap(),
+            before
+        );
+        assert_eq!(db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(raw_secret(&db), ciphertext);
+        assert!(!dir.path().join(INTENT).exists());
     }
 }
