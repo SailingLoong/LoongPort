@@ -185,17 +185,33 @@ impl AuthenticatedUpgrade {
         } else {
             None
         };
+        // A detached Proxy keeps its route, but its native files represent the
+        // independent direct pointer. Verify those files without changing mode.
+        let detached_mode_verified = compatible
+            && mode.as_ref().is_some_and(|mode| {
+                !mode.attached
+                    && (mode.mode == Some(Mode::Direct)
+                        || (mode.mode == Some(Mode::Proxy)
+                            && mode
+                                .proxy_route
+                                .as_ref()
+                                .is_some_and(|id| rows.contains_key(id))))
+            });
         let candidate = local
             .as_ref()
             .filter(|_| {
-                pending == Some(None)
-                    && pointer_consistent == Some(true)
-                    && mode
-                        .as_ref()
-                        .is_some_and(|mode| mode.mode == Some(Mode::Direct) && !mode.attached)
+                pending == Some(None) && pointer_consistent == Some(true) && detached_mode_verified
             })
             .and_then(|id| rows.get(id));
         let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
+        // Claude's projector checks the complete native owned fields. Other
+        // projectors still have unresolved route/catalog or cleanup policy;
+        // a partial field comparison must not authorize their completion.
+        let can_complete_app = *app == AppType::Claude
+            && candidate.is_some()
+            && client.status == "parsed"
+            && client.marker == Some(false)
+            && client.native_completion_match == Some(true);
         // Salt private evidence with this session token. No row, path, credential
         // or journal is serialized into the public DTO or a persistent receipt.
         let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
@@ -238,7 +254,7 @@ impl AuthenticatedUpgrade {
                 can_recover_operation,
                 default_action: "keep_files",
                 default_takeover: false,
-                can_complete_app: false,
+                can_complete_app,
                 can_start_upgrade: false,
             },
             files,

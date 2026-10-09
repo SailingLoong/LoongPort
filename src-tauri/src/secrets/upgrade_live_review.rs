@@ -14,6 +14,7 @@ pub(super) struct LiveFacts {
     pub(super) status: &'static str,
     pub(super) marker: Option<bool>,
     pub(super) stored_fields_match: Option<bool>,
+    pub(super) native_completion_match: Option<bool>,
     pub(super) catalog_ownership: Option<&'static str>,
     pub(super) catalog_file_present: Option<bool>,
 }
@@ -102,6 +103,7 @@ pub(super) fn inspect(
             status: "missing",
             marker: None,
             stored_fields_match: None,
+            native_completion_match: None,
             catalog_ownership: None,
             catalog_file_present: None,
         });
@@ -118,6 +120,13 @@ pub(super) fn inspect(
                     status: "parsed",
                     stored_fields_match: owned_values_known
                         .then(|| super::projection_review::compare(app, candidate, &value))
+                        .flatten(),
+                    native_completion_match: owned_values_known
+                        .then(|| {
+                            super::projection_review::native_completion_match(
+                                app, candidate, &value,
+                            )
+                        })
                         .flatten(),
                     marker: {
                         let observed =
@@ -137,6 +146,7 @@ pub(super) fn inspect(
                     status: "invalid",
                     marker: None,
                     stored_fields_match: None,
+                    native_completion_match: None,
                     catalog_ownership: None,
                     catalog_file_present: None,
                 },
@@ -146,6 +156,7 @@ pub(super) fn inspect(
             status: "invalid",
             marker: None,
             stored_fields_match: None,
+            native_completion_match: None,
             catalog_ownership: None,
             catalog_file_present: None,
         },

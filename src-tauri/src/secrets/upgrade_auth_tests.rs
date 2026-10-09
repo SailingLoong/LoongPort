@@ -2619,7 +2619,7 @@ fn u03_published_pointer_file_drift_refuses_mutation_and_retains_protected_setti
 
 #[test]
 #[serial_test::serial]
-fn u03_published_pointer_no_journal_reports_actual_client_fields_without_completion() {
+fn u03_published_pointer_no_journal_reports_verified_app_without_runtime_admission() {
     let f = Fixture::new();
     publish_resume_fixture(&f);
     let app = crate::app_config::AppType::Claude;
@@ -2663,7 +2663,9 @@ fn u03_published_pointer_no_journal_reports_actual_client_fields_without_complet
     assert_eq!(view.has_pending_operation, Some(false));
     assert_eq!(view.pointer_consistent, Some(true));
     assert_eq!(view.stored_fields_match, Some(true));
-    assert!(!view.can_recover_operation && !view.can_complete_app && !view.can_start_upgrade);
+    assert!(view.can_complete_app);
+    assert!(!view.can_recover_operation && !view.can_start_upgrade);
+    assert!(coordinator.verify_runtime_admission_blocked());
     assert_eq!(snapshot(f.home.path()), before);
     let altered = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-externally-changed-token","ANTHROPIC_BASE_URL":"https://provider.example.invalid"}});
     std::fs::write(&client, serde_json::to_vec(&altered).unwrap()).unwrap();
@@ -3371,4 +3373,153 @@ fn u03_client_files_replaced_before_original_load_is_not_discarded() {
     assert_eq!(pending.op, "apply");
     assert!(!pending.published);
     assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_app_completion_requires_actual_fields_and_preserves_reliable_detached_mode() {
+    let mut missed = Vec::new();
+    for saved_mode in ["direct", "proxy"] {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        let config = serde_json::json!({"env":{
+            "ANTHROPIC_AUTH_TOKEN":"synthetic-credential",
+            "ANTHROPIC_BASE_URL":"https://example.invalid/v1",
+            "ANTHROPIC_MODEL":"synthetic-model"
+        }});
+        for id in ["synthetic-ready", "synthetic-route"] {
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    "synthetic".into(),
+                    if id == "synthetic-route" {
+                        serde_json::json!({"env":{
+                            "ANTHROPIC_AUTH_TOKEN":"synthetic-route-credential",
+                            "ANTHROPIC_MODEL":"synthetic-route-model"
+                        }})
+                    } else {
+                        config.clone()
+                    },
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "synthetic-ready")
+            .unwrap();
+        drop(db);
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_claude: Some("synthetic-ready".into()),
+            ..Default::default()
+        });
+        let path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let state = format!(
+            r#"{{"version":1,"apps":{{"claude":{{"mode":"{saved_mode}","proxy_route":"synthetic-route","attached":false}},"codex":{{"mode":"future-mode","pending":{{"op":"future-op","opaque":true}}}}}}}}"#
+        );
+        f.write_raw_mode(state.as_bytes());
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let before = snapshot(f.home.path());
+        let app = crate::app_config::AppType::Claude;
+        let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+        assert_eq!(
+            view.saved_mode.as_ref().map(|mode| match mode {
+                crate::mode::state::Mode::Direct => "direct",
+                crate::mode::state::Mode::Proxy => "proxy",
+            }),
+            Some(saved_mode)
+        );
+        assert_eq!(view.has_pending_operation, Some(false));
+        assert_eq!(view.pointer_consistent, Some(true));
+        if view.stored_fields_match != Some(true) || !view.can_complete_app {
+            missed.push(format!(
+                "{saved_mode}: actual field proof/completion unavailable"
+            ));
+        }
+        let peer = coordinator
+            .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+            .unwrap();
+        assert!(!peer.can_complete_app && !peer.can_recover_operation);
+        assert_eq!(snapshot(f.home.path()), before);
+        if saved_mode == "proxy" {
+            f.write_raw_mode(
+                state
+                    .replace("synthetic-route", "synthetic-missing")
+                    .as_bytes(),
+            );
+            let missing_route = coordinator.review_upgrade_app(&token, &app).unwrap();
+            assert!(!missing_route.can_complete_app);
+            assert_ne!(view.revision, missing_route.revision);
+            f.write_raw_mode(state.as_bytes());
+        }
+        let unknown_mode = state.replace(
+            &format!("\"mode\":\"{saved_mode}\""),
+            "\"mode\":\"future-mode\"",
+        );
+        f.write_raw_mode(unknown_mode.as_bytes());
+        let unverified = coordinator.review_upgrade_app(&token, &app).unwrap();
+        assert!(unverified.saved_mode.is_none());
+        assert!(!unverified.can_complete_app);
+        f.write_raw_mode(state.as_bytes());
+        let mut changed = config.clone();
+        changed["env"]["ANTHROPIC_MODEL"] = serde_json::json!("synthetic-external-model");
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let drifted = coordinator.review_upgrade_app(&token, &app).unwrap();
+        assert!(!drifted.can_complete_app);
+        assert_ne!(view.revision, drifted.revision);
+        assert!(coordinator.verify_runtime_admission_blocked());
+        let native_bedrock = serde_json::json!({"env":{
+            "CLAUDE_CODE_USE_BEDROCK":"1",
+            "AWS_BEARER_TOKEN_BEDROCK":"synthetic-bedrock-credential"
+        }});
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        db.save_provider(
+            "claude",
+            &crate::provider::Provider::with_id(
+                "synthetic-ready".into(),
+                "synthetic".into(),
+                native_bedrock.clone(),
+                None,
+            ),
+        )
+        .unwrap();
+        drop(db);
+        for legacy in [
+            serde_json::json!({"apiKey":"synthetic-bedrock-credential","env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}),
+            serde_json::json!({"apiKey":"synthetic-stale-credential","env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_BEARER_TOKEN_BEDROCK":"synthetic-bedrock-credential"}}),
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+            let unprojected = coordinator.review_upgrade_app(&token, &app).unwrap();
+            assert_eq!(unprojected.stored_fields_match, Some(true));
+            assert!(
+                !unprojected.can_complete_app,
+                "unprojected native Bedrock fields certified"
+            );
+        }
+        std::fs::write(&path, serde_json::to_vec(&native_bedrock).unwrap()).unwrap();
+        assert!(
+            coordinator
+                .review_upgrade_app(&token, &app)
+                .unwrap()
+                .can_complete_app
+        );
+    }
+    assert!(missed.is_empty(), "{}", missed.join("; "));
 }

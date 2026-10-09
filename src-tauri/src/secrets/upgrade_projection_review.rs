@@ -9,6 +9,24 @@ pub(super) fn compare(app: &AppType, candidate: Option<&Provider>, live: &Value)
     let candidate = candidate?;
     compare_inner(app, candidate, live).ok().flatten()
 }
+
+pub(super) fn native_completion_match(
+    app: &AppType,
+    candidate: Option<&Provider>,
+    live: &Value,
+) -> Option<bool> {
+    if *app != AppType::Claude {
+        return None;
+    }
+    let actual = project::claude::ClaudeProjection::of(live);
+    // Row projection intentionally migrates legacy Bedrock apiKey. Native
+    // readback must not pretend that transformation has happened on disk, or
+    // hide an obsolete top-level credential beside the correct bearer field.
+    if live.get("apiKey").is_some() && !actual.top.contains_key("apiKey") {
+        return Some(false);
+    }
+    compare(app, candidate, live)
+}
 fn compare_inner(app: &AppType, candidate: &Provider, live: &Value) -> Result<Option<bool>, ()> {
     match app {
         AppType::Claude => {
