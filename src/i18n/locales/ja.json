@@ -4530,5 +4530,36 @@
       "signInTab": "ログインアカウント",
       "apiTab": "API 設定"
     }
+  },
+  "startupUpgrade": {
+    "title": "アップグレードと復旧の確認",
+    "databaseOnly": "データベースは確認済みです。各アプリの実際の設定を確認してください。",
+    "verificationRequired": "確認が完了していないため、アップグレード完了は選べません。",
+    "cancelled": "未公開のアップグレードチェックポイントを破棄しました。",
+    "queryFailed": "元の操作を確認できません。アップグレードや完了の前に再確認してください。",
+    "appQueryFailed": "このアプリは確認が必要です。他のアプリは個別に確認・復旧できます。",
+    "authenticate": "ロック解除して確認",
+    "checkBackup": "確認してバックアップ",
+    "cancel": "未公開のアップグレードを破棄",
+    "recheck": "元の操作を再確認",
+    "recover": "確認して復旧",
+    "complete": "アップグレードを完了",
+    "exit": "終了",
+    "later": "後で続けるため終了",
+    "publishedExit": "公開済みのデータと元の操作記録を保持します。次回は実際の状態から続行し、巻き戻しません。",
+    "notComplete": "元の処理でファイル・ポインター・モードの一致を確認した後、完了を選べます。",
+    "modeLabel": "保存済みモード",
+    "journalLabel": "未完了の操作",
+    "pointerLabel": "ポインターの一致",
+    "fieldsLabel": "クライアント項目の一致",
+    "keepFiles": "既存ファイルを保持",
+    "noTakeover": "自動的に引き継がない",
+    "yes": "はい",
+    "no": "いいえ",
+    "unknown": "確認が必要",
+    "mode": {
+      "direct": "Direct（保存済み）",
+      "proxy": "Proxy（保存済み）"
+    }
   }
 }

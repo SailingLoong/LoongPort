@@ -4530,5 +4530,36 @@
       "signInTab": "登录账号",
       "apiTab": "API 配置"
     }
+  },
+  "startupUpgrade": {
+    "title": "升级与恢复核对",
+    "databaseOnly": "数据库已核验；仍需逐应用核对实际配置。",
+    "verificationRequired": "尚未完成核对，暂不显示升级完成。",
+    "cancelled": "升级前检查点已放弃。",
+    "queryFailed": "无法核对原操作。请重新检查；当前不能执行升级或完成。",
+    "appQueryFailed": "此应用待核对。其他应用可继续单独检查或受控恢复。",
+    "authenticate": "解锁并核对",
+    "checkBackup": "检查并备份",
+    "cancel": "放弃未发布的升级",
+    "recheck": "重新检查原操作",
+    "recover": "查看并受控恢复",
+    "complete": "完成升级",
+    "exit": "退出",
+    "later": "稍后继续并退出",
+    "publishedExit": "保留已发布的数据与原操作记录；下次从实际状态继续，不回滚。",
+    "notComplete": "完成入口将在原流程验证文件、指针与模式一致后开放。",
+    "modeLabel": "已保存的模式",
+    "journalLabel": "存在未完成操作",
+    "pointerLabel": "指针一致",
+    "fieldsLabel": "客户端字段一致",
+    "keepFiles": "保留现有文件",
+    "noTakeover": "不自动接管",
+    "yes": "是",
+    "no": "否",
+    "unknown": "待核对",
+    "mode": {
+      "direct": "Direct（已保存）",
+      "proxy": "Proxy（已保存）"
+    }
   }
 }

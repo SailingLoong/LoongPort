@@ -4530,5 +4530,36 @@
       "signInTab": "Login accounts",
       "apiTab": "API configuration"
     }
+  },
+  "startupUpgrade": {
+    "title": "Upgrade and recovery review",
+    "databaseOnly": "Database verified; review each app’s actual configuration next.",
+    "verificationRequired": "Verification is incomplete. Upgrade completion is unavailable.",
+    "cancelled": "The unpublished upgrade checkpoint was abandoned.",
+    "queryFailed": "The original operation could not be verified. Recheck before upgrading or completing.",
+    "appQueryFailed": "This app needs verification. Other apps can be checked or recovered independently.",
+    "authenticate": "Unlock and review",
+    "checkBackup": "Check and back up",
+    "cancel": "Abandon unpublished upgrade",
+    "recheck": "Recheck original operation",
+    "recover": "Review and recover",
+    "complete": "Complete upgrade",
+    "exit": "Exit",
+    "later": "Continue later and exit",
+    "publishedExit": "Keep published data and the original operation record. Continue from actual state next time without rolling back.",
+    "notComplete": "Completion becomes available after the original flow verifies files, pointers and mode together.",
+    "modeLabel": "Saved mode",
+    "journalLabel": "Pending operation",
+    "pointerLabel": "Pointers agree",
+    "fieldsLabel": "Client fields agree",
+    "keepFiles": "Keep existing files",
+    "noTakeover": "No automatic takeover",
+    "yes": "Yes",
+    "no": "No",
+    "unknown": "Needs verification",
+    "mode": {
+      "direct": "Direct (saved)",
+      "proxy": "Proxy (saved)"
+    }
   }
 }

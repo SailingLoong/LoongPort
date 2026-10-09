@@ -4531,5 +4531,36 @@
       "signInTab": "登入帳號",
       "apiTab": "API 設定"
     }
+  },
+  "startupUpgrade": {
+    "title": "升級與恢復核對",
+    "databaseOnly": "資料庫已核驗；仍需逐應用核對實際設定。",
+    "verificationRequired": "尚未完成核對，暫不顯示升級完成。",
+    "cancelled": "升級前檢查點已放棄。",
+    "queryFailed": "無法核對原操作。請重新檢查；目前不能執行升級或完成。",
+    "appQueryFailed": "此應用待核對。其他應用可繼續單獨檢查或受控恢復。",
+    "authenticate": "解鎖並核對",
+    "checkBackup": "檢查並備份",
+    "cancel": "放棄未發布的升級",
+    "recheck": "重新檢查原操作",
+    "recover": "查看並受控恢復",
+    "complete": "完成升級",
+    "exit": "退出",
+    "later": "稍後繼續並退出",
+    "publishedExit": "保留已發布的資料與原操作記錄；下次從實際狀態繼續，不回復舊資料。",
+    "notComplete": "完成入口將在原流程驗證檔案、指標與模式一致後開放。",
+    "modeLabel": "已儲存的模式",
+    "journalLabel": "存在未完成操作",
+    "pointerLabel": "指標一致",
+    "fieldsLabel": "用戶端欄位一致",
+    "keepFiles": "保留現有檔案",
+    "noTakeover": "不自動接管",
+    "yes": "是",
+    "no": "否",
+    "unknown": "待核對",
+    "mode": {
+      "direct": "Direct（已儲存）",
+      "proxy": "Proxy（已儲存）"
+    }
   }
 }

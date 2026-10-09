@@ -11,6 +11,25 @@ vi.mock("react-i18next", () => ({
 describe("SecretUnlock", () => {
   beforeEach(() => vi.mocked(invoke).mockReset());
 
+  it("routes the original upgrade checkpoint block to a read-only upgrade query", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      status: "checkpoint_requires_verification",
+      checkpointPresent: true,
+      reviewToken: null,
+      canAuthenticate: true,
+      canCheckAndBackup: false,
+      canStartUpgrade: false,
+    });
+    render(<SecretUnlock initialError="upgrade.sync_paused" />);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("get_startup_upgrade_review"),
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "secrets.unlock" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("queries an interrupted operation and recovers only after an explicit password action", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       token: "opaque-operation-revision",

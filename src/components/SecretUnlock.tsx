@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { SecretRestore } from "@/components/SecretRestore";
 import { SecretReset } from "@/components/SecretReset";
 import { Label } from "@/components/ui/label";
+import { StartupUpgrade } from "@/components/StartupUpgrade";
 
 interface StartupRecovery {
   token: string;
@@ -15,7 +16,21 @@ interface StartupRecovery {
   restartRequired: boolean;
 }
 
-export function SecretUnlock({
+export function SecretUnlock(props: {
+  onUnlocked?: () => void;
+  requiresRestart?: boolean;
+  initialError?: string;
+}) {
+  if (
+    props.initialError === "upgrade.sync_paused" ||
+    props.initialError === "upgrade.checkpoint_pending"
+  ) {
+    return <StartupUpgrade />;
+  }
+  return <SecretUnlockForm {...props} />;
+}
+
+function SecretUnlockForm({
   onUnlocked = () => window.location.reload(),
   requiresRestart = false,
   initialError,
