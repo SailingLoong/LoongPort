@@ -26,6 +26,12 @@ pub(crate) struct RecoveryEvidence {
     device: DeviceStore,
 }
 impl RecoveryEvidence {
+    pub(super) fn from_publication_intent(device: &DeviceStore, intent: Vec<u8>) -> Self {
+        Self {
+            records: [None, None, Some(intent), None],
+            device: device.clone(),
+        }
+    }
     fn capture(root: &Path, device: &DeviceStore) -> Result<Self, AppError> {
         Ok(Self {
             records: Self::records(root)?,
@@ -92,11 +98,19 @@ impl RecoveryEvidence {
         }
         let inspected = inspect(root, &self.device)?;
         inspected.verify_unchanged(root)?;
-        if inspected.future_version().is_some() {
+        let resumed_database = inspected.is_database_resume_candidate();
+        if inspected.future_version().is_some() && !resumed_database {
             return Err(AppError::Config("upgrade.future_version".into()));
         }
         let vault = session::authenticate_existing(root, store, Some(password))?;
-        inspected.validate_device_state(&vault)?;
+        if resumed_database {
+            // The original published checkpoint authenticates the whole
+            // inventory. Future/pending app facts remain isolated and are
+            // neither decoded as a default mode nor replayed by DB recovery.
+            checkpoint::verified_database_id(root, &self.device, &vault)?.ok_or_else(changed)?;
+        } else {
+            inspected.validate_device_state(&vault)?;
+        }
         inspected.validate_database(root, &vault)?;
         inspected.verify_unchanged(root)?;
         Ok(inspected)

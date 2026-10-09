@@ -30,7 +30,7 @@ export function SecretUnlock(props: {
   return <SecretUnlockForm {...props} />;
 }
 
-function SecretUnlockForm({
+export function SecretUnlockForm({
   onUnlocked = () => window.location.reload(),
   requiresRestart = false,
   initialError,

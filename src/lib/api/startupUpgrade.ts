@@ -38,6 +38,11 @@ export const startupUpgradeApi = {
       expectedReviewToken,
       expectedCheckpointId,
     }),
+  publish: (expectedReviewToken: string, expectedCheckpointId: string) =>
+    invoke<StartupUpgradeReview>("publish_startup_upgrade_checkpoint", {
+      expectedReviewToken,
+      expectedCheckpointId,
+    }),
   queryApp: (expectedReviewToken: string, appType: UpgradeApp) =>
     invoke<UpgradeAppReview>("review_startup_upgrade_app", {
       expectedReviewToken,

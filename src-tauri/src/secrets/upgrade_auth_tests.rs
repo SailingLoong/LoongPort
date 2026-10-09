@@ -338,7 +338,7 @@ fn upgrade_checkpoint_action_is_explicit_token_bound_and_idempotent() {
     let completed = review.prepare_checkpoint(&mut inspected, &token).unwrap();
     assert_eq!(completed.status, "checkpoint_ready");
     assert!(completed.checkpoint_id.is_some());
-    assert!(!completed.can_check_and_backup && !completed.can_start_upgrade);
+    assert!(!completed.can_check_and_backup && completed.can_start_upgrade);
     let after = snapshot(f.home.path());
     let repeated = review.prepare_checkpoint(&mut inspected, &token).unwrap();
     assert_eq!(completed.checkpoint_id, repeated.checkpoint_id);
@@ -1141,14 +1141,20 @@ fn upgrade_database_publication_recovers_through_original_generation_boundaries(
             rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
             session,
         );
-        let result =
-            checkpoint::publish_database_with_hook(&db, &f.device, &keys, &id, &mut |at| {
+        let result = checkpoint::publish_database_with_hook(
+            &db,
+            &f.device,
+            &keys,
+            &id,
+            &mut |at| {
                 if at == boundary {
                     Err(AppError::Config("synthetic.interruption".into()))
                 } else {
                     Ok(())
                 }
-            });
+            },
+            None,
+        );
         assert!(
             matches!(result, Err(AppError::Config(ref code)) if code == "synthetic.interruption"),
             "must reach original {boundary:?} boundary: {result:?}"
@@ -1159,8 +1165,15 @@ fn upgrade_database_publication_recovers_through_original_generation_boundaries(
                 std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
                 source_checkpoint
             );
-            checkpoint::publish_database_with_hook(&db, &f.device, &keys, &id, &mut |_| Ok(()))
-                .unwrap();
+            checkpoint::publish_database_with_hook(
+                &db,
+                &f.device,
+                &keys,
+                &id,
+                &mut |_| Ok(()),
+                None,
+            )
+            .unwrap();
         } else {
             assert!(f.root.join(transition::INTENT).exists());
             drop(db);
@@ -1206,8 +1219,12 @@ fn upgrade_publication_keeps_intent_when_late_inputs_change() {
         let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
         let db_path = f.root.join(crate::config::DB_FILE_NAME);
         let db = Database::from_connection(rusqlite::Connection::open(&db_path).unwrap(), session);
-        let result =
-            checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+        let result = checkpoint::publish_database_with_hook(
+            &db,
+            &f.device,
+            &f.store,
+            &id,
+            &mut |at| {
                 if database_changed && at == Checkpoint::Keys {
                     let conn = rusqlite::Connection::open(&db_path).unwrap();
                     conn.execute(
@@ -1219,7 +1236,9 @@ fn upgrade_publication_keeps_intent_when_late_inputs_change() {
                     std::fs::write(&client, br#"{"later":"preserve"}"#).unwrap();
                 }
                 Ok(())
-            });
+            },
+            None,
+        );
         assert!(
             result.is_err(),
             "late changes cannot erase the original publication intent"
@@ -1277,16 +1296,21 @@ fn upgrade_recovery_rejects_missing_or_inconsistent_stage() {
         let source_cp = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
         let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
         let db = Database::from_connection(rusqlite::Connection::open(&db_path).unwrap(), session);
-        assert!(
-            checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+        assert!(checkpoint::publish_database_with_hook(
+            &db,
+            &f.device,
+            &f.store,
+            &id,
+            &mut |at| {
                 if at == Checkpoint::Intent {
                     Err(AppError::Config("synthetic.interruption".into()))
                 } else {
                     Ok(())
                 }
-            })
-            .is_err()
-        );
+            },
+            None
+        )
+        .is_err());
         drop(db);
         let intent_path = f.root.join(transition::INTENT);
         let mut intent: serde_json::Value =
@@ -1372,6 +1396,7 @@ fn upgrade_checkpoint_replacement_is_bound_to_the_authenticated_ciphertext() {
             })
         },
         &mut |_| Ok(()),
+        None,
     );
     assert!(matches!(result, Err(AppError::Config(ref code)) if code == "upgrade.source_changed"));
     assert_eq!(std::fs::read(&cp_path).unwrap(), later_bytes);
@@ -1395,10 +1420,15 @@ fn upgrade_publication_refuses_memory_target() {
         memory,
         session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
     );
-    assert!(
-        checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(()))
-            .is_err()
-    );
+    assert!(checkpoint::publish_database_with_hook(
+        &db,
+        &f.device,
+        &f.store,
+        &id,
+        &mut |_| Ok(()),
+        None
+    )
+    .is_err());
     assert!(!f.root.join(crate::secrets::transition::INTENT).exists());
     assert_eq!(
         std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
@@ -1419,24 +1449,31 @@ fn upgrade_publication_keeps_intent_after_atomic_database_replacement() {
         rusqlite::Connection::open(&path).unwrap(),
         session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
     );
-    let result = checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
-        if at == Checkpoint::Keys {
-            let replacement = f.root.join("synthetic-replacement.db");
-            let source = rusqlite::Connection::open(&path).unwrap();
-            let mut target = rusqlite::Connection::open(&replacement).unwrap();
-            database::vault::copy(&source, &mut target).unwrap();
-            target
-                .execute(
-                    "INSERT INTO settings(key,value) VALUES('synthetic-replaced','preserve')",
-                    [],
-                )
-                .unwrap();
-            drop(target);
-            drop(source);
-            std::fs::rename(replacement, &path).unwrap();
-        }
-        Ok(())
-    });
+    let result = checkpoint::publish_database_with_hook(
+        &db,
+        &f.device,
+        &f.store,
+        &id,
+        &mut |at| {
+            if at == Checkpoint::Keys {
+                let replacement = f.root.join("synthetic-replacement.db");
+                let source = rusqlite::Connection::open(&path).unwrap();
+                let mut target = rusqlite::Connection::open(&replacement).unwrap();
+                database::vault::copy(&source, &mut target).unwrap();
+                target
+                    .execute(
+                        "INSERT INTO settings(key,value) VALUES('synthetic-replaced','preserve')",
+                        [],
+                    )
+                    .unwrap();
+                drop(target);
+                drop(source);
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            Ok(())
+        },
+        None,
+    );
     assert!(
         result.is_err(),
         "publication must read back the current path, not an obsolete SQLite handle"
@@ -1516,14 +1553,20 @@ fn upgrade_database_handoff_is_durable_without_freezing_later_app_changes() {
         checkpoint::verified_database_id(&f.root, &f.device, &f.vault).unwrap(),
         None
     );
-    let interrupted =
-        checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |at| {
+    let interrupted = checkpoint::publish_database_with_hook(
+        &db,
+        &f.device,
+        &f.store,
+        &id,
+        &mut |at| {
             if at == Checkpoint::Keys {
                 Err(AppError::Config("synthetic.interruption".into()))
             } else {
                 Ok(())
             }
-        });
+        },
+        None,
+    );
     assert!(interrupted.is_err());
     assert!(
         checkpoint::verified_database_id(&f.root, &f.device, &f.vault).is_err(),
@@ -2092,7 +2135,8 @@ fn upgrade_checkpoint_cancel_rejects_published_database_without_cleanup() {
         source,
         session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
     );
-    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(())).unwrap();
+    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(()), None)
+        .unwrap();
     let before = snapshot(f.home.path());
     assert!(review
         .cancel_checkpoint(&mut inspected, &token, &id)
@@ -2129,8 +2173,413 @@ fn publish_resume_fixture(f: &Fixture) -> String {
         rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
         session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
     );
-    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(())).unwrap();
+    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(()), None)
+        .unwrap();
     id
+}
+
+#[test]
+#[serial_test::serial]
+fn authenticated_explicit_database_publication_reuses_original_checkpoint_and_session() {
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    let id = review
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let before = snapshot(f.home.path());
+    assert!(review
+        .publish_checkpoint(&mut inspected, "stale-token", &id, &f.store)
+        .is_err());
+    assert!(review
+        .publish_checkpoint(&mut inspected, &token, "stale-checkpoint", &f.store)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let client_bytes = review
+        .inputs
+        .iter()
+        .map(|input| (input.path.clone(), std::fs::read(&input.path).ok()))
+        .collect::<Vec<_>>();
+    let vault_bytes = std::fs::read(f.root.join("vault.json")).unwrap();
+    let view = review
+        .publish_checkpoint(&mut inspected, &token, &id, &ExistingKeysOnly(&f.store))
+        .unwrap();
+    assert_eq!(view.status, "database_verified");
+    assert_eq!(view.checkpoint_id.as_deref(), Some(id.as_str()));
+    assert_ne!(view.review_token.as_deref(), Some(token.as_str()));
+    assert_eq!(
+        std::fs::read(f.root.join("vault.json")).unwrap(),
+        vault_bytes
+    );
+    assert!(review.inputs.is_empty());
+    for (path, bytes) in client_bytes {
+        assert_eq!(std::fs::read(path).ok(), bytes);
+    }
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault)
+            .unwrap()
+            .as_deref(),
+        Some(id.as_str())
+    );
+    assert!(inspected.ensure_runtime_admitted().is_err());
+    let before = snapshot(f.home.path());
+    assert!(review
+        .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+        .is_err());
+    assert!(review
+        .cancel_checkpoint(&mut inspected, view.review_token.as_ref().unwrap(), &id)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[test]
+#[serial_test::serial]
+fn authenticated_database_publication_interruption_queries_and_recovers_original_intent() {
+    for boundary in [
+        crate::secrets::transition::Checkpoint::Database,
+        crate::secrets::transition::Checkpoint::Keys,
+    ] {
+        let mut f = Fixture::new();
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-recovery-password", true)
+            .unwrap();
+        drop(db);
+        f.vault =
+            session::authenticate_existing(&f.root, &f.store, Some("synthetic-recovery-password"))
+                .unwrap();
+        f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct"},"codex":{"mode":"future-mode","pending":{"op":"future-op","opaque":true}}}}"#);
+        let state_bytes = std::fs::read(f.device.state_path()).unwrap();
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        let before_rotation = snapshot(f.home.path());
+        assert!(crate::secrets::transition::rotate(
+            &db,
+            &f.store,
+            "synthetic-new-key-password",
+            false,
+        )
+        .is_err());
+        assert_eq!(snapshot(f.home.path()), before_rotation);
+        drop(db);
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let id = review
+            .prepare_checkpoint(&mut inspected, &token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        let result = review.publish_checkpoint_with_hook(
+            &mut inspected,
+            &token,
+            &id,
+            &ExistingKeysOnly(&f.store),
+            &mut |at| {
+                if at == boundary {
+                    Err(AppError::Config(
+                        "synthetic.lost-publication-response".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(
+            matches!(&result, Err(AppError::Config(code)) if code == "synthetic.lost-publication-response"),
+            "original boundary {boundary:?} not reached: {:?}",
+            result.as_ref().err()
+        );
+        let before = snapshot(f.home.path());
+        let view = review.view(&inspected).unwrap();
+        assert_eq!(view.status, "recovery_required");
+        assert!(!view.can_start_upgrade && !view.can_check_and_backup);
+        assert!(review
+            .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        let UpgradeInspection::RecoveryRequired(evidence) = &inspected else {
+            panic!("original intent must remain");
+        };
+        let recovery_token = evidence.token();
+        assert!(evidence
+            .recover(
+                &f.root,
+                "stale-recovery-token",
+                &f.store,
+                "synthetic-recovery-password"
+            )
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(evidence
+            .recover(
+                &f.root,
+                &recovery_token,
+                &f.store,
+                "synthetic-wrong-password"
+            )
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        let recovered = evidence
+            .recover(
+                &f.root,
+                &recovery_token,
+                &ExistingKeysOnly(&f.store),
+                "synthetic-recovery-password",
+            )
+            .unwrap();
+        assert!(recovered.is_database_resume_candidate());
+        assert!(recovered.ensure_runtime_admitted().is_err());
+        assert_eq!(std::fs::read(f.device.state_path()).unwrap(), state_bytes);
+        assert_eq!(
+            checkpoint::verified_database_id(&f.root, &f.device, &f.vault)
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str())
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn authenticated_database_coordinator_reuses_original_recovery_after_publication_failure() {
+    let mut f = Fixture::new();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-recovery-password", true)
+        .unwrap();
+    drop(db);
+    f.vault =
+        session::authenticate_existing(&f.root, &f.store, Some("synthetic-recovery-password"))
+            .unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let id = coordinator
+        .prepare_upgrade_checkpoint(&token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let result = coordinator.publish_upgrade_checkpoint_with_hook(
+        &token,
+        &id,
+        &ExistingKeysOnly(&f.store),
+        Some(&mut |at| {
+            if at == crate::secrets::transition::Checkpoint::Keys {
+                Err(AppError::Config(
+                    "synthetic.lost-publication-response".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }),
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        coordinator.upgrade_view().unwrap().status,
+        "recovery_required"
+    );
+    let before = snapshot(f.home.path());
+    let recovery = serde_json::to_value(coordinator.recovery_view().unwrap()).unwrap();
+    assert_eq!(recovery["status"], "pending");
+    assert_eq!(recovery["canRecover"], true);
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(coordinator
+        .recover_operation(
+            "stale-recovery-token",
+            "synthetic-recovery-password",
+            &f.store
+        )
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let result = coordinator
+        .recover_operation(
+            recovery["token"].as_str().unwrap(),
+            "synthetic-recovery-password",
+            &ExistingKeysOnly(&f.store),
+        )
+        .unwrap();
+    let completed = serde_json::to_value(result).unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["canRecover"], false);
+    assert_eq!(completed["restartRequired"], true);
+    assert!(coordinator.verify_runtime_admission_blocked());
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault)
+            .unwrap()
+            .as_deref(),
+        Some(id.as_str())
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn authenticated_database_coordinator_does_not_capture_recovery_before_its_intent() {
+    for foreign in [false, true] {
+        let f = Fixture::new();
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let id = coordinator
+            .prepare_upgrade_checkpoint(&token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        let checkpoint_bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        assert!(coordinator
+            .publish_upgrade_checkpoint_with_hook(
+                &token,
+                &id,
+                &f.store,
+                Some(&mut |at| {
+                    if at == crate::secrets::transition::Checkpoint::Staged {
+                        if foreign {
+                            std::fs::write(
+                                f.root.join(crate::secrets::transition::INTENT),
+                                b"synthetic-foreign-intent",
+                            )
+                            .unwrap();
+                        }
+                        return Err(AppError::Config("synthetic.before-original-intent".into()));
+                    }
+                    Ok(())
+                }),
+            )
+            .is_err());
+        assert_eq!(
+            Database::get_user_version(
+                &rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap()
+            )
+            .unwrap(),
+            17
+        );
+        assert_eq!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+            checkpoint_bytes
+        );
+        assert!(
+            matches!(coordinator.recovery_view(), Err(ref code) if code == "secret.no_pending_operation")
+        );
+        let before = snapshot(f.home.path());
+        if foreign {
+            assert!(coordinator.upgrade_view().is_err());
+            let UpgradeInspection::RecoveryRequired(evidence) =
+                inspect(&f.root, &f.device).unwrap()
+            else {
+                panic!("foreign intent must remain");
+            };
+            assert!(coordinator
+                .recover_operation(&evidence.token(), "synthetic-password", &f.store)
+                .is_err());
+            assert!(coordinator
+                .publish_upgrade_checkpoint(&token, &id, &f.store)
+                .is_err());
+            assert!(coordinator.authenticate_upgrade(None, &f.store).is_err());
+        } else {
+            assert_eq!(
+                coordinator.upgrade_view().unwrap().status,
+                "checkpoint_ready"
+            );
+            assert!(!f.root.join(crate::secrets::transition::INTENT).exists());
+        }
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn authenticated_database_coordinator_never_adopts_replaced_or_additional_journals() {
+    for replace in [true, false] {
+        let f = Fixture::new();
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let id = coordinator
+            .prepare_upgrade_checkpoint(&token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        let mut original = Vec::new();
+        assert!(coordinator
+            .publish_upgrade_checkpoint_with_hook(
+                &token,
+                &id,
+                &f.store,
+                Some(&mut |at| {
+                    if at != crate::secrets::transition::Checkpoint::Intent {
+                        return Ok(());
+                    }
+                    let path = f.root.join(crate::secrets::transition::INTENT);
+                    original = std::fs::read(&path).unwrap();
+                    if replace {
+                        let mut intent: serde_json::Value =
+                            serde_json::from_slice(&original).unwrap();
+                        intent["id"] = serde_json::json!("synthetic-different-operation");
+                        std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+                    } else {
+                        std::fs::write(f.root.join(".vault-rewrap"), b"{}").unwrap();
+                    }
+                    Err(AppError::Config(
+                        "synthetic.lost-publication-response".into(),
+                    ))
+                }),
+            )
+            .is_err());
+        assert!(!original.is_empty());
+        let before = snapshot(f.home.path());
+        let recovery = serde_json::to_value(coordinator.recovery_view().unwrap()).unwrap();
+        assert_eq!(recovery["status"], "verification_required");
+        assert_eq!(recovery["canRecover"], false);
+        let UpgradeInspection::RecoveryRequired(current) = inspect(&f.root, &f.device).unwrap()
+        else {
+            panic!("foreign journal must remain");
+        };
+        // Neither the current foreign token nor the owner's retained token may
+        // replay another operation. Queries and refusals preserve all bytes.
+        assert!(coordinator
+            .recover_operation(&current.token(), "synthetic-password", &f.store)
+            .is_err());
+        assert!(coordinator
+            .recover_operation(
+                recovery["token"].as_str().unwrap(),
+                "synthetic-password",
+                &f.store
+            )
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
 }
 
 #[cfg_attr(test, test)]

@@ -4541,6 +4541,7 @@
     "appQueryFailed": "此應用待核對。其他應用可繼續單獨檢查或受控恢復。",
     "authenticate": "解鎖並核對",
     "checkBackup": "檢查並備份",
+    "start": "開始升級",
     "cancel": "放棄未發布的升級",
     "recheck": "重新檢查原操作",
     "recover": "查看並受控恢復",

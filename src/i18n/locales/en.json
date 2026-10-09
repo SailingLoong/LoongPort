@@ -4540,6 +4540,7 @@
     "appQueryFailed": "This app needs verification. Other apps can be checked or recovered independently.",
     "authenticate": "Unlock and review",
     "checkBackup": "Check and back up",
+    "start": "Start upgrade",
     "cancel": "Abandon unpublished upgrade",
     "recheck": "Recheck original operation",
     "recover": "Review and recover",

@@ -3,7 +3,10 @@
 #[cfg(feature = "gui")]
 use super::key_store::SystemKeyStore;
 use super::session::SecretSession;
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
 #[cfg(feature = "gui")]
 use tauri::{Emitter, Manager};
 
@@ -20,21 +23,20 @@ enum Phase {
 pub(crate) struct StartupCoordinator {
     root: PathBuf,
     inspection: Mutex<super::upgrade::UpgradeInspection>,
-    recovery_token: Option<String>,
+    recovery_token: OnceLock<String>,
     phase: Mutex<Phase>,
     upgrade_review: Mutex<Option<super::upgrade::AuthenticatedUpgrade>>,
 }
 
 impl StartupCoordinator {
     pub(crate) fn new(root: PathBuf, inspection: super::upgrade::UpgradeInspection) -> Self {
+        let recovery_token = OnceLock::new();
+        if let super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = &inspection {
+            let _ = recovery_token.set(evidence.token());
+        }
         Self {
             root,
-            recovery_token: match &inspection {
-                super::upgrade::UpgradeInspection::RecoveryRequired(evidence) => {
-                    Some(evidence.token())
-                }
-                _ => None,
-            },
+            recovery_token,
             inspection: Mutex::new(inspection),
             phase: Mutex::new(Phase::Locked),
             upgrade_review: Mutex::new(None),
@@ -242,6 +244,54 @@ impl StartupCoordinator {
             .map_err(super::error::public_code)
     }
 
+    pub(super) fn publish_upgrade_checkpoint(
+        &self,
+        token: &str,
+        id: &str,
+        store: &dyn super::key_store::KeyStore,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        self.publish_upgrade_checkpoint_with_hook(token, id, store, None)
+    }
+
+    pub(super) fn publish_upgrade_checkpoint_with_hook(
+        &self,
+        token: &str,
+        id: &str,
+        store: &dyn super::key_store::KeyStore,
+        hook: Option<
+            &mut dyn FnMut(super::transition::Checkpoint) -> Result<(), crate::error::AppError>,
+        >,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::UpgradeReview {
+            return Err("secret.locked".into());
+        }
+        let mut inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let mut review = self
+            .upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let review = review.as_mut().ok_or("secret.startup_unavailable")?;
+        let result = match hook {
+            Some(hook) => {
+                review.publish_checkpoint_with_hook(&mut inspection, token, id, store, hook)
+            }
+            None => review.publish_checkpoint(&mut inspection, token, id, store),
+        };
+        if let super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = &*inspection {
+            // This evidence contains the actual intent retained by the original
+            // publication owner, even when current journal bytes differ.
+            let _ = self.recovery_token.set(evidence.token());
+        }
+        result.map_err(super::error::public_code)
+    }
+
     pub(super) fn review_upgrade_ownership(
         &self,
         token: &str,
@@ -333,7 +383,7 @@ impl StartupCoordinator {
             .unwrap_or(true)
     }
 
-    fn recovery_view(&self) -> Result<StartupRecoveryView, String> {
+    pub(super) fn recovery_view(&self) -> Result<StartupRecoveryView, String> {
         let phase = self
             .phase
             .lock()
@@ -344,14 +394,14 @@ impl StartupCoordinator {
             .map_err(|_| "secret.startup_unavailable")?;
         let token = self
             .recovery_token
-            .clone()
+            .get()
+            .cloned()
             .ok_or("secret.no_pending_operation")?;
         let (status, can_recover, restart_required) = match (&*inspection, *phase) {
-            (super::upgrade::UpgradeInspection::RecoveryRequired(evidence), Phase::Locked)
-                if evidence.verify_unchanged(&self.root, &token).is_ok() =>
-            {
-                ("pending", true, false)
-            }
+            (
+                super::upgrade::UpgradeInspection::RecoveryRequired(evidence),
+                Phase::Locked | Phase::UpgradeReview,
+            ) if evidence.verify_unchanged(&self.root, &token).is_ok() => ("pending", true, false),
             (super::upgrade::UpgradeInspection::Stable(_), Phase::Recovered)
                 if inspection.verify_unchanged(&self.root).is_ok() =>
             {
@@ -367,7 +417,7 @@ impl StartupCoordinator {
         })
     }
 
-    fn recover_operation(
+    pub(super) fn recover_operation(
         &self,
         token: &str,
         password: &str,
@@ -377,8 +427,11 @@ impl StartupCoordinator {
             .phase
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        if *phase != Phase::Locked {
+        if !matches!(*phase, Phase::Locked | Phase::UpgradeReview) {
             return Err("secret.restart_required".into());
+        }
+        if self.recovery_token.get().map(String::as_str) != Some(token) {
+            return Err("upgrade.source_changed".into());
         }
         let mut inspection = self
             .inspection
@@ -508,6 +561,27 @@ pub(crate) async fn cancel_startup_upgrade_checkpoint(
             .try_state::<StartupCoordinator>()
             .ok_or("secret.startup_unavailable")?;
         coordinator.cancel_upgrade_checkpoint(&expected_review_token, &expected_checkpoint_id)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn publish_startup_upgrade_checkpoint(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+    expected_checkpoint_id: String,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?
+            .publish_upgrade_checkpoint(
+                &expected_review_token,
+                &expected_checkpoint_id,
+                &SystemKeyStore,
+            )
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?

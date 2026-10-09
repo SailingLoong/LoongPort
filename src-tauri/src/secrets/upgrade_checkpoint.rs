@@ -495,6 +495,7 @@ pub(super) fn publish_database_with_hook(
     store: &dyn crate::secrets::key_store::KeyStore,
     id: &str,
     hook: &mut dyn FnMut(crate::secrets::transition::Checkpoint) -> Result<(), AppError>,
+    original_intent: Option<&mut Option<Vec<u8>>>,
 ) -> Result<(), AppError> {
     let root = db.secret_session().root();
     crate::secrets::transition::install_upgrade_database(
@@ -528,6 +529,7 @@ pub(super) fn publish_database_with_hook(
             })
         },
         hook,
+        original_intent,
     )
 }
 

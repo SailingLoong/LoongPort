@@ -4540,6 +4540,7 @@
     "appQueryFailed": "此应用待核对。其他应用可继续单独检查或受控恢复。",
     "authenticate": "解锁并核对",
     "checkBackup": "检查并备份",
+    "start": "开始升级",
     "cancel": "放弃未发布的升级",
     "recheck": "重新检查原操作",
     "recover": "查看并受控恢复",

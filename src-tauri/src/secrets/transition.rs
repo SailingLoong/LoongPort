@@ -340,6 +340,7 @@ pub(crate) fn install_upgrade_database<F>(
     prepare_database: F,
     checkpoint: &mut UpgradeCheckpointBuilder<'_>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    original_intent: Option<&mut Option<Vec<u8>>>,
 ) -> Result<(), AppError>
 where
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
@@ -358,6 +359,7 @@ where
         device_root,
         Some(checkpoint),
         hook,
+        original_intent,
     )
 }
 
@@ -418,6 +420,7 @@ where
         device_root,
         None,
         hook,
+        None,
     )
 }
 
@@ -432,6 +435,7 @@ fn install_with_roots_scoped<N, F>(
     device_root: &Path,
     mut upgrade: Option<&mut UpgradeCheckpointBuilder<'_>>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    original_intent: Option<&mut Option<Vec<u8>>>,
 ) -> Result<(), AppError>
 where
     N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
@@ -445,7 +449,12 @@ where
         device: device_root,
     };
     roots.validate()?;
-    device::ensure_no_pending_mode_operation(roots, &current)?;
+    // The upgrade seam preserves the exact Vault generation and device
+    // ciphertext. Pending app facts stay with their original owners; only a
+    // generation-changing install could strand their encrypted staging.
+    if upgrade.is_none() {
+        device::ensure_no_pending_mode_operation(roots, &current)?;
+    }
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
         if regular_file(&root.join(name))? {
@@ -702,6 +711,11 @@ where
     let bytes = serde_json::to_vec(&intent).map_err(|_| invalid())?;
     session.set_blocked(true);
     write_durable(&root.join(INTENT), &bytes)?;
+    if let Some(original) = original_intent {
+        // The existing publication owner retains its actual serialized intent
+        // before any interruption hook; never recapture an unrelated journal.
+        *original = Some(bytes);
+    }
     hook(Checkpoint::Intent)?;
     finish(
         roots,

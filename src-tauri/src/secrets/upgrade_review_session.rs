@@ -250,6 +250,81 @@ impl AuthenticatedUpgrade {
         self.prepare_checkpoint_with_hook(inspected, token, &mut |_| Ok(()))
     }
 
+    pub(crate) fn publish_checkpoint(
+        &mut self,
+        inspected: &mut UpgradeInspection,
+        token: &str,
+        id: &str,
+        store: &dyn KeyStore,
+    ) -> Result<StartupUpgradeView, AppError> {
+        self.publish_checkpoint_with_hook(inspected, token, id, store, &mut |_| Ok(()))
+    }
+
+    pub(in crate::secrets) fn publish_checkpoint_with_hook(
+        &mut self,
+        inspected: &mut UpgradeInspection,
+        token: &str,
+        id: &str,
+        store: &dyn KeyStore,
+        hook: &mut dyn FnMut(super::super::transition::Checkpoint) -> Result<(), AppError>,
+    ) -> Result<StartupUpgradeView, AppError> {
+        if token != self.token || self.cancellation.is_some() || self.database_checkpoint.is_some()
+        {
+            return Err(source_changed());
+        }
+        let view = self.view(inspected)?;
+        if view.checkpoint_id.as_deref() != Some(id) {
+            return Err(source_changed());
+        }
+        let path = self.root.join(crate::config::DB_FILE_NAME);
+        let connection = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        self.verify(inspected)?;
+        let db = Database::from_connection(connection, self.session.clone());
+        let mut original_intent = None;
+        let published = checkpoint::publish_database_with_hook(
+            &db,
+            &self.device,
+            store,
+            id,
+            hook,
+            Some(&mut original_intent),
+        );
+        drop(db);
+        // Fresh inspection may detect a foreign journal. Only the actual bytes
+        // retained by this publication owner can enter its recovery holder.
+        let fresh = inspect(&self.root, &self.device)?;
+        if fresh.is_recovery_required() {
+            let original = original_intent.ok_or_else(source_changed)?;
+            let evidence = RecoveryEvidence::from_publication_intent(&self.device, original);
+            let unchanged = evidence.verify_unchanged(&self.root, &evidence.token());
+            *inspected = UpgradeInspection::RecoveryRequired(evidence);
+            unchanged?;
+            return Err(published.err().unwrap_or_else(source_changed));
+        }
+        if fresh.is_database_resume_candidate() {
+            let vault = self.session.read()?;
+            if checkpoint::verified_database_id(&self.root, &self.device, &vault)?.as_deref()
+                != Some(id)
+            {
+                return Err(source_changed());
+            }
+            drop(vault);
+            self.database_checkpoint = Some(id.to_owned());
+            self.inputs.clear();
+            self.token = uuid::Uuid::new_v4().to_string();
+            *inspected = fresh;
+            self.verify(inspected)?;
+        }
+        published?;
+        if self.database_checkpoint.as_deref() != Some(id) {
+            return Err(source_changed());
+        }
+        self.view(inspected)
+    }
+
     pub(super) fn prepare_checkpoint_with_hook(
         &mut self,
         inspected: &mut UpgradeInspection,
@@ -488,6 +563,9 @@ impl AuthenticatedUpgrade {
         &self,
         inspected: &UpgradeInspection,
     ) -> Result<StartupUpgradeView, AppError> {
+        if inspected.is_recovery_required() {
+            return inspected.upgrade_view(&self.root);
+        }
         if let Some(id) = &self.database_checkpoint {
             self.verify(inspected)?;
             let mut view = StartupUpgradeView::blocked("database_verified");
@@ -540,7 +618,7 @@ impl AuthenticatedUpgrade {
         view.requires_authentication = false;
         view.can_authenticate = false;
         view.can_check_and_backup = view.checkpoint_id.is_none();
-        view.can_start_upgrade = false;
+        view.can_start_upgrade = view.checkpoint_id.is_some();
         view.review_token = Some(self.token.clone());
         Ok(view)
     }

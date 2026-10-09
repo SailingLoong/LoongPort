@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { exit } from "@tauri-apps/plugin-process";
+import { SecretUnlockForm } from "@/components/SecretUnlock";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -180,7 +181,8 @@ export function StartupUpgrade() {
   }, []);
 
   async function act(
-    action: "query" | "authenticate" | "prepare" | "cancel" | "exit",
+    action:
+      "query" | "authenticate" | "prepare" | "publish" | "cancel" | "exit",
   ) {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -206,6 +208,16 @@ export function StartupUpgrade() {
       ) {
         next = await startupUpgradeApi.prepare(view.reviewToken);
       } else if (
+        action === "publish" &&
+        canPublish &&
+        view?.reviewToken &&
+        view.checkpointId
+      ) {
+        next = await startupUpgradeApi.publish(
+          view.reviewToken,
+          view.checkpointId,
+        );
+      } else if (
         action === "cancel" &&
         canCancel &&
         view?.reviewToken &&
@@ -228,6 +240,12 @@ export function StartupUpgrade() {
     }
   }
   const published = view?.status === "database_verified";
+  const canPublish =
+    view?.status === "checkpoint_ready" &&
+    view.canStartUpgrade === true &&
+    view.checkpointPresent &&
+    !!view.reviewToken &&
+    !!view.checkpointId;
   const canCancel =
     !!view?.reviewToken &&
     !!view.checkpointId &&
@@ -239,6 +257,9 @@ export function StartupUpgrade() {
       : published
         ? "startupUpgrade.databaseOnly"
         : "startupUpgrade.verificationRequired";
+  if (view?.status === "recovery_required") {
+    return <SecretUnlockForm initialError="secret.recovery_required" />;
+  }
   return (
     <main className="min-h-screen bg-background p-6 text-foreground">
       <div className="mx-auto max-w-3xl space-y-5 rounded-xl border bg-card p-6 shadow-sm">
@@ -296,6 +317,11 @@ export function StartupUpgrade() {
               onClick={() => void act("cancel")}
             >
               {t("startupUpgrade.cancel")}
+            </Button>
+          )}
+          {canPublish && (
+            <Button disabled={busy} onClick={() => void act("publish")}>
+              {t("startupUpgrade.start")}
             </Button>
           )}
         </div>

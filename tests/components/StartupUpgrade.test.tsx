@@ -65,6 +65,145 @@ function serve(view = review(), overrides: Record<string, object> = {}) {
 }
 
 describe("StartupUpgrade", () => {
+  it("uses the original recovery form after publication leaves a generation intent", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "get_startup_upgrade_review")
+        return review({ status: "recovery_required" });
+      if (command === "get_startup_recovery")
+        return {
+          token: "synthetic-original-recovery",
+          status: "pending",
+          canRecover: true,
+          restartRequired: false,
+        };
+      if (command === "recover_startup_operation")
+        return {
+          token: "synthetic-original-recovery",
+          status: "completed",
+          canRecover: false,
+          restartRequired: true,
+        };
+      throw new Error("synthetic unexpected command");
+    });
+    render(<StartupUpgrade />);
+    await screen.findByRole("heading", { name: "secrets.recoveryTitle" });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("get_startup_recovery"),
+    );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "recover_startup_operation",
+      expect.anything(),
+    );
+    fireEvent.change(screen.getByLabelText("secrets.password"), {
+      target: { value: "synthetic-recovery-password" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "secrets.resumeRecovery" }),
+    );
+    await screen.findByRole("button", { name: "secrets.restart" });
+    expect(invoke).toHaveBeenCalledWith("recover_startup_operation", {
+      token: "synthetic-original-recovery",
+      password: "synthetic-recovery-password",
+    });
+    expect(invoke).not.toHaveBeenCalledWith("restart_app");
+    expect(invoke).not.toHaveBeenCalledWith(
+      "publish_startup_upgrade_checkpoint",
+      expect.anything(),
+    );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "cancel_startup_upgrade_checkpoint",
+      expect.anything(),
+    );
+  });
+
+  it("publishes only on an explicit checkpoint-bound click and coalesces duplicates", async () => {
+    const prepared = review({
+      status: "checkpoint_ready",
+      canStartUpgrade: true,
+    });
+    let finish!: (value: ReturnType<typeof review>) => void;
+    const response = new Promise<ReturnType<typeof review>>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "get_startup_upgrade_review") return prepared;
+      if (command === "publish_startup_upgrade_checkpoint") return response;
+      if (command === "review_startup_upgrade_app")
+        return appReview((args as { appType: string }).appType);
+      throw new Error("synthetic unexpected command");
+    });
+    render(<StartupUpgrade />);
+    const button = await screen.findByRole("button", {
+      name: "startupUpgrade.start",
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "publish_startup_upgrade_checkpoint",
+        ),
+    ).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledWith("publish_startup_upgrade_checkpoint", {
+      expectedReviewToken: "synthetic-review",
+      expectedCheckpointId: "synthetic-checkpoint",
+    });
+    finish(review({ reviewToken: "synthetic-published-review" }));
+    await screen.findByRole("region", { name: "Claude Code" });
+    expect(invoke).toHaveBeenCalledWith("review_startup_upgrade_app", {
+      expectedReviewToken: "synthetic-published-review",
+      appType: "claude",
+    });
+    expect(
+      screen.queryByRole("button", { name: "startupUpgrade.cancel" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+  });
+
+  it("queries a lost publication response without repeating publication or cancelling", async () => {
+    serve(review({ status: "checkpoint_ready", canStartUpgrade: true }));
+    render(<StartupUpgrade />);
+    const button = await screen.findByRole("button", {
+      name: "startupUpgrade.start",
+    });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "publish_startup_upgrade_checkpoint")
+        throw new Error("synthetic lost publication response");
+      if (command === "get_startup_upgrade_review")
+        return review({ reviewToken: "synthetic-reconciled-review" });
+      if (command === "review_startup_upgrade_app")
+        return appReview((args as { appType: string }).appType);
+      throw new Error("synthetic unexpected command");
+    });
+    fireEvent.click(button);
+    await screen.findByRole("region", { name: "Claude Code" });
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "publish_startup_upgrade_checkpoint",
+        ),
+    ).toHaveLength(1);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "get_startup_upgrade_review",
+        ),
+    ).toHaveLength(2);
+    expect(invoke).not.toHaveBeenCalledWith(
+      "cancel_startup_upgrade_checkpoint",
+      expect.anything(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "startupUpgrade.start" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("authenticates only after explicit input and clears the submitted password", async () => {
     serve(
       review({
