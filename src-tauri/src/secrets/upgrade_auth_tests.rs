@@ -2795,6 +2795,7 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
         "journal",
         "preference",
         "database",
+        "database-before-open",
         "flags",
         "cleanup-journal",
         "cleanup-preference",
@@ -2804,7 +2805,7 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
         published_pointer_fixture(&f);
         let path = f.root.join(crate::config::DB_FILE_NAME);
         let replacement = f.root.join("synthetic-replacement.db");
-        if scenario == "database" {
+        if scenario.starts_with("database") {
             let source = rusqlite::Connection::open(&path).unwrap();
             let mut copy = rusqlite::Connection::open(&replacement).unwrap();
             rusqlite::backup::Backup::new(&source, &mut copy)
@@ -2838,8 +2839,16 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
         let root = f.root.clone();
         let vault = f.vault.clone();
         let actual_path = path.clone();
+        let injected = std::rc::Rc::new(std::cell::Cell::new(false));
+        let injected_in_hook = injected.clone();
         crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
-            let expected_point = if scenario.starts_with("cleanup-") {
+            let expected_point = if scenario == "database-before-open"
+                || (cfg!(windows) && scenario == "database")
+            {
+                // SQLite holds a Windows handle without delete sharing while open.
+                // Keep the late replacement on Unix; inject real Windows drift before open.
+                "recover:database_open"
+            } else if scenario.starts_with("cleanup-") {
                 "recover:verified"
             } else {
                 "recover:target_committed"
@@ -2847,6 +2856,7 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
             if point != expected_point {
                 return;
             }
+            assert!(!injected_in_hook.replace(true), "injected more than once");
             let effect = scenario.strip_prefix("cleanup-").unwrap_or(scenario);
             match effect {
                 "attachment" | "journal" => {
@@ -2871,7 +2881,10 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
                         )
                         .unwrap();
                 }
-                "database" => std::fs::rename(&replacement, &actual_path).unwrap(),
+                "database" | "database-before-open" => {
+                    std::fs::rename(&replacement, &actual_path).unwrap();
+                    assert!(!replacement.exists());
+                }
                 "vault" => {
                     let path = root.join("vault.json");
                     let mut bytes = std::fs::read(&path).unwrap();
@@ -2899,6 +2912,20 @@ fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal
         })));
         let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
         crate::mode::operation::failpoint::on_boundary(None);
+        if !injected.get() {
+            missed.push(format!("{scenario}: drift was not injected"));
+        }
+        if scenario.starts_with("database") {
+            let db = Database::from_connection(
+                rusqlite::Connection::open(&path).unwrap(),
+                session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+            );
+            assert_eq!(
+                crate::proxy::auto_strategy::get_model_pref_checked(&db, "codex").unwrap(),
+                Some("synthetic-stale-preference".to_string()),
+                "{scenario}: replacement preference was cleared"
+            );
+        }
         if result.is_ok() {
             missed.push(format!("{scenario}: accepted drift"));
         }

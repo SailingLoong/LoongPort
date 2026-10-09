@@ -296,6 +296,7 @@ impl AuthenticatedUpgrade {
             let vault = self.session.read()?;
             self.verify_app_checkpoint_pinned(inspected, &vault)?;
             let path = self.root.join(crate::config::DB_FILE_NAME);
+            crate::mode::operation::failpoint::hit("recover:database_open")?;
             let db = Database::from_connection(
                 rusqlite::Connection::open_with_flags(
                     &path,
