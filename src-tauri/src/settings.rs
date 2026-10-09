@@ -2103,6 +2103,18 @@ pub fn get_effective_current_provider(
             return Ok(Some(local_id));
         }
 
+        // The original review owns an unresolved selection while its checkpoint
+        // is retained. A tray/query refresh must not repair away that evidence.
+        match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+            &crate::live::engine::DeviceStore::for_device(),
+        ) {
+            Ok(()) => {}
+            Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {
+                return Err(AppError::Config("mode.verification_required".into()));
+            }
+            Err(error) => return Err(error),
+        }
+
         // 3. 不存在，清理本地 settings
         log::warn!(
             "本地 settings 中的供应商 {} ({}) 在数据库中不存在，将清理并 fallback 到数据库",
@@ -2729,6 +2741,32 @@ mod u03_foreign_settings_tests {
             .expect("unowned peer settings survive")
             .get()
             .into()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_ordinary_effective_query_retains_original_stale_pointer_cleanup() {
+        let _home = fixture();
+        let session = unlocked_settings_store().unwrap().session.clone();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::Database::create_tables_on_conn(&conn).unwrap();
+        crate::database::Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        crate::database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+        let db = crate::database::Database::from_connection(conn, session);
+        assert!(get_effective_current_provider(&db, &AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert!(get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+        assert_eq!(foreign(), FOREIGN);
     }
 
     #[test]

@@ -1372,6 +1372,76 @@ mod upgrade_handoff_tests {
 
     #[test]
     #[serial_test::serial]
+    fn u03_tray_section_provider_conflicts_keep_reliable_peer_and_shared_refusal() {
+        let f = Fixture::new();
+        let session = f.session();
+        let path = crate::settings::settings_path();
+        let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        fields.insert(
+            "currentProviderCodex".into(),
+            serde_json::value::RawValue::from_string(r#"{"future":true}"#.into()).unwrap(),
+        );
+        std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = Database::init_with_secrets(session.clone()).unwrap();
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            crate::tray::tray_provider_selection(&db, &AppType::Codex).unwrap(),
+            crate::tray::TrayProviderSelection::RequiresReview
+        );
+        assert_eq!(
+            crate::tray::tray_provider_selection(&db, &AppType::Claude).unwrap(),
+            crate::tray::TrayProviderSelection::Ready(Some("a".into()))
+        );
+        assert_eq!(
+            crate::tray::tray_provider_selection(&db, &AppType::Gemini).unwrap(),
+            crate::tray::TrayProviderSelection::Ready(None)
+        );
+        session.set_blocked(true);
+        assert!(crate::tray::tray_provider_selection(&db, &AppType::Claude).is_err());
+        session.set_blocked(false);
+        assert_eq!(
+            crate::tray::tray_provider_selection(&db, &AppType::Claude).unwrap(),
+            crate::tray::TrayProviderSelection::Ready(Some("a".into()))
+        );
+        assert!(snapshot(f.home.path()) == before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_pending_review_effective_query_preserves_conflicting_provider_choice() {
+        let f = Fixture::new();
+        let session = f.session();
+        let path = crate::settings::settings_path();
+        let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        fields.insert(
+            "currentProviderClaude".into(),
+            serde_json::value::RawValue::from_string(r#""synthetic-unresolved-provider""#.into())
+                .unwrap(),
+        );
+        std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = Database::init_with_secrets(session).unwrap();
+        let before = snapshot(f.home.path());
+        let result = crate::settings::get_effective_current_provider(&db, &AppType::Claude);
+        assert!(
+            snapshot(f.home.path()) == before,
+            "effective query must not clear an unresolved review choice"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            crate::settings::get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-unresolved-provider")
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn u03_settings_conflict_projection_requires_original_published_checkpoint() {
         for case in ["absent", "damaged", "protected"] {
             let f = Fixture::new();
