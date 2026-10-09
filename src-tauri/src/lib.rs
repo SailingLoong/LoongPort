@@ -1627,12 +1627,12 @@ pub fn run() {
                     return Ok(());
                 }
             };
-            if let Some((version, supported)) = inspection.future_version() {
+            if let Some((version, supported)) = inspection.future_version().filter(|_| !inspection.is_database_resume_candidate()) {
                 enter_db_version_too_new_recovery(app.handle(), &db_path,
                     format!("数据库版本过新（{version}），当前应用仅支持 {supported}，请升级应用后再尝试。"), version, supported);
                 return Ok(());
             }
-            if inspection.is_recovery_required() {
+            if inspection.is_recovery_required() || inspection.is_database_resume_candidate() {
                 app.manage(secrets::startup::StartupCoordinator::new(app_config_dir, inspection));
                 secrets::startup::try_automatic_unlock(app.handle());
                 return Ok(());

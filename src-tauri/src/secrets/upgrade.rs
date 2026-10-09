@@ -169,7 +169,7 @@ impl UpgradeInspection {
         };
         let mut view = StartupUpgradeView::blocked("not_applicable");
         view.source_versions = stable.source_versions;
-        if stable.future_version().is_some() {
+        if stable.future_version().is_some() && !stable.is_database_resume_candidate() {
             // Preserve existing newer-binary precedence: do not parse a vault
             // format the current binary cannot understand.
             if pending_generation(root)? {
@@ -211,6 +211,12 @@ impl UpgradeInspection {
         view.status = "authentication_required";
         // Actions remain unavailable until the real coordinator actions exist.
         Ok(view)
+    }
+
+    /// Routes only an unverified exact target checkpoint to the original coordinator.
+    /// It never permits runtime initialization, file publication or app recovery.
+    pub(crate) fn is_database_resume_candidate(&self) -> bool {
+        matches!(self, Self::Stable(stable) if stable.is_database_resume_candidate())
     }
 
     pub(crate) fn ensure_runtime_admitted(&self) -> Result<(), AppError> {
@@ -262,6 +268,37 @@ impl UpgradeInspection {
 }
 
 impl StableInspection {
+    fn is_database_resume_candidate(&self) -> bool {
+        self.source_versions
+            == Some(SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            })
+            && self
+                .device_files
+                .iter()
+                .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
+    }
+
+    /// Keep the original checkpoint binding while letting each app own its
+    /// post-DB facts. Peer client/device changes are not DB completion authority.
+    fn verify_resume_checkpoint(&self, root: &Path) -> Result<(), AppError> {
+        if pending_generation(root)? || read_vault(root)? != self.vault {
+            return Err(changed());
+        }
+        let expected = self
+            .device_files
+            .iter()
+            .find(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
+            .ok_or_else(changed)?;
+        if checkpoint::resume_candidate_bytes(&self.device)?.as_deref()
+            != Some(expected.2.as_slice())
+        {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
     pub(crate) fn future_version(&self) -> Option<(i32, i32)> {
         let versions = self.source_versions?;
         if versions.upstream > database::SCHEMA_VERSION {
@@ -294,6 +331,9 @@ impl StableInspection {
 
     pub(crate) fn verify_unchanged(&self, root: &Path) -> Result<(), AppError> {
         self.verify_database_and_vault(root)?;
+        if self.is_database_resume_candidate() {
+            return self.verify_resume_checkpoint(root);
+        }
         if read_device(&self.device)? != self.device_files {
             return Err(changed());
         }
@@ -456,14 +496,38 @@ pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspec
     };
     // An older binary must still present its existing newer-database recovery.
     if result.future_version().is_some() {
-        return Ok(UpgradeInspection::Stable(Box::new(result)));
+        if result.source_versions
+            != Some(SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            })
+        {
+            return Ok(UpgradeInspection::Stable(Box::new(result)));
+        }
+        let Some(bytes) = checkpoint::resume_candidate_bytes(device)? else {
+            return Ok(UpgradeInspection::Stable(Box::new(result)));
+        };
+        result.device_files = vec![(
+            super::owned_file::DeviceFile::registered(checkpoint::FILE)?,
+            device.root().join(checkpoint::FILE),
+            bytes,
+        )];
+    } else {
+        result.device_files = read_device(device)?;
     }
     result.vault = read_vault(root)?;
-    result.device_files = read_device(device)?;
     if let Some(db) = captured.as_ref() {
-        database::vault::preflight_connection(&db.image)?;
+        // The original preflight admits only the running source schema. A
+        // target checkpoint candidate is authenticated by its existing owner;
+        // it must not be rejected here before that proof can be checked.
+        if !result.is_database_resume_candidate() {
+            database::vault::preflight_connection(&db.image)?;
+        }
         let stored = database::vault::stored_metadata(&db.image)?;
         match (&stored, &result.vault) {
+            (None, _) if result.is_database_resume_candidate() => {
+                return Err(AppError::Config("secret.metadata_missing".into()))
+            }
             (Some(_), None) => return Err(AppError::Config("secret.metadata_missing".into())),
             (Some(stored), Some((local, _, _))) if stored != local => {
                 return Err(AppError::Config("secret.identity_mismatch".into()))

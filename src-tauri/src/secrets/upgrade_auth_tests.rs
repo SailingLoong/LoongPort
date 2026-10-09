@@ -1979,3 +1979,234 @@ fn upgrade_checkpoint_cancel_rejects_published_database_without_cleanup() {
         20
     );
 }
+
+fn publish_resume_fixture(f: &Fixture) -> String {
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    let id = review
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(())).unwrap();
+    id
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_resume_authenticates_completed_boundary_without_runtime_or_app_admission() {
+    let f = Fixture::new();
+    let id = publish_resume_fixture(&f);
+    // Later app facts remain separate from the completed DB proof.
+    let mut live = crate::mode::state::LiveState::default();
+    live.apps.entry("codex".into()).or_default().mode = Some(crate::mode::state::Mode::Direct);
+    let mut json = serde_json::to_value(&live).unwrap();
+    json["apps"]["claude"] = serde_json::json!({"mode":"future_mode"});
+    let bytes = serde_json::to_vec(&json).unwrap();
+    assert!(crate::mode::state::decode(&bytes).is_err());
+    let original_session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    f.device
+        .write_device(
+            &original_session.read().unwrap(),
+            &crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap(),
+            &bytes,
+        )
+        .unwrap();
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_codex: Some("later-pointer-canary".into()),
+        ..Default::default()
+    });
+    let before = snapshot(f.home.path());
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let candidate = coordinator.upgrade_view().unwrap();
+    assert_eq!(candidate.status, "checkpoint_requires_verification");
+    assert!(candidate.can_authenticate && candidate.requires_authentication);
+    assert!(candidate.checkpoint_id.is_none());
+    assert!(coordinator.verify_runtime_admission_blocked());
+    assert!(coordinator
+        .authenticate_upgrade(Some("wrong synthetic password"), &f.store)
+        .is_err());
+    let verified = coordinator.authenticate_upgrade(None, &f.store).unwrap();
+    assert_eq!(verified.status, "database_verified");
+    assert_eq!(verified.checkpoint_id.as_deref(), Some(id.as_str()));
+    assert!(verified.checkpoint_present);
+    assert!(!verified.requires_authentication && !verified.can_authenticate);
+    assert!(!verified.can_check_and_backup && !verified.can_start_upgrade);
+    assert!(coordinator.verify_runtime_admission_blocked());
+    assert!(
+        crate::settings::get_current_provider_ready(&crate::app_config::AppType::Codex).is_err()
+    );
+    assert_eq!(
+        coordinator.upgrade_view().unwrap().status,
+        "database_verified"
+    );
+    assert_eq!(snapshot(f.home.path()), before);
+    let public = serde_json::to_string(&verified).unwrap();
+    assert!(!public.contains("later-pointer-canary") && !public.contains(f.root.to_str().unwrap()));
+    let token = verified.review_token.unwrap();
+    assert!(coordinator.prepare_upgrade_checkpoint(&token).is_err());
+    assert!(coordinator.cancel_upgrade_checkpoint(&token, &id).is_err());
+    assert!(coordinator.review_upgrade_ownership(&token).is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_resume_rejects_missing_unpublished_corrupt_and_pending_proofs() {
+    for scenario in ["missing", "unpublished", "corrupt", "pending"] {
+        let f = Fixture::new();
+        if scenario == "unpublished" {
+            let mut inspected = inspect(&f.root, &f.device).unwrap();
+            let mut review =
+                AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                    .unwrap();
+            let token = review.view(&inspected).unwrap().review_token.unwrap();
+            review.prepare_checkpoint(&mut inspected, &token).unwrap();
+        } else if scenario != "missing" {
+            publish_resume_fixture(&f);
+        }
+        if scenario == "missing" || scenario == "unpublished" {
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME))
+                .unwrap()
+                .pragma_update(None, "user_version", 20)
+                .unwrap();
+        }
+        if scenario == "corrupt" {
+            std::fs::write(f.device.root().join(checkpoint::FILE), b"foreign proof").unwrap();
+        }
+        if scenario == "pending" {
+            std::fs::write(
+                f.root.join(crate::secrets::transition::INTENT),
+                b"pending original owner",
+            )
+            .unwrap();
+        }
+        let before = snapshot(f.home.path());
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        assert!(
+            coordinator.authenticate_upgrade(None, &f.store).is_err(),
+            "{scenario}"
+        );
+        assert_eq!(snapshot(f.home.path()), before, "{scenario}");
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_resume_preserves_future_precedence_and_rechecks_checkpoint_drift() {
+    for future in [true, false] {
+        let f = Fixture::new();
+        let id = publish_resume_fixture(&f);
+        if future {
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME))
+                .unwrap()
+                .pragma_update(None, "user_version", 21)
+                .unwrap();
+            std::fs::write(f.root.join("vault.json"), b"unreadable future vault").unwrap();
+            let before = snapshot(f.home.path());
+            let coordinator = crate::secrets::startup::StartupCoordinator::new(
+                f.root.clone(),
+                inspect(&f.root, &f.device).unwrap(),
+            );
+            assert_eq!(
+                coordinator.upgrade_view().unwrap().status,
+                "newer_binary_required"
+            );
+            assert!(coordinator.authenticate_upgrade(None, &f.store).is_err());
+            assert_eq!(snapshot(f.home.path()), before);
+        } else {
+            let coordinator = crate::secrets::startup::StartupCoordinator::new(
+                f.root.clone(),
+                inspect(&f.root, &f.device).unwrap(),
+            );
+            let view = coordinator.authenticate_upgrade(None, &f.store).unwrap();
+            assert_eq!(view.checkpoint_id.as_deref(), Some(id.as_str()));
+            f.write_settings(&crate::settings::AppSettings::default());
+            let before = snapshot(f.home.path());
+            assert_eq!(
+                coordinator.upgrade_view().unwrap().status,
+                "database_verified"
+            );
+            assert_eq!(snapshot(f.home.path()), before);
+            std::fs::write(
+                f.device.root().join(checkpoint::FILE),
+                b"foreign checkpoint",
+            )
+            .unwrap();
+            let changed = snapshot(f.home.path());
+            assert!(coordinator.upgrade_view().is_err());
+            assert_eq!(snapshot(f.home.path()), changed);
+            assert!(coordinator.verify_runtime_admission_blocked());
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_database_resume_queries_revalidate_db_vault_and_exact_checkpoint_binding() {
+    for scenario in ["database_version", "vault_bytes", "same_id_checkpoint"] {
+        let f = Fixture::new();
+        let id = publish_resume_fixture(&f);
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let view = coordinator.authenticate_upgrade(None, &f.store).unwrap();
+        assert_eq!(view.checkpoint_id.as_deref(), Some(id.as_str()));
+        let db = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        db.execute(
+            "INSERT INTO settings(key,value) VALUES('synthetic-later-app','preserved')",
+            [],
+        )
+        .unwrap();
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            coordinator.upgrade_view().unwrap().status,
+            "database_verified"
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        match scenario {
+            "database_version" => db.pragma_update(None, "user_version", 21).unwrap(),
+            "vault_bytes" => {
+                let path = f.root.join("vault.json");
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes.push(b'\n');
+                std::fs::write(path, bytes).unwrap();
+            }
+            "same_id_checkpoint" => {
+                let file =
+                    crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE).unwrap();
+                let path = f.device.root().join(checkpoint::FILE);
+                let bytes = std::fs::read(&path).unwrap();
+                let plain = file.decode(&f.vault, &bytes).unwrap();
+                let replacement = file.encode(&f.vault, &plain).unwrap();
+                assert_ne!(replacement, bytes);
+                std::fs::write(path, replacement).unwrap();
+                assert_eq!(
+                    checkpoint::verified_database_id(&f.root, &f.device, &f.vault).unwrap(),
+                    Some(id)
+                );
+            }
+            _ => unreachable!(),
+        }
+        let changed = snapshot(f.home.path());
+        assert!(coordinator.upgrade_view().is_err(), "{scenario}");
+        assert_eq!(snapshot(f.home.path()), changed, "{scenario}");
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+}

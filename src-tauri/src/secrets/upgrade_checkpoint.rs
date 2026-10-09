@@ -80,6 +80,15 @@ fn descriptor() -> Result<DeviceFile, AppError> {
 fn path(device: &DeviceStore) -> PathBuf {
     device.root().join(FILE)
 }
+/// A passive candidate only; content and completed DB identity require authentication.
+pub(super) fn resume_candidate_bytes(device: &DeviceStore) -> Result<Option<Vec<u8>>, AppError> {
+    if !super::super::files::device_directory_exists(device.root())? {
+        return Ok(None);
+    }
+    config_file_io::read_regular_file(&path(device), MAX_BYTES)
+        .map_err(|e| AppError::io(path(device), e))
+}
+
 fn device_paths(device: &DeviceStore) -> Result<Vec<PathBuf>, AppError> {
     Ok(super::super::files::device_file_paths(device.root())?
         .into_iter()

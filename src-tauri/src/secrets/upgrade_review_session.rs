@@ -30,6 +30,7 @@ pub(crate) struct AuthenticatedUpgrade {
     session: Arc<SecretSession>,
     token: String,
     cancellation: Option<CheckpointCancellation>,
+    database_checkpoint: Option<String>,
     pub(super) inputs: Vec<ReviewedInput>,
 }
 
@@ -104,30 +105,59 @@ impl AuthenticatedUpgrade {
         if inspected.is_recovery_required() {
             return Err(AppError::Config("secret.recovery_required".into()));
         }
-        if inspected.future_version().is_some() {
+        if inspected.future_version().is_some() && !inspected.is_database_resume_candidate() {
             return Err(AppError::Config("upgrade.future_version".into()));
         }
         let UpgradeInspection::Stable(stable) = inspected else {
             return Err(source_changed());
         };
-        if stable.source_versions
-            != Some(SchemaVersions {
-                upstream: database::UPSTREAM4_SOURCE_SCHEMA_VERSION,
-                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
-            })
+        if !stable.is_database_resume_candidate()
+            && stable.source_versions
+                != Some(SchemaVersions {
+                    upstream: database::UPSTREAM4_SOURCE_SCHEMA_VERSION,
+                    loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+                })
         {
             return Err(AppError::Config("upgrade.unsupported_source".into()));
         }
         if stable.device.root() != device.root() || crate::config::get_app_config_dir() != root {
             return Err(source_changed());
         }
-        inspected.verify_unchanged(root)?;
-        let settings = ReviewedInput::capture(crate::settings::settings_path())?;
+        let resumed = stable.is_database_resume_candidate();
+        if resumed {
+            stable.verify_resume_checkpoint(root)?;
+        } else {
+            inspected.verify_unchanged(root)?;
+        }
+        let settings = if resumed {
+            None
+        } else {
+            Some(ReviewedInput::capture(crate::settings::settings_path())?)
+        };
         let vault = session::authenticate_existing(root, store, password)?;
         let session = SecretSession::from_context(root.to_path_buf(), vault);
         if session.migration_pending()? || session.legacy_json_pending()? {
             return Err(AppError::Config("secret.migration_required".into()));
         }
+        if resumed {
+            let vault = session.read()?;
+            let id = checkpoint::verified_database_id(root, device, &vault)?
+                .ok_or_else(source_changed)?;
+            stable.verify_resume_checkpoint(root)?;
+            drop(vault);
+            let result = Self {
+                root: root.to_path_buf(),
+                device: device.clone(),
+                session,
+                token: uuid::Uuid::new_v4().to_string(),
+                cancellation: None,
+                database_checkpoint: Some(id),
+                inputs: Vec::new(),
+            };
+            result.verify(inspected)?;
+            return Ok(result);
+        }
+        let settings = settings.ok_or_else(source_changed)?;
         {
             let vault = session.read()?;
             inspected.validate_device_state(&vault)?;
@@ -158,6 +188,7 @@ impl AuthenticatedUpgrade {
             session,
             token: uuid::Uuid::new_v4().to_string(),
             cancellation: None,
+            database_checkpoint: None,
             inputs,
         };
         result.verify(inspected)?;
@@ -171,6 +202,19 @@ impl AuthenticatedUpgrade {
     fn verify(&self, inspected: &UpgradeInspection) -> Result<(), AppError> {
         if crate::config::get_app_config_dir() != self.root {
             return Err(source_changed());
+        }
+        if let Some(expected) = &self.database_checkpoint {
+            let UpgradeInspection::Stable(stable) = inspected else {
+                return Err(source_changed());
+            };
+            stable.verify_resume_checkpoint(&self.root)?;
+            let vault = self.session.read()?;
+            if checkpoint::verified_database_id(&self.root, &self.device, &vault)?.as_ref()
+                != Some(expected)
+            {
+                return Err(source_changed());
+            }
+            return stable.verify_resume_checkpoint(&self.root);
         }
         inspected.verify_unchanged(&self.root)?;
         self.verify_inputs()?;
@@ -215,7 +259,7 @@ impl AuthenticatedUpgrade {
         if token != self.token {
             return Err(source_changed());
         }
-        if self.cancellation.is_some() {
+        if self.cancellation.is_some() || self.database_checkpoint.is_some() {
             return Err(source_changed());
         }
         let view = self.view(inspected)?;
@@ -283,7 +327,7 @@ impl AuthenticatedUpgrade {
         id: &str,
         hook: &mut dyn FnMut(checkpoint::CancellationBoundary) -> Result<(), AppError>,
     ) -> Result<StartupUpgradeView, AppError> {
-        if token != self.token {
+        if token != self.token || self.database_checkpoint.is_some() {
             return Err(source_changed());
         }
         if let Some(cancellation) = &self.cancellation {
@@ -361,7 +405,8 @@ impl AuthenticatedUpgrade {
         inspected: &UpgradeInspection,
         token: &str,
     ) -> Result<StagedUpgradeReview, AppError> {
-        if token != self.token || self.cancellation.is_some() {
+        if token != self.token || self.cancellation.is_some() || self.database_checkpoint.is_some()
+        {
             return Err(source_changed());
         }
         let current = self.view(inspected)?;
@@ -443,6 +488,17 @@ impl AuthenticatedUpgrade {
         &self,
         inspected: &UpgradeInspection,
     ) -> Result<StartupUpgradeView, AppError> {
+        if let Some(id) = &self.database_checkpoint {
+            self.verify(inspected)?;
+            let mut view = StartupUpgradeView::blocked("database_verified");
+            if let UpgradeInspection::Stable(stable) = inspected {
+                view.source_versions = stable.source_versions;
+            }
+            view.checkpoint_present = true;
+            view.checkpoint_id = Some(id.clone());
+            view.review_token = Some(self.token.clone());
+            return Ok(view);
+        }
         if let Some(cancellation) = &self.cancellation {
             self.verify_cancellation(inspected)?;
             let mut view = StartupUpgradeView::blocked(if cancellation.completed {
