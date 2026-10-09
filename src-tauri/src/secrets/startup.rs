@@ -1292,6 +1292,163 @@ mod upgrade_handoff_tests {
 
     #[test]
     #[serial_test::serial]
+    fn u03_verified_handoff_isolates_conflicting_peer_provider_settings() {
+        let f = Fixture::new();
+        let path = crate::settings::settings_path();
+        let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let peer = r#"{"future":"pointer", "opaque":900719925474099312345}"#;
+        fields.insert(
+            "currentProviderCodex".into(),
+            serde_json::value::RawValue::from_string(peer.into()).unwrap(),
+        );
+        std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
+        let native_before = std::fs::read(&f.native).unwrap();
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+                Database::init_with_secrets(session).map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.coordinator
+                .review_upgrade_app(&f.token, &AppType::Claude)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(f
+            .coordinator
+            .review_upgrade_app(&f.token, &AppType::Codex)
+            .is_err());
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(
+            crate::settings::get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        assert!(crate::settings::get_current_provider_ready(&AppType::Codex).is_err());
+        let session = f.session();
+        let db = Database::init_with_secrets(session.clone()).unwrap();
+        assert!(crate::settings::get_effective_current_provider(&db, &AppType::Codex).is_err());
+        assert!(
+            crate::settings::get_effective_current_provider_readonly(&db, &AppType::Codex).is_err()
+        );
+        let before = snapshot(f.home.path());
+        assert!(crate::settings::set_current_provider(&AppType::Codex, None).is_err());
+        let mut dto = crate::settings::get_settings();
+        dto.current_provider_codex = Some("synthetic-new-selection".into());
+        assert!(crate::settings::update_settings(dto).is_err());
+        {
+            let vault = session.read().unwrap();
+            assert!(crate::settings::set_current_provider_with_vault(
+                &AppType::Codex,
+                Some("synthetic-new-selection"),
+                &session,
+                &vault
+            )
+            .is_err());
+        }
+        assert_eq!(snapshot(f.home.path()), before);
+        crate::settings::update_settings(crate::settings::get_settings()).unwrap();
+        {
+            let vault = session.read().unwrap();
+            crate::settings::set_current_provider_with_vault(
+                &AppType::Claude,
+                Some("a"),
+                &session,
+                &vault,
+            )
+            .unwrap();
+        }
+        crate::settings::mutate_settings(|settings| settings.language = Some("zh".into())).unwrap();
+        let after: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["currentProviderCodex"].get(), peer);
+        assert_eq!(std::fs::read(&f.native).unwrap(), native_before);
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_settings_conflict_projection_requires_original_published_checkpoint() {
+        for case in ["absent", "damaged", "protected"] {
+            let f = Fixture::new();
+            let session = f.session();
+            let path = crate::settings::settings_path();
+            let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            fields.insert(
+                "currentProviderCodex".into(),
+                serde_json::value::RawValue::from_string(r#"{"future":true}"#.into()).unwrap(),
+            );
+            match case {
+                "absent" => std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap(),
+                "damaged" => std::fs::write(
+                    f.device.root().join(checkpoint::FILE),
+                    b"synthetic-invalid-checkpoint",
+                )
+                .unwrap(),
+                "protected" => {
+                    fields.insert(
+                        "webdavSync".into(),
+                        serde_json::value::RawValue::from_string(
+                            r#"{"password":"synthetic-plaintext"}"#.into(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let bytes = serde_json::to_vec(&fields).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let before = snapshot(f.home.path());
+            assert!(
+                crate::settings::decode_settings_with_vault(&bytes, &session.read().unwrap())
+                    .is_err(),
+                "{case}"
+            );
+            assert!(crate::settings::unlock_settings(session).is_err(), "{case}");
+            assert_eq!(snapshot(f.home.path()), before, "{case}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_settings_projection_retains_each_conflicting_app_pointer() {
+        for (field, app) in [
+            ("currentProviderClaude", AppType::Claude),
+            ("currentProviderCodex", AppType::Codex),
+            ("currentProviderGemini", AppType::Gemini),
+            ("currentProviderGrokbuild", AppType::GrokBuild),
+        ] {
+            let f = Fixture::new();
+            let path = crate::settings::settings_path();
+            let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let peer = r#"{"future":"pointer", "opaque":900719925474099312345}"#;
+            fields.insert(
+                field.into(),
+                serde_json::value::RawValue::from_string(peer.into()).unwrap(),
+            );
+            std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
+            crate::settings::unlock_settings(f.session()).unwrap();
+            crate::settings::reload_settings().unwrap();
+            assert!(
+                crate::settings::get_current_provider_ready(&app).is_err(),
+                "{field}"
+            );
+            crate::settings::mutate_settings(|settings| settings.language = Some("zh".into()))
+                .unwrap();
+            let after: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(after[field].get(), peer, "{field}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn u03_explicit_handoff_reuses_session_once_and_keeps_original_review() {
         let f = Fixture::new();
         let expected = f.session();

@@ -919,6 +919,80 @@ pub(crate) fn encode_settings_with_vault(
 /// Normal runtime decoding is ciphertext-only for every registered protected field.
 type UnownedSettings = std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>;
 
+const UPGRADE_APP_POINTER_FIELDS: [&str; 4] = [
+    "currentProviderClaude",
+    "currentProviderCodex",
+    "currentProviderGemini",
+    "currentProviderGrokbuild",
+];
+
+/// Only the original authenticated, published checkpoint permits a runtime
+/// projection of conflicting app pointers. Selected native reads remain strict.
+fn decode_runtime_settings_document(
+    bytes: &[u8],
+    vault: &VaultContext,
+    root: &Path,
+) -> Result<(AppSettings, UnownedSettings), AppError> {
+    let strict = decode_settings_document_with_vault(bytes, vault);
+    if !matches!(&strict, Err(AppError::Json { .. })) {
+        return strict;
+    }
+    let mut fields: UnownedSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let conflicts: Vec<_> = UPGRADE_APP_POINTER_FIELDS
+        .into_iter()
+        .filter(|field| {
+            fields
+                .get(*field)
+                .is_some_and(|raw| serde_json::from_str::<Option<String>>(raw.get()).is_err())
+        })
+        .collect();
+    if conflicts.is_empty() {
+        return strict;
+    }
+    let device = crate::live::engine::DeviceStore::for_device();
+    match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(&device) {
+        Ok(()) => return strict,
+        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {}
+        Err(error) => return Err(error),
+    }
+    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, vault)?.is_none() {
+        return strict;
+    }
+    let opaque: UnownedSettings = conflicts
+        .into_iter()
+        .filter_map(|field| fields.remove(field).map(|value| (field.to_owned(), value)))
+        .collect();
+    let projected = zeroize::Zeroizing::new(
+        serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
+    );
+    let (settings, mut unowned) = decode_settings_document_with_vault(&projected, vault)?;
+    unowned.extend(opaque);
+    Ok((settings, unowned))
+}
+
+fn validate_selected_pointer_at(path: &Path, app: &AppType) -> Result<(), AppError> {
+    let field = match app {
+        AppType::Claude => UPGRADE_APP_POINTER_FIELDS[0],
+        AppType::Codex => UPGRADE_APP_POINTER_FIELDS[1],
+        AppType::Gemini => UPGRADE_APP_POINTER_FIELDS[2],
+        AppType::GrokBuild => UPGRADE_APP_POINTER_FIELDS[3],
+        _ => return Ok(()),
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io(path, error)),
+    };
+    let fields: UnownedSettings =
+        serde_json::from_slice(&bytes).map_err(|source| AppError::json("settings.json", source))?;
+    if let Some(raw) = fields.get(field) {
+        serde_json::from_str::<Option<String>>(raw.get())
+            .map_err(|_| AppError::Config("mode.verification_required".into()))?;
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct SettingsProjection {
     #[serde(flatten)]
@@ -1110,7 +1184,8 @@ fn read_encrypted_at(
     match fs::read(path) {
         Ok(bytes) => {
             let vault = session.read()?;
-            decode_settings_with_vault(&bytes, &vault)
+            decode_runtime_settings_document(&bytes, &vault, session.root())
+                .map(|(settings, _)| settings)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
         Err(error) => Err(AppError::io(path, error)),
@@ -1225,7 +1300,7 @@ impl SettingsStore {
         // Read foreign fields freshly under the original settings write lock and
         // caller's existing vault guard. They never enter the frontend projection.
         let unowned = match fs::read(&self.path) {
-            Ok(bytes) => decode_settings_document_with_vault(&bytes, vault)?.1,
+            Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())?.1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => UnownedSettings::new(),
             Err(error) => return Err(AppError::io(&self.path, error)),
         };
@@ -1235,6 +1310,14 @@ impl SettingsStore {
         let encoded = encode_settings_with_vault(&next, vault)?;
         let mut fields: UnownedSettings = serde_json::from_slice(&encoded)
             .map_err(|source| AppError::json("settings.json", source))?;
+        // A DTO cannot replace an unresolved pointer with a new selection. Its
+        // exact disk value remains owned by the original app difference review.
+        if UPGRADE_APP_POINTER_FIELDS
+            .iter()
+            .any(|field| unowned.contains_key(*field) && fields.contains_key(*field))
+        {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
         fields.extend(unowned);
         let bytes = serde_json::to_vec_pretty(&fields)
             .map_err(|source| AppError::JsonSerialize { source })?;
@@ -1251,6 +1334,12 @@ impl SettingsStore {
         session: &SecretSession,
         vault: &RwLockReadGuard<'_, VaultContext>,
     ) -> Result<(), AppError> {
+        if !std::ptr::eq(session, self.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
+        self.ready_snapshot()?;
+        validate_selected_pointer_at(&self.path, app_type)?;
         self.mutate_with_vault(
             session,
             vault,
@@ -1270,7 +1359,8 @@ impl SettingsStore {
         let vault = self.session.read()?;
         let mut state = self.state.write()?;
         let loaded = match fs::read(&self.path) {
-            Ok(bytes) => decode_settings_with_vault(&bytes, &vault),
+            Ok(bytes) => decode_runtime_settings_document(&bytes, &vault, self.session.root())
+                .map(|(settings, _)| settings),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(AppSettings::default())
             }
@@ -1752,6 +1842,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
 /// This reads the existing store only and never reacquires its vault guard.
 pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<String>, AppError> {
     let mut settings = unlocked_settings_store()?.ready_snapshot()?;
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     Ok(current_provider_slot(&mut settings, app_type).and_then(|current| current.clone()))
 }
 
@@ -1905,7 +1996,9 @@ fn verify_current_provider_at(
     expected: &Option<String>,
 ) -> Result<(), AppError> {
     let bytes = fs::read(path).map_err(|error| AppError::io(path, error))?;
-    let mut persisted = decode_settings_with_vault(&bytes, vault)?;
+    validate_selected_pointer_at(path, app_type)?;
+    let mut persisted =
+        decode_runtime_settings_document(&bytes, vault, &crate::config::get_app_config_dir())?.0;
     let actual =
         current_provider_slot(&mut persisted, app_type).and_then(|current| current.clone());
     if actual != *expected {
@@ -1944,6 +2037,8 @@ pub fn set_imagegen_output_dir(dir: String) -> Result<(), AppError> {
 /// 这是设备级别的设置，不随数据库同步。
 /// 传入 `None` 会清除当前供应商设置。
 pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
+    unlocked_settings_store()?.ready_snapshot()?;
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     mutate_settings(|settings| {
         if let Some(current) = current_provider_slot(settings, app_type) {
             *current = id.map(str::to_owned);
@@ -1973,6 +2068,7 @@ pub fn get_effective_current_provider_readonly(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     if let Some(local_id) = get_current_provider(app_type) {
         if db
             .get_all_providers(app_type.as_str())?
@@ -1997,6 +2093,7 @@ pub fn get_effective_current_provider(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     // 1. 从本地 settings 读取
     if let Some(local_id) = get_current_provider(app_type) {
         // 2. 验证该 ID 在数据库中存在
