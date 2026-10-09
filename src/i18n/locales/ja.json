@@ -4561,6 +4561,15 @@
     "mode": {
       "direct": "Direct（保存済み）",
       "proxy": "Proxy（保存済み）"
-    }
+    },
+    "providerLabel": "プロバイダー",
+    "resolution": {
+      "preserved": "既存の値を保持",
+      "missing": "未設定",
+      "conflict": "競合",
+      "verification_required": "確認が必要"
+    },
+    "modeChoiceRequired": "このアプリの保存されたモードが未設定または競合しているため、選択が必要です。",
+    "providerChoiceRequired": "このアプリのプロバイダーが未設定または競合しているため、選択が必要です。"
   }
 }

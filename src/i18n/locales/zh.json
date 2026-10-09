@@ -4561,6 +4561,15 @@
     "mode": {
       "direct": "Direct（已保存）",
       "proxy": "Proxy（已保存）"
-    }
+    },
+    "providerLabel": "提供商",
+    "resolution": {
+      "preserved": "保留现有值",
+      "missing": "缺失",
+      "conflict": "冲突",
+      "verification_required": "需要核验"
+    },
+    "modeChoiceRequired": "此应用已有模式缺失或冲突，需要选择模式。",
+    "providerChoiceRequired": "此应用提供商缺失或冲突，需要选择提供商。"
   }
 }

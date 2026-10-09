@@ -4561,6 +4561,15 @@
     "mode": {
       "direct": "Direct (saved)",
       "proxy": "Proxy (saved)"
-    }
+    },
+    "providerLabel": "Provider",
+    "resolution": {
+      "preserved": "Preserved",
+      "missing": "Missing",
+      "conflict": "Conflicting",
+      "verification_required": "Verification required"
+    },
+    "modeChoiceRequired": "This app requires a mode choice because the saved value is missing or conflicting.",
+    "providerChoiceRequired": "This app requires a provider choice because the saved value is missing or conflicting."
   }
 }

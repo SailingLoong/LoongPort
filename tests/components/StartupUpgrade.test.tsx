@@ -41,6 +41,18 @@ const appReview = (appType: string, extra = {}) => ({
   canStartUpgrade: false,
   ...extra,
 });
+const ownershipReview = () => ({
+  checkpointId: "synthetic-checkpoint",
+  apps: ["claude", "codex", "gemini", "grokbuild"].map((appType) => ({
+    appType,
+    savedMode: "direct",
+    providerResolution: "preserved",
+    hasPendingOperation: false,
+    storedFieldsMatch: null,
+    requiresModeChoice: false,
+    requiresProviderChoice: false,
+  })),
+});
 const recoveries = () =>
   vi
     .mocked(invoke)
@@ -56,6 +68,8 @@ beforeEach(() => {
 function serve(view = review(), overrides: Record<string, object> = {}) {
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "get_startup_upgrade_review") return view;
+    if (command === "review_startup_upgrade_ownership")
+      return ownershipReview();
     if (command === "review_startup_upgrade_app") {
       const app = (args as { appType: string }).appType;
       return appReview(app, overrides[app]);
@@ -127,6 +141,8 @@ describe("StartupUpgrade", () => {
     });
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "get_startup_upgrade_review") return prepared;
+      if (command === "review_startup_upgrade_ownership")
+        return ownershipReview();
       if (command === "publish_startup_upgrade_checkpoint") return response;
       if (command === "review_startup_upgrade_app")
         return appReview((args as { appType: string }).appType);
@@ -136,7 +152,8 @@ describe("StartupUpgrade", () => {
     const button = await screen.findByRole("button", {
       name: "startupUpgrade.start",
     });
-    expect(invoke).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(invoke).toHaveBeenCalledTimes(2);
     fireEvent.click(button);
     fireEvent.click(button);
     expect(
@@ -152,10 +169,12 @@ describe("StartupUpgrade", () => {
     });
     finish(review({ reviewToken: "synthetic-published-review" }));
     await screen.findByRole("region", { name: "Claude Code" });
-    expect(invoke).toHaveBeenCalledWith("review_startup_upgrade_app", {
-      expectedReviewToken: "synthetic-published-review",
-      appType: "claude",
-    });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("review_startup_upgrade_app", {
+        expectedReviewToken: "synthetic-published-review",
+        appType: "claude",
+      }),
+    );
     expect(
       screen.queryByRole("button", { name: "startupUpgrade.cancel" }),
     ).not.toBeInTheDocument();
@@ -170,6 +189,7 @@ describe("StartupUpgrade", () => {
     const button = await screen.findByRole("button", {
       name: "startupUpgrade.start",
     });
+    await waitFor(() => expect(button).toBeEnabled());
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "publish_startup_upgrade_checkpoint")
         throw new Error("synthetic lost publication response");
@@ -385,6 +405,50 @@ describe("StartupUpgrade", () => {
       expectedReviewToken: "synthetic-review",
       appType: "codex",
     });
+  });
+
+  it("clears stale recovery uncertainty only after original native completion readback", async () => {
+    serve(review(), {
+      claude: { hasPendingOperation: true, canRecoverOperation: true },
+    });
+    render(<StartupUpgrade />);
+    const card = await screen.findByRole("region", { name: "Claude Code" });
+    const recover = within(card).getByRole("button", {
+      name: "startupUpgrade.recover",
+    });
+    await waitFor(() => expect(recover).toBeEnabled());
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "recover_startup_upgrade_app")
+        throw new Error("synthetic lost response");
+      if (command === "review_startup_upgrade_app")
+        return appReview("claude", {
+          revision: "synthetic-completed-revision",
+          canCompleteApp: true,
+        });
+      throw new Error("synthetic unexpected action");
+    });
+    fireEvent.click(recover);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenLastCalledWith("review_startup_upgrade_app", {
+        expectedReviewToken: "synthetic-review",
+        appType: "claude",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        within(card).getByText("startupUpgrade.journalLabel")
+          .nextElementSibling,
+      ).toHaveTextContent("startupUpgrade.no"),
+    );
+    await waitFor(() =>
+      expect(within(card).queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(recover).toBeDisabled();
+    expect(recoveries()).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+    expect(invoke).not.toHaveBeenCalledWith("restart_app");
   });
 
   it("keeps an unresolved app isolated while another app can query and recover", async () => {

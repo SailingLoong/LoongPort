@@ -25,6 +25,21 @@ export interface UpgradeAppReview {
   canStartUpgrade: boolean;
 }
 
+export interface UpgradeSourceAppFacts {
+  appType: UpgradeApp;
+  savedMode: "direct" | "proxy" | null;
+  hasPendingOperation: boolean | null;
+  storedFieldsMatch: boolean | null;
+  providerResolution:
+    "preserved" | "missing" | "conflict" | "verification_required";
+  requiresModeChoice: boolean;
+  requiresProviderChoice: boolean;
+}
+export interface UpgradeSourceReview {
+  checkpointId: string;
+  apps: UpgradeSourceAppFacts[];
+}
+
 export const startupUpgradeApi = {
   query: () => invoke<StartupUpgradeReview>("get_startup_upgrade_review"),
   authenticate: (password: string | null) =>
@@ -42,6 +57,10 @@ export const startupUpgradeApi = {
     invoke<StartupUpgradeReview>("publish_startup_upgrade_checkpoint", {
       expectedReviewToken,
       expectedCheckpointId,
+    }),
+  reviewOwnership: (expectedReviewToken: string) =>
+    invoke<UpgradeSourceReview>("review_startup_upgrade_ownership", {
+      expectedReviewToken,
     }),
   queryApp: (expectedReviewToken: string, appType: UpgradeApp) =>
     invoke<UpgradeAppReview>("review_startup_upgrade_app", {

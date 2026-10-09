@@ -10,6 +10,7 @@ import {
   type StartupUpgradeReview,
   type UpgradeApp,
   type UpgradeAppReview,
+  type UpgradeSourceReview,
 } from "@/lib/api/startupUpgrade";
 
 const APPS: { id: UpgradeApp; name: string }[] = [
@@ -44,6 +45,9 @@ function UpgradeAppCard({
       if (next.appType !== app.id) throw new Error("upgrade.source_changed");
       setView(next);
       setFresh(true);
+      if (next.canCompleteApp === true && next.hasPendingOperation === false) {
+        setError(false);
+      }
     } catch {
       if (sequence === request.current) setError(true);
     }
@@ -162,9 +166,53 @@ export function StartupUpgrade() {
   const busyRef = useRef(false);
   const request = useRef(0);
 
+  const [ownership, setOwnership] = useState<{
+    token: string;
+    facts: UpgradeSourceReview;
+  } | null>(null);
+  const ownershipRequest = useRef(0);
+  useEffect(() => {
+    const sequence = ++ownershipRequest.current;
+    setOwnership(null);
+    if (
+      view?.status !== "checkpoint_ready" ||
+      !view.canStartUpgrade ||
+      !view.reviewToken ||
+      !view.checkpointId
+    )
+      return;
+    const token = view.reviewToken;
+    const checkpointId = view.checkpointId;
+    void startupUpgradeApi
+      .reviewOwnership(token)
+      .then((facts) => {
+        if (sequence !== ownershipRequest.current) return;
+        if (
+          facts.checkpointId !== checkpointId ||
+          facts.apps.length !== APPS.length ||
+          APPS.some(
+            (app) =>
+              facts.apps.filter((fact) => fact.appType === app.id).length !== 1,
+          )
+        ) {
+          setError(true);
+          return;
+        }
+        setOwnership({ token, facts });
+      })
+      .catch(() => {
+        if (sequence === ownershipRequest.current) setError(true);
+      });
+    return () => {
+      ++ownershipRequest.current;
+    };
+  }, [view]);
+
   async function query() {
     const sequence = ++request.current;
     // Never leave an old token actionable while a fresh query is uncertain.
+    ++ownershipRequest.current;
+    setOwnership(null);
     setView(null);
     try {
       const next = await startupUpgradeApi.query();
@@ -210,6 +258,7 @@ export function StartupUpgrade() {
       } else if (
         action === "publish" &&
         canPublish &&
+        ownershipReady &&
         view?.reviewToken &&
         view.checkpointId
       ) {
@@ -246,6 +295,10 @@ export function StartupUpgrade() {
     view.checkpointPresent &&
     !!view.reviewToken &&
     !!view.checkpointId;
+  const ownershipReady =
+    !!ownership &&
+    ownership.token === view?.reviewToken &&
+    ownership.facts.checkpointId === view?.checkpointId;
   const canCancel =
     !!view?.reviewToken &&
     !!view.checkpointId &&
@@ -320,11 +373,86 @@ export function StartupUpgrade() {
             </Button>
           )}
           {canPublish && (
-            <Button disabled={busy} onClick={() => void act("publish")}>
+            <Button
+              disabled={busy || !ownershipReady}
+              onClick={() => void act("publish")}
+            >
               {t("startupUpgrade.start")}
             </Button>
           )}
         </div>
+        {canPublish && ownershipReady && ownership && (
+          <div className="grid gap-3 md:grid-cols-2">
+            {APPS.map((app) => {
+              const facts = ownership.facts.apps.find(
+                (fact) => fact.appType === app.id,
+              )!;
+              return (
+                <section
+                  key={app.id}
+                  aria-label={app.name}
+                  className="space-y-3 rounded-lg border p-4"
+                >
+                  <h2 className="font-semibold">{app.name}</h2>
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                    <dt>{t("startupUpgrade.modeLabel")}</dt>
+                    <dd>
+                      {t(
+                        facts.savedMode === "direct"
+                          ? "startupUpgrade.mode.direct"
+                          : facts.savedMode === "proxy"
+                            ? "startupUpgrade.mode.proxy"
+                            : "startupUpgrade.unknown",
+                      )}
+                    </dd>
+                    <dt>{t("startupUpgrade.journalLabel")}</dt>
+                    <dd>
+                      {t(
+                        facts.hasPendingOperation === true
+                          ? "startupUpgrade.yes"
+                          : facts.hasPendingOperation === false
+                            ? "startupUpgrade.no"
+                            : "startupUpgrade.unknown",
+                      )}
+                    </dd>
+                    <dt>{t("startupUpgrade.fieldsLabel")}</dt>
+                    <dd>
+                      {t(
+                        facts.storedFieldsMatch === true
+                          ? "startupUpgrade.yes"
+                          : facts.storedFieldsMatch === false
+                            ? "startupUpgrade.no"
+                            : "startupUpgrade.unknown",
+                      )}
+                    </dd>
+                    <dt>{t("startupUpgrade.providerLabel")}</dt>
+                    <dd>
+                      {t(
+                        `startupUpgrade.resolution.${facts.providerResolution}`,
+                      )}
+                    </dd>
+                  </dl>
+                  {facts.requiresModeChoice && (
+                    <p className="text-sm">
+                      {t("startupUpgrade.modeChoiceRequired")}
+                    </p>
+                  )}
+                  {facts.requiresProviderChoice && (
+                    <p className="text-sm">
+                      {t("startupUpgrade.providerChoiceRequired")}
+                    </p>
+                  )}
+                  <p className="text-sm text-muted-foreground">
+                    {t("startupUpgrade.keepFiles")}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {t("startupUpgrade.noTakeover")}
+                  </p>
+                </section>
+              );
+            })}
+          </div>
+        )}
         {published && view?.reviewToken && (
           <div className="grid gap-3 md:grid-cols-2">
             {APPS.map((app) => (
