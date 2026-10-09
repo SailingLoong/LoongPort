@@ -260,6 +260,26 @@ pub(crate) fn recover_checked(
     commit_target: CommitTarget<'_>,
     verify_replay: VerifyReplay<'_>,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
+    recover_checked_with_cleanup(
+        store,
+        vault,
+        guard,
+        admitted_files,
+        commit_target,
+        verify_replay,
+        &|_| Ok(()),
+    )
+}
+
+fn recover_checked_with_cleanup(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    guard: &AppWriteGuard,
+    admitted_files: &[LiveFile],
+    commit_target: CommitTarget<'_>,
+    verify_replay: VerifyReplay<'_>,
+    verify_cleanup: &dyn Fn(&state::LiveState) -> Result<(), AppError>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
     let Some(mut pending) = state::pending(store, vault, guard.app())? else {
         return Ok(None);
     };
@@ -393,7 +413,8 @@ pub(crate) fn recover_checked(
         return Ok(Some(RecoveryOutcome::VerificationRequired { paths }));
     }
     discard_pending_files(&pending)?;
-    state::set_pending(store, vault, guard.app(), None)?;
+    failpoint::hit("recover:verified")?;
+    state::clear_pending_checked(store, vault, guard.app(), &pending, verify_cleanup)?;
     Ok(Some(RecoveryOutcome::RolledForward))
 }
 
@@ -556,10 +577,14 @@ pub(crate) mod failpoint {
     type PublishHook = Box<dyn FnMut(usize, &Path)>;
 
     #[cfg(any(test, feature = "test-hooks"))]
+    type BoundaryHook = Box<dyn FnMut(&str)>;
+
+    #[cfg(any(test, feature = "test-hooks"))]
     thread_local! {
         static CRASH_AT: RefCell<Option<String>> = const { RefCell::new(None) };
         static BEFORE_PUBLISH: RefCell<Option<PublishHook>> =
             const { RefCell::new(None) };
+        static BOUNDARY_HOOK: RefCell<Option<BoundaryHook>> = const { RefCell::new(None) };
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -570,6 +595,11 @@ pub(crate) mod failpoint {
     #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn on_before_publish(hook: Option<PublishHook>) {
         BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn on_boundary(hook: Option<BoundaryHook>) {
+        BOUNDARY_HOOK.with(|slot| *slot.borrow_mut() = hook);
     }
 
     pub(crate) fn current_crash() -> Option<String> {
@@ -606,6 +636,12 @@ pub(crate) mod failpoint {
     }
 
     pub(crate) fn hit(point: &str) -> Result<(), AppError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        BOUNDARY_HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(point);
+            }
+        });
         #[cfg(any(test, feature = "test-hooks"))]
         if CRASH_AT.with(|slot| slot.borrow().as_deref() == Some(point)) {
             return Err(AppError::Message(format!("injected crash at {point}")));
@@ -881,6 +917,36 @@ pub(crate) fn commit_target(
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
+    commit_target_with_pointer(
+        db,
+        session,
+        store,
+        vault,
+        app,
+        target,
+        &PointerCommit {
+            publish: &|id| {
+                crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)
+            },
+            verify: &|id| super::current::verify_direct_pointer(db, app, id),
+        },
+    )
+}
+
+struct PointerCommit<'a> {
+    publish: &'a dyn Fn(&str) -> Result<(), AppError>,
+    verify: &'a dyn Fn(&str) -> Result<(), AppError>,
+}
+
+fn commit_target_with_pointer(
+    db: &Database,
+    session: &SecretSession,
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+    target: &PendingTarget,
+    pointers: &PointerCommit<'_>,
+) -> Result<(), AppError> {
     if target.stack.is_some()
         || !target.extra.is_empty()
         || (target.written.is_some() && !matches!(app, AppType::GrokBuild | AppType::Codex))
@@ -910,9 +976,9 @@ pub(crate) fn commit_target(
         if !super::current::provider_exists(db, app, id)? {
             return Err(AppError::Config("mode.verification_required".into()));
         }
-        crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)?;
+        (pointers.publish)(id)?;
         db.set_current_provider(app.as_str(), id)?;
-        super::current::verify_direct_pointer(db, app, id)?;
+        (pointers.verify)(id)?;
     }
     let fallback_clear = target.pointer.is_some()
         || target
@@ -979,6 +1045,109 @@ pub(crate) fn commit_target(
         }
     }
     super::current::validate_known_mode(store, vault, app).map(|_| ())
+}
+
+/// Resume only an already-published device pointer, never client-file replay or
+/// an inferred mode transition. The authenticated startup caller supplies the
+/// original disk pointer proof while the runtime SettingsStore remains locked.
+pub(crate) fn published_pointer_target<'a>(
+    app: &str,
+    pending: &'a Pending,
+) -> Result<&'a str, AppError> {
+    validate_pending(app, pending, &[])?;
+    let target = &pending.target;
+    if !pending.published
+        || !pending.files.is_empty()
+        || !matches!(pending.op.as_str(), state::op::SWITCH | state::op::APPLY)
+        || target.state.is_some()
+        || target.written.is_some()
+        || target.stack.is_some()
+        || target.saved_row.is_some()
+        || target.model_preference.is_some()
+        || target.routing_order.is_some()
+        || !target.extra.is_empty()
+    {
+        return Err(verification_required());
+    }
+    target
+        .pointer
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(verification_required)
+}
+
+pub(crate) struct PointerRecoveryChecks<'a> {
+    pub(crate) before_target: &'a dyn Fn() -> Result<(), AppError>,
+    pub(crate) pointer: &'a dyn Fn(&str) -> Result<(), AppError>,
+    pub(crate) after_target: &'a dyn Fn() -> Result<(), AppError>,
+    pub(crate) before_cleanup: &'a dyn Fn(&state::LiveState) -> Result<(), AppError>,
+}
+
+pub(crate) fn recover_published_pointer(
+    db: &Database,
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    guard: &AppWriteGuard,
+    app: &AppType,
+    checks: &PointerRecoveryChecks<'_>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
+    if guard.app() != app.as_str() {
+        return Err(verification_required());
+    }
+    let live = state::load_app(store, vault, app.as_str())?;
+    let entry = live
+        .apps
+        .get(app.as_str())
+        .ok_or_else(verification_required)?;
+    state::validate_app_for_update(entry)?;
+    let pending = state::pending(store, vault, app.as_str())?.ok_or_else(verification_required)?;
+    let id = published_pointer_target(app.as_str(), &pending)?;
+    let mode = super::current::validate_known_mode(store, vault, app)?;
+    if mode.attached
+        || (mode.mode == Some(state::Mode::Proxy)
+            && !mode
+                .proxy_route
+                .as_deref()
+                .map(|id| super::current::provider_exists(db, app, id))
+                .transpose()?
+                .unwrap_or(false))
+    {
+        return Err(verification_required());
+    }
+    if !super::current::provider_exists(db, app, id)? {
+        return Err(verification_required());
+    }
+    (checks.pointer)(id)?;
+    recover_checked_with_cleanup(
+        store,
+        vault,
+        guard,
+        &[],
+        &|target| {
+            (checks.before_target)()?;
+            commit_target_with_pointer(
+                db,
+                db.secret_session(),
+                store,
+                vault,
+                app,
+                target,
+                &PointerCommit {
+                    publish: checks.pointer,
+                    verify: &|id| {
+                        if db.get_current_provider(app.as_str())?.as_deref() != Some(id) {
+                            return Err(verification_required());
+                        }
+                        (checks.pointer)(id)
+                    },
+                },
+            )?;
+            failpoint::hit("recover:target_committed")?;
+            (checks.after_target)()
+        },
+        &|_| Ok(None),
+        checks.before_cleanup,
+    )
 }
 
 /// Upstream per-app transaction context, borrowing the existing session guard.

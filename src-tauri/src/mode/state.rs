@@ -602,10 +602,21 @@ pub(crate) fn update_app<R>(
     app: &str,
     change: impl FnOnce(&mut AppLiveState) -> Result<R, AppError>,
 ) -> Result<R, AppError> {
+    update_app_checked(store, vault, app, &|_| Ok(()), change)
+}
+
+fn update_app_checked<R>(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+    check: &dyn Fn(&LiveState) -> Result<(), AppError>,
+    change: impl FnOnce(&mut AppLiveState) -> Result<R, AppError>,
+) -> Result<R, AppError> {
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut raw = read_preserved(store, vault)?;
+    check(&raw.app_view(app)?)?;
     let before = selected_app(&raw, app)?.unwrap_or_default();
     validate_app_for_update(&before)?;
     let mut after = before.clone();
@@ -628,6 +639,24 @@ pub(crate) fn update_app<R>(
     );
     store.write_device(vault, &DeviceFile::registered(DEVICE_STATE_FILE)?, &bytes)?;
     Ok(result)
+}
+
+/// Conditional journal removal uses the same state lock as publication. A
+/// replacement operation or changed app evidence must never be acknowledged.
+pub(crate) fn clear_pending_checked(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+    expected: &Pending,
+    check: &dyn Fn(&LiveState) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    update_app_checked(store, vault, app, check, |entry| {
+        if entry.pending.as_ref() != Some(expected) {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+        entry.pending = None;
+        Ok(())
+    })
 }
 
 /// Absence is the only empty-state case. Authentication, parse and version errors
@@ -677,7 +706,7 @@ fn validate_change(before: &LiveState, after: &LiveState) -> Result<(), AppError
     Ok(())
 }
 
-fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError> {
+pub(crate) fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError> {
     app.mode_state()
         .validate_for_update()
         .map_err(|_| unsupported_update())?;

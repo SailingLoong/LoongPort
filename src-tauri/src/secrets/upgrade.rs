@@ -737,7 +737,7 @@ pub(crate) mod auth_tests;
 
 #[path = "upgrade_review_session.rs"]
 mod review_session;
-pub(crate) use review_session::AuthenticatedUpgrade;
+pub(crate) use review_session::{AuthenticatedUpgrade, UpgradeAppReview};
 
 #[path = "upgrade_staged_review.rs"]
 mod staged_review;

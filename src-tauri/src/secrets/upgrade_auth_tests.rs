@@ -2345,3 +2345,609 @@ fn upgrade_database_resume_queries_revalidate_db_vault_and_exact_checkpoint_bind
         assert!(coordinator.verify_runtime_admission_blocked());
     }
 }
+
+fn published_pointer_fixture(f: &Fixture) {
+    publish_resume_fixture(f);
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    for id in ["synthetic-before", "synthetic-target"] {
+        db.save_provider(
+            "codex",
+            &crate::provider::Provider::with_id(
+                id.into(),
+                "synthetic".into(),
+                serde_json::json!({}),
+                None,
+            ),
+        )
+        .unwrap();
+    }
+    db.set_current_provider("codex", "synthetic-before")
+        .unwrap();
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_codex: Some("synthetic-target".into()),
+        ..Default::default()
+    });
+    f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target"},"published":true}},"claude":{"mode":"future-mode","opaque":123456789012345678901234567890}}}"#);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_recovery_uses_original_journal_without_runtime_or_file_writes() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let settings = std::fs::read(crate::settings::settings_path()).unwrap();
+    let before = snapshot(f.home.path());
+    let view = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    assert!(view.can_recover_operation);
+    assert_eq!(view.has_pending_operation, Some(true));
+    assert!(!view.can_start_upgrade && !view.can_complete_app);
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, "stale-revision")
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let recovered = coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &view.revision)
+        .unwrap();
+    assert_eq!(recovered.has_pending_operation, Some(false));
+    assert_eq!(recovered.saved_mode, Some(crate::mode::state::Mode::Direct));
+    assert_eq!(recovered.pointer_consistent, Some(true));
+    assert!(!recovered.can_complete_app && !recovered.can_start_upgrade);
+    assert_eq!(
+        std::fs::read(crate::settings::settings_path()).unwrap(),
+        settings
+    );
+    assert!(coordinator.verify_runtime_admission_blocked());
+    assert!(
+        crate::settings::get_current_provider_ready(&crate::app_config::AppType::Codex).is_err()
+    );
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let vault = session.read().unwrap();
+    let raw = f
+        .device
+        .read_device(
+            &vault,
+            &crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(std::str::from_utf8(&raw)
+        .unwrap()
+        .contains("123456789012345678901234567890"));
+    assert!(crate::mode::state::pending(&f.device, &vault, "codex")
+        .unwrap()
+        .is_none());
+    let public = serde_json::to_string(&recovered).unwrap();
+    assert!(!public.contains("synthetic-target") && !public.contains(f.root.to_str().unwrap()));
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_failure_retains_journal_for_explicit_retry() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    let path = f.root.join(crate::config::DB_FILE_NAME);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TRIGGER synthetic_recovery_abort BEFORE UPDATE OF is_current ON providers BEGIN SELECT RAISE(ABORT, 'synthetic interruption'); END;").unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let view = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    assert!(view.can_recover_operation);
+    assert!(coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &view.revision)
+        .is_err());
+    let retry = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    assert_eq!(retry.has_pending_operation, Some(true));
+    assert!(retry.can_recover_operation);
+    assert!(coordinator.verify_runtime_admission_blocked());
+    conn.execute_batch("DROP TRIGGER synthetic_recovery_abort;")
+        .unwrap();
+    let fresh = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    let done = coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &fresh.revision)
+        .unwrap();
+    assert_eq!(done.pointer_consistent, Some(true));
+    assert_eq!(done.has_pending_operation, Some(false));
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_rejects_conflicts_and_own_drift_but_isolates_future_peers() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target"},"published":true}},"claude":{"mode":"another-future-mode","opaque":987654321098765432109876543210}}}"#);
+    assert_eq!(
+        coordinator
+            .review_upgrade_app(&token, &app)
+            .unwrap()
+            .revision,
+        view.revision
+    );
+    let peer = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Claude)
+        .unwrap();
+    assert_eq!(peer.has_pending_operation, None);
+    assert!(!peer.can_recover_operation && !peer.can_complete_app);
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_codex: Some("synthetic-before".into()),
+        ..Default::default()
+    });
+    let before = snapshot(f.home.path());
+    assert!(coordinator
+        .recover_upgrade_app(&token, &app, &view.revision)
+        .is_err());
+    let conflict = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(!conflict.can_recover_operation);
+    assert!(coordinator
+        .recover_upgrade_app("wrong-token", &app, &conflict.revision)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    std::fs::write(
+        f.device.root().join(checkpoint::FILE),
+        b"changed checkpoint",
+    )
+    .unwrap();
+    assert!(coordinator.review_upgrade_app(&token, &app).is_err());
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_missing_proxy_route_is_unresolved_without_direct_fallback() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"proxy","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target"},"published":true}}}}"#);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let before = snapshot(f.home.path());
+    let view = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    assert_eq!(view.saved_mode, Some(crate::mode::state::Mode::Proxy));
+    assert!(!view.can_recover_operation);
+    assert!(coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &view.revision)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_file_drift_refuses_mutation_and_retains_protected_settings() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_codex: Some("synthetic-target".into()),
+        webdav_sync: Some(crate::settings::WebDavSyncSettings {
+            password: "synthetic-settings-canary".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let settings_path = crate::settings::settings_path();
+    let bytes = std::fs::read(&settings_path).unwrap();
+    let mut raw: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&bytes).unwrap();
+    raw.insert(
+        "futurePeerSetting".into(),
+        serde_json::value::RawValue::from_string("123456789012345678901234567890".into()).unwrap(),
+    );
+    std::fs::write(&settings_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    let config = crate::codex_config::get_codex_config_path();
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "model = 'synthetic-external-model'\n").unwrap();
+    let before = snapshot(f.home.path());
+    assert!(coordinator
+        .recover_upgrade_app(&token, &app, &view.revision)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let fresh = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert_ne!(fresh.revision, view.revision);
+    let settings = std::fs::read(&settings_path).unwrap();
+    coordinator
+        .recover_upgrade_app(&token, &app, &fresh.revision)
+        .unwrap();
+    assert_eq!(std::fs::read(&settings_path).unwrap(), settings);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "model = 'synthetic-external-model'\n"
+    );
+    assert!(!std::str::from_utf8(&settings)
+        .unwrap()
+        .contains("synthetic-settings-canary"));
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_no_journal_reports_actual_client_fields_without_completion() {
+    let f = Fixture::new();
+    publish_resume_fixture(&f);
+    let app = crate::app_config::AppType::Claude;
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    let config = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-client-token","ANTHROPIC_BASE_URL":"https://provider.example.invalid"}});
+    db.save_provider(
+        "claude",
+        &crate::provider::Provider::with_id(
+            "synthetic-live".into(),
+            "synthetic".into(),
+            config.clone(),
+            None,
+        ),
+    )
+    .unwrap();
+    db.set_current_provider("claude", "synthetic-live").unwrap();
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_claude: Some("synthetic-live".into()),
+        ..Default::default()
+    });
+    f.write_raw_mode(
+        br#"{"version":1,"apps":{"claude":{"mode":"direct"},"codex":{"mode":"future-mode"}}}"#,
+    );
+    let client = crate::config::get_claude_settings_path();
+    std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+    std::fs::write(&client, serde_json::to_vec(&config).unwrap()).unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let before = snapshot(f.home.path());
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert_eq!(view.has_pending_operation, Some(false));
+    assert_eq!(view.pointer_consistent, Some(true));
+    assert_eq!(view.stored_fields_match, Some(true));
+    assert!(!view.can_recover_operation && !view.can_complete_app && !view.can_start_upgrade);
+    assert_eq!(snapshot(f.home.path()), before);
+    let altered = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-externally-changed-token","ANTHROPIC_BASE_URL":"https://provider.example.invalid"}});
+    std::fs::write(&client, serde_json::to_vec(&altered).unwrap()).unwrap();
+    let before = snapshot(f.home.path());
+    let changed = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert_eq!(changed.stored_fields_match, Some(false));
+    assert_ne!(changed.revision, view.revision);
+    assert!(!changed.can_complete_app && !changed.can_start_upgrade);
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_refuses_unpublished_future_target_and_credentials_drift() {
+    for scenario in [
+        "unpublished",
+        "future-target",
+        "own-journal",
+        "vault",
+        "transition",
+    ] {
+        let f = Fixture::new();
+        published_pointer_fixture(&f);
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let app = crate::app_config::AppType::Codex;
+        let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+        match scenario {
+            "unpublished" => f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target"}}}}}"#),
+            "future-target" => f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target","future":true},"published":true}}}}"#),
+            "own-journal" => f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct","pending":{"op":"apply","files":[],"target":{"pointer":"synthetic-target"},"published":true}}}}"#),
+            "vault" => { let path = f.root.join("vault.json"); let mut bytes = std::fs::read(&path).unwrap(); bytes.push(b'\n'); std::fs::write(path, bytes).unwrap(); },
+            "transition" => std::fs::write(f.root.join(crate::secrets::transition::INTENT), b"synthetic pending original owner").unwrap(),
+            _ => unreachable!(),
+        }
+        let before = snapshot(f.home.path());
+        assert!(
+            coordinator
+                .recover_upgrade_app(&token, &app, &view.revision)
+                .is_err(),
+            "{scenario}"
+        );
+        if matches!(scenario, "unpublished" | "future-target") {
+            let unknown = coordinator.review_upgrade_app(&token, &app).unwrap();
+            assert!(!unknown.can_recover_operation, "{scenario}");
+        }
+        assert_eq!(snapshot(f.home.path()), before, "{scenario}");
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_future_peer_settings_do_not_block_supported_app() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    let path = crate::settings::settings_path();
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["currentProviderClaude"] = serde_json::json!({"future":"opaque-peer-pointer"});
+    std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let before = snapshot(f.home.path());
+    let view = coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+        .unwrap();
+    assert!(view.can_recover_operation);
+    assert_eq!(snapshot(f.home.path()), before);
+    let bytes = std::fs::read(&path).unwrap();
+    coordinator
+        .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &view.revision)
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(coordinator
+        .review_upgrade_app(&token, &crate::app_config::AppType::Claude)
+        .is_err());
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_future_owned_state_is_refused_before_any_db_write() {
+    for payload in [r#""written":{"future":true}"#, r#""stack":{"future":true}"#] {
+        let f = Fixture::new();
+        published_pointer_fixture(&f);
+        f.write_raw_mode(format!(r#"{{"version":1,"apps":{{"codex":{{"mode":"direct",{payload},"pending":{{"op":"switch","files":[],"target":{{"pointer":"synthetic-target"}},"published":true}}}}}}}}"#).as_bytes());
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let before = snapshot(f.home.path());
+        let view = coordinator
+            .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+            .unwrap();
+        assert!(!view.can_recover_operation);
+        assert!(coordinator
+            .recover_upgrade_app(&token, &crate::app_config::AppType::Codex, &view.revision)
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_rechecks_full_evidence_before_clearing_original_journal() {
+    let mut missed = Vec::new();
+    for scenario in [
+        "attachment",
+        "journal",
+        "preference",
+        "database",
+        "flags",
+        "cleanup-journal",
+        "cleanup-preference",
+        "cleanup-vault",
+    ] {
+        let f = Fixture::new();
+        published_pointer_fixture(&f);
+        let path = f.root.join(crate::config::DB_FILE_NAME);
+        let replacement = f.root.join("synthetic-replacement.db");
+        if scenario == "database" {
+            let source = rusqlite::Connection::open(&path).unwrap();
+            let mut copy = rusqlite::Connection::open(&replacement).unwrap();
+            rusqlite::backup::Backup::new(&source, &mut copy)
+                .unwrap()
+                .run_to_completion(10, std::time::Duration::ZERO, None)
+                .unwrap();
+            let db = Database::from_connection(
+                copy,
+                session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+            );
+            db.set_current_provider("codex", "synthetic-target")
+                .unwrap();
+            crate::proxy::auto_strategy::set_model_pref(
+                &db,
+                "codex",
+                Some("synthetic-stale-preference"),
+            )
+            .unwrap();
+        }
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let app = crate::app_config::AppType::Codex;
+        let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+        let root = f.root.clone();
+        let vault = f.vault.clone();
+        let actual_path = path.clone();
+        crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+            let expected_point = if scenario.starts_with("cleanup-") {
+                "recover:verified"
+            } else {
+                "recover:target_committed"
+            };
+            if point != expected_point {
+                return;
+            }
+            let effect = scenario.strip_prefix("cleanup-").unwrap_or(scenario);
+            match effect {
+                "attachment" | "journal" => {
+                    let op = if effect == "journal" {
+                        "apply"
+                    } else {
+                        "switch"
+                    };
+                    let attached = effect == "attachment";
+                    let bytes = format!(
+                        r#"{{"version":1,"apps":{{"codex":{{"mode":"direct","attached":{attached},"pending":{{"op":"{op}","files":[],"target":{{"pointer":"synthetic-target"}},"published":true}}}}}}}}"#
+                    );
+                    let session = session::SecretSession::from_context(root.clone(), vault.clone());
+                    DeviceStore::for_device()
+                        .write_device(
+                            &session.read().unwrap(),
+                            &crate::secrets::owned_file::DeviceFile::registered(
+                                crate::secrets::owned_file::DEVICE_STATE_FILE,
+                            )
+                            .unwrap(),
+                            bytes.as_bytes(),
+                        )
+                        .unwrap();
+                }
+                "database" => std::fs::rename(&replacement, &actual_path).unwrap(),
+                "vault" => {
+                    let path = root.join("vault.json");
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    bytes.push(b'\n');
+                    std::fs::write(path, bytes).unwrap();
+                }
+                "preference" | "flags" => {
+                    let db = Database::from_connection(
+                        rusqlite::Connection::open(&actual_path).unwrap(),
+                        session::SecretSession::from_context(root.clone(), vault.clone()),
+                    );
+                    if effect == "preference" {
+                        crate::proxy::auto_strategy::set_model_pref(
+                            &db,
+                            "codex",
+                            Some("synthetic-later-preference"),
+                        )
+                        .unwrap();
+                    } else {
+                        db.set_proxy_flags_sync("codex", true, true).unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+        })));
+        let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+        crate::mode::operation::failpoint::on_boundary(None);
+        if result.is_ok() {
+            missed.push(format!("{scenario}: accepted drift"));
+        }
+        let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        let pending =
+            crate::mode::state::pending(&f.device, &session.read().unwrap(), "codex").unwrap();
+        if pending.as_ref().map(|pending| pending.op.as_str())
+            != Some(if scenario.ends_with("journal") {
+                "apply"
+            } else {
+                "switch"
+            })
+        {
+            missed.push(format!("{scenario}: original/replacement journal removed"));
+        }
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+    assert!(missed.is_empty(), "{}", missed.join("; "));
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_published_pointer_retains_reliable_detached_proxy_route() {
+    let f = Fixture::new();
+    published_pointer_fixture(&f);
+    f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"proxy","proxy_route":"synthetic-before","pending":{"op":"switch","files":[],"target":{"pointer":"synthetic-target"},"published":true}}}}"#);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(view.can_recover_operation);
+    let done = coordinator
+        .recover_upgrade_app(&token, &app, &view.revision)
+        .unwrap();
+    assert_eq!(done.saved_mode, Some(crate::mode::state::Mode::Proxy));
+    assert_eq!(done.has_pending_operation, Some(false));
+    assert_eq!(done.stored_fields_match, None);
+    assert!(!done.can_complete_app && !done.can_start_upgrade);
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let mode =
+        crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "codex").unwrap();
+    assert_eq!(mode.proxy_route.as_deref(), Some("synthetic-before"));
+    assert!(!mode.attached);
+    assert!(coordinator.verify_runtime_admission_blocked());
+}

@@ -1297,3 +1297,33 @@ fn recovery_marker_save_failure_precedes_any_publication_or_target_effect() {
     assert_eq!(fx.temp_files(), staged_before);
     assert!(!fx.store.first_write_backup_dir().exists());
 }
+
+#[test]
+fn u03_recovery_never_clears_a_replacement_journal() {
+    let fx = Fixture::new();
+    let guard = lock_app(&fx.app);
+    let vault = fx.key.read().unwrap();
+    let pending = Pending {
+        op: state::op::SWITCH.into(),
+        files: vec![],
+        target: PendingTarget::pointer(Some("original".into())),
+        published: true,
+        extra: Default::default(),
+    };
+    state::set_pending(&fx.store, &vault, &fx.app, Some(pending)).unwrap();
+    let replacement = Pending {
+        op: state::op::SWITCH.into(),
+        files: vec![],
+        target: PendingTarget::pointer(Some("replacement".into())),
+        published: true,
+        extra: Default::default(),
+    };
+    let result = recover(&fx.store, &vault, &guard, &[], &|_| {
+        state::set_pending(&fx.store, &vault, &fx.app, Some(replacement.clone()))
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        state::pending(&fx.store, &vault, &fx.app).unwrap(),
+        Some(replacement)
+    );
+}

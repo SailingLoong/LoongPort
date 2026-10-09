@@ -24,6 +24,40 @@ pub(crate) struct SourceRevision {
     files: Vec<Option<FileRevision>>,
 }
 
+/// Transient original-file identity across an admitted write. Content and WAL
+/// may change through SQLite; replacing the primary file is never acknowledged.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct DatabaseIdentity {
+    path: PathBuf,
+    directories: Vec<(PathBuf, FileIdentity)>,
+    file: FileIdentity,
+}
+
+impl SourceRevision {
+    pub(crate) fn primary_identity(&self) -> Result<DatabaseIdentity, AppError> {
+        let file = self
+            .files
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(changed)?;
+        Ok(DatabaseIdentity {
+            path: self.path.clone(),
+            directories: self.directories.clone(),
+            file: file.stamp.identity.clone(),
+        })
+    }
+}
+
+pub(crate) fn verify_primary_identity(
+    path: &Path,
+    expected: &DatabaseIdentity,
+) -> Result<(), AppError> {
+    if observe(path, None)?.primary_identity()? != *expected {
+        return Err(changed());
+    }
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileIdentity {
     #[cfg(unix)]

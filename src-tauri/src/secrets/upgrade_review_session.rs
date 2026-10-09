@@ -545,3 +545,7 @@ impl AuthenticatedUpgrade {
         Ok(view)
     }
 }
+
+#[path = "upgrade_app_recovery.rs"]
+mod app_recovery;
+pub(crate) use app_recovery::UpgradeAppReview;

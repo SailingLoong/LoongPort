@@ -1719,6 +1719,81 @@ pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<St
     Ok(current_provider_slot(&mut settings, app_type).and_then(|current| current.clone()))
 }
 
+/// Original settings owner exposes only a transient authenticated startup read.
+/// No runtime store/cache is unlocked and no protected bundle is re-encrypted.
+pub(crate) fn read_upgrade_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+) -> Result<AppSettings, AppError> {
+    session.ensure_available()?;
+    if session.root() != crate::config::get_app_config_dir() {
+        return Err(AppError::Config("settings.session_mismatch".into()));
+    }
+    let runtime = settings_store().read()?;
+    if runtime.unlocked.is_some() {
+        return Err(AppError::Config("settings.already_unlocked".into()));
+    }
+    let path = settings_path();
+    let (pointer_field, directory_field) = match app {
+        AppType::Claude => ("currentProviderClaude", "claudeConfigDir"),
+        AppType::Codex => ("currentProviderCodex", "codexConfigDir"),
+        AppType::Gemini => ("currentProviderGemini", "geminiConfigDir"),
+        AppType::GrokBuild => ("currentProviderGrokbuild", "grokConfigDir"),
+        _ => return Err(AppError::Config("mode.verification_required".into())),
+    };
+    let settings = match crate::config_file_io::read_regular_file(&path, max_bytes)
+        .map_err(|error| AppError::io(&path, error))?
+    {
+        Some(bytes) => {
+            serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(&bytes)
+                .map_err(|source| AppError::json("settings.json", source))?;
+            let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_slice(&bytes)
+                    .map_err(|source| AppError::json("settings.json", source))?;
+            // Unknown peer pointer values are opaque. Validate the original
+            // registered protected bundles without interpreting another app.
+            fields.retain(|field, _| {
+                field == pointer_field
+                    || field == directory_field
+                    || PROTECTED_SETTINGS_FIELDS.contains(&field.as_str())
+            });
+            let projected = zeroize::Zeroizing::new(
+                serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
+            );
+            let mut selected = decode_settings_with_vault(&projected, vault)?;
+            clear_protected_settings(&mut selected);
+            selected
+        }
+        None => AppSettings::default(),
+    };
+    // Resolve paths through the existing bootstrap owner, never a second resolver.
+    let (actual, bound) = match app {
+        AppType::Claude => (
+            &settings.claude_config_dir,
+            &runtime.bootstrap.claude_config_dir,
+        ),
+        AppType::Codex => (
+            &settings.codex_config_dir,
+            &runtime.bootstrap.codex_config_dir,
+        ),
+        AppType::Gemini => (
+            &settings.gemini_config_dir,
+            &runtime.bootstrap.gemini_config_dir,
+        ),
+        AppType::GrokBuild => (
+            &settings.grok_config_dir,
+            &runtime.bootstrap.grok_config_dir,
+        ),
+        _ => return Err(AppError::Config("mode.verification_required".into())),
+    };
+    if actual != bound {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    Ok(settings)
+}
+
 /// Read a caller-authenticated settings snapshot without unlocking runtime state.
 pub(crate) fn current_provider_from_settings(
     settings: &mut AppSettings,
@@ -2108,6 +2183,44 @@ mod tests {
             restored.webdav_backup.unwrap()["password"],
             "legacy-canary-secret"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_upgrade_settings_projection_uses_existing_pointer_slots() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            VaultContext::generate().unwrap(),
+        );
+        let mut settings = AppSettings::default();
+        for app in crate::mode::controller::PROXY_APPS {
+            *current_provider_slot(&mut settings, &app).unwrap() =
+                Some(format!("synthetic-{}", app.as_str()));
+        }
+        let vault = session.read().unwrap();
+        fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            settings_path(),
+            encode_settings_with_vault(&settings, &vault).unwrap(),
+        )
+        .unwrap();
+        let bytes = fs::read(settings_path()).unwrap();
+        for app in crate::mode::controller::PROXY_APPS {
+            let mut selected =
+                read_upgrade_settings_with_vault(&app, &session, &vault, 1024 * 1024).unwrap();
+            assert_eq!(
+                current_provider_from_settings(&mut selected, &app),
+                Some(format!("synthetic-{}", app.as_str()))
+            );
+            for peer in crate::mode::controller::PROXY_APPS {
+                if peer != app {
+                    assert!(current_provider_from_settings(&mut selected, &peer).is_none());
+                }
+            }
+        }
+        assert_eq!(fs::read(settings_path()).unwrap(), bytes);
+        assert!(get_current_provider_ready(&AppType::Codex).is_err());
     }
 
     #[test]
