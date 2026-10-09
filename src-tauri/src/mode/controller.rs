@@ -566,21 +566,22 @@ pub(crate) fn recover_locked(
     )
 }
 
-/// Only persisted, admitted applications participate. Missing state is not an
-/// instruction to infer old flags or create a new Direct/Proxy decision.
+/// Enumerate persisted applications without interpreting peer subtrees. The
+/// existing loop admits each app independently; missing/shared-unknown state
+/// never instructs it to infer old flags or create a Direct/Proxy decision.
 fn persisted_apps(service: &ProxyService) -> Result<Vec<AppType>, AppError> {
     let store = DeviceStore::for_device();
     if crate::live::engine::read_current(&store.state_path())?.is_none() {
         return Err(invalid());
     }
     let vault = service.database().secret_session().read()?;
-    let live = state::load(&store, &vault)?;
-    if !live.extra.is_empty() {
+    let live = state::read_review_snapshot(&store, &vault)?;
+    if live.has_shared_extensions() {
         return Err(invalid());
     }
     Ok(PROXY_APPS
         .into_iter()
-        .filter(|app| live.apps.contains_key(app.as_str()))
+        .filter(|app| live.app_names().any(|name| name == app.as_str()))
         .collect())
 }
 
@@ -690,31 +691,38 @@ pub(crate) async fn startup_locked(service: &ProxyService) -> Result<(), String>
     stop_if_unused(service).await
 }
 
-/// The same admitted mode snapshot supplies both the UI hint and the locked
-/// execution-time stop check. Compatibility flags are not routing authority.
+/// The same authenticated snapshot supplies the hint and locked stop check.
+/// An opaque app is not proof that stopping is safe. Shared envelope uncertainty
+/// still fails globally; compatibility flags never supply routing authority.
 pub(crate) fn needs_listener(service: &ProxyService) -> Result<bool, AppError> {
     let store = DeviceStore::for_device();
     if crate::live::engine::read_current(&store.state_path())?.is_none() {
         return Err(invalid());
     }
     let vault = service.database().secret_session().read()?;
-    let live = state::load(&store, &vault)?;
-    if !live.extra.is_empty() {
+    let live = state::read_review_snapshot(&store, &vault)?;
+    if live.has_shared_extensions() {
         return Err(invalid());
     }
-    for app in PROXY_APPS {
-        if let Some(entry) = live.apps.get(app.as_str()) {
-            let mode = entry.mode_state();
-            mode.validate_for_update().map_err(|_| invalid())?;
-            if mode.mode.is_none() || entry.stack.enabled {
-                return Err(invalid());
-            }
+    for name in live.app_names() {
+        if !PROXY_APPS.iter().any(|app| app.as_str() == name) {
+            return Ok(true);
+        }
+        let selected = match live.app_view(name) {
+            Ok(selected) => selected,
+            Err(_) => return Ok(true),
+        };
+        let entry = selected.apps.get(name).ok_or_else(invalid)?;
+        if state::validate_app_for_update(entry).is_err()
+            || entry.mode.is_none()
+            || entry.stack.enabled
+            || entry.attached
+            || entry.pending.is_some()
+        {
+            return Ok(true);
         }
     }
-    Ok(live
-        .apps
-        .values()
-        .any(|entry| entry.attached || entry.pending.is_some()))
+    Ok(false)
 }
 
 pub(crate) async fn stop_if_unused(service: &ProxyService) -> Result<(), String> {

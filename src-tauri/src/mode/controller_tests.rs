@@ -115,6 +115,192 @@ impl Drop for Fault {
     }
 }
 
+fn lifecycle_insert_future_peer(fixture: &Fixture) -> String {
+    let store = DeviceStore::for_device();
+    let vault = fixture.state.db.secret_session().read().unwrap();
+    let file = crate::secrets::owned_file::DeviceFile::registered(
+        crate::secrets::owned_file::DEVICE_STATE_FILE,
+    )
+    .unwrap();
+    let plain = store.read_device(&vault, &file).unwrap().unwrap();
+    let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&plain).unwrap();
+    let mut apps: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_str(fields["apps"].get()).unwrap();
+    let peer = r#"{"mode":"future-mode","pending":{"future":true},"opaque":900719925474099312345}"#;
+    apps.insert("codex".into(), serde_json::from_str(peer).unwrap());
+    fields.insert(
+        "apps".into(),
+        serde_json::value::RawValue::from_string(serde_json::to_string(&apps).unwrap()).unwrap(),
+    );
+    store
+        .write_device(&vault, &file, &serde_json::to_vec(&fields).unwrap())
+        .unwrap();
+    peer.into()
+}
+
+fn lifecycle_read_future_peer(fixture: &Fixture) -> String {
+    let store = DeviceStore::for_device();
+    let vault = fixture.state.db.secret_session().read().unwrap();
+    let file = crate::secrets::owned_file::DeviceFile::registered(
+        crate::secrets::owned_file::DEVICE_STATE_FILE,
+    )
+    .unwrap();
+    let plain = store.read_device(&vault, &file).unwrap().unwrap();
+    let fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&plain).unwrap();
+    let apps: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_str(fields["apps"].get()).unwrap();
+    apps["codex"].get().into()
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_lifecycle_restore_proven_app_despite_future_peer() {
+    let fixture = Fixture::claude();
+    ProviderService::switch(&fixture.state, AppType::Claude, "a").unwrap();
+    let native = read_current(&fixture.path).unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    assert_ne!(read_current(&fixture.path).unwrap(), native);
+    let peer = lifecycle_insert_future_peer(&fixture);
+    let error = fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore_keep_state())
+        .unwrap_err();
+    assert_eq!(
+        read_current(&fixture.path).unwrap(),
+        native,
+        "future peer must not block this app's original native restoration"
+    );
+    assert!(
+        error.contains("codex"),
+        "partial result names the refused app: {error}"
+    );
+    let mode = state::mode_state(
+        &DeviceStore::for_device(),
+        &fixture.state.db.secret_session().read().unwrap(),
+        "claude",
+    )
+    .unwrap();
+    assert_eq!(mode.mode, Some(Mode::Proxy));
+    assert!(!mode.attached);
+    assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+    assert!(fixture.pending().is_none());
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+    assert_eq!(lifecycle_read_future_peer(&fixture), peer);
+    assert!(super::controller::needs_listener(&fixture.state.proxy_service).unwrap());
+    assert!(fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.is_running()));
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_lifecycle_startup_proven_app_despite_future_peer() {
+    let fixture = Fixture::claude();
+    ProviderService::switch(&fixture.state, AppType::Claude, "a").unwrap();
+    let native = read_current(&fixture.path).unwrap();
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .state
+                .proxy_service
+                .set_takeover_for_app("claude", true),
+        )
+        .unwrap();
+    fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.stop_with_restore_keep_state())
+        .unwrap();
+    assert_eq!(read_current(&fixture.path).unwrap(), native);
+    let peer = lifecycle_insert_future_peer(&fixture);
+    let error = fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.recover_from_crash())
+        .unwrap_err();
+    let mode = state::mode_state(
+        &DeviceStore::for_device(),
+        &fixture.state.db.secret_session().read().unwrap(),
+        "claude",
+    )
+    .unwrap();
+    assert!(
+        mode.attached,
+        "future peer must not block this app's original startup projection"
+    );
+    assert_eq!(mode.mode, Some(Mode::Proxy));
+    assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+    assert!(
+        error.contains("codex"),
+        "partial result names the refused app: {error}"
+    );
+    let projected: serde_json::Value =
+        serde_json::from_slice(&read_current(&fixture.path).unwrap().unwrap()).unwrap();
+    let (base, _) = fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.build_proxy_urls())
+        .unwrap();
+    assert_eq!(projected["env"]["ANTHROPIC_BASE_URL"], base);
+    assert_eq!(projected["unowned"], json!({"keep":true}));
+    assert!(fixture.pending().is_none());
+    assert_eq!(lifecycle_read_future_peer(&fixture), peer);
+    assert!(fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.is_running()));
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_lifecycle_future_peer_conservatively_retains_listener() {
+    let fixture = Fixture::claude();
+    let peer = lifecycle_insert_future_peer(&fixture);
+    assert!(
+        super::controller::needs_listener(&fixture.state.proxy_service).unwrap(),
+        "opaque peer is not proof that the listener can stop"
+    );
+    assert_eq!(lifecycle_read_future_peer(&fixture), peer);
+    let store = DeviceStore::for_device();
+    let vault = fixture.state.db.secret_session().read().unwrap();
+    let file = crate::secrets::owned_file::DeviceFile::registered(
+        crate::secrets::owned_file::DEVICE_STATE_FILE,
+    )
+    .unwrap();
+    for shared in [
+        br#"{"version":1,"future_root":true,"apps":{}}"#.as_slice(),
+        br#"{"version":99,"apps":{}}"#.as_slice(),
+    ] {
+        store.write_device(&vault, &file, shared).unwrap();
+        let before = read_current(&store.state_path()).unwrap();
+        assert!(super::controller::needs_listener(&fixture.state.proxy_service).is_err());
+        assert_eq!(read_current(&store.state_path()).unwrap(), before);
+    }
+    std::fs::write(store.state_path(), b"synthetic-invalid-ciphertext").unwrap();
+    assert!(super::controller::needs_listener(&fixture.state.proxy_service).is_err());
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn app_scoped_original_recovery_restores_settings_and_db_without_touching_future_peer() {

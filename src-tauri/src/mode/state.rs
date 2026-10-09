@@ -559,6 +559,14 @@ fn selected_app(state: &PreservedState, app: &str) -> Result<Option<AppLiveState
 }
 
 impl PreservedState {
+    pub(crate) fn has_shared_extensions(&self) -> bool {
+        !self.extra.is_empty()
+    }
+
+    pub(crate) fn app_names(&self) -> impl Iterator<Item = &str> {
+        self.apps.keys().map(String::as_str)
+    }
+
     pub(crate) fn app_view(&self, app: &str) -> Result<LiveState, AppError> {
         let apps = selected_app(self, app)?
             .map(|entry| (app.to_owned(), entry))
