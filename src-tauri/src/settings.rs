@@ -917,10 +917,27 @@ pub(crate) fn encode_settings_with_vault(
 }
 
 /// Normal runtime decoding is ciphertext-only for every registered protected field.
+type UnownedSettings = std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>;
+
+#[derive(Deserialize)]
+struct SettingsProjection {
+    #[serde(flatten)]
+    settings: AppSettings,
+    #[serde(flatten)]
+    unowned: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+}
+
 pub(crate) fn decode_settings_with_vault(
     bytes: &[u8],
     vault: &crate::secrets::VaultContext,
 ) -> Result<AppSettings, AppError> {
+    decode_settings_document_with_vault(bytes, vault).map(|(settings, _)| settings)
+}
+
+fn decode_settings_document_with_vault(
+    bytes: &[u8],
+    vault: &crate::secrets::VaultContext,
+) -> Result<(AppSettings, UnownedSettings), AppError> {
     let mut value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
     let object = settings_object(&mut value)?;
@@ -940,10 +957,17 @@ pub(crate) fn decode_settings_with_vault(
         *protected = serde_json::from_slice(&plaintext)
             .map_err(|_| AppError::Config("secret.invalid_settings_payload".into()))?;
     }
-    let mut settings: AppSettings =
+    let projection: SettingsProjection =
         serde_json::from_value(value).map_err(|source| AppError::json("settings.json", source))?;
+    // Classify fields through the original AppSettings serde contract, including
+    // optional fields absent from its default serialization. Keep foreign values
+    // from the original bytes so large numbers and future shapes are never rounded.
+    let mut unowned: UnownedSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    unowned.retain(|field, _| projection.unowned.contains_key(field));
+    let mut settings = projection.settings;
     settings.normalize_paths();
-    Ok(settings)
+    Ok((settings, unowned))
 }
 
 /// Controlled migration entrypoint. Normal reads never accept this plaintext form.
@@ -1198,10 +1222,22 @@ impl SettingsStore {
         if let Some(error) = &state.failure {
             return Err(AppError::Config(error.clone()));
         }
+        // Read foreign fields freshly under the original settings write lock and
+        // caller's existing vault guard. They never enter the frontend projection.
+        let unowned = match fs::read(&self.path) {
+            Ok(bytes) => decode_settings_document_with_vault(&bytes, vault)?.1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => UnownedSettings::new(),
+            Err(error) => return Err(AppError::io(&self.path, error)),
+        };
         let mut next = state.settings.clone();
         let result = mutator(&mut next);
         next.normalize_paths();
-        let bytes = encode_settings_with_vault(&next, vault)?;
+        let encoded = encode_settings_with_vault(&next, vault)?;
+        let mut fields: UnownedSettings = serde_json::from_slice(&encoded)
+            .map_err(|source| AppError::json("settings.json", source))?;
+        fields.extend(unowned);
+        let bytes = serde_json::to_vec_pretty(&fields)
+            .map_err(|source| AppError::JsonSerialize { source })?;
         crate::config::atomic_write_private(&self.path, &bytes)?;
         verify(&self.path, vault, &result)?;
         state.settings = next;
@@ -2543,5 +2579,109 @@ mod app_visibility_tests {
         visible.set_visible(&AppType::Codex, false).unwrap();
         assert!(visible.pi);
         assert!(!visible.codex);
+    }
+}
+
+#[cfg(test)]
+mod u03_foreign_settings_tests {
+    use super::*;
+    use crate::secrets::testing::TestHome;
+    use std::collections::BTreeMap;
+
+    const FOREIGN: &str = r#"{"mode":"future-mode", "opaque":900719925474099312345, "keep":true}"#;
+    const UPDATED: &str = r#"{"mode":"future-mode", "opaque":900719925474099312346, "keep":false}"#;
+
+    fn write_foreign(value: &str) {
+        let bytes = fs::read(settings_path()).unwrap();
+        let mut fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&bytes).unwrap();
+        fields.insert(
+            "futureCodexSettings".into(),
+            serde_json::value::RawValue::from_string(value.into()).unwrap(),
+        );
+        fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
+    }
+
+    fn fixture() -> TestHome {
+        let home = TestHome::new().unwrap();
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            VaultContext::generate().unwrap(),
+        );
+        let settings = AppSettings {
+            current_provider_claude: Some("synthetic-claude".into()),
+            current_provider_codex: Some("synthetic-codex".into()),
+            ..Default::default()
+        };
+        fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            settings_path(),
+            encode_settings_with_vault(&settings, &session.read().unwrap()).unwrap(),
+        )
+        .unwrap();
+        write_foreign(FOREIGN);
+        unlock_settings(session).unwrap();
+        home
+    }
+
+    fn foreign() -> String {
+        let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&fs::read(settings_path()).unwrap()).unwrap();
+        fields
+            .get("futureCodexSettings")
+            .expect("unowned peer settings survive")
+            .get()
+            .into()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_runtime_settings_preserve_exact_foreign_peer_without_exposing_it() {
+        let _home = fixture();
+        let frontend = serde_json::to_string(&get_settings_for_frontend().unwrap()).unwrap();
+        assert!(!frontend.contains("futureCodexSettings"));
+        mutate_settings(|settings| settings.language = Some("zh".into())).unwrap();
+        assert_eq!(foreign(), FOREIGN);
+        assert_eq!(
+            get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-claude")
+        );
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_unrelated_settings_write_preserves_newer_foreign_peer_bytes() {
+        let _home = fixture();
+        write_foreign(UPDATED);
+        mutate_settings(|settings| settings.language = Some("en".into())).unwrap();
+        assert_eq!(foreign(), UPDATED);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_provider_clear_does_not_resurrect_known_slot_from_foreign_fields() {
+        let _home = fixture();
+        set_current_provider(&AppType::Claude, None).unwrap();
+        assert_eq!(foreign(), FOREIGN);
+        assert!(get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+        let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&fs::read(settings_path()).unwrap()).unwrap();
+        assert!(!fields.contains_key("currentProviderClaude"));
     }
 }
