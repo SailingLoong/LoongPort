@@ -481,7 +481,7 @@ fn state_lock() -> &'static Mutex<()> {
 /// A transient view of the original file, not a second state store. Untouched
 /// app/root payloads retain their exact JSON bytes, including future numbers.
 #[derive(Serialize)]
-struct PreservedState {
+pub(crate) struct PreservedState {
     version: u32,
     #[serde(default)]
     apps: BTreeMap<String, Box<serde_json::value::RawValue>>,
@@ -505,12 +505,15 @@ fn read_preserved(
             extra: BTreeMap::new(),
         });
     };
-    serde_json::from_slice::<super::unique_keys::UniqueKeys>(&bytes)
-        .map_err(|_| invalid_state())?;
+    decode_preserved(&bytes)
+}
+
+fn decode_preserved(bytes: &[u8]) -> Result<PreservedState, AppError> {
+    serde_json::from_slice::<super::unique_keys::UniqueKeys>(bytes).map_err(|_| invalid_state())?;
     // RawValue must be captured by the JSON parser itself. serde's flatten
     // deserialization buffers unknown values and loses their original bytes.
     let mut fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
-        serde_json::from_slice(&bytes).map_err(|_| invalid_state())?;
+        serde_json::from_slice(bytes).map_err(|_| invalid_state())?;
     let version = fields.remove("version").ok_or_else(invalid_state)?;
     let version: u32 = serde_json::from_str(version.get()).map_err(|_| invalid_state())?;
     if version != STATE_VERSION {
@@ -530,12 +533,52 @@ fn read_preserved(
     })
 }
 
+/// Backup/review validates the authenticated shared envelope only. This never
+/// authorizes an unknown app, rewrites its bytes or relaxes ordinary decode.
+pub(crate) fn validate_envelope(bytes: &[u8]) -> Result<(), AppError> {
+    decode_preserved(bytes).map(|_| ())
+}
+
+/// One transient authenticated file view for the original upgrade reviewer.
+pub(crate) fn read_review_snapshot(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<PreservedState, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    read_preserved(store, vault)
+}
+
 fn selected_app(state: &PreservedState, app: &str) -> Result<Option<AppLiveState>, AppError> {
     state
         .apps
         .get(app)
         .map(|raw| serde_json::from_str(raw.get()).map_err(|_| invalid_state()))
         .transpose()
+}
+
+impl PreservedState {
+    pub(crate) fn app_view(&self, app: &str) -> Result<LiveState, AppError> {
+        let apps = selected_app(self, app)?
+            .map(|entry| (app.to_owned(), entry))
+            .into_iter()
+            .collect();
+        let extra = self
+            .extra
+            .iter()
+            .map(|(key, value)| {
+                serde_json::from_str(value.get())
+                    .map(|value| (key.clone(), value))
+                    .map_err(|_| invalid_state())
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LiveState {
+            version: self.version,
+            apps,
+            extra,
+        })
+    }
 }
 
 /// Read only the selected typed app. Missing mode stays unknown; malformed or
@@ -548,25 +591,7 @@ pub(crate) fn load_app(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let raw = read_preserved(store, vault)?;
-    let apps = selected_app(&raw, app)?
-        .map(|entry| (app.to_owned(), entry))
-        .into_iter()
-        .collect();
-    let extra = raw
-        .extra
-        .into_iter()
-        .map(|(key, value)| {
-            serde_json::from_str(value.get())
-                .map(|value| (key, value))
-                .map_err(|_| invalid_state())
-        })
-        .collect::<Result<_, _>>()?;
-    Ok(LiveState {
-        version: raw.version,
-        apps,
-        extra,
-    })
+    read_preserved(store, vault)?.app_view(app)
 }
 
 /// Change one compatible subtree under the original file lock. A future target

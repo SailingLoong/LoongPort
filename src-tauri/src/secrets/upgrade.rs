@@ -418,7 +418,7 @@ impl StableInspection {
         for (file, path, bytes) in &self.device_files {
             let plaintext = file.decode(vault, bytes)?;
             if path == &self.device.state_path() {
-                crate::mode::state::decode(&plaintext)
+                crate::mode::state::validate_envelope(&plaintext)
                     .map_err(|_| AppError::Config("upgrade.invalid_mode_state".into()))?;
             }
         }

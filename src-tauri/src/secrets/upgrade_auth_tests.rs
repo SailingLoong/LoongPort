@@ -48,6 +48,141 @@ impl Fixture {
         let bytes = crate::settings::encode_settings_with_vault(settings, &self.vault).unwrap();
         crate::config_file_io::write_durable(&crate::settings::settings_path(), &bytes).unwrap();
     }
+    fn write_raw_mode(&self, bytes: &[u8]) {
+        let session = session::SecretSession::from_context(self.root.clone(), self.vault.clone());
+        self.device
+            .write_device(
+                &session.read().unwrap(),
+                &crate::secrets::owned_file::DeviceFile::registered(
+                    crate::secrets::owned_file::DEVICE_STATE_FILE,
+                )
+                .unwrap(),
+                bytes,
+            )
+            .unwrap();
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn schema17_per_app_future_peer_authentication_is_read_only() {
+    let f = Fixture::new();
+    f.write_raw_mode(br#"{"version":1,"apps":{"codex":{"mode":"direct"},"claude":{"mode":"future-mode","opaque":123456789012345678901234567890}}}"#);
+    let inspected = inspect(&f.root, &f.device).unwrap();
+    let before = snapshot(f.home.path());
+    let review = AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+        .expect("future peer is not a shared authentication failure");
+    assert_eq!(review.view(&inspected).unwrap().status, "ready_to_check");
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(
+        crate::settings::get_current_provider_ready(&crate::app_config::AppType::Codex).is_err()
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn schema17_per_app_future_peer_staging_preserves_known_facts_and_unknown_pending() {
+    let f = Fixture::new();
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session,
+    );
+    db.save_provider(
+        "codex",
+        &crate::provider::Provider::with_id(
+            "synthetic-retained".into(),
+            "synthetic".into(),
+            serde_json::json!({}),
+            None,
+        ),
+    )
+    .unwrap();
+    db.set_current_provider("codex", "synthetic-retained")
+        .unwrap();
+    drop(db);
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_codex: Some("synthetic-retained".into()),
+        ..Default::default()
+    });
+    let bytes = br#"{"version":1,"apps":{"codex":{"mode":"direct"},"claude":{"mode":"future-mode","pending":{"op":"future-op","opaque":true},"opaque":123456789012345678901234567890}}}"#;
+    f.write_raw_mode(bytes);
+    let cipher = std::fs::read(f.device.state_path()).unwrap();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    review.prepare_checkpoint(&mut inspected, &token).unwrap();
+    let before = snapshot(f.home.path());
+    let result = review.stage_review(&inspected, &token).unwrap();
+    let codex = result
+        .apps
+        .iter()
+        .find(|app| app.app_type == "codex")
+        .unwrap();
+    assert_eq!(codex.saved_mode, Some(crate::mode::state::Mode::Direct));
+    assert_eq!(codex.mode_resolution, "preserved");
+    assert_eq!(codex.provider_resolution, "preserved");
+    assert!(!codex.requires_mode_choice && !codex.requires_provider_choice);
+    assert_eq!(
+        serde_json::to_value(codex).unwrap()["hasPendingOperation"],
+        false
+    );
+    let claude = result
+        .apps
+        .iter()
+        .find(|app| app.app_type == "claude")
+        .unwrap();
+    assert_eq!(claude.saved_mode, None);
+    assert_eq!(claude.mode_resolution, "verification_required");
+    assert_eq!(claude.provider_resolution, "verification_required");
+    assert!(!claude.requires_mode_choice && !claude.requires_provider_choice);
+    assert!(serde_json::to_value(claude).unwrap()["hasPendingOperation"].is_null());
+    for app in &result.apps {
+        assert_eq!(app.default_action, "keep_files");
+        assert!(!app.default_takeover);
+    }
+    let gemini = result
+        .apps
+        .iter()
+        .find(|app| app.app_type == "gemini")
+        .unwrap();
+    assert_eq!(gemini.mode_resolution, "missing");
+    assert_eq!(gemini.saved_mode, None);
+    assert_eq!(
+        serde_json::to_value(gemini).unwrap()["hasPendingOperation"],
+        false
+    );
+    assert!(!result.can_start_upgrade);
+    assert_eq!(snapshot(f.home.path()), before);
+    assert_eq!(std::fs::read(f.device.state_path()).unwrap(), cipher);
+    assert!(
+        crate::settings::get_current_provider_ready(&crate::app_config::AppType::Codex).is_err()
+    );
+    let public = serde_json::to_string(&result).unwrap();
+    assert!(!public.contains("synthetic-retained") && !public.contains("future-op"));
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn schema17_per_app_shared_envelope_failure_is_never_repaired() {
+    let f = Fixture::new();
+    for bytes in [
+        br#"{"version":2,"apps":{"codex":{"mode":"direct"}}}"#.as_slice(),
+        br#"{"version":1,"apps":[]}"#,
+        br#"{"version":1,"apps":{"codex":{},"codex":{}}}"#,
+        br#"{"version":1,"apps":{}} trailing"#,
+    ] {
+        f.write_raw_mode(bytes);
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let before = snapshot(f.home.path());
+        assert!(
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .is_err()
+        );
+        assert!(checkpoint::create(&f.root, &f.device, &f.vault, &[]).is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+    }
 }
 
 #[cfg_attr(test, test)]

@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     app_config::AppType,
-    mode::state::{LiveState, Mode},
+    mode::state::{LiveState, Mode, PreservedState},
     settings::AppSettings,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -20,7 +20,9 @@ pub(crate) struct StagedAppFacts {
     pub(crate) legacy_proxy_enabled: Option<bool>,
     pub(crate) legacy_failover_enabled: Option<bool>,
     pub(crate) saved_mode: Option<Mode>,
-    pub(crate) has_pending_operation: bool,
+    /// None means this app's original state could not be decoded; it must not
+    /// be reported as having no operation or be admitted as a fresh default.
+    pub(crate) has_pending_operation: Option<bool>,
     pub(crate) live_status: &'static str,
     pub(crate) legacy_takeover_marker: Option<bool>,
     /// Stored-row projection facts, not an effective model or final apply plan.
@@ -54,7 +56,7 @@ pub(super) fn source_facts(
     conn: &Connection,
     vault: &VaultContext,
     settings: &mut AppSettings,
-    live: &LiveState,
+    live: &PreservedState,
     files: &super::live_review::BoundFiles,
     managed_catalog_present: Option<bool>,
 ) -> Result<Vec<StagedAppFacts>, AppError> {
@@ -86,8 +88,15 @@ pub(super) fn source_facts(
             )
             .optional()?;
         // Never infer modern mode from legacy flags, a missing row or a pointer.
-        let mode = crate::mode::current::known_mode_from_state(live, &app).ok();
-        let mode_resolution = mode_resolution(live, &app, mode.as_ref());
+        let app_live = live.app_view(app.as_str());
+        let mode = app_live
+            .as_ref()
+            .ok()
+            .and_then(|live| crate::mode::current::known_mode_from_state(live, &app).ok());
+        let mode_resolution = match &app_live {
+            Ok(live) => mode_resolution(live, &app, mode.as_ref()),
+            Err(_) => "verification_required",
+        };
         let provider_resolution = if mode_resolution == "verification_required" {
             "verification_required"
         } else if mode
@@ -135,11 +144,14 @@ pub(super) fn source_facts(
         } else {
             selected
         };
-        let pending = live
-            .apps
-            .get(app.as_str())
-            .is_some_and(|entry| entry.pending.is_some());
-        let candidate = selected.filter(|_| !pending).and_then(|id| rows.get(id));
+        let pending = app_live.as_ref().ok().map(|live| {
+            live.apps
+                .get(app.as_str())
+                .is_some_and(|entry| entry.pending.is_some())
+        });
+        let candidate = selected
+            .filter(|_| pending == Some(false))
+            .and_then(|id| rows.get(id));
         let client = super::live_review::inspect(&app, files, candidate, managed_catalog_present)?;
         facts.push(StagedAppFacts {
             live_status: client.status,
@@ -166,10 +178,7 @@ pub(super) fn source_facts(
             legacy_proxy_enabled: flags.map(|flags| flags.0),
             legacy_failover_enabled: flags.map(|flags| flags.1),
             saved_mode: mode.and_then(|mode| mode.mode),
-            has_pending_operation: live
-                .apps
-                .get(app.as_str())
-                .is_some_and(|entry| entry.pending.is_some()),
+            has_pending_operation: pending,
         });
     }
     Ok(facts)

@@ -423,7 +423,7 @@ impl AuthenticatedUpgrade {
                 Some(bytes) => crate::settings::decode_settings_with_vault(&bytes, &vault)?,
                 None => crate::settings::AppSettings::default(),
             };
-        let live = crate::mode::state::load(&self.device, &vault)?;
+        let live = crate::mode::state::read_review_snapshot(&self.device, &vault)?;
         let mut files = live_review::BoundFiles::new();
         for input in &self.inputs {
             input.verify()?;
