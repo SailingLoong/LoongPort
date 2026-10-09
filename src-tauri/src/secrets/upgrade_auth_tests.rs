@@ -4377,3 +4377,253 @@ fn u03_native_admission_rejects_same_path_database_replacement_with_old_connecti
     );
     assert_eq!(snapshot(f.home.path()), before);
 }
+
+#[test]
+#[serial_test::serial]
+fn u03_gemini_native_completion_uses_original_projection_and_keeps_peer_isolated() {
+    for mode in ["direct", "proxy"] {
+        for official in [false, true] {
+            let f = Fixture::new();
+            publish_resume_fixture(&f);
+            let db = Database::from_connection(
+                rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+                session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+            );
+            let mut row = crate::provider::Provider::with_id(
+                "synthetic-gemini".into(),
+                "synthetic".into(),
+                serde_json::json!({"env": {
+                    "GEMINI_API_KEY": "synthetic-key",
+                    "GOOGLE_GEMINI_BASE_URL": "https://example.invalid",
+                    "GEMINI_MODEL": "synthetic-model"
+                }, "config": {"model": {"name": "synthetic-model"}}}),
+                None,
+            );
+            if official {
+                row.category = Some("official".into());
+            }
+            let projection = crate::services::provider::gemini_direct::projection(&row).unwrap();
+            db.save_provider("gemini", &row).unwrap();
+            db.set_current_provider("gemini", &row.id).unwrap();
+            drop(db);
+            f.write_settings(&crate::settings::AppSettings {
+                current_provider_gemini: Some(row.id.clone()),
+                ..Default::default()
+            });
+            f.write_raw_mode(format!(r#"{{"version":1,"apps":{{"gemini":{{"mode":"{mode}","attached":false,"proxy_route":"synthetic-gemini"}},"codex":{{"mode":"future-mode"}}}}}}"#).as_bytes());
+            use crate::live::patch::LivePatch;
+            let env_path = crate::gemini_config::get_gemini_env_path();
+            let config_path = crate::gemini_config::get_gemini_settings_path();
+            std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+            let env = projection
+                .env_patch()
+                .apply(&env_path, Some(b"# keep\nUSER_OPTION=keep\n"))
+                .unwrap();
+            let config = projection
+                .settings_patch()
+                .apply(&config_path, Some(br#"{"ui":{"theme":"synthetic"}}"#))
+                .unwrap();
+            std::fs::write(&env_path, &env).unwrap();
+            std::fs::write(&config_path, &config).unwrap();
+            let coordinator = crate::secrets::startup::StartupCoordinator::new(
+                f.root.clone(),
+                inspect(&f.root, &f.device).unwrap(),
+            );
+            let token = coordinator
+                .authenticate_upgrade(None, &f.store)
+                .unwrap()
+                .review_token
+                .unwrap();
+            let before = snapshot(f.home.path());
+            let view = coordinator
+                .review_upgrade_app(&token, &crate::app_config::AppType::Gemini)
+                .unwrap();
+            assert_eq!(view.stored_fields_match, Some(true));
+            assert!(view.can_complete_app, "mode={mode}, official={official}");
+            assert_eq!(snapshot(f.home.path()), before);
+            assert!(
+                !coordinator
+                    .review_upgrade_app(&token, &crate::app_config::AppType::Codex)
+                    .unwrap()
+                    .can_complete_app
+            );
+            for suffix in [
+                "GOOGLE_CLOUD_PROJECT=unexpected\n",
+                "GEMINI_API_KEY=${FROM_ENV}\n",
+                "GEMINI_API_KEY=PROXY_MANAGED\n",
+            ] {
+                let mut changed = env.clone();
+                changed.extend_from_slice(suffix.as_bytes());
+                std::fs::write(&env_path, changed).unwrap();
+                let before = snapshot(f.home.path());
+                let changed = coordinator
+                    .review_upgrade_app(&token, &crate::app_config::AppType::Gemini)
+                    .unwrap();
+                assert!(!changed.can_complete_app);
+                assert_ne!(changed.revision, view.revision);
+                assert_eq!(snapshot(f.home.path()), before);
+            }
+            std::fs::write(&env_path, &env).unwrap();
+            std::fs::write(
+                &config_path,
+                br#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":"unsupported"}"#,
+            )
+            .unwrap();
+            assert!(
+                !coordinator
+                    .review_upgrade_app(&token, &crate::app_config::AppType::Gemini)
+                    .unwrap()
+                    .can_complete_app
+            );
+        }
+    }
+}
+
+#[test]
+fn u03_gemini_native_completion_does_not_treat_malformed_model_as_absent() {
+    let row = crate::provider::Provider::with_id(
+        "synthetic".into(),
+        "synthetic".into(),
+        serde_json::json!({"env":{"GEMINI_API_KEY":"synthetic-key"}}),
+        None,
+    );
+    let live = serde_json::json!({"env":{"GEMINI_API_KEY":"synthetic-key"}, "config":{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":"unsupported"}});
+    assert_ne!(
+        super::projection_review::native_completion_match(
+            &crate::app_config::AppType::Gemini,
+            Some(&row),
+            &live
+        ),
+        Some(true)
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_gemini_retained_checkpoint_admits_actual_native_owner_and_keeps_sync_paused() {
+    use crate::app_config::AppType;
+    use crate::live::patch::LivePatch;
+    for saved_mode in ["direct", "proxy"] {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        for id in ["a", "b"] {
+            db.save_provider("gemini", &crate::provider::Provider::with_id(id.into(), "synthetic".into(), serde_json::json!({"env":{"GEMINI_API_KEY":format!("synthetic-{id}"),"GOOGLE_GEMINI_BASE_URL":format!("https://{id}.example.invalid")},"config":{"model":{"name":format!("synthetic-{id}")}}}), None)).unwrap();
+        }
+        let row = db.get_provider_by_id("a", "gemini").unwrap().unwrap();
+        db.set_current_provider("gemini", "a").unwrap();
+        drop(db);
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_gemini: Some("a".into()),
+            ..Default::default()
+        });
+        f.write_raw_mode(format!(r#"{{"version":1,"apps":{{"gemini":{{"mode":"{saved_mode}","attached":false,"proxy_route":"a"}},"codex":{{"mode":"future-mode","opaque":900719925474099312345}}}}}}"#).as_bytes());
+        let env_path = crate::gemini_config::get_gemini_env_path();
+        let config_path = crate::gemini_config::get_gemini_settings_path();
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        let projection = crate::services::provider::gemini_direct::projection(&row).unwrap();
+        std::fs::write(
+            &env_path,
+            projection
+                .env_patch()
+                .apply(&env_path, Some(b"# synthetic-user\nUSER_OPTION=keep\n"))
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &config_path,
+            projection
+                .settings_patch()
+                .apply(&config_path, Some(br#"{"ui":{"theme":"synthetic-user"}}"#))
+                .unwrap(),
+        )
+        .unwrap();
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let session = review.runtime_session(&inspected, &token).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = std::sync::Arc::new(Database::init_with_secrets(session.clone()).unwrap());
+        assert!(std::sync::Arc::ptr_eq(&db.secrets, &session));
+        let state = crate::store::AppState::new(db).unwrap();
+        let before = snapshot(f.home.path());
+        drop(
+            crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Gemini)
+                .unwrap(),
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        if saved_mode == "direct" {
+            crate::services::ProviderService::switch(&state, AppType::Gemini, "b").unwrap();
+            assert_eq!(
+                crate::settings::get_current_provider_ready(&AppType::Gemini)
+                    .unwrap()
+                    .as_deref(),
+                Some("b")
+            );
+            assert_eq!(
+                state.db.get_current_provider("gemini").unwrap().as_deref(),
+                Some("b")
+            );
+            assert!(std::fs::read_to_string(&env_path)
+                .unwrap()
+                .contains("GEMINI_API_KEY=synthetic-b"));
+            assert!(std::fs::read_to_string(&env_path)
+                .unwrap()
+                .contains("USER_OPTION=keep"));
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+            assert_eq!(
+                config
+                    .pointer("/model/name")
+                    .and_then(serde_json::Value::as_str),
+                Some("synthetic-b")
+            );
+            assert_eq!(
+                config
+                    .pointer("/ui/theme")
+                    .and_then(serde_json::Value::as_str),
+                Some("synthetic-user")
+            );
+            assert!(
+                review
+                    .review_app(&inspected, &token, &AppType::Gemini)
+                    .unwrap()
+                    .can_complete_app
+            );
+        }
+        let mode =
+            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "gemini").unwrap();
+        assert_eq!(
+            mode.mode,
+            Some(if saved_mode == "direct" {
+                crate::mode::state::Mode::Direct
+            } else {
+                crate::mode::state::Mode::Proxy
+            })
+        );
+        assert!(!mode.attached);
+        assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+        assert!(
+            crate::mode::state::pending(&f.device, &session.read().unwrap(), "gemini")
+                .unwrap()
+                .is_none()
+        );
+        let before = snapshot(f.home.path());
+        assert!(crate::mode::operation::AppWrite::begin_mode(
+            &state.proxy_service,
+            &AppType::Codex
+        )
+        .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        assert_eq!(
+            checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap()).unwrap(),
+            review.view(&inspected).unwrap().checkpoint_id
+        );
+    }
+}

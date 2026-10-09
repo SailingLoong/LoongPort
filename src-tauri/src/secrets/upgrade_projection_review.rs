@@ -15,6 +15,30 @@ pub(super) fn native_completion_match(
     candidate: Option<&Provider>,
     live: &Value,
 ) -> Option<bool> {
+    if *app == AppType::Gemini {
+        // The existing Gemini writer owns every floor env key and exactly two
+        // JSON paths. Partial review treats null model names as absent; native
+        // readback must also prove the containers and actual removal on disk.
+        let config = live.get("config")?.as_object()?;
+        for key in ["security", "model"] {
+            if config.get(key).is_some_and(|value| !value.is_object()) {
+                return None;
+            }
+        }
+        if live
+            .pointer("/config/security/auth")
+            .is_some_and(|value| !value.is_object())
+        {
+            return None;
+        }
+        if live
+            .pointer("/config/model/name")
+            .is_some_and(Value::is_null)
+        {
+            return Some(false);
+        }
+        return compare(app, candidate, live);
+    }
     if *app != AppType::Claude {
         return None;
     }

@@ -366,11 +366,9 @@ fn capture_app_with_state(
         })
         .and_then(|id| rows.get(id));
     let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
-    // Claude's projector checks the complete native owned fields. Other
-    // projectors still have unresolved route/catalog or cleanup policy;
-    // a partial field comparison must not authorize their completion.
-    let can_complete_app = *app == AppType::Claude
-        && candidate.is_some()
+    // Only a complete native owned-field proof grants admission. Codex and
+    // Grok remain unresolved until their route/catalog or cleanup is proven.
+    let can_complete_app = candidate.is_some()
         && client.status == "parsed"
         && client.marker == Some(false)
         && client.native_completion_match == Some(true);
