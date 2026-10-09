@@ -267,8 +267,18 @@ pub(crate) fn recover_checked(
         admitted_files,
         commit_target,
         verify_replay,
-        &|_| Ok(()),
+        &RecoveryCleanup {
+            verify: &|_| Ok(()),
+            publish_remaining: true,
+            expected_pending: None,
+        },
     )
+}
+
+struct RecoveryCleanup<'a> {
+    verify: &'a dyn Fn(&state::LiveState) -> Result<(), AppError>,
+    publish_remaining: bool,
+    expected_pending: Option<&'a Pending>,
 }
 
 fn recover_checked_with_cleanup(
@@ -278,13 +288,21 @@ fn recover_checked_with_cleanup(
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
     verify_replay: VerifyReplay<'_>,
-    verify_cleanup: &dyn Fn(&state::LiveState) -> Result<(), AppError>,
+    cleanup: &RecoveryCleanup<'_>,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
+    failpoint::hit("recover:load")?;
     let Some(mut pending) = state::pending(store, vault, guard.app())? else {
         return Ok(None);
     };
+    if cleanup
+        .expected_pending
+        .is_some_and(|expected| expected != &pending)
+    {
+        return Err(verification_required());
+    }
 
     validate_pending(guard.app(), &pending, admitted_files)?;
+    failpoint::hit("recover:begin")?;
 
     enum At {
         Pre,
@@ -378,6 +396,10 @@ fn recover_checked_with_cleanup(
         if !matches!(at, At::Pre) {
             continue;
         }
+        if !cleanup.publish_remaining {
+            skipped.push(file.path.clone());
+            continue;
+        }
         let staged_ok = match &file.staged {
             Some(staged) => digest(read_current(staged)?.as_deref()) == file.planned,
             None => file.planned.is_none(),
@@ -412,9 +434,12 @@ fn recover_checked_with_cleanup(
     if !paths.is_empty() {
         return Ok(Some(RecoveryOutcome::VerificationRequired { paths }));
     }
-    discard_pending_files(&pending)?;
     failpoint::hit("recover:verified")?;
-    state::clear_pending_checked(store, vault, guard.app(), &pending, verify_cleanup)?;
+    state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
+        (cleanup.verify)(live)?;
+        discard_pending_files(&pending)?;
+        (cleanup.verify)(live)
+    })?;
     Ok(Some(RecoveryOutcome::RolledForward))
 }
 
@@ -510,13 +535,16 @@ fn discard_all(staged: &[Option<PathBuf>]) {
 fn discard_staged(file: &PendingFile) -> Result<(), AppError> {
     if let Some(staged) = &file.staged {
         validate_file_path(staged)?;
+        let revision = crate::database::inspection::file_revision(staged)?;
         let Some(bytes) = read_current(staged)? else {
             return Ok(());
         };
         if file.private.is_none() || digest(Some(&bytes)) != file.planned {
             return Err(invalid_pending());
         }
+        crate::database::inspection::verify_unchanged(staged, &revision)?;
         failpoint::hit("discard")?;
+        crate::database::inspection::verify_unchanged(staged, &revision)?;
         fs::remove_file(staged).map_err(|error| AppError::io(staged, error))?;
         crate::live::engine::sync_parent(staged)?;
     }
@@ -1053,11 +1081,12 @@ fn commit_target_with_pointer(
 pub(crate) fn published_pointer_target<'a>(
     app: &str,
     pending: &'a Pending,
+    admitted: &[LiveFile],
 ) -> Result<&'a str, AppError> {
-    validate_pending(app, pending, &[])?;
+    validate_pending(app, pending, admitted)?;
     let target = &pending.target;
     if !pending.published
-        || !pending.files.is_empty()
+        || !unverified_files(pending)?.is_empty()
         || !matches!(pending.op.as_str(), state::op::SWITCH | state::op::APPLY)
         || target.state.is_some()
         || target.written.is_some()
@@ -1101,7 +1130,8 @@ pub(crate) fn recover_published_pointer(
         .ok_or_else(verification_required)?;
     state::validate_app_for_update(entry)?;
     let pending = state::pending(store, vault, app.as_str())?.ok_or_else(verification_required)?;
-    let id = published_pointer_target(app.as_str(), &pending)?;
+    let admitted = super::controller::files(app)?;
+    let id = published_pointer_target(app.as_str(), &pending, &admitted)?;
     let mode = super::current::validate_known_mode(store, vault, app)?;
     if mode.attached
         || (mode.mode == Some(state::Mode::Proxy)
@@ -1122,7 +1152,7 @@ pub(crate) fn recover_published_pointer(
         store,
         vault,
         guard,
-        &[],
+        &admitted,
         &|target| {
             (checks.before_target)()?;
             commit_target_with_pointer(
@@ -1146,7 +1176,11 @@ pub(crate) fn recover_published_pointer(
             (checks.after_target)()
         },
         &|_| Ok(None),
-        checks.before_cleanup,
+        &RecoveryCleanup {
+            verify: checks.before_cleanup,
+            publish_remaining: false,
+            expected_pending: Some(&pending),
+        },
     )
 }
 

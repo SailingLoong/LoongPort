@@ -650,13 +650,24 @@ pub(crate) fn clear_pending_checked(
     expected: &Pending,
     check: &dyn Fn(&LiveState) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    update_app_checked(store, vault, app, check, |entry| {
-        if entry.pending.as_ref() != Some(expected) {
-            return Err(AppError::Config("mode.verification_required".into()));
-        }
-        entry.pending = None;
-        Ok(())
-    })
+    update_app_checked(
+        store,
+        vault,
+        app,
+        &|live| {
+            if live.apps.get(app).and_then(|entry| entry.pending.as_ref()) != Some(expected) {
+                return Err(AppError::Config("mode.verification_required".into()));
+            }
+            check(live)
+        },
+        |entry| {
+            if entry.pending.as_ref() != Some(expected) {
+                return Err(AppError::Config("mode.verification_required".into()));
+            }
+            entry.pending = None;
+            Ok(())
+        },
+    )
 }
 
 /// Absence is the only empty-state case. Authentication, parse and version errors

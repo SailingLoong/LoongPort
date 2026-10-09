@@ -2951,3 +2951,397 @@ fn u03_published_pointer_retains_reliable_detached_proxy_route() {
     assert!(!mode.attached);
     assert!(coordinator.verify_runtime_admission_blocked());
 }
+
+fn published_client_files_fixture(f: &Fixture) -> Vec<crate::mode::state::PendingFile> {
+    published_pointer_fixture(f);
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let vault = session.read().unwrap();
+    let mut pending = crate::mode::state::pending(&f.device, &vault, "codex")
+        .unwrap()
+        .unwrap();
+    for (path, bytes) in [
+        (
+            crate::codex_config::get_codex_auth_path(),
+            b"{}\n".as_slice(),
+        ),
+        (
+            crate::codex_config::get_codex_config_path(),
+            b"model = \"synthetic-model\"\n".as_slice(),
+        ),
+    ] {
+        crate::config_file_io::write_durable(&path, bytes).unwrap();
+        let staged = crate::config_file_io::stage_write(&path, bytes, Some(0o600), true)
+            .unwrap()
+            .tmp_path()
+            .to_owned();
+        pending.files.push(crate::mode::state::PendingFile {
+            private: Some(true),
+            path,
+            pre: crate::live::engine::digest(Some(b"synthetic-preimage")),
+            planned: crate::live::engine::digest(Some(bytes)),
+            staged: Some(staged),
+            extra: Default::default(),
+        });
+    }
+    let files = pending.files.clone();
+    crate::mode::state::set_pending(&f.device, &vault, "codex", Some(pending)).unwrap();
+    files
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_already_published_complete_original_cleanup_without_rewriting() {
+    let f = Fixture::new();
+    let files = published_client_files_fixture(&f);
+    let witnesses: Vec<_> = files
+        .iter()
+        .map(|file| inspection::file_revision(&file.path).unwrap())
+        .collect();
+    let settings = std::fs::read(crate::settings::settings_path()).unwrap();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(
+        view.can_recover_operation,
+        "the original published files prove their planned bytes"
+    );
+    let result = coordinator
+        .recover_upgrade_app(&token, &app, &view.revision)
+        .unwrap();
+    assert_eq!(result.has_pending_operation, Some(false));
+    assert_eq!(result.pointer_consistent, Some(true));
+    assert!(!result.can_complete_app && !result.can_start_upgrade);
+    for (file, witness) in files.iter().zip(&witnesses) {
+        inspection::verify_unchanged(&file.path, witness).unwrap();
+        assert!(!file.staged.as_ref().unwrap().exists());
+    }
+    assert_eq!(
+        std::fs::read(crate::settings::settings_path()).unwrap(),
+        settings
+    );
+    assert!(coordinator.verify_runtime_admission_blocked());
+    // A lost result is resolved by querying the original owner, not starting again.
+    let observed = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert_eq!(observed.has_pending_operation, Some(false));
+    assert!(!observed.can_recover_operation && !observed.can_complete_app);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_unproven_content_or_staging_keeps_original_intent() {
+    for scenario in [
+        "preimage",
+        "external",
+        "staging",
+        "foreign-path",
+        "unknown-policy",
+    ] {
+        let f = Fixture::new();
+        let files = published_client_files_fixture(&f);
+        match scenario {
+            "preimage" => std::fs::write(&files[0].path, b"synthetic-preimage").unwrap(),
+            "external" => std::fs::write(&files[0].path, b"external generation").unwrap(),
+            "staging" => {
+                std::fs::write(files[0].staged.as_ref().unwrap(), b"external stage").unwrap()
+            }
+            "foreign-path" | "unknown-policy" => {
+                let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+                let vault = session.read().unwrap();
+                let mut pending = crate::mode::state::pending(&f.device, &vault, "codex")
+                    .unwrap()
+                    .unwrap();
+                if scenario == "foreign-path" {
+                    pending.files[0].path = f.home.path().join("unowned-client-file");
+                } else {
+                    pending.files[0].private = None;
+                }
+                f.write_raw_mode(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "version": 1,
+                        "apps": {"codex": {"mode": "direct", "pending": pending}}
+                    }))
+                    .unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let before = snapshot(f.home.path());
+        let app = crate::app_config::AppType::Codex;
+        let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+        assert!(!view.can_recover_operation, "{scenario}");
+        assert!(coordinator
+            .recover_upgrade_app(&token, &app, &view.revision)
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before, "{scenario}");
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_late_preimage_is_never_replayed() {
+    let f = Fixture::new();
+    let files = published_client_files_fixture(&f);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(view.can_recover_operation);
+    let path = files[0].path.clone();
+    crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+        if point == "recover:begin" {
+            std::fs::write(&path, b"synthetic-preimage").unwrap();
+        }
+    })));
+    let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+    crate::mode::operation::failpoint::on_boundary(None);
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read(&files[0].path).unwrap(),
+        b"synthetic-preimage"
+    );
+    for file in &files {
+        assert!(file.staged.as_ref().unwrap().exists());
+    }
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    assert!(
+        crate::mode::state::pending(&f.device, &session.read().unwrap(), "codex")
+            .unwrap()
+            .is_some()
+    );
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session,
+    );
+    assert_eq!(
+        db.get_current_provider("codex").unwrap().as_deref(),
+        Some("synthetic-before")
+    );
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_replaced_journal_keeps_its_staging_before_cleanup() {
+    let f = Fixture::new();
+    let files = published_client_files_fixture(&f);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(view.can_recover_operation);
+    let root = f.root.clone();
+    let vault = f.vault.clone();
+    crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+        if point == "recover:verified" {
+            let session = session::SecretSession::from_context(root.clone(), vault.clone());
+            let vault = session.read().unwrap();
+            let store = DeviceStore::for_device();
+            let mut pending = crate::mode::state::pending(&store, &vault, "codex")
+                .unwrap()
+                .unwrap();
+            pending.op = "apply".into();
+            crate::mode::state::set_pending(&store, &vault, "codex", Some(pending)).unwrap();
+        }
+    })));
+    let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+    crate::mode::operation::failpoint::on_boundary(None);
+    assert!(result.is_err());
+    for file in &files {
+        assert!(
+            file.staged.as_ref().unwrap().exists(),
+            "replacement retains original staging"
+        );
+    }
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    assert_eq!(
+        crate::mode::state::pending(&f.device, &session.read().unwrap(), "codex")
+            .unwrap()
+            .unwrap()
+            .op,
+        "apply"
+    );
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_partial_cleanup_failure_retries_without_client_writes() {
+    let f = Fixture::new();
+    let files = published_client_files_fixture(&f);
+    let witnesses: Vec<_> = files
+        .iter()
+        .map(|file| inspection::file_revision(&file.path).unwrap())
+        .collect();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert!(view.can_recover_operation);
+    let mut discards = 0;
+    crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+        if point == "discard" {
+            discards += 1;
+            if discards == 2 {
+                crate::mode::operation::failpoint::crash_at(Some("discard"));
+            }
+        }
+    })));
+    let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+    crate::mode::operation::failpoint::on_boundary(None);
+    crate::mode::operation::failpoint::crash_at(None);
+    assert!(result.is_err());
+    assert!(!files[0].staged.as_ref().unwrap().exists());
+    assert!(files[1].staged.as_ref().unwrap().exists());
+    let observed = coordinator.review_upgrade_app(&token, &app).unwrap();
+    assert_eq!(observed.has_pending_operation, Some(true));
+    assert!(observed.can_recover_operation);
+    let result = coordinator
+        .recover_upgrade_app(&token, &app, &observed.revision)
+        .unwrap();
+    assert_eq!(result.has_pending_operation, Some(false));
+    for (file, witness) in files.iter().zip(&witnesses) {
+        inspection::verify_unchanged(&file.path, witness).unwrap();
+        assert!(!file.staged.as_ref().unwrap().exists());
+    }
+    assert!(!result.can_complete_app && !result.can_start_upgrade);
+    assert!(coordinator.verify_runtime_admission_blocked());
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_replacement_staging_is_not_deleted_or_acknowledged() {
+    for same_bytes in [false, true] {
+        let f = Fixture::new();
+        let files = published_client_files_fixture(&f);
+        let coordinator = crate::secrets::startup::StartupCoordinator::new(
+            f.root.clone(),
+            inspect(&f.root, &f.device).unwrap(),
+        );
+        let token = coordinator
+            .authenticate_upgrade(None, &f.store)
+            .unwrap()
+            .review_token
+            .unwrap();
+        let app = crate::app_config::AppType::Codex;
+        let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+        let staged = files[0].staged.as_ref().unwrap().clone();
+        let replacement = staged.with_extension("synthetic-replacement");
+        let bytes = if same_bytes {
+            b"{}\n".as_slice()
+        } else {
+            b"external stage".as_slice()
+        };
+        std::fs::write(&replacement, bytes).unwrap();
+        let replaced = staged.clone();
+        let mut applied = false;
+        crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+            if point == "discard" && !applied {
+                applied = true;
+                std::fs::rename(&replacement, &replaced).unwrap();
+            }
+        })));
+        let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+        crate::mode::operation::failpoint::on_boundary(None);
+        assert!(
+            result.is_err(),
+            "replacement must remain unresolved: same_bytes={same_bytes}"
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), bytes);
+        assert!(files[1].staged.as_ref().unwrap().exists());
+        let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        assert!(
+            crate::mode::state::pending(&f.device, &session.read().unwrap(), "codex")
+                .unwrap()
+                .is_some()
+        );
+        assert!(coordinator.verify_runtime_admission_blocked());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_client_files_replaced_before_original_load_is_not_discarded() {
+    let f = Fixture::new();
+    let files = published_client_files_fixture(&f);
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let app = crate::app_config::AppType::Codex;
+    let view = coordinator.review_upgrade_app(&token, &app).unwrap();
+    let root = f.root.clone();
+    let vault = f.vault.clone();
+    crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+        if point == "recover:load" {
+            let session = session::SecretSession::from_context(root.clone(), vault.clone());
+            let vault = session.read().unwrap();
+            let store = DeviceStore::for_device();
+            let mut pending = crate::mode::state::pending(&store, &vault, "codex")
+                .unwrap()
+                .unwrap();
+            pending.op = "apply".into();
+            pending.published = false;
+            for file in &mut pending.files {
+                file.pre = file.planned.clone();
+            }
+            crate::mode::state::set_pending(&store, &vault, "codex", Some(pending)).unwrap();
+        }
+    })));
+    let result = coordinator.recover_upgrade_app(&token, &app, &view.revision);
+    crate::mode::operation::failpoint::on_boundary(None);
+    assert!(result.is_err());
+    for file in &files {
+        assert!(file.staged.as_ref().unwrap().exists());
+    }
+    let session = session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let pending = crate::mode::state::pending(&f.device, &session.read().unwrap(), "codex")
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.op, "apply");
+    assert!(!pending.published);
+    assert!(coordinator.verify_runtime_admission_blocked());
+}

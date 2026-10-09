@@ -130,9 +130,10 @@ impl AuthenticatedUpgrade {
                 .as_ref()
                 .is_some_and(|id| rows.contains_key(id) && currents.first() == Some(id))
         });
-        let target = pending
-            .flatten()
-            .and_then(|pending| operation::published_pointer_target(app.as_str(), pending).ok());
+        let admitted = crate::mode::controller::files(app)?;
+        let target = pending.flatten().and_then(|pending| {
+            operation::published_pointer_target(app.as_str(), pending, &admitted).ok()
+        });
         let compatible = live
             .as_ref()
             .and_then(|live| live.apps.get(app.as_str()))
@@ -150,7 +151,7 @@ impl AuthenticatedUpgrade {
             && currents.len() <= 1;
         let mut bound = live_review::BoundFiles::new();
         let mut files = Vec::new();
-        for file in crate::mode::controller::files(app)? {
+        for file in admitted {
             let input = ReviewedInput::capture(file.path.clone())?;
             let bytes = crate::config_file_io::read_regular_file(&file.path, checkpoint::MAX_BYTES)
                 .map_err(|error| AppError::io(&file.path, error))?;
