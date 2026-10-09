@@ -28,6 +28,16 @@ pub(crate) struct StagedAppFacts {
     pub(crate) stored_fields_match: Option<bool>,
     pub(crate) catalog_ownership: Option<&'static str>,
     pub(crate) catalog_file_present: Option<bool>,
+    /// Resolution of captured evidence only, never permission to publish. The
+    /// original difference card asks only about missing or conflicting facts.
+    pub(crate) mode_resolution: &'static str,
+    /// The provider in the saved mode: proxy route or direct pointer. No IDs or
+    /// decrypted row values leave this authenticated review owner.
+    pub(crate) provider_resolution: &'static str,
+    pub(crate) requires_mode_choice: bool,
+    pub(crate) requires_provider_choice: bool,
+    pub(crate) default_action: &'static str,
+    pub(crate) default_takeover: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -77,6 +87,35 @@ pub(super) fn source_facts(
             .optional()?;
         // Never infer modern mode from legacy flags, a missing row or a pointer.
         let mode = crate::mode::current::known_mode_from_state(live, &app).ok();
+        let mode_resolution = mode_resolution(live, &app, mode.as_ref());
+        let provider_resolution = if mode_resolution == "verification_required" {
+            "verification_required"
+        } else if mode
+            .as_ref()
+            .is_some_and(|mode| mode.mode == Some(Mode::Proxy))
+        {
+            match mode.as_ref().and_then(|mode| mode.proxy_route.as_ref()) {
+                Some(id) if providers.iter().any(|(candidate, _)| candidate == id) => "preserved",
+                Some(_) => "conflict",
+                None => "missing",
+            }
+        } else {
+            match local.as_ref() {
+                Some(id)
+                    if !providers.iter().any(|(candidate, _)| candidate == id)
+                        || current.len() > 1
+                        || (current.len() == 1 && current[0] != id) =>
+                {
+                    "conflict"
+                }
+                Some(_) => "preserved",
+                None => match current.len() {
+                    0 => "missing",
+                    1 => "preserved",
+                    _ => "conflict",
+                },
+            }
+        };
         let rows = Database::get_all_providers_on_connection(conn, vault, app.as_str())?;
         let selected = local
             .as_ref()
@@ -109,6 +148,12 @@ pub(super) fn source_facts(
             catalog_ownership: client.catalog_ownership,
             catalog_file_present: client.catalog_file_present,
             app_type: app.as_str().to_owned(),
+            mode_resolution,
+            provider_resolution,
+            requires_mode_choice: matches!(mode_resolution, "missing" | "conflict"),
+            requires_provider_choice: matches!(provider_resolution, "missing" | "conflict"),
+            default_action: "keep_files",
+            default_takeover: false,
             provider_count: providers.len(),
             local_current_present: local.is_some(),
             local_current_exists: local
@@ -128,4 +173,45 @@ pub(super) fn source_facts(
         });
     }
     Ok(facts)
+}
+
+fn mode_resolution(
+    live: &LiveState,
+    app: &AppType,
+    known: Option<&crate::mode::state::ModeState>,
+) -> &'static str {
+    if !live.extra.is_empty() {
+        return "verification_required";
+    }
+    let Some(entry) = live.apps.get(app.as_str()) else {
+        return "missing";
+    };
+    if entry.pending.is_some()
+        || !entry.extra.is_empty()
+        || !entry.stack.extra.is_empty()
+        || entry.stack.enabled
+        || entry
+            .written
+            .as_ref()
+            .is_some_and(|written| written.validate().is_err())
+    {
+        return "verification_required";
+    }
+    let Some(known) = known else {
+        return if entry.mode.is_none()
+            && entry.contract.is_none()
+            && entry.proxy_route.is_none()
+            && !entry.attached
+        {
+            "missing"
+        } else {
+            "verification_required"
+        };
+    };
+    if (known.mode == Some(Mode::Direct) && known.attached)
+        || (known.mode == Some(Mode::Proxy) && known.attached && known.contract.is_none())
+    {
+        return "conflict";
+    }
+    "preserved"
 }

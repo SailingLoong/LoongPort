@@ -1449,3 +1449,303 @@ fn upgrade_database_handoff_is_durable_without_freezing_later_app_changes() {
         .unwrap();
     assert!(checkpoint::verified_database_id(&f.root, &f.device, &f.vault).is_err());
 }
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn staged_app_resolution_preserves_reliable_mode_and_provider_without_takeover() {
+    use crate::mode::state::{AppLiveState, LiveState, Mode};
+    let f = Fixture::new();
+    let session =
+        crate::secrets::session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    let db = Database::from_connection(source, session.clone());
+    for app in ["claude", "codex"] {
+        db.save_provider(
+            app,
+            &crate::provider::Provider::with_id(
+                "retained-pointer-canary".into(),
+                "synthetic".into(),
+                serde_json::json!({}),
+                None,
+            ),
+        )
+        .unwrap();
+        db.set_current_provider(app, "retained-pointer-canary")
+            .unwrap();
+    }
+    // Modern saved mode remains authoritative over stale legacy proxy flags.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE proxy_config SET enabled=1 WHERE app_type='claude'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_claude: Some("retained-pointer-canary".into()),
+        current_provider_codex: Some("retained-pointer-canary".into()),
+        ..Default::default()
+    });
+    let mut live = LiveState::default();
+    live.apps.insert(
+        "claude".into(),
+        AppLiveState {
+            mode: Some(Mode::Direct),
+            ..Default::default()
+        },
+    );
+    live.apps.insert(
+        "codex".into(),
+        AppLiveState {
+            mode: Some(Mode::Proxy),
+            proxy_route: Some("retained-pointer-canary".into()),
+            ..Default::default()
+        },
+    );
+    f.device
+        .write_device(
+            &session.read().unwrap(),
+            &crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap(),
+            &serde_json::to_vec(&live).unwrap(),
+        )
+        .unwrap();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    review.prepare_checkpoint(&mut inspected, &token).unwrap();
+    let before = snapshot(f.home.path());
+    let staged = review.stage_review(&inspected, &token).unwrap();
+    for (name, mode) in [("claude", Mode::Direct), ("codex", Mode::Proxy)] {
+        let app = staged.apps.iter().find(|app| app.app_type == name).unwrap();
+        assert_eq!(app.saved_mode, Some(mode));
+        assert_eq!(app.mode_resolution, "preserved");
+        assert_eq!(app.provider_resolution, "preserved");
+        assert!(!app.requires_mode_choice && !app.requires_provider_choice);
+        assert_eq!(app.default_action, "keep_files");
+        assert!(!app.default_takeover);
+    }
+    assert!(!staged.can_start_upgrade);
+    assert_eq!(snapshot(f.home.path()), before);
+    let public = serde_json::to_string(&staged).unwrap();
+    assert!(!public.contains("retained-pointer-canary"));
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn staged_app_resolution_isolates_pending_and_future_state_without_direct_defaults() {
+    use crate::mode::state::{AppLiveState, LiveState, Mode, Pending};
+    let f = Fixture::new();
+    let session =
+        crate::secrets::session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let mut live = LiveState::default();
+    live.apps.insert(
+        "claude".into(),
+        AppLiveState {
+            mode: Some(Mode::Direct),
+            pending: Some(Pending {
+                op: "switch".into(),
+                files: vec![],
+                target: Default::default(),
+                published: true,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        },
+    );
+    live.apps.insert(
+        "codex".into(),
+        AppLiveState {
+            mode: Some(Mode::Direct),
+            extra: serde_json::from_value(serde_json::json!({"future-semantics":true})).unwrap(),
+            ..Default::default()
+        },
+    );
+    f.device
+        .write_device(
+            &session.read().unwrap(),
+            &crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap(),
+            &serde_json::to_vec(&live).unwrap(),
+        )
+        .unwrap();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    review.prepare_checkpoint(&mut inspected, &token).unwrap();
+    let before = snapshot(f.home.path());
+    let staged = review.stage_review(&inspected, &token).unwrap();
+    for name in ["claude", "codex"] {
+        let app = staged.apps.iter().find(|app| app.app_type == name).unwrap();
+        assert_eq!(app.mode_resolution, "verification_required");
+        assert!(
+            !app.requires_mode_choice,
+            "a choice must not bypass an unresolved operation or future semantics"
+        );
+    }
+    for name in ["gemini", "grokbuild"] {
+        let app = staged.apps.iter().find(|app| app.app_type == name).unwrap();
+        assert_eq!(app.mode_resolution, "missing");
+        assert_eq!(app.provider_resolution, "missing");
+        assert!(app.requires_mode_choice && app.requires_provider_choice);
+        assert_eq!(app.saved_mode, None);
+        assert_eq!(app.default_action, "keep_files");
+        assert!(!app.default_takeover);
+    }
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn staged_app_resolution_requests_only_missing_or_conflicting_pointers() {
+    use crate::mode::state::{AppLiveState, LiveState, Mode};
+    let f = Fixture::new();
+    let session =
+        crate::secrets::session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    let db = Database::from_connection(source, session.clone());
+    for app in ["claude", "codex", "gemini"] {
+        for id in ["local", "database"] {
+            db.save_provider(
+                app,
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    "synthetic".into(),
+                    serde_json::json!({}),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider(app, "database").unwrap();
+    }
+    drop(db);
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_claude: Some("local".into()),
+        current_provider_codex: Some("removed".into()),
+        ..Default::default()
+    });
+    let mut live = LiveState::default();
+    for app in ["claude", "codex", "gemini"] {
+        live.apps.insert(
+            app.into(),
+            AppLiveState {
+                mode: Some(Mode::Direct),
+                ..Default::default()
+            },
+        );
+    }
+    f.device
+        .write_device(
+            &session.read().unwrap(),
+            &crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap(),
+            &serde_json::to_vec(&live).unwrap(),
+        )
+        .unwrap();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    review.prepare_checkpoint(&mut inspected, &token).unwrap();
+    let before = snapshot(f.home.path());
+    let staged = review.stage_review(&inspected, &token).unwrap();
+    for name in ["claude", "codex"] {
+        let app = staged.apps.iter().find(|app| app.app_type == name).unwrap();
+        assert_eq!(app.mode_resolution, "preserved");
+        assert_eq!(app.provider_resolution, "conflict");
+        assert!(!app.requires_mode_choice && app.requires_provider_choice);
+    }
+    let gemini = staged
+        .apps
+        .iter()
+        .find(|app| app.app_type == "gemini")
+        .unwrap();
+    assert_eq!(
+        gemini.provider_resolution, "preserved",
+        "unique DB pointer is reliable when local pointer is absent"
+    );
+    assert!(!gemini.requires_provider_choice);
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn staged_app_resolution_never_infers_mode_from_flags_or_unverified_routes() {
+    use crate::mode::state::{AppLiveState, LiveState, Mode};
+    for (mode, attached, route, expected_mode, expected_provider) in [
+        (None, false, None, "missing", "missing"),
+        (Some(Mode::Direct), true, None, "conflict", "missing"),
+        (Some(Mode::Proxy), false, None, "preserved", "missing"),
+        (
+            Some(Mode::Proxy),
+            false,
+            Some("removed"),
+            "preserved",
+            "conflict",
+        ),
+    ] {
+        let f = Fixture::new();
+        let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        source.execute("UPDATE proxy_config SET enabled=1, auto_failover_enabled=1 WHERE app_type='claude'", []).unwrap();
+        drop(source);
+        let session =
+            crate::secrets::session::SecretSession::from_context(f.root.clone(), f.vault.clone());
+        let mut live = LiveState::default();
+        live.apps.insert(
+            "claude".into(),
+            AppLiveState {
+                mode,
+                attached,
+                proxy_route: route.map(str::to_owned),
+                ..Default::default()
+            },
+        );
+        f.device
+            .write_device(
+                &session.read().unwrap(),
+                &crate::secrets::owned_file::DeviceFile::registered(
+                    crate::secrets::owned_file::DEVICE_STATE_FILE,
+                )
+                .unwrap(),
+                &serde_json::to_vec(&live).unwrap(),
+            )
+            .unwrap();
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        review.prepare_checkpoint(&mut inspected, &token).unwrap();
+        let before = snapshot(f.home.path());
+        let staged = review.stage_review(&inspected, &token).unwrap();
+        let app = staged
+            .apps
+            .iter()
+            .find(|app| app.app_type == "claude")
+            .unwrap();
+        assert_eq!(app.mode_resolution, expected_mode);
+        assert_eq!(app.provider_resolution, expected_provider);
+        assert_eq!(
+            app.requires_mode_choice,
+            matches!(expected_mode, "missing" | "conflict")
+        );
+        assert_eq!(
+            app.requires_provider_choice,
+            matches!(expected_provider, "missing" | "conflict")
+        );
+        assert_eq!(app.default_action, "keep_files");
+        assert!(!app.default_takeover);
+        assert_eq!(snapshot(f.home.path()), before);
+    }
+}
