@@ -58,6 +58,54 @@ pub(crate) fn verify_primary_identity(
     Ok(())
 }
 
+/// Bind the existing SQLite connection to the same primary file inspected on disk.
+/// The caller holds the original connection mutex; no second connection is opened.
+pub(crate) fn verify_connection_primary_identity(
+    conn: &Connection,
+    expected: &DatabaseIdentity,
+) -> Result<(), AppError> {
+    if conn.path().map(Path::new) != Some(expected.path.as_path()) {
+        return Err(changed());
+    }
+    #[cfg(unix)]
+    {
+        let mut moved: std::ffi::c_int = 1;
+        // The connection remains borrowed and its mutex held. SQLite writes one
+        // c_int through this live buffer; neither pointer escapes the call.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                conn.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+                std::ptr::addr_of_mut!(moved).cast(),
+            )
+        };
+        if rc != rusqlite::ffi::SQLITE_OK || moved != 0 {
+            return Err(changed());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+        // SQLite owns this native handle. File control only lends its value;
+        // the identity query below does not wrap, close or retain the handle.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                conn.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+                std::ptr::addr_of_mut!(handle).cast(),
+            )
+        };
+        if rc != rusqlite::ffi::SQLITE_OK || identity_from_handle(handle)? != expected.file {
+            return Err(changed());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    return Err(error("storage_unavailable"));
+    verify_primary_identity(&expected.path, expected)
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileIdentity {
     #[cfg(unix)]
@@ -148,34 +196,41 @@ fn identity(file: &File, metadata: &Metadata) -> Result<FileIdentity, AppError> 
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
-        };
         let _ = metadata;
-        let mut info = FILE_ID_INFO::default();
-        // Same handle-identity API as the existing session-log reader. The owned
-        // handle and correctly sized writable buffer remain live for this call.
-        if unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                FileIdInfo,
-                std::ptr::addr_of_mut!(info).cast(),
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(error("storage_unavailable"));
-        }
-        Ok(FileIdentity {
-            volume: info.VolumeSerialNumber,
-            id: info.FileId.Identifier,
-        })
+        identity_from_handle(file.as_raw_handle())
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, metadata);
         Err(error("storage_unavailable"))
     }
+}
+
+#[cfg(windows)]
+fn identity_from_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<FileIdentity, AppError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+    let mut info = FILE_ID_INFO::default();
+    // Same handle-identity API as the existing session-log reader. The owned
+    // handle and correctly sized writable buffer remain live for this call.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            std::ptr::addr_of_mut!(info).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(error("storage_unavailable"));
+    }
+    Ok(FileIdentity {
+        volume: info.VolumeSerialNumber,
+        id: info.FileId.Identifier,
+    })
 }
 
 fn stamp(file: &File) -> Result<FileStamp, AppError> {

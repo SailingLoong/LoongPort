@@ -1218,7 +1218,7 @@ impl<'a> AppWrite<'a> {
         let guard = crate::live::engine::lock_app(app.as_str());
         let session = db.secret_session();
         let vault = session.read()?;
-        crate::secrets::upgrade::checkpoint::ensure_sync_admitted(&store)?;
+        crate::secrets::upgrade::ensure_native_app_write_admitted(db, &store, app, &vault)?;
         let mode = super::current::validate_known_mode(&store, &vault, app)?;
         if placeholder
             && !(mode.is_proxy() && mode.attached)

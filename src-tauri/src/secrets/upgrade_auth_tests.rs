@@ -3972,3 +3972,308 @@ fn u03_app_completion_requires_actual_fields_and_preserves_reliable_detached_mod
     }
     assert!(missed.is_empty(), "{}", missed.join("; "));
 }
+
+#[test]
+#[serial_test::serial]
+fn u03_native_proven_app_switches_while_future_peer_stays_blocked_and_sync_paused() {
+    use crate::app_config::AppType;
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut upgrade =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = upgrade.view(&inspected).unwrap().review_token.unwrap();
+    let id = upgrade
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    upgrade
+        .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+        .unwrap();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        upgrade.session_for_test(),
+    );
+    let config = |key: &str| {
+        serde_json::json!({"env":{
+            "ANTHROPIC_AUTH_TOKEN": format!("synthetic-{key}-credential"),
+            "ANTHROPIC_BASE_URL": format!("https://{key}.example.invalid/v1"),
+            "ANTHROPIC_MODEL": format!("synthetic-{key}-model")
+        }})
+    };
+    for key in ["a", "b"] {
+        db.save_provider(
+            "claude",
+            &crate::provider::Provider::with_id(key.into(), "synthetic".into(), config(key), None),
+        )
+        .unwrap();
+    }
+    db.set_current_provider("claude", "a").unwrap();
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_claude: Some("a".into()),
+        ..Default::default()
+    });
+    let path = crate::config::get_claude_settings_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut initial = config("a");
+    initial["unowned"] = serde_json::json!({"keep":true});
+    std::fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+    f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct","attached":false},"codex":{"mode":"future-mode","pending":{"op":"future-op","opaque":true,"large":123456789012345678901234567890}}}}"#);
+    let original_checkpoint = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    let opaque_peer = || {
+        let file = crate::secrets::owned_file::DeviceFile::registered(
+            crate::secrets::owned_file::DEVICE_STATE_FILE,
+        )
+        .unwrap();
+        let plain = file
+            .decode(&f.vault, &std::fs::read(f.device.state_path()).unwrap())
+            .unwrap();
+        let root: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&plain).unwrap();
+        let apps: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_str(root["apps"].get()).unwrap();
+        apps["codex"].get().to_owned()
+    };
+    let original_peer = opaque_peer();
+    crate::settings::unlock_settings(upgrade.session_for_test()).unwrap();
+    let state = crate::store::AppState::new(std::sync::Arc::new(db)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &state.db.secrets,
+        &upgrade.session_for_test()
+    ));
+    let result = crate::services::provider::ProviderService::switch(&state, AppType::Claude, "b");
+    assert!(
+        result.is_ok(),
+        "original native Claude write must not be blocked by its peer: {:?}",
+        result.err()
+    );
+    let native: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(native["env"], config("b")["env"]);
+    assert_eq!(native["unowned"], serde_json::json!({"keep":true}));
+    assert_eq!(
+        state.db.get_current_provider("claude").unwrap().as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert!(
+        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Claude)
+            .is_ok()
+    );
+    assert!(
+        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Codex)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+        original_checkpoint
+    );
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault)
+            .unwrap()
+            .as_deref(),
+        Some(id.as_str())
+    );
+    fn assert_paused<T>(result: Result<T, AppError>) {
+        assert!(matches!(result, Err(AppError::Config(code)) if code == "upgrade.sync_paused"));
+    }
+    assert_paused(checkpoint::ensure_sync_admitted(&f.device));
+    assert_eq!(opaque_peer(), original_peer);
+    let before = snapshot(f.home.path());
+    let mut dav = crate::settings::WebDavSyncSettings::default();
+    let mut s3 = crate::settings::S3SyncSettings::default();
+    assert_paused(crate::rt::block_on(crate::services::webdav_sync::upload(
+        &state.db, &mut dav,
+    )));
+    assert_paused(crate::rt::block_on(crate::services::s3_sync::upload(
+        &state.db, &mut s3,
+    )));
+    assert_paused(crate::rt::block_on(
+        crate::services::webdav_sync::fetch_snapshot(&dav),
+    ));
+    assert_paused(crate::rt::block_on(
+        crate::services::s3_sync::fetch_snapshot(&s3),
+    ));
+    assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_checkpoint_native_admission_refuses_unproven_app_without_mutation() {
+    for case in [
+        "native_drift",
+        "pointer_drift",
+        "missing_mode",
+        "future_mode",
+        "future_root",
+        "checkpoint_corrupt",
+        "generation_pending",
+    ] {
+        use crate::app_config::AppType;
+        let f = Fixture::new();
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut upgrade =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = upgrade.view(&inspected).unwrap().review_token.unwrap();
+        let id = upgrade
+            .prepare_checkpoint(&mut inspected, &token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        upgrade
+            .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+            .unwrap();
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            upgrade.session_for_test(),
+        );
+        let config = |key: &str| {
+            serde_json::json!({"env":{
+                "ANTHROPIC_AUTH_TOKEN": format!("synthetic-{key}-credential"),
+                "ANTHROPIC_BASE_URL": format!("https://{key}.example.invalid/v1"),
+                "ANTHROPIC_MODEL": format!("synthetic-{key}-model")
+            }})
+        };
+        for key in ["a", "b"] {
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    key.into(),
+                    "synthetic".into(),
+                    config(key),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "a").unwrap();
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_claude: Some("a".into()),
+            ..Default::default()
+        });
+        let path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut initial = config("a");
+        initial["unowned"] = serde_json::json!({"keep":true});
+        std::fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct","attached":false},"codex":{"mode":"future-mode","pending":{"op":"future-op","opaque":true,"large":123456789012345678901234567890}}}}"#);
+        crate::settings::unlock_settings(upgrade.session_for_test()).unwrap();
+        let state = crate::store::AppState::new(std::sync::Arc::new(db)).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &state.db.secrets,
+            &upgrade.session_for_test()
+        ));
+
+        match case {
+            "native_drift" => {
+                let mut value = initial.clone();
+                value["env"]["ANTHROPIC_AUTH_TOKEN"] = serde_json::json!("synthetic-external-change");
+                std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "pointer_drift" => f.write_settings(&crate::settings::AppSettings {
+                current_provider_claude: Some("b".into()),
+                ..Default::default()
+            }),
+            "missing_mode" => f.write_raw_mode(br#"{"version":1,"apps":{}}"#),
+            "future_mode" => f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"future-mode","opaque":true}}}"#),
+            "future_root" => f.write_raw_mode(br#"{"version":1,"future":true,"apps":{"claude":{"mode":"direct","attached":false}}}"#),
+            "checkpoint_corrupt" => std::fs::write(f.device.root().join(checkpoint::FILE), b"synthetic-invalid-envelope").unwrap(),
+            "generation_pending" => std::fs::write(f.root.join(crate::secrets::transition::INTENT), b"synthetic-pending-generation").unwrap(),
+            _ => unreachable!(),
+        }
+        let before = snapshot(f.home.path());
+        assert!(
+            crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Claude)
+                .is_err(),
+            "{case} must retain app admission block"
+        );
+        assert_eq!(
+            snapshot(f.home.path()),
+            before,
+            "{case} must remain read-only"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn u03_native_admission_rejects_same_path_database_replacement_with_old_connection() {
+    use crate::app_config::AppType;
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut upgrade =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = upgrade.view(&inspected).unwrap().review_token.unwrap();
+    let id = upgrade
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    upgrade
+        .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+        .unwrap();
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        upgrade.session_for_test(),
+    );
+    let config = |key: &str| {
+        serde_json::json!({"env":{
+            "ANTHROPIC_AUTH_TOKEN": format!("synthetic-{key}-credential"),
+            "ANTHROPIC_BASE_URL": format!("https://{key}.example.invalid/v1"),
+            "ANTHROPIC_MODEL": format!("synthetic-{key}-model")
+        }})
+    };
+    for key in ["a", "b"] {
+        db.save_provider(
+            "claude",
+            &crate::provider::Provider::with_id(key.into(), "synthetic".into(), config(key), None),
+        )
+        .unwrap();
+    }
+    db.set_current_provider("claude", "a").unwrap();
+    f.write_settings(&crate::settings::AppSettings {
+        current_provider_claude: Some("a".into()),
+        ..Default::default()
+    });
+    let path = crate::config::get_claude_settings_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut initial = config("a");
+    initial["unowned"] = serde_json::json!({"keep":true});
+    std::fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+    f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct","attached":false},"codex":{"mode":"future-mode","pending":{"op":"future-op","opaque":true,"large":123456789012345678901234567890}}}}"#);
+    crate::settings::unlock_settings(upgrade.session_for_test()).unwrap();
+    let state = crate::store::AppState::new(std::sync::Arc::new(db)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &state.db.secrets,
+        &upgrade.session_for_test()
+    ));
+
+    let database_path = f.root.join(crate::config::DB_FILE_NAME);
+    let bytes = std::fs::read(&database_path).unwrap();
+    let moved = f.root.join("synthetic-original-database.db");
+    std::fs::rename(&database_path, &moved).unwrap();
+    std::fs::write(&database_path, &bytes).unwrap();
+    let replacement = Database::from_connection(
+        rusqlite::Connection::open(&database_path).unwrap(),
+        upgrade.session_for_test(),
+    );
+    crate::database::vault::check_identity(&replacement.conn.lock().unwrap(), &f.vault).unwrap();
+    assert_eq!(
+        Database::get_user_version(&replacement.conn.lock().unwrap()).unwrap(),
+        20
+    );
+    drop(replacement);
+    let before = snapshot(f.home.path());
+    assert!(
+        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Claude)
+            .is_err(),
+        "same-path same-Vault replacement cannot authorize the old connection"
+    );
+    assert_eq!(snapshot(f.home.path()), before);
+}

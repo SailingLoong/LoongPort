@@ -95,6 +95,11 @@ fn client_paths(
 }
 
 impl AuthenticatedUpgrade {
+    #[cfg(test)]
+    pub(super) fn session_for_test(&self) -> Arc<SecretSession> {
+        self.session.clone()
+    }
+
     pub(crate) fn authenticate(
         root: &Path,
         device: &DeviceStore,
@@ -626,4 +631,4 @@ impl AuthenticatedUpgrade {
 
 #[path = "upgrade_app_recovery.rs"]
 mod app_recovery;
-pub(crate) use app_recovery::UpgradeAppReview;
+pub(crate) use app_recovery::{ensure_native_app_write_admitted, UpgradeAppReview};

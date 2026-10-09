@@ -84,184 +84,21 @@ impl AuthenticatedUpgrade {
         vault: &RwLockReadGuard<'_, VaultContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
     ) -> Result<AppCapture, AppError> {
-        let mut settings = crate::settings::read_upgrade_settings_with_vault(
+        let settings = crate::settings::read_upgrade_settings_with_vault(
             app,
             &self.session,
             vault,
             checkpoint::MAX_BYTES,
         )?;
-        let local = crate::settings::current_provider_from_settings(&mut settings, app);
-        // Cleanup borrows the snapshot already pinned by the original state
-        // lock; ordinary queries capture one authenticated shared envelope.
-        let live = match pinned_state {
-            Some(live) => Some(live.clone()),
-            None => crate::mode::state::read_review_snapshot(&self.device, vault)?
-                .app_view(app.as_str())
-                .ok(),
-        };
-        let mode = live
-            .as_ref()
-            .and_then(|live| current::known_mode_from_state(live, app).ok());
-        let pending = live.as_ref().map(|live| {
-            live.apps
-                .get(app.as_str())
-                .and_then(|entry| entry.pending.as_ref())
-        });
-        let path = self.root.join(crate::config::DB_FILE_NAME);
-        let captured = inspection::capture(&path)?.ok_or_else(source_changed)?;
-        let db_revision = captured.revision;
-        let identity = db_revision.primary_identity()?;
-        let db = Database::from_connection(captured.image, self.session.clone());
-        let (rows, currents) = {
-            let conn = db.conn.lock()?;
-            let rows = Database::get_all_providers_on_connection(&conn, vault, app.as_str())?;
-            let mut statement = conn.prepare(
-                "SELECT id FROM providers WHERE app_type=?1 AND is_current<>0 ORDER BY id",
-            )?;
-            let ids = statement
-                .query_map([app.as_str()], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            (rows, ids)
-        };
-        let flags = db.get_proxy_flags_checked(app.as_str())?;
-        let preference = crate::proxy::auto_strategy::get_model_pref_checked(&db, app.as_str())?;
-        let pointer_consistent = (currents.len() <= 1).then(|| {
-            local
-                .as_ref()
-                .is_some_and(|id| rows.contains_key(id) && currents.first() == Some(id))
-        });
-        let admitted = crate::mode::controller::files(app)?;
-        let target = pending.flatten().and_then(|pending| {
-            operation::published_pointer_target(app.as_str(), pending, &admitted).ok()
-        });
-        let compatible = live
-            .as_ref()
-            .and_then(|live| live.apps.get(app.as_str()))
-            .is_some_and(|entry| crate::mode::state::validate_app_for_update(entry).is_ok());
-        let can_recover_operation = compatible
-            && mode.as_ref().is_some_and(|mode| {
-                !mode.attached
-                    && (mode.mode == Some(Mode::Direct)
-                        || mode
-                            .proxy_route
-                            .as_ref()
-                            .is_some_and(|id| rows.contains_key(id)))
-            })
-            && target.is_some_and(|id| local.as_deref() == Some(id) && rows.contains_key(id))
-            && currents.len() <= 1;
-        let mut bound = live_review::BoundFiles::new();
-        let mut files = Vec::new();
-        for file in admitted {
-            let input = ReviewedInput::capture(file.path.clone())?;
-            let bytes = crate::config_file_io::read_regular_file(&file.path, checkpoint::MAX_BYTES)
-                .map_err(|error| AppError::io(&file.path, error))?;
-            input.verify()?;
-            bound.insert(file.path, bytes.map(zeroize::Zeroizing::new));
-            files.push(input);
-        }
-        let catalog = if *app == AppType::Codex {
-            bound
-                .get(&crate::codex_config::get_codex_config_path())
-                .and_then(|bytes| bytes.as_ref())
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .and_then(|text| {
-                    crate::codex_config::resolve_cc_switch_catalog_path(
-                        text,
-                        &crate::codex_config::get_codex_config_dir(),
-                    )
-                })
-        } else {
-            None
-        };
-        let catalog_present = if let Some(path) = catalog {
-            let input = ReviewedInput::capture(path.clone())?;
-            let bytes = crate::config_file_io::read_regular_file(&path, checkpoint::MAX_BYTES)
-                .map_err(|error| AppError::io(&path, error))?;
-            input.verify()?;
-            let present = bytes.is_some();
-            bound.insert(path, bytes.map(zeroize::Zeroizing::new));
-            files.push(input);
-            Some(present)
-        } else {
-            None
-        };
-        // A detached Proxy keeps its route, but its native files represent the
-        // independent direct pointer. Verify those files without changing mode.
-        let detached_mode_verified = compatible
-            && mode.as_ref().is_some_and(|mode| {
-                !mode.attached
-                    && (mode.mode == Some(Mode::Direct)
-                        || (mode.mode == Some(Mode::Proxy)
-                            && mode
-                                .proxy_route
-                                .as_ref()
-                                .is_some_and(|id| rows.contains_key(id))))
-            });
-        let candidate = local
-            .as_ref()
-            .filter(|_| {
-                pending == Some(None) && pointer_consistent == Some(true) && detached_mode_verified
-            })
-            .and_then(|id| rows.get(id));
-        let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
-        // Claude's projector checks the complete native owned fields. Other
-        // projectors still have unresolved route/catalog or cleanup policy;
-        // a partial field comparison must not authorize their completion.
-        let can_complete_app = *app == AppType::Claude
-            && candidate.is_some()
-            && client.status == "parsed"
-            && client.marker == Some(false)
-            && client.native_completion_match == Some(true);
-        // Salt private evidence with this session token. No row, path, credential
-        // or journal is serialized into the public DTO or a persistent receipt.
-        let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
-        let digest_evidence =
-            |currents: &[String], preference: &Option<String>| -> Result<String, AppError> {
-                let bytes = zeroize::Zeroizing::new(
-                    serde_json::to_vec(&(
-                        &self.token,
-                        app.as_str(),
-                        &live,
-                        &local,
-                        currents,
-                        &rows,
-                        flags,
-                        preference,
-                        &revisions,
-                        &identity,
-                    ))
-                    .map_err(|source| AppError::JsonSerialize { source })?,
-                );
-                Ok(hex::encode(Sha256::digest(&*bytes)))
-            };
-        let revision = digest_evidence(&currents, &preference)?;
-        let finalized_revision = target
-            .map(|id| digest_evidence(&[id.to_owned()], &Some(String::new())))
-            .transpose()?;
-        for file in &files {
-            file.verify()?;
-        }
-        inspection::verify_unchanged(&path, &db_revision)?;
-        Ok(AppCapture {
-            view: UpgradeAppReview {
-                app_type: app.as_str().into(),
-                revision,
-                saved_mode: mode.and_then(|mode| mode.mode),
-                has_pending_operation: pending.map(|value| value.is_some()),
-                pointer_consistent,
-                live_status: client.status,
-                stored_fields_match: client.stored_fields_match,
-                can_recover_operation,
-                default_action: "keep_files",
-                default_takeover: false,
-                can_complete_app,
-                can_start_upgrade: false,
-            },
-            files,
-            live,
-            identity,
-            finalized_revision,
-        })
+        capture_app_with_state(
+            &self.device,
+            &self.session,
+            &self.token,
+            app,
+            vault,
+            pinned_state,
+            settings,
+        )
     }
 
     fn review_app_locked(
@@ -390,4 +227,247 @@ impl AuthenticatedUpgrade {
         }
         Ok(self.review_app_locked(inspected, token, app)?.view)
     }
+}
+
+// Startup review and native AppWrite consume the same transient app facts.
+fn capture_app_with_state(
+    device: &DeviceStore,
+    session: &std::sync::Arc<crate::secrets::session::SecretSession>,
+    token: &str,
+    app: &AppType,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    pinned_state: Option<&crate::mode::state::LiveState>,
+    mut settings: crate::settings::AppSettings,
+) -> Result<AppCapture, AppError> {
+    let root = session.root();
+    let local = crate::settings::current_provider_from_settings(&mut settings, app);
+    // Cleanup borrows the snapshot already pinned by the original state
+    // lock; ordinary queries capture one authenticated shared envelope.
+    let live = match pinned_state {
+        Some(live) => Some(live.clone()),
+        None => crate::mode::state::read_review_snapshot(device, vault)?
+            .app_view(app.as_str())
+            .ok(),
+    };
+    let mode = live
+        .as_ref()
+        .and_then(|live| current::known_mode_from_state(live, app).ok());
+    let pending = live.as_ref().map(|live| {
+        live.apps
+            .get(app.as_str())
+            .and_then(|entry| entry.pending.as_ref())
+    });
+    let path = root.join(crate::config::DB_FILE_NAME);
+    let captured = inspection::capture(&path)?.ok_or_else(source_changed)?;
+    let db_revision = captured.revision;
+    let identity = db_revision.primary_identity()?;
+    let db = Database::from_connection(captured.image, session.clone());
+    let (rows, currents) = {
+        let conn = db.conn.lock()?;
+        let rows = Database::get_all_providers_on_connection(&conn, vault, app.as_str())?;
+        let mut statement = conn
+            .prepare("SELECT id FROM providers WHERE app_type=?1 AND is_current<>0 ORDER BY id")?;
+        let ids = statement
+            .query_map([app.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        (rows, ids)
+    };
+    let flags = db.get_proxy_flags_checked(app.as_str())?;
+    let preference = crate::proxy::auto_strategy::get_model_pref_checked(&db, app.as_str())?;
+    let pointer_consistent = (currents.len() <= 1).then(|| {
+        local
+            .as_ref()
+            .is_some_and(|id| rows.contains_key(id) && currents.first() == Some(id))
+    });
+    let admitted = crate::mode::controller::files(app)?;
+    let target = pending.flatten().and_then(|pending| {
+        operation::published_pointer_target(app.as_str(), pending, &admitted).ok()
+    });
+    let compatible = live
+        .as_ref()
+        .and_then(|live| live.apps.get(app.as_str()))
+        .is_some_and(|entry| crate::mode::state::validate_app_for_update(entry).is_ok());
+    let can_recover_operation = compatible
+        && mode.as_ref().is_some_and(|mode| {
+            !mode.attached
+                && (mode.mode == Some(Mode::Direct)
+                    || mode
+                        .proxy_route
+                        .as_ref()
+                        .is_some_and(|id| rows.contains_key(id)))
+        })
+        && target.is_some_and(|id| local.as_deref() == Some(id) && rows.contains_key(id))
+        && currents.len() <= 1;
+    let mut bound = live_review::BoundFiles::new();
+    let mut files = Vec::new();
+    for file in admitted {
+        let input = ReviewedInput::capture(file.path.clone())?;
+        let bytes = crate::config_file_io::read_regular_file(&file.path, checkpoint::MAX_BYTES)
+            .map_err(|error| AppError::io(&file.path, error))?;
+        input.verify()?;
+        bound.insert(file.path, bytes.map(zeroize::Zeroizing::new));
+        files.push(input);
+    }
+    let catalog = if *app == AppType::Codex {
+        bound
+            .get(&crate::codex_config::get_codex_config_path())
+            .and_then(|bytes| bytes.as_ref())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|text| {
+                crate::codex_config::resolve_cc_switch_catalog_path(
+                    text,
+                    &crate::codex_config::get_codex_config_dir(),
+                )
+            })
+    } else {
+        None
+    };
+    let catalog_present = if let Some(path) = catalog {
+        let input = ReviewedInput::capture(path.clone())?;
+        let bytes = crate::config_file_io::read_regular_file(&path, checkpoint::MAX_BYTES)
+            .map_err(|error| AppError::io(&path, error))?;
+        input.verify()?;
+        let present = bytes.is_some();
+        bound.insert(path, bytes.map(zeroize::Zeroizing::new));
+        files.push(input);
+        Some(present)
+    } else {
+        None
+    };
+    // A detached Proxy keeps its route, but its native files represent the
+    // independent direct pointer. Verify those files without changing mode.
+    let detached_mode_verified = compatible
+        && mode.as_ref().is_some_and(|mode| {
+            !mode.attached
+                && (mode.mode == Some(Mode::Direct)
+                    || (mode.mode == Some(Mode::Proxy)
+                        && mode
+                            .proxy_route
+                            .as_ref()
+                            .is_some_and(|id| rows.contains_key(id))))
+        });
+    let candidate = local
+        .as_ref()
+        .filter(|_| {
+            pending == Some(None) && pointer_consistent == Some(true) && detached_mode_verified
+        })
+        .and_then(|id| rows.get(id));
+    let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
+    // Claude's projector checks the complete native owned fields. Other
+    // projectors still have unresolved route/catalog or cleanup policy;
+    // a partial field comparison must not authorize their completion.
+    let can_complete_app = *app == AppType::Claude
+        && candidate.is_some()
+        && client.status == "parsed"
+        && client.marker == Some(false)
+        && client.native_completion_match == Some(true);
+    // Salt private evidence with this session token. No row, path, credential
+    // or journal is serialized into the public DTO or a persistent receipt.
+    let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
+    let digest_evidence =
+        |currents: &[String], preference: &Option<String>| -> Result<String, AppError> {
+            let bytes = zeroize::Zeroizing::new(
+                serde_json::to_vec(&(
+                    token,
+                    app.as_str(),
+                    &live,
+                    &local,
+                    currents,
+                    &rows,
+                    flags,
+                    preference,
+                    &revisions,
+                    &identity,
+                ))
+                .map_err(|source| AppError::JsonSerialize { source })?,
+            );
+            Ok(hex::encode(Sha256::digest(&*bytes)))
+        };
+    let revision = digest_evidence(&currents, &preference)?;
+    let finalized_revision = target
+        .map(|id| digest_evidence(&[id.to_owned()], &Some(String::new())))
+        .transpose()?;
+    for file in &files {
+        file.verify()?;
+    }
+    inspection::verify_unchanged(&path, &db_revision)?;
+    Ok(AppCapture {
+        view: UpgradeAppReview {
+            app_type: app.as_str().into(),
+            revision,
+            saved_mode: mode.and_then(|mode| mode.mode),
+            has_pending_operation: pending.map(|value| value.is_some()),
+            pointer_consistent,
+            live_status: client.status,
+            stored_fields_match: client.stored_fields_match,
+            can_recover_operation,
+            default_action: "keep_files",
+            default_takeover: false,
+            can_complete_app,
+            can_start_upgrade: false,
+        },
+        files,
+        live,
+        identity,
+        finalized_revision,
+    })
+}
+
+/// The original app writer may use a freshly proven app after DB publication.
+/// The checkpoint remains owned by startup and continues pausing both sync directions.
+/// Caller holds the existing app lock and this database's original vault guard.
+pub(crate) fn ensure_native_app_write_admitted(
+    db: &Database,
+    device: &DeviceStore,
+    app: &AppType,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<(), AppError> {
+    match checkpoint::ensure_no_pending_checkpoint(device) {
+        Ok(()) => return Ok(()),
+        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {}
+        Err(error) => return Err(error),
+    }
+    let root = db.secret_session().root();
+    if crate::config::get_app_config_dir() != root {
+        return Err(source_changed());
+    }
+    {
+        let conn = db.conn.lock()?;
+        if conn.path().map(Path::new) != Some(root.join(crate::config::DB_FILE_NAME).as_path()) {
+            return Err(source_changed());
+        }
+        crate::database::vault::check_identity(&conn, vault)?;
+    }
+    let checkpoint_path = device.root().join(checkpoint::FILE);
+    let revision = inspection::file_revision(&checkpoint_path)?;
+    let id = checkpoint::verified_database_id(root, device, vault)?
+        .ok_or_else(|| AppError::Config("upgrade.migration_required".into()))?;
+    let settings = crate::settings::read_native_app_settings_with_vault(
+        app,
+        &db.secrets,
+        vault,
+        checkpoint::MAX_BYTES,
+    )?;
+    let first = capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings)?;
+    if !first.view.can_complete_app {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    let settings = crate::settings::read_native_app_settings_with_vault(
+        app,
+        &db.secrets,
+        vault,
+        checkpoint::MAX_BYTES,
+    )?;
+    let second = capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings)?;
+    if !second.view.can_complete_app || first.view.revision != second.view.revision {
+        return Err(source_changed());
+    }
+    {
+        let conn = db.conn.lock()?;
+        inspection::verify_connection_primary_identity(&conn, &second.identity)?;
+    }
+    if checkpoint::verified_database_id(root, device, vault)?.as_deref() != Some(id.as_str()) {
+        return Err(source_changed());
+    }
+    inspection::verify_unchanged(&checkpoint_path, &revision)
 }

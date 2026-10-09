@@ -1727,14 +1727,50 @@ pub(crate) fn read_upgrade_settings_with_vault(
     vault: &RwLockReadGuard<'_, VaultContext>,
     max_bytes: u64,
 ) -> Result<AppSettings, AppError> {
+    read_app_settings_with_vault(app, session, vault, max_bytes, false)
+}
+
+/// Read current native app inputs through the original unlocked settings owner.
+/// The caller keeps that owner's vault guard; disk facts must match its ready pointer.
+pub(crate) fn read_native_app_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+) -> Result<AppSettings, AppError> {
+    read_app_settings_with_vault(app, session, vault, max_bytes, true)
+}
+
+fn read_app_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+    native: bool,
+) -> Result<AppSettings, AppError> {
     session.ensure_available()?;
     if session.root() != crate::config::get_app_config_dir() {
         return Err(AppError::Config("settings.session_mismatch".into()));
     }
     let runtime = settings_store().read()?;
-    if runtime.unlocked.is_some() {
-        return Err(AppError::Config("settings.already_unlocked".into()));
-    }
+    let mut ready = if native {
+        if let Some(error) = &runtime.failure {
+            return Err(AppError::Config(error.clone()));
+        }
+        let store = runtime
+            .unlocked
+            .as_ref()
+            .ok_or_else(|| AppError::Config("secret.locked".into()))?;
+        if !std::ptr::eq(session, store.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        Some(store.ready_snapshot()?)
+    } else {
+        if runtime.unlocked.is_some() {
+            return Err(AppError::Config("settings.already_unlocked".into()));
+        }
+        None
+    };
     let path = settings_path();
     let (pointer_field, directory_field) = match app {
         AppType::Claude => ("currentProviderClaude", "claudeConfigDir"),
@@ -1743,7 +1779,7 @@ pub(crate) fn read_upgrade_settings_with_vault(
         AppType::GrokBuild => ("currentProviderGrokbuild", "grokConfigDir"),
         _ => return Err(AppError::Config("mode.verification_required".into())),
     };
-    let settings = match crate::config_file_io::read_regular_file(&path, max_bytes)
+    let mut settings = match crate::config_file_io::read_regular_file(&path, max_bytes)
         .map_err(|error| AppError::io(&path, error))?
     {
         Some(bytes) => {
@@ -1768,6 +1804,12 @@ pub(crate) fn read_upgrade_settings_with_vault(
         }
         None => AppSettings::default(),
     };
+    if ready.as_mut().is_some_and(|ready| {
+        current_provider_from_settings(ready, app)
+            != current_provider_from_settings(&mut settings, app)
+    }) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
     // Resolve paths through the existing bootstrap owner, never a second resolver.
     let (actual, bound) = match app {
         AppType::Claude => (
