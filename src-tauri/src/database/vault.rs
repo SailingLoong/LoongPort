@@ -110,7 +110,16 @@ pub(crate) fn upgrade_staging(conn: &Connection, vault: &VaultContext) -> Result
 /// The published encrypted staging file is the recovery intent. It remains until
 /// SQLite has committed and removed its old journal/pages; no services run meanwhile.
 pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, AppError> {
-    preflight(path)?;
+    match preflight(path) {
+        Ok(()) => {}
+        Err(AppError::Config(code)) if code == "secret.database_version_too_new" => {
+            if let Some(conn) = reopen_verified_upgrade(path, vault)? {
+                return Ok(conn);
+            }
+            return Err(AppError::Config(code));
+        }
+        Err(error) => return Err(error),
+    }
     let root = path
         .parent()
         .ok_or_else(|| AppError::Config("secret.invalid_path".into()))?;
@@ -175,6 +184,56 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
     sync_directory(&backup_dir)?;
     sync_directory(root)?;
     Ok(destination)
+}
+
+/// Reopen only the original authenticated upgrade target. Locked preflight
+/// stays strict; this owner never upgrades, clears a checkpoint or admits apps.
+fn reopen_verified_upgrade(
+    path: &Path,
+    vault: &VaultContext,
+) -> Result<Option<Connection>, AppError> {
+    let root = crate::config::get_app_config_dir();
+    if path != root.join(crate::config::DB_FILE_NAME) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    let Some(captured) = super::inspection::capture(path)? else {
+        return Ok(None);
+    };
+    if Database::get_user_version(&captured.image)? != super::UPSTREAM4_SCHEMA_VERSION
+        || super::loongport_schema::read_stored_version(&captured.image)?
+            != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        return Ok(None);
+    }
+    let identity = captured.revision.primary_identity()?;
+    let device = crate::live::engine::DeviceStore::for_device();
+    let checkpoint_path = device
+        .root()
+        .join(crate::secrets::upgrade::checkpoint::FILE);
+    let revision = super::inspection::file_revision(&checkpoint_path)?;
+    let Some(id) =
+        crate::secrets::upgrade::checkpoint::verified_database_id(&root, &device, vault)?
+    else {
+        return Ok(None);
+    };
+    super::inspection::verify_unchanged(path, &captured.revision)?;
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(db_error)?;
+    check_identity(&conn, vault)?;
+    crate::secrets::inventory::validate_database(&conn, vault)?;
+    super::inspection::verify_connection_primary_identity(&conn, &identity)?;
+    if crate::secrets::upgrade::checkpoint::verified_database_id(&root, &device, vault)?.as_deref()
+        != Some(id.as_str())
+    {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    super::inspection::verify_unchanged(&checkpoint_path, &revision)?;
+    super::inspection::verify_connection_primary_identity(&conn, &identity)?;
+    crate::config::ensure_private_file(path)?;
+    Ok(Some(conn))
 }
 
 #[cfg_attr(not(unix), allow(unused_variables))]

@@ -610,7 +610,7 @@ fn verify_current_database(
 /// transition removes its intent only after final on-disk target readback. That
 /// completed boundary survives later per-app changes; no second ack is needed.
 /// Per-app admission still needs its own reviewed inputs and operation readback.
-pub(super) fn verified_database_id(
+pub(crate) fn verified_database_id(
     root: &Path,
     device: &DeviceStore,
     vault: &VaultContext,

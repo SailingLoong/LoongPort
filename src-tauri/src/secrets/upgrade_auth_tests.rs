@@ -3975,6 +3975,106 @@ fn u03_app_completion_requires_actual_fields_and_preserves_reliable_detached_mod
 
 #[test]
 #[serial_test::serial]
+fn u03_runtime_database_constructor_reuses_verified_checkpoint_and_original_session() {
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut upgrade =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = upgrade.view(&inspected).unwrap().review_token.unwrap();
+    let id = upgrade
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    upgrade
+        .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+        .unwrap();
+    let session = upgrade.session_for_test();
+    let checkpoint_bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    let db = Database::init_with_secrets(session.clone()).unwrap_or_else(|error| {
+        panic!("original runtime database owner must reopen its authenticated target20: {error}")
+    });
+    assert!(std::sync::Arc::ptr_eq(&db.secrets, &session));
+    let conn = db.conn.lock().unwrap();
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
+    assert_eq!(
+        database::loongport_schema::read_stored_version(&conn).unwrap(),
+        24
+    );
+    database::vault::check_identity(&conn, &f.vault).unwrap();
+    crate::secrets::inventory::validate_database(&conn, &f.vault).unwrap();
+    drop(conn);
+    assert_eq!(
+        std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+        checkpoint_bytes
+    );
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &f.vault)
+            .unwrap()
+            .as_deref(),
+        Some(id.as_str())
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    assert!(
+        database::vault::preflight(&f.root.join(crate::config::DB_FILE_NAME)).is_err(),
+        "ordinary locked preflight must retain its older-version refusal"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_runtime_database_constructor_refuses_unverified_target_without_mutation() {
+    for case in [
+        "missing_checkpoint",
+        "corrupt_checkpoint",
+        "future_schema",
+        "generation_pending",
+    ] {
+        let f = Fixture::new();
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut upgrade =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = upgrade.view(&inspected).unwrap().review_token.unwrap();
+        let id = upgrade
+            .prepare_checkpoint(&mut inspected, &token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        upgrade
+            .publish_checkpoint(&mut inspected, &token, &id, &f.store)
+            .unwrap();
+        match case {
+            "missing_checkpoint" => {
+                std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap()
+            }
+            "corrupt_checkpoint" => std::fs::write(
+                f.device.root().join(checkpoint::FILE),
+                b"synthetic-invalid-checkpoint",
+            )
+            .unwrap(),
+            "future_schema" => rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME))
+                .unwrap()
+                .pragma_update(None, "user_version", 21)
+                .unwrap(),
+            "generation_pending" => std::fs::write(
+                f.root.join(crate::secrets::transition::INTENT),
+                b"synthetic-pending-generation",
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let before = snapshot(f.home.path());
+        assert!(
+            Database::init_with_secrets(upgrade.session_for_test()).is_err(),
+            "{case}"
+        );
+        assert_eq!(snapshot(f.home.path()), before, "{case}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn u03_native_proven_app_switches_while_future_peer_stays_blocked_and_sync_paused() {
     use crate::app_config::AppType;
     let f = Fixture::new();
