@@ -533,6 +533,10 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
 /// [`crate::codex_config::refresh_codex_catalog_projection`]）。无当前供应商、
 /// 投影不出 catalog、或内容与磁盘一致时为 no-op。
 pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
     // Native config remains authoritative. Its generated reasoning can refresh
     // independently, with provenance protecting explicit and legacy overrides.

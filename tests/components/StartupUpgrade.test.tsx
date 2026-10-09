@@ -542,3 +542,83 @@ describe("StartupUpgrade", () => {
     expect(recoveries()).toHaveLength(0);
   });
 });
+
+describe("explicit runtime handoff", () => {
+  it("keeps files until an explicit handoff and returns to the workbench only after success", async () => {
+    const onReady = vi.fn();
+    serve();
+    render(<StartupUpgrade onReady={onReady} />);
+    const button = await screen.findByRole("button", {
+      name: "startupUpgrade.continue",
+    });
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([command]) => command === "continue_startup_upgrade"),
+    ).toBe(false);
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "continue_startup_upgrade") {
+        expect(args).toEqual({ expectedReviewToken: "synthetic-review" });
+        return null;
+      }
+      if (command === "get_startup_upgrade_review") return review();
+      if (command === "review_startup_upgrade_app")
+        return appReview((args as { appType: string }).appType);
+      throw new Error("synthetic unexpected command");
+    });
+    fireEvent.click(button);
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(recoveries()).toHaveLength(0);
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+  });
+
+  it("queries a lost handoff response without replaying or entering the workbench", async () => {
+    const onReady = vi.fn();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "get_startup_upgrade_review") return review();
+      if (command === "review_startup_upgrade_app")
+        return appReview((args as { appType: string }).appType);
+      if (command === "continue_startup_upgrade")
+        throw new Error("synthetic lost response");
+      throw new Error("synthetic unexpected command");
+    });
+    render(<StartupUpgrade onReady={onReady} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "startupUpgrade.continue" }),
+    );
+    await screen.findByRole("alert");
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(([c]) => c === "get_startup_upgrade_review"),
+      ).toHaveLength(2),
+    );
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(([c]) => c === "continue_startup_upgrade"),
+    ).toHaveLength(1);
+    expect(onReady).not.toHaveBeenCalled();
+    expect(recoveries()).toHaveLength(0);
+  });
+});
+
+it("uses the original explicit restart form after failed runtime preparation", async () => {
+  serve(review({ status: "restart_required", reviewToken: null }));
+  render(<StartupUpgrade />);
+  const button = await screen.findByRole("button", { name: "secrets.restart" });
+  expect(
+    vi.mocked(invoke).mock.calls.some(([command]) => command === "restart_app"),
+  ).toBe(false);
+  vi.mocked(invoke).mockResolvedValueOnce(null);
+  fireEvent.click(button);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("restart_app"));
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.some(([command]) => command === "continue_startup_upgrade"),
+  ).toBe(false);
+});

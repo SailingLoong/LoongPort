@@ -3,7 +3,7 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub(super) fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, current: &Path, result: &mut BTreeMap<PathBuf, Vec<u8>>) {
         if !current.exists() {
             return;

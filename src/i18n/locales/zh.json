@@ -4532,6 +4532,8 @@
     }
   },
   "startupUpgrade": {
+    "continue": "继续进入工作台",
+    "reviewApps": "核验升级中的应用",
     "title": "升级与恢复核对",
     "databaseOnly": "数据库已核验；仍需逐应用核对实际配置。",
     "verificationRequired": "尚未完成核对，暂不显示升级完成。",

@@ -157,7 +157,13 @@ function UpgradeAppCard({
   );
 }
 
-export function StartupUpgrade() {
+export function StartupUpgrade({
+  onReady = () => window.location.reload(),
+  embedded = false,
+}: {
+  onReady?: () => void;
+  embedded?: boolean;
+}) {
   const { t } = useTranslation();
   const [view, setView] = useState<StartupUpgradeReview | null>(null);
   const [password, setPassword] = useState("");
@@ -230,7 +236,13 @@ export function StartupUpgrade() {
 
   async function act(
     action:
-      "query" | "authenticate" | "prepare" | "publish" | "cancel" | "exit",
+      | "query"
+      | "authenticate"
+      | "prepare"
+      | "publish"
+      | "cancel"
+      | "exit"
+      | "continue",
   ) {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -245,6 +257,11 @@ export function StartupUpgrade() {
       }
       if (action === "exit") {
         await exit(0);
+        return;
+      }
+      if (action === "continue" && published && view?.reviewToken) {
+        await startupUpgradeApi.continueRuntime(view.reviewToken);
+        if (sequence === request.current) onReady();
         return;
       }
       if (action === "authenticate" && view?.canAuthenticate === true) {
@@ -310,11 +327,25 @@ export function StartupUpgrade() {
       : published
         ? "startupUpgrade.databaseOnly"
         : "startupUpgrade.verificationRequired";
+  if (view?.status === "restart_required") {
+    return (
+      <SecretUnlockForm
+        requiresRestart
+        initialError="secret.restart_required"
+      />
+    );
+  }
   if (view?.status === "recovery_required") {
     return <SecretUnlockForm initialError="secret.recovery_required" />;
   }
   return (
-    <main className="min-h-screen bg-background p-6 text-foreground">
+    <main
+      className={
+        embedded
+          ? "bg-background text-foreground"
+          : "min-h-screen bg-background p-6 text-foreground"
+      }
+    >
       <div className="mx-auto max-w-3xl space-y-5 rounded-xl border bg-card p-6 shadow-sm">
         <h1 className="text-xl font-semibold">{t("startupUpgrade.title")}</h1>
         <p role="status" className="text-sm text-muted-foreground">
@@ -468,7 +499,12 @@ export function StartupUpgrade() {
           {t("startupUpgrade.notComplete")}
         </p>
         <div className="flex flex-wrap justify-between gap-2 border-t pt-4">
-          {/* Completion stays unavailable until the original owner exposes verified handoff. */}
+          {/* Runtime handoff retains the checkpoint; completion still requires all app and sync proofs. */}
+          {published && view?.reviewToken && !embedded && (
+            <Button disabled={busy} onClick={() => void act("continue")}>
+              {t("startupUpgrade.continue")}
+            </Button>
+          )}
           <Button disabled>{t("startupUpgrade.complete")}</Button>
           <Button
             variant="outline"

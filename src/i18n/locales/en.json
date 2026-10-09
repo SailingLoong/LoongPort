@@ -4532,6 +4532,8 @@
     }
   },
   "startupUpgrade": {
+    "continue": "Continue to workbench",
+    "reviewApps": "Review upgrade apps",
     "title": "Upgrade and recovery review",
     "databaseOnly": "Database verified; review each app’s actual configuration next.",
     "verificationRequired": "Verification is incomplete. Upgrade completion is unavailable.",

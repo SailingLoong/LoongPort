@@ -4533,6 +4533,8 @@
     }
   },
   "startupUpgrade": {
+    "continue": "繼續進入工作台",
+    "reviewApps": "核驗升級中的應用",
     "title": "升級與恢復核對",
     "databaseOnly": "資料庫已核驗；仍需逐應用核對實際設定。",
     "verificationRequired": "尚未完成核對，暫不顯示升級完成。",

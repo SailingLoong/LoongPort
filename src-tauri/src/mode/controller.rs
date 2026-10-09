@@ -672,6 +672,10 @@ pub(crate) async fn restore_all_locked(
 /// Startup reattaches only the saved mode. Pending operations require explicit
 /// checked recovery; attach failure never launches a compensating exit.
 pub(crate) async fn startup_locked(service: &ProxyService) -> Result<(), String> {
+    // The original checkpoint still suspends automatic takeover during review.
+    // Explicit app operations retain their independently verified native path.
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(&DeviceStore::for_device())
+        .map_err(err)?;
     let apps = persisted_apps(service).map_err(err)?;
     let mut failures = Vec::new();
     for app in apps {

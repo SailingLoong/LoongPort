@@ -4532,6 +4532,8 @@
     }
   },
   "startupUpgrade": {
+    "continue": "ワークベンチへ進む",
+    "reviewApps": "アップグレード中のアプリを確認",
     "title": "アップグレードと復旧の確認",
     "databaseOnly": "データベースは確認済みです。各アプリの実際の設定を確認してください。",
     "verificationRequired": "確認が完了していないため、アップグレード完了は選べません。",

@@ -34,6 +34,29 @@ struct AppCapture {
 }
 
 impl AuthenticatedUpgrade {
+    fn app_settings(
+        &self,
+        app: &AppType,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<crate::settings::AppSettings, AppError> {
+        match crate::settings::read_upgrade_settings_with_vault(
+            app,
+            &self.session,
+            vault,
+            checkpoint::MAX_BYTES,
+        ) {
+            Err(AppError::Config(code)) if code == "settings.already_unlocked" => {
+                crate::settings::read_native_app_settings_with_vault(
+                    app,
+                    &self.session,
+                    vault,
+                    checkpoint::MAX_BYTES,
+                )
+            }
+            result => result,
+        }
+    }
+
     fn verify_app_session(
         &self,
         inspected: &UpgradeInspection,
@@ -84,12 +107,7 @@ impl AuthenticatedUpgrade {
         vault: &RwLockReadGuard<'_, VaultContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
     ) -> Result<AppCapture, AppError> {
-        let settings = crate::settings::read_upgrade_settings_with_vault(
-            app,
-            &self.session,
-            vault,
-            checkpoint::MAX_BYTES,
-        )?;
+        let settings = self.app_settings(app, vault)?;
         capture_app_with_state(
             &self.device,
             &self.session,
@@ -168,12 +186,7 @@ impl AuthenticatedUpgrade {
             let pointer = |id: &str| {
                 inspection::verify_primary_identity(&path, &captured.identity)?;
                 self.verify_app_checkpoint_pinned(inspected, &vault)?;
-                let mut settings = crate::settings::read_upgrade_settings_with_vault(
-                    app,
-                    &self.session,
-                    &vault,
-                    checkpoint::MAX_BYTES,
-                )?;
+                let mut settings = self.app_settings(app, &vault)?;
                 if crate::settings::current_provider_from_settings(&mut settings, app).as_deref()
                     != Some(id)
                 {

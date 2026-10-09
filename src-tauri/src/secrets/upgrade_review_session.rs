@@ -95,6 +95,22 @@ fn client_paths(
 }
 
 impl AuthenticatedUpgrade {
+    /// Explicit runtime handoff borrows the original authenticated session.
+    /// The retained checkpoint still owns app verification and sync suspension.
+    pub(crate) fn runtime_session(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+    ) -> Result<Arc<SecretSession>, AppError> {
+        if token != self.token || self.database_checkpoint.is_none() || self.cancellation.is_some()
+        {
+            return Err(source_changed());
+        }
+        self.verify(inspected)?;
+        self.session.ensure_available()?;
+        Ok(self.session.clone())
+    }
+
     #[cfg(test)]
     pub(super) fn session_for_test(&self) -> Arc<SecretSession> {
         self.session.clone()

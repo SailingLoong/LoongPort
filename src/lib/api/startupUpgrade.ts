@@ -41,6 +41,8 @@ export interface UpgradeSourceReview {
 }
 
 export const startupUpgradeApi = {
+  continueRuntime: (expectedReviewToken: string) =>
+    invoke<void>("continue_startup_upgrade", { expectedReviewToken }),
   query: () => invoke<StartupUpgradeReview>("get_startup_upgrade_review"),
   authenticate: (password: string | null) =>
     invoke<StartupUpgradeReview>("authenticate_startup_upgrade", { password }),

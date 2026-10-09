@@ -122,13 +122,70 @@ impl StartupCoordinator {
         result
     }
 
+    fn run_upgrade_attempt<P>(&self, token: &str, prepare: P) -> Result<(), String>
+    where
+        P: FnOnce(std::sync::Arc<SecretSession>) -> Result<(), String>,
+    {
+        let mut phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        match *phase {
+            Phase::UpgradeReview | Phase::Ready => {}
+            Phase::Initializing => return Err("secret.initializing".into()),
+            Phase::Failed | Phase::Recovered => return Err("secret.restart_required".into()),
+            Phase::Locked => return Err("secret.locked".into()),
+        }
+        let session = {
+            let inspection = self
+                .inspection
+                .lock()
+                .map_err(|_| "secret.startup_unavailable")?;
+            self.upgrade_review
+                .lock()
+                .map_err(|_| "secret.startup_unavailable")?
+                .as_ref()
+                .ok_or("secret.locked")?
+                .runtime_session(&inspection, token)
+                .map_err(super::error::public_code)?
+        };
+        // A repeated explicit request verifies the retained evidence but does not
+        // prepare the process twice. The existing phase owns publication.
+        if *phase == Phase::Ready {
+            return Ok(());
+        }
+        *phase = Phase::Initializing;
+        drop(phase);
+        let result = prepare(session);
+        *self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")? = if result.is_ok() {
+            Phase::Ready
+        } else {
+            Phase::Failed
+        };
+        result
+    }
+
     pub(super) fn upgrade_view(&self) -> Result<super::upgrade::StartupUpgradeView, String> {
         let phase = self
             .phase
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
         let blocked = match *phase {
-            Phase::Ready => Some("runtime_active"),
+            Phase::Ready => {
+                if self
+                    .upgrade_review
+                    .lock()
+                    .map_err(|_| "secret.startup_unavailable")?
+                    .is_none()
+                {
+                    Some("runtime_active")
+                } else {
+                    None
+                }
+            }
             Phase::Initializing => Some("busy"),
             Phase::Failed | Phase::Recovered => Some("restart_required"),
             Phase::Locked | Phase::UpgradeReview => None,
@@ -140,7 +197,7 @@ impl StartupCoordinator {
             .inspection
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        if *phase == Phase::UpgradeReview {
+        if matches!(*phase, Phase::UpgradeReview | Phase::Ready) {
             return self
                 .upgrade_review
                 .lock()
@@ -325,7 +382,7 @@ impl StartupCoordinator {
             .phase
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        if *phase != Phase::UpgradeReview {
+        if !matches!(*phase, Phase::UpgradeReview | Phase::Ready) {
             return Err("secret.locked".into());
         }
         let inspection = self
@@ -351,7 +408,7 @@ impl StartupCoordinator {
             .phase
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        if *phase != Phase::UpgradeReview {
+        if !matches!(*phase, Phase::UpgradeReview | Phase::Ready) {
             return Err("secret.locked".into());
         }
         let inspection = self
@@ -582,6 +639,29 @@ pub(crate) async fn publish_startup_upgrade_checkpoint(
                 &expected_checkpoint_id,
                 &SystemKeyStore,
             )
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn continue_startup_upgrade(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+) -> Result<(), String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.run_upgrade_attempt(&expected_review_token, |session| {
+            crate::initialize_runtime(&app, session).map_err(|error| error.to_string())
+        })?;
+        // Publish GUI readiness only after the original phase has become Ready.
+        crate::init_status::clear_init_error();
+        let _ = app.emit("runtime-ready", ());
+        Ok(())
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?
@@ -1106,4 +1186,292 @@ pub(crate) fn verify_original_startup_admission() {
     tests::failed_unlock_never_starts_runtime_and_success_is_published_once();
     tests::failed_runtime_preparation_is_not_repeated_in_the_same_process();
     checkpoint_admission_tests::pending_upgrade_stops_unlock_before_any_runtime_callback();
+}
+
+#[cfg(test)]
+mod upgrade_handoff_tests {
+    use super::*;
+    use crate::app_config::AppType;
+    use crate::database::{self, Database};
+    use crate::live::engine::DeviceStore;
+    use crate::secrets::testing::{MemoryKeyStore, TestHome};
+    use crate::secrets::upgrade::{checkpoint, review_tests::snapshot};
+    use std::{cell::Cell, sync::Arc};
+
+    struct Fixture {
+        coordinator: StartupCoordinator,
+        token: String,
+        device: DeviceStore,
+        native: PathBuf,
+        home: TestHome,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let home = TestHome::new().unwrap();
+            crate::settings::reload_settings().unwrap();
+            let root = crate::config::get_app_config_dir();
+            let store = MemoryKeyStore::default();
+            let session = SecretSession::open(&root, &store, None).unwrap();
+            let conn = rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
+            Database::create_tables_on_conn(&conn).unwrap();
+            Database::apply_schema_migrations_on_conn(&conn).unwrap();
+            database::loongport_schema::apply(&conn).unwrap();
+            database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+            session.complete_migration().unwrap();
+            let db = Database::from_connection(conn, session.clone());
+            let config = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-credential","ANTHROPIC_BASE_URL":"https://synthetic.example.invalid/v1","ANTHROPIC_MODEL":"synthetic-model"}});
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    "a".into(),
+                    "Synthetic".into(),
+                    config.clone(),
+                    None,
+                ),
+            )
+            .unwrap();
+            db.set_current_provider("claude", "a").unwrap();
+            drop(db);
+            let settings = crate::settings::AppSettings {
+                current_provider_claude: Some("a".into()),
+                ..Default::default()
+            };
+            let bytes =
+                crate::settings::encode_settings_with_vault(&settings, &session.read().unwrap())
+                    .unwrap();
+            crate::config_file_io::write_durable(&crate::settings::settings_path(), &bytes)
+                .unwrap();
+            let native = crate::config::get_claude_settings_path();
+            crate::config_file_io::ensure_private_directory(native.parent().unwrap()).unwrap();
+            let mut config = config;
+            config["unowned"] = serde_json::json!({"keep":true});
+            crate::config_file_io::write_durable(&native, &serde_json::to_vec(&config).unwrap())
+                .unwrap();
+            let device = DeviceStore::for_device();
+            let file = crate::secrets::owned_file::DeviceFile::registered(
+                crate::secrets::owned_file::DEVICE_STATE_FILE,
+            )
+            .unwrap();
+            device.write_device(&session.read().unwrap(),&file,br#"{"version":1,"apps":{"claude":{"mode":"proxy","attached":false,"proxy_route":"a"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#).unwrap();
+            let inspected = crate::secrets::upgrade::inspect(&root, &device).unwrap();
+            let coordinator = StartupCoordinator::new(root, inspected);
+            let token = coordinator
+                .authenticate_upgrade(None, &store)
+                .unwrap()
+                .review_token
+                .unwrap();
+            let id = coordinator
+                .prepare_upgrade_checkpoint(&token)
+                .unwrap()
+                .checkpoint_id
+                .unwrap();
+            let token = coordinator
+                .publish_upgrade_checkpoint(&token, &id, &store)
+                .unwrap()
+                .review_token
+                .unwrap();
+            Self {
+                coordinator,
+                token,
+                device,
+                native,
+                home,
+            }
+        }
+        fn session(&self) -> Arc<SecretSession> {
+            self.coordinator
+                .upgrade_review
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .runtime_session(&self.coordinator.inspection.lock().unwrap(), &self.token)
+                .unwrap()
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_explicit_handoff_reuses_session_once_and_keeps_original_review() {
+        let f = Fixture::new();
+        let expected = f.session();
+        let calls = Cell::new(0);
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                calls.set(calls.get() + 1);
+                assert!(Arc::ptr_eq(&expected, &session));
+                crate::settings::unlock_settings(session.clone()).unwrap();
+                let db = Database::init_with_secrets(session).unwrap();
+                assert!(Arc::ptr_eq(&db.secrets, &expected));
+                Ok(())
+            })
+            .unwrap();
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |_| panic!("handoff must not prepare twice"))
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            f.coordinator.upgrade_view().unwrap().status,
+            "database_verified"
+        );
+        assert!(
+            f.coordinator
+                .review_upgrade_app(&f.token, &AppType::Claude)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(
+            !f.coordinator
+                .review_upgrade_app(&f.token, &AppType::Codex)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_explicit_handoff_refuses_stale_or_unverified_facts_before_callback() {
+        for case in [
+            "stale_token",
+            "checkpoint_replaced",
+            "generation_pending",
+            "busy",
+        ] {
+            let f = Fixture::new();
+            let mut token = f.token.clone();
+            match case {
+                "stale_token" => token = "synthetic-stale-token".into(),
+                "checkpoint_replaced" => std::fs::write(
+                    f.device.root().join(checkpoint::FILE),
+                    b"synthetic-replaced-checkpoint",
+                )
+                .unwrap(),
+                "generation_pending" => std::fs::write(
+                    f.coordinator.root.join(crate::secrets::transition::INTENT),
+                    b"synthetic-generation-intent",
+                )
+                .unwrap(),
+                "busy" => *f.coordinator.phase.lock().unwrap() = Phase::Initializing,
+                _ => unreachable!(),
+            }
+            let before = snapshot(f.home.path());
+            let called = Cell::new(false);
+            assert!(
+                f.coordinator
+                    .run_upgrade_attempt(&token, |_| {
+                        called.set(true);
+                        Ok(())
+                    })
+                    .is_err(),
+                "{case}"
+            );
+            assert!(!called.get(), "{case}");
+            assert_eq!(snapshot(f.home.path()), before, "{case}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_explicit_handoff_failure_preserves_checkpoint_and_requires_restart() {
+        let f = Fixture::new();
+        let before = snapshot(f.home.path());
+        let result = f
+            .coordinator
+            .run_upgrade_attempt(&f.token, |_| Err("synthetic-runtime-failure".into()));
+        assert_eq!(result, Err("synthetic-runtime-failure".into()));
+        assert!(f.coordinator.restart_required());
+        assert!(f
+            .coordinator
+            .run_upgrade_attempt(&f.token, |_| panic!("failed runtime cannot prepare again"))
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        assert_eq!(
+            f.coordinator.upgrade_view().unwrap().status,
+            "restart_required"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_default_handoff_never_automatically_reattaches_saved_proxy() {
+        let f = Fixture::new();
+        let session = f.session();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = Arc::new(Database::init_with_secrets(session).unwrap());
+        let state = crate::store::AppState::new(db).unwrap();
+        let native = std::fs::read(&f.native).unwrap();
+        let checkpoint_bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        let peer = std::fs::read(f.device.state_path()).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(runtime
+            .block_on(state.proxy_service.recover_from_crash())
+            .is_err());
+        assert_eq!(
+            std::fs::read(&f.native).unwrap(),
+            native,
+            "default handoff keeps original native files"
+        );
+        let vault = state.db.secret_session().read().unwrap();
+        let mode = crate::mode::state::mode_state(&f.device, &vault, "claude").unwrap();
+        assert_eq!(mode.mode, Some(crate::mode::state::Mode::Proxy));
+        assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+        assert!(!mode.attached);
+        assert_eq!(std::fs::read(f.device.state_path()).unwrap(), peer);
+        assert_eq!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+            checkpoint_bytes
+        );
+        assert!(!runtime.block_on(state.proxy_service.is_running()));
+    }
+    #[test]
+    #[serial_test::serial]
+    fn u03_retained_checkpoint_pauses_automatic_history_mcp_and_catalog_owners() {
+        for case in [
+            "history",
+            "templates",
+            "official_history",
+            "imagegen_mcp",
+            "catalog",
+        ] {
+            let f = Fixture::new();
+            let session = f.session();
+            crate::settings::unlock_settings(session.clone()).unwrap();
+            let db = Arc::new(Database::init_with_secrets(session).unwrap());
+            db.save_mcp_server(&crate::app_config::McpServer {
+                id: crate::relay::imagegen_mcp::IMAGEGEN_MCP_ID.into(),
+                name: "Synthetic retained MCP".into(),
+                server: serde_json::json!({"command":"synthetic-command"}),
+                apps: crate::app_config::McpApps {
+                    claude: true,
+                    ..Default::default()
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            })
+            .unwrap();
+            let state = crate::store::AppState::new(db).unwrap();
+            let before = snapshot(f.home.path());
+            let result = match case {
+                "history" => crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(&state.db).map(|_| ()),
+                "templates" => crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(&state.db).map(|_| ()),
+                "official_history" => crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket().map(|_| ()),
+                "imagegen_mcp" => crate::relay::imagegen_mcp::sync_registration(&state),
+                "catalog" => crate::services::provider::refresh_current_codex_catalog_projection(&state).map(|_| ()),
+                _ => unreachable!(),
+            }.map_err(super::super::error::public_code);
+            assert_eq!(result, Err("upgrade.checkpoint_pending".into()), "{case}");
+            assert_eq!(snapshot(f.home.path()), before, "{case}");
+            assert!(
+                state
+                    .db
+                    .get_all_mcp_servers()
+                    .unwrap()
+                    .contains_key(crate::relay::imagegen_mcp::IMAGEGEN_MCP_ID),
+                "{case}"
+            );
+        }
+    }
 }
