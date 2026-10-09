@@ -117,6 +117,94 @@ impl Drop for Fault {
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
+fn app_scoped_original_recovery_restores_settings_and_db_without_touching_future_peer() {
+    let fixture = Fixture::claude();
+    let store = DeviceStore::for_device();
+    let vault = fixture.state.db.secret_session().read().unwrap();
+    let file = crate::secrets::owned_file::DeviceFile::registered(
+        crate::secrets::owned_file::DEVICE_STATE_FILE,
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(state::load(&store, &vault).unwrap()).unwrap();
+    let peer = json!({"mode":"future-mode","opaque":{"synthetic":"keep"}});
+    value["apps"]["gemini"] = peer.clone();
+    value["apps"]["claude"]["pending"] = serde_json::to_value(state::Pending {
+        op: state::op::SWITCH.into(),
+        files: vec![],
+        target: state::PendingTarget::pointer(Some("b".into())),
+        published: true,
+        extra: Default::default(),
+    })
+    .unwrap();
+    store
+        .write_device(&vault, &file, &serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    drop(vault);
+    let before_client = read_current(&fixture.path).unwrap();
+    fixture.state.db.conn.lock().unwrap().execute_batch("CREATE TRIGGER synthetic_recovery_fault BEFORE UPDATE OF is_current ON providers WHEN NEW.id='b' AND NEW.is_current=1 BEGIN SELECT RAISE(ABORT,'synthetic recovery interruption'); END;").unwrap();
+    assert!(
+        super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).is_err()
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+    assert!(fixture.pending().unwrap().published);
+    fixture
+        .state
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER synthetic_recovery_fault;")
+        .unwrap();
+    assert_eq!(
+        super::controller::recover_locked(&fixture.state.proxy_service, &AppType::Claude).unwrap(),
+        Some(super::operation::RecoveryOutcome::RolledForward)
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    let vault = fixture.state.db.secret_session().read().unwrap();
+    assert_eq!(
+        state::mode_state(&store, &vault, "claude").unwrap().mode,
+        Some(Mode::Direct)
+    );
+    assert!(state::pending(&store, &vault, "claude").unwrap().is_none());
+    assert!(state::mode_state(&store, &vault, "gemini").is_err());
+    let plain = store.read_device(&vault, &file).unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&plain).unwrap()["apps"]["gemini"],
+        peer
+    );
+    assert_eq!(read_current(&fixture.path).unwrap(), before_client);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
 fn existing_takeover_entry_records_intent_before_client_publication() {
     let fixture = Fixture::claude();
     let before = read_current(&fixture.path).unwrap();

@@ -39,6 +39,157 @@ fn sample_pending() -> Pending {
 }
 
 #[test]
+fn app_scoped_reads_keep_unknown_peer_modes_without_direct_fallback() {
+    let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = DeviceStore::at(fixture.path());
+    let key = RwLock::new(VaultContext::generate().unwrap());
+    let vault = key.read().unwrap();
+    let bytes = serde_json::to_vec(&json!({"version":1,"apps":{
+        "codex":{"mode":"direct"},
+        "claude":{"mode":"future-mode","futureData":{"keep":[1,2,3]}}
+    }}))
+    .unwrap();
+    let before = write_fixture(&store, &vault, &bytes);
+    assert_eq!(pending(&store, &vault, "codex").unwrap(), None);
+    assert_eq!(
+        mode_state(&store, &vault, "codex").unwrap().mode,
+        Some(Mode::Direct)
+    );
+    assert_eq!(
+        crate::mode::current::validate_known_mode(
+            &store,
+            &vault,
+            &crate::app_config::AppType::Codex
+        )
+        .unwrap()
+        .mode,
+        Some(Mode::Direct)
+    );
+    assert_eq!(mode_state(&store, &vault, "gemini").unwrap().mode, None);
+    assert!(mode_state(&store, &vault, "claude").is_err());
+    assert!(pending(&store, &vault, "claude").is_err());
+    assert_eq!(fs::read(store.state_path()).unwrap(), before);
+}
+
+#[test]
+fn app_scoped_pending_updates_preserve_opaque_peers_and_refuse_their_mutation() {
+    let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = DeviceStore::at(fixture.path());
+    let key = RwLock::new(VaultContext::generate().unwrap());
+    let vault = key.read().unwrap();
+    let original = json!({"version":1,"futureRoot":{"preserve":true},"apps":{
+        "codex":{"mode":"direct"},
+        "claude":{"mode":"future-mode","pending":{"op":"future-op","files":[],"futureIntent":7},"futureData":[true,"synthetic-keep"]}
+    }});
+    write_fixture(&store, &vault, &serde_json::to_vec(&original).unwrap());
+    set_pending(&store, &vault, "codex", Some(sample_pending())).unwrap();
+    assert_eq!(
+        pending(&store, &vault, "codex").unwrap(),
+        Some(sample_pending())
+    );
+    let plain = state_file()
+        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .unwrap();
+    let after: Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(after["apps"]["claude"], original["apps"]["claude"]);
+    assert_eq!(after["futureRoot"], original["futureRoot"]);
+    assert_eq!(after["apps"]["codex"]["mode"], "direct");
+    let before = fs::read(store.state_path()).unwrap();
+    assert!(set_pending(&store, &vault, "claude", None).is_err());
+    assert_eq!(fs::read(store.state_path()).unwrap(), before);
+    set_pending(&store, &vault, "codex", None).unwrap();
+    let plain = state_file()
+        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .unwrap();
+    let after: Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(after["apps"]["claude"], original["apps"]["claude"]);
+    assert_eq!(after["apps"]["codex"]["mode"], "direct");
+}
+
+#[test]
+fn app_scoped_pending_updates_share_original_serialization_and_keep_unknown_peer() {
+    let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = Arc::new(DeviceStore::at(fixture.path()));
+    let key = Arc::new(RwLock::new(VaultContext::generate().unwrap()));
+    let peer = json!({"mode":"future-mode","opaque":["synthetic-value",3]});
+    write_fixture(
+        &store,
+        &key.read().unwrap(),
+        &serde_json::to_vec(&json!({"version":1,"apps":{"claude":peer}})).unwrap(),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = ["codex", "gemini"]
+        .into_iter()
+        .map(|app| {
+            let store = store.clone();
+            let key = key.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                set_pending(&store, &key.read().unwrap(), app, Some(sample_pending())).unwrap();
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let vault = key.read().unwrap();
+    for app in ["codex", "gemini"] {
+        assert_eq!(
+            pending(&store, &vault, app).unwrap(),
+            Some(sample_pending())
+        );
+    }
+    let plain = state_file()
+        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&plain).unwrap()["apps"]["claude"],
+        peer
+    );
+}
+
+#[test]
+fn app_scoped_pending_rejects_invalid_shared_envelope_without_repair() {
+    let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = DeviceStore::at(fixture.path());
+    let key = RwLock::new(VaultContext::generate().unwrap());
+    let vault = key.read().unwrap();
+    for bytes in [
+        br#"{"version":2,"apps":{"codex":{"mode":"direct"}}}"#.as_slice(),
+        br#"{"version":1,"apps":[]}"#,
+        br#"{"version":1,"apps":{"codex":{},"codex":{}}}"#,
+    ] {
+        let before = write_fixture(&store, &vault, bytes);
+        assert!(pending(&store, &vault, "codex").is_err());
+        assert!(set_pending(&store, &vault, "codex", Some(sample_pending())).is_err());
+        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+    }
+}
+
+#[test]
+fn app_scoped_pending_preserves_exact_opaque_peer_and_root_payloads() {
+    let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let store = DeviceStore::at(fixture.path());
+    let key = RwLock::new(VaultContext::generate().unwrap());
+    let vault = key.read().unwrap();
+    let peer = r#"{ "mode" : "future-mode", "precise" : 123456789012345678901234567890, "fraction" : 1.2345678901234567890123456789 }"#;
+    let root = r#"{ "precise" : 123456789012345678901234567890 }"#;
+    let bytes = format!(r#"{{"version":1,"futureRoot":{root},"apps":{{"claude":{peer}}}}}"#);
+    write_fixture(&store, &vault, bytes.as_bytes());
+    set_pending(&store, &vault, "codex", Some(sample_pending())).unwrap();
+    let plain = state_file()
+        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .unwrap();
+    let text = std::str::from_utf8(&plain).unwrap();
+    assert!(
+        text.contains(peer),
+        "unknown peer bytes must not be numerically reinterpreted"
+    );
+    assert!(text.contains(root), "unknown root value bytes must survive");
+}
+
+#[test]
 fn missing_state_reads_are_empty_without_creating_storage() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path().join("not-created"));

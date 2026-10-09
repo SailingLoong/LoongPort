@@ -29,7 +29,7 @@ pub(crate) fn validate_known_mode(
     vault: &RwLockReadGuard<'_, VaultContext>,
     app: &AppType,
 ) -> Result<ModeState, AppError> {
-    let live = state::load(store, vault)?;
+    let live = state::load_app(store, vault, app.as_str())?;
     known_mode_from_state(&live, app)
 }
 
@@ -55,7 +55,7 @@ pub(crate) fn validate_direct_mode(
     vault: &RwLockReadGuard<'_, VaultContext>,
     app: &AppType,
 ) -> Result<(), AppError> {
-    let mut entry = state::load(store, vault)?
+    let mut entry = state::load_app(store, vault, app.as_str())?
         .apps
         .get(app.as_str())
         .cloned()

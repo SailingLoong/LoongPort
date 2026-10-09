@@ -947,11 +947,8 @@ pub(crate) fn commit_target(
         )?;
     }
     if let Some(written) = &target.written {
-        state::update(store, vault, |live| {
-            live.apps
-                .entry(app.as_str().to_owned())
-                .or_default()
-                .written = Some(written.clone());
+        state::update_app(store, vault, app.as_str(), |entry| {
+            entry.written = Some(written.clone());
             Ok(())
         })?;
         if state::written(store, vault, app.as_str())?.as_ref() != Some(written) {
@@ -968,10 +965,8 @@ pub(crate) fn commit_target(
                 return Err(verification_required());
             }
         }
-        state::update(store, vault, |live| {
-            live.apps
-                .entry(app.as_str().to_owned())
-                .or_default()
+        state::update_app(store, vault, app.as_str(), |entry| {
+            entry
                 .set_mode_state(mode.clone())
                 .map_err(|_| invalid_pending())
         })?;

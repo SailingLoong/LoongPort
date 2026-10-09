@@ -478,6 +478,133 @@ fn state_lock() -> &'static Mutex<()> {
     &LOCK
 }
 
+/// A transient view of the original file, not a second state store. Untouched
+/// app/root payloads retain their exact JSON bytes, including future numbers.
+#[derive(Serialize)]
+struct PreservedState {
+    version: u32,
+    #[serde(default)]
+    apps: BTreeMap<String, Box<serde_json::value::RawValue>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Box<serde_json::value::RawValue>>,
+}
+
+fn invalid_state() -> AppError {
+    AppError::Config(StateDecodeError::InvalidData.to_string())
+}
+
+fn read_preserved(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<PreservedState, AppError> {
+    let file = DeviceFile::registered(DEVICE_STATE_FILE)?;
+    let Some(bytes) = store.read_device(vault, &file)? else {
+        return Ok(PreservedState {
+            version: STATE_VERSION,
+            apps: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        });
+    };
+    serde_json::from_slice::<super::unique_keys::UniqueKeys>(&bytes)
+        .map_err(|_| invalid_state())?;
+    // RawValue must be captured by the JSON parser itself. serde's flatten
+    // deserialization buffers unknown values and loses their original bytes.
+    let mut fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_state())?;
+    let version = fields.remove("version").ok_or_else(invalid_state)?;
+    let version: u32 = serde_json::from_str(version.get()).map_err(|_| invalid_state())?;
+    if version != STATE_VERSION {
+        return Err(AppError::Config(
+            StateDecodeError::UnsupportedVersion(version).to_string(),
+        ));
+    }
+    let apps = fields
+        .remove("apps")
+        .map(|raw| serde_json::from_str(raw.get()).map_err(|_| invalid_state()))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(PreservedState {
+        version,
+        apps,
+        extra: fields,
+    })
+}
+
+fn selected_app(state: &PreservedState, app: &str) -> Result<Option<AppLiveState>, AppError> {
+    state
+        .apps
+        .get(app)
+        .map(|raw| serde_json::from_str(raw.get()).map_err(|_| invalid_state()))
+        .transpose()
+}
+
+/// Read only the selected typed app. Missing mode stays unknown; malformed or
+/// future peer apps are retained opaquely, never interpreted as empty/Direct.
+pub(crate) fn load_app(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+) -> Result<LiveState, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let raw = read_preserved(store, vault)?;
+    let apps = selected_app(&raw, app)?
+        .map(|entry| (app.to_owned(), entry))
+        .into_iter()
+        .collect();
+    let extra = raw
+        .extra
+        .into_iter()
+        .map(|(key, value)| {
+            serde_json::from_str(value.get())
+                .map(|value| (key, value))
+                .map_err(|_| invalid_state())
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(LiveState {
+        version: raw.version,
+        apps,
+        extra,
+    })
+}
+
+/// Change one compatible subtree under the original file lock. A future target
+/// app is refused; unrelated payloads are never decoded, normalized or removed.
+pub(crate) fn update_app<R>(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+    change: impl FnOnce(&mut AppLiveState) -> Result<R, AppError>,
+) -> Result<R, AppError> {
+    let _guard = state_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut raw = read_preserved(store, vault)?;
+    let before = selected_app(&raw, app)?.unwrap_or_default();
+    validate_app_for_update(&before)?;
+    let mut after = before.clone();
+    let result = change(&mut after)?;
+    validate_app_for_update(&after)?;
+    if after == before {
+        return Ok(result);
+    }
+    if after.is_empty() {
+        raw.apps.remove(app);
+    } else {
+        raw.apps.insert(
+            app.to_owned(),
+            serde_json::value::to_raw_value(&after)
+                .map_err(|source| AppError::JsonSerialize { source })?,
+        );
+    }
+    let bytes = Zeroizing::new(
+        serde_json::to_vec_pretty(&raw).map_err(|source| AppError::JsonSerialize { source })?,
+    );
+    store.write_device(vault, &DeviceFile::registered(DEVICE_STATE_FILE)?, &bytes)?;
+    Ok(result)
+}
+
 /// Absence is the only empty-state case. Authentication, parse and version errors
 /// leave the original file untouched for controlled inspection and recovery.
 pub(crate) fn load(
@@ -593,10 +720,7 @@ pub(crate) fn pending(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(load(store, vault)?
-        .apps
-        .get(app)
-        .and_then(|state| state.pending.clone()))
+    Ok(selected_app(&read_preserved(store, vault)?, app)?.and_then(|state| state.pending))
 }
 
 pub(crate) fn set_pending(
@@ -605,8 +729,8 @@ pub(crate) fn set_pending(
     app: &str,
     pending: Option<Pending>,
 ) -> Result<(), AppError> {
-    update(store, vault, |state| {
-        state.apps.entry(app.to_string()).or_default().pending = pending;
+    update_app(store, vault, app, |state| {
+        state.pending = pending;
         Ok(())
     })
 }
@@ -620,14 +744,25 @@ pub(crate) fn mode_states<const N: usize>(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let state = load(store, vault)?;
-    Ok(apps.map(|app| {
-        state
-            .apps
-            .get(app)
-            .map(AppLiveState::mode_state)
-            .unwrap_or_default()
-    }))
+    let state = read_preserved(store, vault)?;
+    let selected = apps.map(|app| {
+        selected_app(&state, app)
+            .map(|entry| entry.map(|entry| entry.mode_state()).unwrap_or_default())
+    });
+    // Keep a fallible result for each requested app without typing its peers.
+    let mut selected = selected.into_iter();
+    let mut failure = None;
+    let modes = std::array::from_fn(|_| match selected.next().expect("fixed app count") {
+        Ok(mode) => mode,
+        Err(error) => {
+            failure = Some(error);
+            ModeState::default()
+        }
+    });
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(modes),
+    }
 }
 
 pub(crate) fn mode_state(
@@ -648,10 +783,7 @@ pub(crate) fn written(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(load(store, vault)?
-        .apps
-        .get(app)
-        .and_then(|state| state.written.clone()))
+    Ok(selected_app(&read_preserved(store, vault)?, app)?.and_then(|state| state.written))
 }
 
 pub(crate) fn stack(
@@ -662,10 +794,8 @@ pub(crate) fn stack(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(load(store, vault)?
-        .apps
-        .get(app)
-        .map(|state| state.stack.clone())
+    Ok(selected_app(&read_preserved(store, vault)?, app)?
+        .map(|state| state.stack)
         .unwrap_or_default())
 }
 
@@ -677,9 +807,7 @@ pub(crate) fn stack_mode(
     let _guard = state_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(load(store, vault)?
-        .apps
-        .get(app)
+    Ok(selected_app(&read_preserved(store, vault)?, app)?
         .is_some_and(|state| state.mode == Some(Mode::Proxy) && state.stack.enabled))
 }
 
