@@ -1749,3 +1749,233 @@ fn staged_app_resolution_never_infers_mode_from_flags_or_unverified_routes() {
         assert_eq!(snapshot(f.home.path()), before);
     }
 }
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_cancel_is_explicit_bound_and_keeps_runtime_blocked() {
+    let f = Fixture::new();
+    let coordinator = crate::secrets::startup::StartupCoordinator::new(
+        f.root.clone(),
+        inspect(&f.root, &f.device).unwrap(),
+    );
+    let token = coordinator
+        .authenticate_upgrade(None, &f.store)
+        .unwrap()
+        .review_token
+        .unwrap();
+    let id = coordinator
+        .prepare_upgrade_checkpoint(&token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let before = snapshot(f.home.path());
+    assert!(coordinator.cancel_upgrade_checkpoint("stale", &id).is_err());
+    assert!(coordinator
+        .cancel_upgrade_checkpoint(&token, "stale")
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let cancelled = coordinator.cancel_upgrade_checkpoint(&token, &id).unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert!(!cancelled.checkpoint_present);
+    assert!(!cancelled.can_check_and_backup && !cancelled.can_start_upgrade);
+    assert!(coordinator.verify_runtime_admission_blocked());
+    assert_eq!(coordinator.upgrade_view().unwrap().status, "cancelled");
+    let after = snapshot(f.home.path());
+    let mut expected = before;
+    expected.remove(
+        f.device
+            .root()
+            .join(checkpoint::FILE)
+            .strip_prefix(f.home.path())
+            .unwrap(),
+    );
+    assert_eq!(after, expected);
+    assert_eq!(
+        coordinator
+            .cancel_upgrade_checkpoint(&token, &id)
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    assert_eq!(snapshot(f.home.path()), after);
+    assert!(coordinator.prepare_upgrade_checkpoint(&token).is_err());
+    assert!(coordinator.review_upgrade_ownership(&token).is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_cancel_lost_cleanup_response_requires_explicit_retry() {
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    let id = review
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let before = snapshot(f.home.path());
+    assert!(review
+        .cancel_checkpoint_with_hook(&mut inspected, &token, &id, &mut |at| {
+            if at == checkpoint::CancellationBoundary::Removed {
+                Err(AppError::Config("test.lost_response".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+    assert!(!f.device.root().join(checkpoint::FILE).exists());
+    let pending = review.view(&inspected).unwrap();
+    assert_eq!(pending.status, "cancellation_requires_verification");
+    assert!(!pending.can_check_and_backup && !pending.can_start_upgrade);
+    let after = snapshot(f.home.path());
+    assert_eq!(review.view(&inspected).unwrap().status, pending.status);
+    assert_eq!(snapshot(f.home.path()), after);
+    assert_eq!(
+        review
+            .cancel_checkpoint(&mut inspected, &token, &id)
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    let mut expected = before;
+    expected.remove(
+        f.device
+            .root()
+            .join(checkpoint::FILE)
+            .strip_prefix(f.home.path())
+            .unwrap(),
+    );
+    assert_eq!(snapshot(f.home.path()), expected);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_cancel_preserves_changed_sources_and_replacement_artifacts() {
+    for replace_checkpoint in [false, true] {
+        let f = Fixture::new();
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let id = review
+            .prepare_checkpoint(&mut inspected, &token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        if replace_checkpoint {
+            std::fs::write(
+                f.device.root().join(checkpoint::FILE),
+                b"foreign checkpoint",
+            )
+            .unwrap();
+        } else {
+            f.write_settings(&crate::settings::AppSettings::default());
+        }
+        let before = snapshot(f.home.path());
+        assert!(review
+            .cancel_checkpoint(&mut inspected, &token, &id)
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_cancel_pending_preserves_identity_and_rechecks_before_remove() {
+    for replace in [false, true] {
+        let f = Fixture::new();
+        let mut inspected = inspect(&f.root, &f.device).unwrap();
+        let mut review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let id = review
+            .prepare_checkpoint(&mut inspected, &token)
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        let path = f.device.root().join(checkpoint::FILE);
+        let original = std::fs::read(&path).unwrap();
+        assert!(review
+            .cancel_checkpoint_with_hook(&mut inspected, &token, &id, &mut |at| {
+                if at == checkpoint::CancellationBoundary::Verified {
+                    if replace {
+                        std::fs::write(&path, b"foreign replacement").unwrap();
+                    } else {
+                        return Err(AppError::Config("test.before_remove".into()));
+                    }
+                }
+                Ok(())
+            })
+            .is_err());
+        if replace {
+            assert_eq!(std::fs::read(&path).unwrap(), b"foreign replacement");
+            assert!(review.view(&inspected).is_err());
+            assert!(review
+                .cancel_checkpoint(&mut inspected, &token, &id)
+                .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"foreign replacement");
+        } else {
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let before = snapshot(f.home.path());
+            let view = review.view(&inspected).unwrap();
+            assert_eq!(view.status, "cancellation_requires_verification");
+            assert!(view.checkpoint_present);
+            assert_eq!(view.checkpoint_id.as_deref(), Some(id.as_str()));
+            assert!(review.stage_review(&inspected, &token).is_err());
+            assert!(review.prepare_checkpoint(&mut inspected, &token).is_err());
+            assert_eq!(snapshot(f.home.path()), before);
+            assert_eq!(
+                review
+                    .cancel_checkpoint(&mut inspected, &token, &id)
+                    .unwrap()
+                    .status,
+                "cancelled"
+            );
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn upgrade_checkpoint_cancel_rejects_published_database_without_cleanup() {
+    let f = Fixture::new();
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    let id = review
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    let db = Database::from_connection(
+        source,
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(())).unwrap();
+    let before = snapshot(f.home.path());
+    assert!(review
+        .cancel_checkpoint(&mut inspected, &token, &id)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    assert!(checkpoint::cancel_with_hook(
+        &f.root,
+        &f.device,
+        &f.vault,
+        &[],
+        (&id, &bytes),
+        &mut |_| Ok(())
+    )
+    .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    assert_eq!(
+        Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
+        20
+    );
+}

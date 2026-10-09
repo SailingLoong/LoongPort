@@ -426,6 +426,58 @@ fn existing_manifest(
     Ok((manifest, bytes))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CancellationBoundary {
+    Verified,
+    Removed,
+}
+
+/// Explicit pre-publication cancellation. The original authenticated review
+/// retains the exact artifact across response loss; absence alone is no receipt.
+pub(super) fn cancel_with_hook(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    clients: &[PathBuf],
+    artifact: (&str, &[u8]),
+    hook: &mut dyn FnMut(CancellationBoundary) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let (id, expected) = artifact;
+    let plaintext = descriptor()?.decode(vault, expected)?;
+    let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    manifest.verify_source(root, device, vault, id)?;
+    manifest.database(vault)?;
+    let inventory: std::collections::BTreeSet<_> = device_paths(device)?
+        .into_iter()
+        .chain(clients.iter().cloned())
+        .collect();
+    if inventory != manifest.files.iter().map(|f| f.path.clone()).collect() {
+        return Err(invalid());
+    }
+    let target = path(device);
+    let revision = inspection::file_revision(&target)?;
+    let current = config_file_io::read_regular_file(&target, MAX_BYTES)
+        .map_err(|e| AppError::io(&target, e))?;
+    if current.as_deref().is_some_and(|bytes| bytes != expected) {
+        return Err(invalid());
+    }
+    hook(CancellationBoundary::Verified)?;
+    manifest.verify_source(root, device, vault, id)?;
+    inspection::verify_unchanged(&target, &revision)?;
+    if current.is_some() {
+        std::fs::remove_file(&target).map_err(|e| AppError::io(&target, e))?;
+        hook(CancellationBoundary::Removed)?;
+    }
+    crate::live::engine::sync_parent(&target)?;
+    if config_file_io::read_regular_file(&target, MAX_BYTES)
+        .map_err(|e| AppError::io(&target, e))?
+        .is_some()
+    {
+        return Err(invalid());
+    }
+    manifest.verify_source(root, device, vault, id)
+}
+
 /// Prepare the target handoff inside the original generation transaction. This
 /// private seam does not publish runtime settings, establish mode or enable apps.
 pub(super) fn publish_database_with_hook(

@@ -276,7 +276,7 @@ impl StableInspection {
         }
     }
 
-    pub(crate) fn verify_unchanged(&self, root: &Path) -> Result<(), AppError> {
+    fn verify_database_and_vault(&self, root: &Path) -> Result<(), AppError> {
         if pending_generation(root)? {
             return Err(changed());
         }
@@ -286,9 +286,51 @@ impl StableInspection {
             None if inspection::capture(&path)?.is_some() => return Err(changed()),
             None => {}
         }
-        if read_vault(root)? != self.vault || read_device(&self.device)? != self.device_files {
+        if read_vault(root)? != self.vault {
             return Err(changed());
         }
+        Ok(())
+    }
+
+    pub(crate) fn verify_unchanged(&self, root: &Path) -> Result<(), AppError> {
+        self.verify_database_and_vault(root)?;
+        if read_device(&self.device)? != self.device_files {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    /// Verify only this authenticated output's absence; retain all other evidence.
+    fn verify_checkpoint_removed(&self, root: &Path, bytes: &[u8]) -> Result<(), AppError> {
+        let path = self.device.root().join(checkpoint::FILE);
+        if !self
+            .device_files
+            .iter()
+            .any(|(_, p, b)| p == &path && b == bytes)
+        {
+            return Err(changed());
+        }
+        self.verify_database_and_vault(root)?;
+        let expected = self
+            .device_files
+            .iter()
+            .filter(|(_, p, _)| p != &path)
+            .cloned()
+            .collect::<Vec<_>>();
+        if read_device(&self.device)? != expected {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    fn acknowledge_checkpoint_removed(
+        &mut self,
+        root: &Path,
+        bytes: &[u8],
+    ) -> Result<(), AppError> {
+        self.verify_checkpoint_removed(root, bytes)?;
+        let path = self.device.root().join(checkpoint::FILE);
+        self.device_files.retain(|(_, p, _)| p != &path);
         Ok(())
     }
 

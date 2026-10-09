@@ -1720,6 +1720,7 @@ pub fn run() {
             secrets::startup::get_startup_upgrade_review,
             secrets::startup::authenticate_startup_upgrade,
             secrets::startup::prepare_startup_upgrade_checkpoint,
+            secrets::startup::cancel_startup_upgrade_checkpoint,
             secrets::startup::review_startup_upgrade_ownership,
             secrets::startup::recover_startup_operation,
             secrets::startup::preview_secret_reset,

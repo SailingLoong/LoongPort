@@ -18,11 +18,18 @@ impl ReviewedInput {
     }
 }
 
+struct CheckpointCancellation {
+    id: String,
+    bytes: Vec<u8>,
+    completed: bool,
+}
+
 pub(crate) struct AuthenticatedUpgrade {
     root: PathBuf,
     device: DeviceStore,
     session: Arc<SecretSession>,
     token: String,
+    cancellation: Option<CheckpointCancellation>,
     pub(super) inputs: Vec<ReviewedInput>,
 }
 
@@ -150,6 +157,7 @@ impl AuthenticatedUpgrade {
             device: device.clone(),
             session,
             token: uuid::Uuid::new_v4().to_string(),
+            cancellation: None,
             inputs,
         };
         result.verify(inspected)?;
@@ -165,6 +173,14 @@ impl AuthenticatedUpgrade {
             return Err(source_changed());
         }
         inspected.verify_unchanged(&self.root)?;
+        self.verify_inputs()?;
+        inspected.verify_unchanged(&self.root)
+    }
+
+    fn verify_inputs(&self) -> Result<(), AppError> {
+        if crate::config::get_app_config_dir() != self.root {
+            return Err(source_changed());
+        }
         let settings = self
             .inputs
             .iter()
@@ -179,7 +195,7 @@ impl AuthenticatedUpgrade {
         for input in &self.inputs {
             input.verify()?;
         }
-        inspected.verify_unchanged(&self.root)
+        Ok(())
     }
 
     pub(crate) fn prepare_checkpoint(
@@ -197,6 +213,9 @@ impl AuthenticatedUpgrade {
         hook: &mut dyn FnMut(checkpoint::Boundary) -> Result<(), AppError>,
     ) -> Result<StartupUpgradeView, AppError> {
         if token != self.token {
+            return Err(source_changed());
+        }
+        if self.cancellation.is_some() {
             return Err(source_changed());
         }
         let view = self.view(inspected)?;
@@ -248,12 +267,101 @@ impl AuthenticatedUpgrade {
         self.view(inspected)
     }
 
+    pub(crate) fn cancel_checkpoint(
+        &mut self,
+        inspected: &mut UpgradeInspection,
+        token: &str,
+        id: &str,
+    ) -> Result<StartupUpgradeView, AppError> {
+        self.cancel_checkpoint_with_hook(inspected, token, id, &mut |_| Ok(()))
+    }
+
+    pub(super) fn cancel_checkpoint_with_hook(
+        &mut self,
+        inspected: &mut UpgradeInspection,
+        token: &str,
+        id: &str,
+        hook: &mut dyn FnMut(checkpoint::CancellationBoundary) -> Result<(), AppError>,
+    ) -> Result<StartupUpgradeView, AppError> {
+        if token != self.token {
+            return Err(source_changed());
+        }
+        if let Some(cancellation) = &self.cancellation {
+            if cancellation.id != id {
+                return Err(source_changed());
+            }
+            if cancellation.completed {
+                return self.view(inspected);
+            }
+        } else {
+            self.verify(inspected)?;
+            let vault = self.session.read()?;
+            let (actual, bytes) = checkpoint::verified_checkpoint_for_clients(
+                &self.root,
+                &self.device,
+                &vault,
+                &self.paths(),
+            )?;
+            if actual != id {
+                return Err(source_changed());
+            }
+            self.cancellation = Some(CheckpointCancellation {
+                id: actual,
+                bytes,
+                completed: false,
+            });
+        }
+        self.verify_cancellation(inspected)?;
+        let cancellation = self.cancellation.as_ref().ok_or_else(source_changed)?;
+        let vault = self.session.read()?;
+        checkpoint::cancel_with_hook(
+            &self.root,
+            &self.device,
+            &vault,
+            &self.paths(),
+            (id, &cancellation.bytes),
+            hook,
+        )?;
+        self.verify_inputs()?;
+        let UpgradeInspection::Stable(stable) = inspected else {
+            return Err(source_changed());
+        };
+        stable.acknowledge_checkpoint_removed(&self.root, &cancellation.bytes)?;
+        self.cancellation
+            .as_mut()
+            .ok_or_else(source_changed)?
+            .completed = true;
+        self.view(inspected)
+    }
+
+    fn verify_cancellation(&self, inspected: &UpgradeInspection) -> Result<(), AppError> {
+        let cancellation = self.cancellation.as_ref().ok_or_else(source_changed)?;
+        if cancellation.completed {
+            return self.verify(inspected);
+        }
+        let UpgradeInspection::Stable(stable) = inspected else {
+            return Err(source_changed());
+        };
+        if crate::config_file_io::read_regular_file(
+            &self.device.root().join(checkpoint::FILE),
+            checkpoint::MAX_BYTES,
+        )
+        .map_err(|e| AppError::io(self.device.root().join(checkpoint::FILE), e))?
+        .is_some()
+        {
+            self.verify(inspected)?;
+        } else {
+            stable.verify_checkpoint_removed(&self.root, &cancellation.bytes)?;
+        }
+        self.verify_inputs()
+    }
+
     pub(crate) fn stage_review(
         &self,
         inspected: &UpgradeInspection,
         token: &str,
     ) -> Result<StagedUpgradeReview, AppError> {
-        if token != self.token {
+        if token != self.token || self.cancellation.is_some() {
             return Err(source_changed());
         }
         let current = self.view(inspected)?;
@@ -335,6 +443,28 @@ impl AuthenticatedUpgrade {
         &self,
         inspected: &UpgradeInspection,
     ) -> Result<StartupUpgradeView, AppError> {
+        if let Some(cancellation) = &self.cancellation {
+            self.verify_cancellation(inspected)?;
+            let mut view = StartupUpgradeView::blocked(if cancellation.completed {
+                "cancelled"
+            } else {
+                "cancellation_requires_verification"
+            });
+            if let UpgradeInspection::Stable(stable) = inspected {
+                view.source_versions = stable.source_versions;
+            }
+            view.review_token = Some(self.token.clone());
+            if !cancellation.completed {
+                view.checkpoint_id = Some(cancellation.id.clone());
+                view.checkpoint_present = crate::config_file_io::read_regular_file(
+                    &self.device.root().join(checkpoint::FILE),
+                    checkpoint::MAX_BYTES,
+                )
+                .map_err(|e| AppError::io(self.device.root().join(checkpoint::FILE), e))?
+                .is_some();
+            }
+            return Ok(view);
+        }
         self.verify(inspected)?;
         let mut view = inspected.upgrade_view(&self.root)?;
         if view.checkpoint_present {

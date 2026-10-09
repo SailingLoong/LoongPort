@@ -217,6 +217,31 @@ impl StartupCoordinator {
             .map_err(super::error::public_code)
     }
 
+    pub(super) fn cancel_upgrade_checkpoint(
+        &self,
+        token: &str,
+        id: &str,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::UpgradeReview {
+            return Err("secret.locked".into());
+        }
+        let mut inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        self.upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .as_mut()
+            .ok_or("secret.startup_unavailable")?
+            .cancel_checkpoint(&mut inspection, token, id)
+            .map_err(super::error::public_code)
+    }
+
     pub(super) fn review_upgrade_ownership(
         &self,
         token: &str,
@@ -414,6 +439,24 @@ pub(crate) async fn prepare_startup_upgrade_checkpoint(
             .try_state::<StartupCoordinator>()
             .ok_or("secret.startup_unavailable")?;
         coordinator.prepare_upgrade_checkpoint(&expected_review_token)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn cancel_startup_upgrade_checkpoint(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+    expected_checkpoint_id: String,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.cancel_upgrade_checkpoint(&expected_review_token, &expected_checkpoint_id)
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?
