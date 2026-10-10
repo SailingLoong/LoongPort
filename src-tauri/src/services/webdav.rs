@@ -126,12 +126,20 @@ fn webdav_transport_error(
     )
 }
 
+fn client_for_auth(auth: &WebDavAuth, url: &str) -> Result<reqwest::Client, AppError> {
+    if auth.is_some() || http_client::url_has_credentials(url) {
+        http_client::get_authenticated().map_err(AppError::Message)
+    } else {
+        Ok(http_client::get())
+    }
+}
+
 // ─── HTTP operations ─────────────────────────────────────────
 
 /// Test WebDAV connectivity via PROPFIND Depth=0 on the base URL.
 pub async fn test_connection(base_url: &str, auth: &WebDavAuth) -> Result<(), AppError> {
     let url = parse_base_url(base_url)?;
-    let client = http_client::get();
+    let client = client_for_auth(auth, base_url)?;
 
     let resp = apply_auth(
         client
@@ -170,7 +178,7 @@ pub async fn ensure_remote_directories(
     if segments.is_empty() {
         return Ok(());
     }
-    let client = http_client::get();
+    let client = client_for_auth(auth, base_url)?;
 
     for depth in 1..=segments.len() {
         let prefix = &segments[..depth];
@@ -254,7 +262,7 @@ pub(crate) async fn put_bytes_conditional(
     condition: &super::sync_protocol::PutCondition,
 ) -> Result<Option<String>, AppError> {
     let (condition_name, condition_value) = condition.header()?;
-    let client = http_client::get();
+    let client = client_for_auth(auth, url)?;
     let resp = apply_auth(
         client
             .put(url)
@@ -288,7 +296,7 @@ pub async fn get_bytes(
     auth: &WebDavAuth,
     max_bytes: usize,
 ) -> Result<Option<(Vec<u8>, Option<String>)>, AppError> {
-    let client = http_client::get();
+    let client = client_for_auth(auth, url)?;
     let resp = apply_auth(
         client
             .get(url)
@@ -348,8 +356,9 @@ async fn propfind_exists(
         Ok(r) => Ok(r.status().is_success() || r.status() == StatusCode::MULTI_STATUS),
         Err(e) => {
             log::warn!(
-                "[WebDAV] PROPFIND check failed for {}: {e}",
-                redact_url(url)
+                "[WebDAV] PROPFIND check failed for {}: {}",
+                redact_url(url),
+                e.without_url()
             );
             Ok(false)
         }
@@ -446,7 +455,7 @@ fn ensure_content_length_within_limit(
 /// Inspect one exact object. Missing or weak ETags cannot authorize deletion.
 pub(crate) async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
     let response = apply_auth(
-        http_client::get()
+        client_for_auth(auth, url)?
             .head(url)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
         auth,
@@ -479,7 +488,7 @@ pub(crate) async fn delete_conditional(
     use super::sync_cleanup::DeleteResult;
     let etag = super::sync_protocol::require_strong_etag(Some(etag))?;
     let response = apply_auth(
-        http_client::get()
+        client_for_auth(auth, url)?
             .delete(url)
             .header("If-Match", etag)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
@@ -546,6 +555,58 @@ mod tests {
 
         let segs: Vec<_> = path_segments("").collect();
         assert!(segs.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_webdav_blocks_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/dav/", 307, &format!("{}/final", target.base_url));
+        let result = test_connection(
+            &format!("{}/dav/", source.base_url),
+            &auth_from_credentials("fake-user", "fake-password"),
+        )
+        .await;
+        assert!(source.received()[0].headers.contains_key("authorization"));
+        assert!(
+            target.received().is_empty(),
+            "authenticated WebDAV request crossed origin"
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_webdav_url_userinfo_is_authenticated() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/dav/", 307, &format!("{}/final", target.base_url));
+        let url = source
+            .base_url
+            .replace("http://", "http://fake-user:fake-password@");
+        let result = test_connection(&format!("{url}/dav/"), &None).await;
+        assert!(source.received()[0].headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Basic "));
+        assert!(target.received().is_empty());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_ordinary_webdav_retains_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/dav/", 307, &format!("{}/final", target.base_url));
+        test_connection(&format!("{}/dav/", source.base_url), &None)
+            .await
+            .unwrap();
+        assert_eq!(target.received().len(), 1);
     }
 
     #[test]

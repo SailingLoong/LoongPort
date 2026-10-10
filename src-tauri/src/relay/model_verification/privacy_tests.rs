@@ -101,6 +101,7 @@ static LOGGER: CapturingLogger = CapturingLogger {
 static LOGGER_INIT: Once = Once::new();
 
 #[tokio::test]
+#[serial_test::serial]
 async fn active_protocols_keep_private_request_and_response_material_out_of_every_sink() {
     init_logger();
     LOGGER.records.lock().unwrap().clear();
@@ -209,7 +210,7 @@ async fn unsupported_apps_and_user_providers_are_rejected_before_network_io() {
     server.abort();
 }
 
-fn init_logger() {
+pub(crate) fn init_logger() {
     LOGGER_INIT.call_once(|| {
         log::set_logger(&LOGGER).expect("test logger should be the first installed logger");
         log::set_max_level(log::LevelFilter::Trace);
@@ -631,4 +632,8 @@ fn assert_no_private_values(
             "{label} leaked captured request content {private_string:?}"
         );
     }
+}
+
+pub(crate) fn captured_logs() -> String {
+    LOGGER.records.lock().unwrap().join("\n")
 }

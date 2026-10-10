@@ -11,7 +11,21 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 /// 全局 HTTP 客户端实例
-static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
+static GLOBAL_CLIENT: OnceCell<RwLock<HttpClients>> = OnceCell::new();
+
+// Both policies share the existing proxy/TLS configuration owner and update lock.
+#[derive(Clone)]
+struct HttpClients {
+    ordinary: Client,
+    authenticated: Client,
+}
+
+fn build_clients(proxy_url: Option<&str>) -> Result<HttpClients, String> {
+    Ok(HttpClients {
+        ordinary: build_client(proxy_url)?,
+        authenticated: build_authenticated_client(proxy_url)?,
+    })
+}
 
 /// 当前代理 URL（用于日志和状态查询）
 static CURRENT_PROXY_URL: OnceCell<RwLock<Option<String>>> = OnceCell::new();
@@ -52,7 +66,7 @@ fn get_proxy_port() -> u16 {
 ///   传入 None 或空字符串表示直连
 pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let client = build_client(effective_url)?;
+    let client = build_clients(effective_url)?;
 
     // 尝试初始化全局客户端，如果已存在则记录警告并使用 apply_proxy 更新
     if GLOBAL_CLIENT.set(RwLock::new(client.clone())).is_err() {
@@ -92,7 +106,7 @@ pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
 pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
     // 只调用 build_client 来验证，但不应用
-    build_client(effective_url)?;
+    build_clients(effective_url)?;
     Ok(())
 }
 
@@ -105,7 +119,7 @@ pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 /// * `proxy_url` - 代理 URL，None 或空字符串表示直连
 pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let new_client = build_client(effective_url)?;
+    let new_client = build_clients(effective_url)?;
 
     // 更新客户端
     if let Some(lock) = GLOBAL_CLIENT.get() {
@@ -149,7 +163,7 @@ pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 #[allow(dead_code)]
 pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let new_client = build_client(effective_url)?;
+    let new_client = build_clients(effective_url)?;
 
     // 更新客户端
     if let Some(lock) = GLOBAL_CLIENT.get() {
@@ -189,11 +203,28 @@ pub fn get() -> Client {
     GLOBAL_CLIENT
         .get()
         .and_then(|lock| lock.read().ok())
-        .map(|c| c.clone())
+        .map(|c| c.ordinary.clone())
         .unwrap_or_else(|| {
             log::warn!("[GlobalProxy] [GP-004] Client not initialized, using fallback");
             build_client(None).unwrap_or_default()
         })
+}
+
+/// Client for requests carrying credentials, including provider-specific headers.
+/// Redirects may retain credentials only within the original scheme/host/port.
+/// Never fall back to an unrestricted client after a configuration/lock failure.
+pub fn get_authenticated() -> Result<Client, String> {
+    authenticated_client_from(GLOBAL_CLIENT.get())
+}
+
+fn authenticated_client_from(lock: Option<&RwLock<HttpClients>>) -> Result<Client, String> {
+    match lock {
+        Some(lock) => lock
+            .read()
+            .map(|clients| clients.authenticated.clone())
+            .map_err(|_| "Failed to get authenticated HTTP client: lock poisoned".to_string()),
+        None => build_authenticated_client(None),
+    }
 }
 
 /// 获取当前代理 URL
@@ -214,7 +245,43 @@ pub fn is_proxy_enabled() -> bool {
 
 /// 构建 HTTP 客户端
 fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    build_client_with_redirect(proxy_url, reqwest::redirect::Policy::default())
+}
+
+/// reqwest turns URL userinfo into Basic Authorization even without auth headers.
+pub(crate) fn url_has_credentials(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+}
+
+fn same_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str().is_some()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn build_authenticated_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt
+            .previous()
+            .first()
+            .is_some_and(|origin| same_origin(origin, attempt.url()))
+        {
+            // A custom policy does not inherit reqwest's default ten-hop bound.
+            reqwest::redirect::Policy::limited(10).redirect(attempt)
+        } else {
+            attempt.error("authenticated request cannot redirect across origins")
+        }
+    });
+    build_client_with_redirect(proxy_url, policy)
+}
+
+fn build_client_with_redirect(
+    proxy_url: Option<&str>,
+    policy: reqwest::redirect::Policy,
+) -> Result<Client, String> {
     let mut builder = Client::builder()
+        .redirect(policy)
         .timeout(Duration::from_secs(600))
         .connect_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
@@ -349,6 +416,222 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_ordinary_client_retains_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/download", 302, &format!("{}/final", target.base_url));
+        let result = build_client(None)
+            .unwrap()
+            .get(format!("{}/download", source.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), reqwest::StatusCode::OK);
+        assert_eq!(source.received().len(), 1);
+        assert_eq!(target.received().len(), 1);
+    }
+
+    #[test]
+    fn authenticated_redirect_origin_includes_scheme_host_and_effective_port() {
+        for (left, right, expected) in [
+            ("https://EXAMPLE.test/a", "https://example.test:443/b", true),
+            ("http://example.test/a", "http://example.test:80/b", true),
+            (
+                "https://example.test:443/a",
+                "http://example.test:443/b",
+                false,
+            ),
+            (
+                "http://example.test:80/a",
+                "https://example.test:80/b",
+                false,
+            ),
+            ("https://example.test/a", "https://other.test/a", false),
+            (
+                "https://example.test/a",
+                "https://example.test:444/a",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                same_origin(
+                    &url::Url::parse(left).unwrap(),
+                    &url::Url::parse(right).unwrap()
+                ),
+                expected,
+                "{left} -> {right}"
+            );
+        }
+        assert!(url_has_credentials("https://user:password@example.test"));
+        assert!(url_has_credentials("https://:password@example.test"));
+        assert!(!url_has_credentials("https://example.test"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_uninitialized_fallback_is_guarded() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/start", 302, &format!("{}/final", target.base_url));
+        let result = authenticated_client_from(None)
+            .unwrap()
+            .get(format!("{}/start", source.base_url))
+            .header("x-private-token", "fake-fallback-canary")
+            .send()
+            .await;
+        assert!(result.unwrap_err().is_redirect());
+        assert_eq!(source.received().len(), 1);
+        assert!(target.received().is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn authenticated_redirect_poisoned_lock_fails_closed() {
+        let lock = RwLock::new(build_clients(None).unwrap());
+        let _ = std::panic::catch_unwind(|| {
+            let _write = lock.write().unwrap();
+            panic!("synthetic lock poisoning");
+        });
+        assert!(authenticated_client_from(Some(&lock)).is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_pair_uses_proxy_on_init_apply_and_update() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::http_client::tests::authenticated_redirect_pair_uses_proxy_on_init_apply_and_update",
+        ) {
+            return;
+        }
+        use crate::proxy::redirect_test_support::MockServer;
+        struct Restore(Option<HttpClients>, Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(clients) = self.0.take() {
+                    *GLOBAL_CLIENT.get().unwrap().write().unwrap() = clients;
+                }
+                if let Some(lock) = CURRENT_PROXY_URL.get() {
+                    *lock.write().unwrap() = self.1.take();
+                }
+            }
+        }
+        let _restore = Restore(
+            GLOBAL_CLIENT
+                .get()
+                .map(|lock| lock.read().unwrap().clone())
+                .or_else(|| Some(build_clients(None).unwrap())),
+            get_current_proxy_url(),
+        );
+        let proxy = MockServer::spawn().await;
+        for apply in [init, apply_proxy, update_proxy] {
+            apply(Some(&proxy.base_url)).unwrap();
+            for client in [get(), get_authenticated().unwrap()] {
+                client
+                    .get("http://authenticated-redirect.invalid/resource")
+                    .header("x-private-token", "fake-proxy-canary")
+                    .send()
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                get_current_proxy_url().as_deref(),
+                Some(proxy.base_url.as_str())
+            );
+        }
+        assert_eq!(proxy.received().len(), 6);
+        assert!(proxy
+            .received()
+            .iter()
+            .all(|request| request.headers["x-private-token"] == "fake-proxy-canary"));
+        assert!(apply_proxy(Some("invalid-scheme://127.0.0.1:1")).is_err());
+        get_authenticated()
+            .unwrap()
+            .get("http://authenticated-redirect.invalid/still-configured")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            proxy.received().len(),
+            7,
+            "invalid update must leave the configured pair intact"
+        );
+        assert!(build_clients(Some("socks5://127.0.0.1:1080")).is_ok());
+        assert!(build_clients(Some("https://127.0.0.1:7890")).is_ok());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_pair_preserves_system_proxy_and_loop_avoidance() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::http_client::tests::authenticated_redirect_pair_preserves_system_proxy_and_loop_avoidance",
+        ) {
+            return;
+        }
+        use crate::proxy::redirect_test_support::MockServer;
+        const KEYS: [&str; 8] = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ];
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>, u16);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+                set_proxy_port(self.1);
+            }
+        }
+        let _restore = Restore(
+            KEYS.iter().map(|&key| (key, env::var_os(key))).collect(),
+            get_proxy_port(),
+        );
+        for key in KEYS {
+            env::remove_var(key);
+        }
+        let proxy = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        env::set_var("HTTP_PROXY", &proxy.base_url);
+        let port = url::Url::parse(&proxy.base_url).unwrap().port().unwrap();
+        set_proxy_port(port);
+        let pair = build_clients(None).unwrap();
+        for client in [pair.ordinary, pair.authenticated] {
+            client
+                .get(format!("{}/direct", target.base_url))
+                .send()
+                .await
+                .unwrap();
+        }
+        assert_eq!(target.received().len(), 2);
+        assert!(proxy.received().is_empty(), "must bypass own proxy port");
+        set_proxy_port(if port == 1 { 2 } else { 1 });
+        let pair = build_clients(None).unwrap();
+        for client in [pair.ordinary, pair.authenticated] {
+            client
+                .get("http://authenticated-redirect.invalid/system-proxy")
+                .send()
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            proxy.received().len(),
+            2,
+            "both policies must retain external system proxy"
+        );
+    }
+
     #[test]
     fn test_mask_url() {
         assert_eq!(mask_url("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
@@ -407,7 +690,13 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_proxy_points_to_loopback() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::http_client::tests::test_proxy_points_to_loopback",
+        ) {
+            return;
+        }
         // 设置 CC Switch 代理端口为 15721（默认值）
         set_proxy_port(15721);
 
@@ -426,7 +715,13 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_system_proxy_points_to_loopback() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::http_client::tests::test_system_proxy_points_to_loopback",
+        ) {
+            return;
+        }
         let _guard = env_lock().lock().unwrap();
 
         // 设置 CC Switch 代理端口

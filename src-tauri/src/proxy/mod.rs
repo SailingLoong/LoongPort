@@ -70,3 +70,6 @@ pub use types::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 // 注意：这个导出用于模块内部，编译器可能警告未使用但实际被子模块使用
 #[allow(unused_imports)]
 pub(crate) use types::*;
+
+#[cfg(test)]
+pub(crate) mod redirect_test_support;

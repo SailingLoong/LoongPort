@@ -107,13 +107,13 @@ pub async fn get_xai_oauth_models(
         .await
         .map_err(|error| format!("xAI OAuth token unavailable: {error}"))?;
 
-    let response = crate::proxy::http_client::get()
+    let response = crate::proxy::http_client::get_authenticated()?
         .get(format!("{XAI_API_BASE_URL}/models"))
         .bearer_auth(token)
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|error| format!("xAI models request failed: {error}"))?;
+        .map_err(|error| format!("xAI models request failed: {}", error.without_url()))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("xAI models request failed: HTTP {status}"));
