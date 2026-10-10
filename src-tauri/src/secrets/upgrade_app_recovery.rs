@@ -84,6 +84,41 @@ fn listener_endpoint(facts: &ListenerFacts) -> Option<(&str, u16)> {
     .then_some((global.1.as_str(), global.2))
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
+#[cfg_attr(test, test)]
+fn recovery_listener_endpoint_requires_fixed_loopback() {
+    let facts = |address: &str, port| {
+        ["claude", "codex", "gemini", "grokbuild"]
+            .into_iter()
+            .map(|app| (app.into(), address.into(), port, true, false))
+            .collect::<ListenerFacts>()
+    };
+    for address in ["127.0.0.1", "::1"] {
+        assert_eq!(
+            listener_endpoint(&facts(address, 15721)),
+            Some((address, 15721))
+        );
+        assert!(listener_endpoint(&facts(address, 0)).is_none());
+    }
+    for address in [
+        "0.0.0.0",
+        "::",
+        "192.0.2.1",
+        "2001:db8::1",
+        "localhost",
+        "unknown",
+        "",
+    ] {
+        assert!(
+            listener_endpoint(&facts(address, 15721)).is_none(),
+            "{address}"
+        );
+    }
+    let mut inconsistent = facts("::1", 15721);
+    inconsistent[1].1 = "127.0.0.1".into();
+    assert!(listener_endpoint(&inconsistent).is_none());
+}
+
 #[derive(Clone, PartialEq)]
 struct RecoveryFacts {
     live: Option<crate::mode::state::LiveState>,

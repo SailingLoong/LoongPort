@@ -3,9 +3,13 @@ use super::*;
 use crate::{app_config::AppType, mode::operation};
 
 fn health(port: u16) {
+    health_at("127.0.0.1", port);
+}
+
+fn health_at(address: &str, port: u16) {
     use std::io::{Read, Write};
     let mut client = std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        &std::net::SocketAddr::new(address.parse().unwrap(), port),
         std::time::Duration::from_secs(3),
     )
     .unwrap();
@@ -53,6 +57,16 @@ fn assert_no_recovery_writes(
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn retained_checkpoint_recovers_enter_listener_after_restart() {
+    check_enter_listener_after_restart("127.0.0.1");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_ipv6_enter_listener_after_restart() {
+    check_enter_listener_after_restart("::1");
+}
+
+fn check_enter_listener_after_restart(address: &str) {
     let f = Fixture::new();
     let app = AppType::Claude;
     let reactor = tokio::runtime::Runtime::new().unwrap();
@@ -61,7 +75,7 @@ fn retained_checkpoint_recovers_enter_listener_after_restart() {
     let mut global = reactor
         .block_on(runtime.db.get_global_proxy_config())
         .unwrap();
-    global.listen_address = "127.0.0.1".into();
+    global.listen_address = address.into();
     global.listen_port = 0;
     reactor
         .block_on(runtime.db.update_global_proxy_config(global))
@@ -84,9 +98,9 @@ fn retained_checkpoint_recovers_enter_listener_after_restart() {
         .unwrap()
         .listen_port;
     assert_ne!(port, 0);
-    health(port);
+    health_at(address, port);
     reactor.block_on(runtime.proxy_service.stop()).unwrap();
-    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(std::net::TcpStream::connect((address, port)).is_err());
     let restarted = crate::store::AppState::new(runtime.db.clone()).unwrap();
     let view = review.review_app(&inspected, &token, &app).unwrap();
     let before = snapshot(f.home.path());
@@ -96,7 +110,7 @@ fn retained_checkpoint_recovers_enter_listener_after_restart() {
     drop(context);
     let running = reactor.block_on(restarted.proxy_service.is_running());
     if running {
-        health(port);
+        health_at(address, port);
         reactor.block_on(restarted.proxy_service.stop()).unwrap();
     }
     assert!(
@@ -115,6 +129,15 @@ fn retained_checkpoint_recovers_enter_listener_after_restart() {
     .unwrap();
     assert!(mode.attached);
     assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+    let completed = review.review_app(&inspected, &token, &app).unwrap();
+    assert!(!completed.can_recover_operation);
+    let before_retry = snapshot(f.home.path());
+    let context = reactor.enter();
+    assert!(review
+        .recover_app_with_state(&inspected, &token, &app, &completed.revision, &restarted)
+        .is_err());
+    drop(context);
+    assert_no_recovery_writes(&before_retry, &snapshot(f.home.path()), "completed retry");
 }
 
 fn interrupted(

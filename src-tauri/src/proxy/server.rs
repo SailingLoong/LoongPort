@@ -131,10 +131,15 @@ impl ProxyServer {
             return Err(ProxyError::AlreadyRunning);
         }
 
-        let addr: SocketAddr =
-            format!("{}:{}", self.config.listen_address, self.config.listen_port)
-                .parse()
-                .map_err(|e| ProxyError::BindFailed(format!("无效的地址: {e}")))?;
+        let addr: SocketAddr = self
+            .config
+            .listen_address
+            .parse::<std::net::IpAddr>()
+            .map(|ip| SocketAddr::new(ip, self.config.listen_port))
+            .or_else(|_| {
+                format!("{}:{}", self.config.listen_address, self.config.listen_port).parse()
+            })
+            .map_err(|e| ProxyError::BindFailed(format!("无效的地址: {e}")))?;
 
         // 创建关闭通道
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
