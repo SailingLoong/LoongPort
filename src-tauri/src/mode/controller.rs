@@ -589,6 +589,62 @@ pub(crate) fn recover_locked_with_checks(
     )
 }
 
+/// Read-only listener dependency proof from the original route/contract owners.
+/// Call outside a pinned vault read: the existing planners acquire their own.
+pub(crate) fn recovery_listener_required(
+    service: &ProxyService,
+    app: &AppType,
+    pending: &state::Pending,
+    address: &str,
+    port: u16,
+) -> Result<bool, AppError> {
+    let store = DeviceStore::for_device();
+    let before = {
+        let vault = service.database().secret_session().read()?;
+        current::validate_known_mode(&store, &vault, app)?
+    };
+    let forward = operation::recovery_will_roll_forward(pending)?;
+    let intended = if forward {
+        pending.target.state.as_ref().unwrap_or(&before)
+    } else {
+        &before
+    };
+    if !intended.attached {
+        return Ok(false);
+    }
+    if !intended.is_proxy()
+        || port == 0
+        || !address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Err(invalid());
+    }
+    let id = intended.proxy_route.as_deref().ok_or_else(invalid)?;
+    let route = match &pending.target.saved_row {
+        Some(saved) if forward => {
+            let row = operation::saved_provider(saved)?;
+            if row.id == id {
+                row
+            } else {
+                provider(service, app, id)?
+            }
+        }
+        _ => provider(service, app, id)?,
+    };
+    admit(service, app, &route)?;
+    let live = LiveNow::of(service, app, &before)?;
+    // The original builder handles IPv6 and produces the client URL. With no
+    // listener/config mismatch accepted, it cannot mix two endpoint identities.
+    let (url, _) =
+        futures::executor::block_on(service.build_proxy_urls()).map_err(AppError::Message)?;
+    let expected = expected_proxy_contract(service, app, &route, &live, &url)?;
+    if intended.contract.as_ref() != Some(&expected) {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
 /// Enumerate persisted applications without interpreting peer subtrees. The
 /// existing loop admits each app independently; missing/shared-unknown state
 /// never instructs it to infer old flags or create a Direct/Proxy decision.

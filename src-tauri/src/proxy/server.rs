@@ -288,6 +288,16 @@ impl ProxyServer {
         }
     }
 
+    /// A retained server slot/status alone cannot prove a live accept task.
+    pub(crate) async fn listener_is_running(&self) -> bool {
+        self.server_handle
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+            && self.state.status.read().await.running
+    }
+
     pub async fn get_status(&self) -> ProxyStatus {
         let mut status = self.state.status.read().await.clone();
 

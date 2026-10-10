@@ -5786,3 +5786,6 @@ mod codex_native_tests;
 
 #[path = "upgrade_native_recovery_tests.rs"]
 mod native_recovery_tests;
+
+#[path = "upgrade_attached_recovery_tests.rs"]
+mod attached_recovery_tests;

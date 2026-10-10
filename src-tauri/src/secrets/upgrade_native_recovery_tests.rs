@@ -3,7 +3,7 @@ use super::*;
 use crate::{app_config::AppType, mode::operation, provider::Provider};
 use serde_json::json;
 
-fn native_runtime(
+pub(super) fn native_runtime(
     f: &Fixture,
     app: &AppType,
 ) -> (

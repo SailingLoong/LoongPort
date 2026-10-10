@@ -1164,6 +1164,19 @@ impl ProxyService {
             .await
     }
 
+    /// Explicit retained-checkpoint recovery uses the original lifecycle order.
+    pub(crate) async fn lock_recovery_for_app(
+        &self,
+        app_type: &str,
+    ) -> (
+        tokio::sync::OwnedMutexGuard<()>,
+        tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        let lifecycle = self.takeover_lock.clone().lock_owned().await;
+        let app = self.switch_locks.lock_for_app(app_type).await;
+        (lifecycle, app)
+    }
+
     pub(crate) async fn lock_switch_for_app(
         &self,
         app_type: &str,
@@ -1174,6 +1187,22 @@ impl ProxyService {
     #[cfg(any(feature = "gui", feature = "test-hooks"))]
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
+        self.start_checked(None::<&fn() -> Result<(), String>>, None)
+            .await
+            .map(|(info, _created)| info)
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    async fn start_checked<F: Fn() -> Result<(), String> + ?Sized>(
+        &self,
+        check: Option<&F>,
+        reviewed_endpoint: Option<(&str, u16)>,
+    ) -> Result<(ProxyServerInfo, bool), String> {
+        if let Some(check) = check {
+            check()?;
+            crate::mode::operation::failpoint::hit("upgrade:listener_config")
+                .map_err(|error| error.to_string())?;
+        }
         let mut server_slot = self.server.write().await;
         // 2. 获取配置
         let config = self
@@ -1181,16 +1210,26 @@ impl ProxyService {
             .get_proxy_config()
             .await
             .map_err(|e| format!("获取代理配置失败: {e}"))?;
+        // Compare the actual configuration used to bind, not just an earlier
+        // database observation. A concurrent settings edit must never widen it.
+        if reviewed_endpoint.is_some_and(|(address, port)| {
+            config.listen_address != address || config.listen_port != port
+        }) {
+            return Err("mode.verification_required".into());
+        }
 
         // 3. 若已在运行：确保持久化状态（如需要）并返回当前信息
         if let Some(server) = server_slot.as_ref() {
             let status = server.get_status().await;
-            return Ok(ProxyServerInfo {
-                address: status.address,
-                port: status.port,
-                // 无法精确取回首次启动时间，返回当前时间用于 UI 展示即可
-                started_at: chrono::Utc::now().to_rfc3339(),
-            });
+            return Ok((
+                ProxyServerInfo {
+                    address: status.address,
+                    port: status.port,
+                    // 无法精确取回首次启动时间，返回当前时间用于 UI 展示即可
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                },
+                false,
+            ));
         }
 
         // 4. 创建并启动服务器
@@ -1209,6 +1248,17 @@ impl ProxyService {
             .start()
             .await
             .map_err(|e| format!("启动代理服务器失败: {e}"))?;
+        if let Some(check) = check {
+            let verified = crate::mode::operation::failpoint::hit("upgrade:listener_bound")
+                .map_err(|error| error.to_string())
+                .and_then(|()| check());
+            if let Err(error) = verified {
+                if let Err(cleanup) = server.stop().await {
+                    return Err(format!("{error}; listener cleanup failed: {cleanup}"));
+                }
+                return Err(error);
+            }
+        }
         if let Err(e) = self
             .persist_ephemeral_listen_port_if_needed(&config, info.port)
             .await
@@ -1231,7 +1281,75 @@ impl ProxyService {
         *server_slot = Some(server);
 
         log::info!("代理服务器已启动: {}:{}", info.address, info.port);
-        Ok(info)
+        Ok((info, true))
+    }
+
+    /// A journal's client URL does not prove wildcard bind authority. This
+    /// bounded recovery only starts its reviewed fixed loopback dependency.
+    pub(crate) async fn start_recovery_listener(
+        &self,
+        address: &str,
+        port: u16,
+        check: &dyn Fn() -> Result<(), String>,
+    ) -> Result<bool, String> {
+        if port == 0
+            || !address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        {
+            return Err("mode.verification_required".into());
+        }
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
+        {
+            // Never leave an accept loop on the CLI's short-lived rt::block_on.
+            tokio::runtime::Handle::try_current().map_err(|_| "proxy.runtime_unavailable")?;
+            check()?;
+            // The original start owner decides creation under the same slot
+            // write lock. A competing ordinary start may legitimately win it.
+            let (_, created) = self
+                .start_checked(Some(check), Some((address, port)))
+                .await?;
+            if let Err(error) = self.verify_recovery_listener(address, port).await {
+                if created {
+                    if let Err(cleanup) = self.stop().await {
+                        return Err(format!("{error}; listener cleanup failed: {cleanup}"));
+                    }
+                }
+                return Err(error);
+            }
+            Ok(created)
+        }
+        #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
+        {
+            let _ = check;
+            Err("proxy.runtime_unavailable".into())
+        }
+    }
+
+    pub(crate) async fn verify_recovery_listener(
+        &self,
+        address: &str,
+        port: u16,
+    ) -> Result<(), String> {
+        #[cfg(any(feature = "gui", feature = "test-hooks"))]
+        {
+            let slot = self.server.read().await;
+            let server = slot.as_ref().ok_or("mode.verification_required")?;
+            let status = server.get_status().await;
+            if !server.listener_is_running().await
+                || !status.running
+                || status.address != address
+                || status.port != port
+            {
+                return Err("mode.verification_required".into());
+            }
+            Ok(())
+        }
+        #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
+        {
+            let _ = (address, port);
+            Err("proxy.runtime_unavailable".into())
+        }
     }
 
     pub(crate) async fn start_for_mode(&self) -> Result<(), String> {

@@ -59,11 +59,29 @@ struct AppCapture {
     finalized_revision: Option<String>,
     provider_digests: std::collections::BTreeMap<String, String>,
     native_pending: Option<crate::mode::state::Pending>,
+    listener_running_revision: Option<String>,
     recovery_facts: RecoveryFacts,
 }
 
 /// Only the original target's own fields may change during replay. This is a
 /// transient projection of the same reviewed app facts, not another journal.
+// Original shared listener fields, by app row: app, address, port, enabled, logging.
+type ListenerFacts = Vec<(String, String, u16, bool, bool)>;
+
+fn listener_endpoint(facts: &ListenerFacts) -> Option<(&str, u16)> {
+    let global = facts.iter().find(|row| row.0 == "claude")?;
+    (global.2 != 0
+        && global
+            .1
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+        && facts.iter().all(|row| {
+            (row.1.as_str(), row.2, row.3, row.4)
+                == (global.1.as_str(), global.2, global.3, global.4)
+        }))
+    .then_some((global.1.as_str(), global.2))
+}
+
 #[derive(Clone, PartialEq)]
 struct RecoveryFacts {
     live: Option<crate::mode::state::LiveState>,
@@ -76,6 +94,7 @@ struct RecoveryFacts {
     preference: Option<String>,
     settings: serde_json::Value,
     codex_endpoint: Option<(String, u16)>,
+    listener: Option<ListenerFacts>,
 }
 impl RecoveryFacts {
     fn verify_target_changes(
@@ -83,7 +102,23 @@ impl RecoveryFacts {
         mut actual: Self,
         app: &AppType,
         target: &crate::mode::state::PendingTarget,
+        listener_running: bool,
     ) -> Result<(), AppError> {
+        if listener_running {
+            let (Some(before), Some(now)) = (&self.listener, &mut actual.listener) else {
+                return Err(source_changed());
+            };
+            // The admitted owner has started/reused a running listener. A late
+            // false bit is drift, even when false was the pre-start value.
+            if now.is_empty() || now.iter().any(|row| !row.3) {
+                return Err(source_changed());
+            }
+            for row in now {
+                if let Some(old) = before.iter().find(|old| old.0 == row.0) {
+                    row.3 = old.3;
+                }
+            }
+        }
         if let Some(id) = &target.pointer {
             if actual.local.as_ref() == Some(id) {
                 actual.local = self.local.clone();
@@ -229,6 +264,16 @@ impl AuthenticatedUpgrade {
         vault: &RwLockReadGuard<'_, VaultContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
     ) -> Result<AppCapture, AppError> {
+        self.capture_recovery_app(app, vault, pinned_state, false)
+    }
+
+    fn capture_recovery_app(
+        &self,
+        app: &AppType,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        pinned_state: Option<&crate::mode::state::LiveState>,
+        include_listener: bool,
+    ) -> Result<AppCapture, AppError> {
         let settings = self.app_settings(app, vault)?;
         capture_app_with_state(
             &self.device,
@@ -238,6 +283,7 @@ impl AuthenticatedUpgrade {
             vault,
             pinned_state,
             settings,
+            include_listener,
         )
     }
 
@@ -522,7 +568,7 @@ impl AuthenticatedUpgrade {
         runtime: Option<&crate::store::AppState>,
     ) -> Result<UpgradeAppReview, AppError> {
         let _switch = runtime.map(|state| {
-            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()))
+            futures::executor::block_on(state.proxy_service.lock_recovery_for_app(app.as_str()))
         });
         if runtime.is_some_and(|state| !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session)) {
             return Err(source_changed());
@@ -553,10 +599,45 @@ impl AuthenticatedUpgrade {
                     &captured.identity,
                 )
             };
+            let endpoint = captured
+                .recovery_facts
+                .listener
+                .as_ref()
+                .and_then(listener_endpoint);
+            let listener_required = match endpoint {
+                Some((address, port)) => crate::mode::controller::recovery_listener_required(
+                    &state.proxy_service,
+                    app,
+                    pending,
+                    address,
+                    port,
+                )?,
+                None => false,
+            };
+            let listener_ready = std::cell::Cell::new(false);
+            let verify_listener = || -> Result<(), AppError> {
+                if listener_ready.get() {
+                    let (address, port) = endpoint.ok_or_else(source_changed)?;
+                    futures::executor::block_on(
+                        state.proxy_service.verify_recovery_listener(address, port),
+                    )
+                    .map_err(AppError::Message)?;
+                }
+                Ok(())
+            };
             let admit = |db: &Database, vault: &RwLockReadGuard<'_, VaultContext>| {
                 verify_identity(db, vault)?;
+                verify_listener()?;
                 let actual = self.capture_app(app, vault)?;
-                if actual.view.revision != revision
+                let expected_revision = if listener_ready.get() {
+                    captured
+                        .listener_running_revision
+                        .as_deref()
+                        .ok_or_else(source_changed)?
+                } else {
+                    revision
+                };
+                if actual.view.revision != expected_revision
                     || actual.native_pending.as_ref() != Some(pending)
                 {
                     return Err(source_changed());
@@ -570,27 +651,65 @@ impl AuthenticatedUpgrade {
                           current: &crate::mode::state::Pending,
                           live: Option<&crate::mode::state::LiveState>| {
                 verify_identity(&state.db, vault)?;
+                verify_listener()?;
                 if current.op != pending.op || current.target != pending.target {
                     return Err(source_changed());
                 }
-                let actual = self.capture_app_with_state(app, vault, live)?;
+                // EXIT/DETACH may replace attached state before cleanup. Keep
+                // checking the original listener facts through that same replay.
+                let actual = self.capture_recovery_app(
+                    app,
+                    vault,
+                    live,
+                    captured.recovery_facts.listener.is_some(),
+                )?;
                 captured.recovery_facts.verify_target_changes(
                     actual.recovery_facts,
                     app,
                     &pending.target,
+                    listener_ready.get(),
                 )?;
                 verify_identity(&state.db, vault)
             };
-            operation::failpoint::hit("upgrade:native_recovery_owner")?;
-            crate::mode::controller::recover_locked_with_checks(
-                &state.proxy_service,
-                app,
-                Some(&operation::AppRecoveryChecks {
-                    pending,
-                    admit: &admit,
-                    verify: &verify,
-                }),
-            )?;
+            let mut started = false;
+            if listener_required {
+                let (address, port) = endpoint.ok_or_else(source_changed)?;
+                let before_start = || {
+                    let _app = crate::live::engine::lock_app(app.as_str());
+                    let vault = self.session.read().map_err(|error| error.to_string())?;
+                    admit(&state.db, &vault).map_err(|error| error.to_string())
+                };
+                operation::failpoint::hit("upgrade:listener_start")?;
+                started = futures::executor::block_on(state.proxy_service.start_recovery_listener(
+                    address,
+                    port,
+                    &before_start,
+                ))
+                .map_err(AppError::Message)?;
+                listener_ready.set(true);
+            }
+            let result =
+                operation::failpoint::hit("upgrade:native_recovery_owner").and_then(|()| {
+                    crate::mode::controller::recover_locked_with_checks(
+                        &state.proxy_service,
+                        app,
+                        Some(&operation::AppRecoveryChecks {
+                            pending,
+                            admit: &admit,
+                            verify: &verify,
+                        }),
+                    )
+                });
+            if let Err(error) = result {
+                if started {
+                    if let Err(cleanup) = futures::executor::block_on(state.proxy_service.stop()) {
+                        return Err(AppError::Message(format!(
+                            "{error}; listener cleanup failed: {cleanup}"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
             // Discarded/Abandoned/VerificationRequired retain their original
             // meaning; only a new read reports the actual app outcome.
             return self.review_app(inspected, token, app);
@@ -708,6 +827,7 @@ impl AuthenticatedUpgrade {
 }
 
 // Startup review and native AppWrite consume the same transient app facts.
+#[allow(clippy::too_many_arguments)]
 fn capture_app_with_state(
     device: &DeviceStore,
     session: &std::sync::Arc<crate::secrets::session::SecretSession>,
@@ -716,6 +836,7 @@ fn capture_app_with_state(
     vault: &RwLockReadGuard<'_, VaultContext>,
     pinned_state: Option<&crate::mode::state::LiveState>,
     mut settings: crate::settings::AppSettings,
+    include_listener: bool,
 ) -> Result<AppCapture, AppError> {
     let root = session.root();
     let local = crate::settings::current_provider_from_settings(&mut settings, app);
@@ -760,6 +881,32 @@ fn capture_app_with_state(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, u16>(1)?)),
         )
         .optional()?
+    } else {
+        None
+    };
+    let attached_pending = pending.flatten().is_some_and(|pending| {
+        mode.as_ref().is_some_and(|mode| mode.attached)
+            || pending
+                .target
+                .state
+                .as_ref()
+                .is_some_and(|mode| mode.attached)
+    });
+    let listener = if attached_pending || include_listener {
+        let conn = db.conn.lock()?;
+        let mut statement = conn.prepare("SELECT app_type, listen_address, listen_port, proxy_enabled, enable_logging FROM proxy_config ORDER BY app_type")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u16>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            })?
+            .collect::<Result<ListenerFacts, _>>()?;
+        Some(rows)
     } else {
         None
     };
@@ -926,10 +1073,16 @@ fn capture_app_with_state(
         .filter(|pending| {
             target.is_none()
                 && compatible
-                // Listener-dependent recovery needs the service lifecycle owner
-                // before the switch lock; this checkpoint seam does not start it.
-                && mode.as_ref().is_some_and(|mode| !mode.attached)
-                && pending.target.state.as_ref().is_none_or(|mode| !mode.attached)
+                && mode.is_some()
+                && (!attached_pending
+                    || (listener.as_ref().and_then(listener_endpoint).is_some()
+                        && pending
+                            .target
+                            .state
+                            .as_ref()
+                            .filter(|mode| mode.attached)
+                            .or_else(|| mode.as_ref().filter(|mode| mode.attached))
+                            .is_some_and(|mode| mode.contract.is_some())))
                 && (!pending.files.is_empty()
                     || pending.target.saved_row.is_some()
                     || pending.target.model_preference.is_some()
@@ -1057,7 +1210,8 @@ fn capture_app_with_state(
                            preference: &Option<String>,
                            local: &Option<String>,
                            projected_live: &Option<crate::mode::state::LiveState>,
-                           projected_flags: (bool, bool)|
+                           projected_flags: (bool, bool),
+                           projected_listener: &Option<ListenerFacts>|
      -> Result<String, AppError> {
         let bytes = zeroize::Zeroizing::new(
             serde_json::to_vec(&(
@@ -1077,12 +1231,23 @@ fn capture_app_with_state(
                 )),
                 &codex_endpoint,
                 &order,
+                projected_listener,
             ))
             .map_err(|source| AppError::JsonSerialize { source })?,
         );
         Ok(hex::encode(Sha256::digest(&*bytes)))
     };
-    let revision = digest_evidence(&currents, &preference, &local, &live, flags)?;
+    let revision = digest_evidence(&currents, &preference, &local, &live, flags, &listener)?;
+    let listener_running_revision = listener
+        .as_ref()
+        .map(|rows| {
+            let mut rows = rows.clone();
+            for row in &mut rows {
+                row.3 = true;
+            }
+            digest_evidence(&currents, &preference, &local, &live, flags, &Some(rows))
+        })
+        .transpose()?;
     let finalized_revision = target
         .map(|id| {
             let mut projected = live.clone();
@@ -1102,6 +1267,7 @@ fn capture_app_with_state(
                 &Some(id.to_owned()),
                 &projected,
                 projected_flags,
+                &listener,
             )
         })
         .transpose()?;
@@ -1149,6 +1315,7 @@ fn capture_app_with_state(
         preference: preference.clone(),
         settings: settings_evidence,
         codex_endpoint,
+        listener,
     };
     Ok(AppCapture {
         view: UpgradeAppReview {
@@ -1177,6 +1344,7 @@ fn capture_app_with_state(
         finalized_revision,
         provider_digests,
         native_pending,
+        listener_running_revision,
         recovery_facts,
     })
 }
@@ -1216,7 +1384,8 @@ pub(crate) fn ensure_native_app_write_admitted(
         vault,
         checkpoint::MAX_BYTES,
     )?;
-    let first = capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings)?;
+    let first =
+        capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings, false)?;
     if !first.view.can_complete_app {
         return Err(AppError::Config("mode.verification_required".into()));
     }
@@ -1226,7 +1395,8 @@ pub(crate) fn ensure_native_app_write_admitted(
         vault,
         checkpoint::MAX_BYTES,
     )?;
-    let second = capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings)?;
+    let second =
+        capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings, false)?;
     if !second.view.can_complete_app || first.view.revision != second.view.revision {
         return Err(source_changed());
     }

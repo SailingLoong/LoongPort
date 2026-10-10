@@ -826,6 +826,21 @@ pub(crate) mod failpoint {
     }
 }
 
+/// The original replay decision: a durable marker or a changed file already at
+/// its planned digest requires forward recovery. No-op files are not publication.
+pub(crate) fn recovery_will_roll_forward(pending: &Pending) -> Result<bool, AppError> {
+    if pending.published {
+        return Ok(true);
+    }
+    for file in &pending.files {
+        if file.pre != file.planned && digest(read_current(&file.path)?.as_deref()) == file.planned
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn invalid_pending() -> AppError {
     AppError::Config("live.invalid_pending".into())
 }
