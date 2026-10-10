@@ -4093,7 +4093,10 @@
     "proposedOrder": "將套用的順序",
     "requestedSelection": "本次請求的目前檔位與模型",
     "noExplicitSelection": "本次請求未明確切換目前檔位或模型；執行時實際選用項由路由服務決定。",
-    "reviewChanged": "草稿或已套用狀態已變更。請取消並重新點選「套用變更」，查看最新影響。"
+    "reviewChanged": "草稿或已套用狀態已變更。請取消並重新點選「套用變更」，查看最新影響。",
+    "leaveDraftTitle": "放棄本地變更？",
+    "leaveDraftDescription": "繼續編輯會保留草稿；放棄只會捨棄尚未提交的本地變更並離開工作台，不會取消或復原已經提交的操作。",
+    "discardAndLeave": "放棄變更並離開"
   },
   "secrets": {
     "recoveryTitle": "繼續復原",

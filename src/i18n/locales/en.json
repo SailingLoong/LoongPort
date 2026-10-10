@@ -4092,7 +4092,10 @@
     "proposedOrder": "Order to apply",
     "requestedSelection": "Requested current tier and model",
     "noExplicitSelection": "This request does not explicitly select a different current tier or model. Runtime selection is determined by the routing service.",
-    "reviewChanged": "The draft or applied state has changed. Cancel and select Apply changes again to review the latest impact."
+    "reviewChanged": "The draft or applied state has changed. Cancel and select Apply changes again to review the latest impact.",
+    "leaveDraftTitle": "Discard local changes?",
+    "leaveDraftDescription": "Continue editing to keep the draft, or discard unsubmitted local changes and leave this workspace. Discarding does not cancel or undo operations already submitted.",
+    "discardAndLeave": "Discard and leave"
   },
   "secrets": {
     "recoveryTitle": "Resume recovery",

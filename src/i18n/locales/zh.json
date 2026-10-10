@@ -4092,7 +4092,10 @@
     "proposedOrder": "将应用的顺序",
     "requestedSelection": "本次请求的当前档位与模型",
     "noExplicitSelection": "本次请求未明确切换当前档位或模型；运行时实际选用项由路由服务决定。",
-    "reviewChanged": "草稿或已应用状态已变化。请取消并重新点击“应用更改”，查看最新影响。"
+    "reviewChanged": "草稿或已应用状态已变化。请取消并重新点击“应用更改”，查看最新影响。",
+    "leaveDraftTitle": "放弃本地修改？",
+    "leaveDraftDescription": "继续编辑会保留草稿；放弃只会丢弃未提交的本地修改并离开工作台，不会取消或撤销已经提交的操作。",
+    "discardAndLeave": "放弃修改并离开"
   },
   "secrets": {
     "recoveryTitle": "继续恢复",

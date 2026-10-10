@@ -77,7 +77,10 @@ import {
   useClientNavigation,
   type ClientView as View,
 } from "@/components/shell/navigation";
-import { ApplicationWorkspace } from "@/components/applications/ApplicationWorkspace";
+import {
+  ApplicationWorkspace,
+  type ApplicationWorkspaceHandle,
+} from "@/components/applications/ApplicationWorkspace";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 import { useAccountSessionStartup } from "@/components/relay/accounts/useAccountSessionStartup";
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
@@ -147,7 +150,7 @@ interface SyncStatusUpdatedPayload {
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 
 // 两个 localStorage key 的定义在 `@/config/constants` —— 别在这里重新写字面量。
-// 写入端在 `AppSwitcher.tsx`，那次分叉就是因为它们各写一份（见常量那边的文档）。
+// activeApp 的保存统一在下方 effect，切换请求尚待草稿确认时不提前写入。
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(LAST_APP_STORAGE_KEY) as AppId | null;
   if (saved && APP_IDS.includes(saved)) {
@@ -172,7 +175,35 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const navigation = useClientNavigation(getInitialView, getInitialApp);
+  const workspaceRef = useRef<ApplicationWorkspaceHandle>(null);
+  const pendingNavigation = useRef<(() => void) | null>(null);
+  const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
+  const beforeNavigate = useCallback(
+    (proceed: () => void) => {
+      if (workspaceRef.current?.submitting) {
+        toast.info(t("common.saving"));
+        return;
+      }
+      if (pendingNavigation.current) return;
+      if (!workspaceRef.current?.hasPendingChanges) {
+        proceed();
+        return;
+      }
+      // First destination wins until the user explicitly keeps or discards this draft.
+      pendingNavigation.current = proceed;
+      setLeaveDraftOpen(true);
+    },
+    [t],
+  );
+  const cancelLeaveDraft = () => {
+    pendingNavigation.current = null;
+    setLeaveDraftOpen(false);
+  };
+  const navigation = useClientNavigation(
+    getInitialView,
+    getInitialApp,
+    beforeNavigate,
+  );
   const activeApp = navigation.app;
   // Observe the existing workspace query; do not mirror its facts in local state.
   const routingAdmission = useQuery({
@@ -1236,6 +1267,7 @@ function App() {
                       </>
                     ) : (
                       <ApplicationWorkspace
+                        ref={workspaceRef}
                         key={activeApp}
                         appId={activeApp}
                         providers={providers}
@@ -1715,6 +1747,25 @@ function App() {
           renderContent()}
       </main>
 
+      <ConfirmDialog
+        isOpen={leaveDraftOpen}
+        title={t("applications.leaveDraftTitle")}
+        message={t("applications.leaveDraftDescription")}
+        cancelText={t("loongport.tier.editConfirmButton")}
+        confirmText={t("applications.discardAndLeave")}
+        onCancel={cancelLeaveDraft}
+        onConfirm={() => {
+          const proceed = pendingNavigation.current;
+          cancelLeaveDraft();
+          if (!proceed) return;
+          if (workspaceRef.current?.submitting) {
+            toast.info(t("common.saving"));
+            return;
+          }
+          workspaceRef.current?.discard();
+          proceed();
+        }}
+      />
       <EditProviderDialog
         mutationsDisabled={providerWritesBlocked}
         open={Boolean(editingProvider)}

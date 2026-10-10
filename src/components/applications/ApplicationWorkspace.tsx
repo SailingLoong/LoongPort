@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -187,7 +195,14 @@ function FilterCombobox({
   );
 }
 
+export interface ApplicationWorkspaceHandle {
+  hasPendingChanges: boolean;
+  submitting: boolean;
+  discard: () => void;
+}
+
 interface Props {
+  ref?: Ref<ApplicationWorkspaceHandle>;
   appId: AppId;
   providers: Record<string, Provider>;
   onSwitchProvider: (provider: Provider) => void | Promise<void>;
@@ -228,6 +243,7 @@ function applicationReviewFacts(
 }
 
 export function ApplicationWorkspace({
+  ref,
   appId,
   providers,
   onSwitchProvider,
@@ -374,6 +390,12 @@ export function ApplicationWorkspace({
       stagedIds?.length === 0 ||
       (targetIds.length === 0 &&
         (Boolean(search) || Boolean(accountFilter) || Boolean(modelFilter))));
+  useImperativeHandle(ref, () => ({
+    hasPendingChanges,
+    // Existing write lifecycles only; candidate loading/read-only refetches do not block leaving.
+    submitting: saving || draft.submitting || routing.busy || model.busy,
+    discard: draft.discard,
+  }));
   const modelCandidate =
     currentConfig && targetIds.includes(currentConfig.providerId)
       ? currentConfig
