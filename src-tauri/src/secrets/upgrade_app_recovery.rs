@@ -1,6 +1,7 @@
 //! App-local recovery inside the original authenticated startup owner. A DB
 //! checkpoint is not app completion; these queries never authorize runtime.
 use super::*;
+use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard;
 use crate::{
     app_config::AppType,
     mode::{current, operation, state::Mode},
@@ -284,6 +285,27 @@ impl AuthenticatedUpgrade {
             pinned_state,
             settings,
             include_listener,
+            None,
+        )
+    }
+
+    fn capture_app_with_generation(
+        &self,
+        app: &AppType,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        pinned_state: Option<&crate::mode::state::LiveState>,
+        generation: Option<&CodexLiveAuthGuard<'_>>,
+    ) -> Result<AppCapture, AppError> {
+        capture_app_with_state(
+            &self.device,
+            &self.session,
+            &self.token,
+            app,
+            vault,
+            pinned_state,
+            self.app_settings(app, vault)?,
+            false,
+            generation,
         )
     }
 
@@ -293,12 +315,22 @@ impl AuthenticatedUpgrade {
         token: &str,
         app: &AppType,
     ) -> Result<AppCapture, AppError> {
+        self.review_app_locked_with_generation(inspected, token, app, None)
+    }
+
+    fn review_app_locked_with_generation(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        generation: Option<&CodexLiveAuthGuard<'_>>,
+    ) -> Result<AppCapture, AppError> {
         self.verify_app_session(inspected, token, app)?;
         let result = {
             let vault = self.session.read()?;
             self.verify_app_checkpoint_pinned(inspected, &vault)?;
-            let first = self.capture_app(app, &vault)?;
-            let second = self.capture_app(app, &vault)?;
+            let first = self.capture_app_with_generation(app, &vault, None, generation)?;
+            let second = self.capture_app_with_generation(app, &vault, None, generation)?;
             if first.view.revision != second.view.revision {
                 return Err(source_changed());
             }
@@ -317,6 +349,47 @@ impl AuthenticatedUpgrade {
     ) -> Result<UpgradeAppReview, AppError> {
         let _guard = crate::live::engine::lock_app(app.as_str());
         Ok(self.review_app_locked(inspected, token, app)?.view)
+    }
+
+    /// Ready runtime supplies the original manager barrier before app/vault.
+    /// Before runtime publication, the byte-only review keeps managed state unknown.
+    pub(crate) fn review_app_with_state(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
+        if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session) {
+            return Err(source_changed());
+        }
+        if *app != AppType::Codex {
+            return self.review_app(inspected, token, app);
+        }
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+        self.review_codex_with_switch(inspected, token, app, state)
+    }
+
+    /// Caller already holds the original switch (and, during recovery,
+    /// lifecycle) owner. Never reacquire it after the native journal returns.
+    fn review_codex_with_switch(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
+        crate::rt::block_on(
+            state
+                .codex_oauth_manager
+                .with_live_auth_guard(&[], |generation| {
+                    let _app = crate::live::engine::lock_app(app.as_str());
+                    Ok(self
+                        .review_app_locked_with_generation(inspected, token, app, Some(generation))?
+                        .view)
+                }),
+        )
     }
 
     pub(crate) fn select_provider(
@@ -368,11 +441,41 @@ impl AuthenticatedUpgrade {
     ) -> Result<UpgradeAppReview, AppError> {
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+        if *app == AppType::Codex {
+            return crate::rt::block_on(state.codex_oauth_manager.with_live_auth_guard(
+                &[],
+                |generation| {
+                    self.select_keep_files_pinned(
+                        inspected,
+                        token,
+                        app,
+                        revision,
+                        choice,
+                        state,
+                        Some(generation),
+                    )
+                },
+            ));
+        }
+        self.select_keep_files_pinned(inspected, token, app, revision, choice, state, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_keep_files_pinned(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        choice: KeepFilesChoice<'_>,
+        state: &crate::store::AppState,
+        generation: Option<&CodexLiveAuthGuard<'_>>,
+    ) -> Result<UpgradeAppReview, AppError> {
         let guard = crate::live::engine::lock_app(app.as_str());
         if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session) {
             return Err(source_changed());
         }
-        let captured = self.review_app_locked(inspected, token, app)?;
+        let captured = self.review_app_locked_with_generation(inspected, token, app, generation)?;
         let (provider_id, selected_mode) = match choice {
             KeepFilesChoice::Provider(id) if captured.view.can_choose_provider => (id, None),
             KeepFilesChoice::Mode(choice) if captured.view.can_choose_mode => {
@@ -425,7 +528,12 @@ impl AuthenticatedUpgrade {
             // Refresh the original runtime owner under this same Vault guard.
             // Fresh unrelated settings must survive the selected pointer write.
             crate::settings::reload_settings_with_vault(&self.session, &vault)?;
-            if self.capture_app(app, &vault)?.view.revision != revision {
+            if self
+                .capture_app_with_generation(app, &vault, None, generation)?
+                .view
+                .revision
+                != revision
+            {
                 return Err(source_changed());
             }
             let admitted = crate::mode::controller::files(app)?;
@@ -483,7 +591,8 @@ impl AuthenticatedUpgrade {
                     inspection::verify_connection_primary_identity(&conn, &captured.identity)?;
                 }
                 verify_provider()?;
-                let actual = self.capture_app_with_state(app, &vault, Some(live))?;
+                let actual =
+                    self.capture_app_with_generation(app, &vault, Some(live), generation)?;
                 let mode = target.state.as_ref().ok_or_else(source_changed)?;
                 if live
                     .apps
@@ -535,7 +644,9 @@ impl AuthenticatedUpgrade {
                 },
             )?;
         }
-        Ok(self.review_app_locked(inspected, token, app)?.view)
+        Ok(self
+            .review_app_locked_with_generation(inspected, token, app, generation)?
+            .view)
     }
 
     pub(crate) fn recover_app(
@@ -572,6 +683,45 @@ impl AuthenticatedUpgrade {
         });
         if runtime.is_some_and(|state| !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session)) {
             return Err(source_changed());
+        }
+        if *app == AppType::Codex {
+            if let Some(state) = runtime {
+                let recovered = crate::rt::block_on(
+                    state
+                        .codex_oauth_manager
+                        .with_live_auth_guard(&[], |generation| {
+                            let guard = crate::live::engine::lock_app(app.as_str());
+                            let captured = self.review_app_locked_with_generation(
+                                inspected,
+                                token,
+                                app,
+                                Some(generation),
+                            )?;
+                            if captured.finalized_revision.is_none() {
+                                return Ok(None);
+                            }
+                            if captured.view.revision != revision
+                                || !captured.view.can_recover_operation
+                            {
+                                return Err(source_changed());
+                            }
+                            self.recover_pointer_pinned(
+                                inspected,
+                                token,
+                                app,
+                                revision,
+                                runtime,
+                                &captured,
+                                &guard,
+                                Some(generation),
+                            )
+                            .map(Some)
+                        }),
+                )?;
+                if let Some(view) = recovered {
+                    return Ok(view);
+                }
+            }
         }
         let guard = crate::live::engine::lock_app(app.as_str());
         let captured = self.review_app_locked(inspected, token, app)?;
@@ -712,8 +862,29 @@ impl AuthenticatedUpgrade {
             }
             // Discarded/Abandoned/VerificationRequired retain their original
             // meaning; only a new read reports the actual app outcome.
-            return self.review_app(inspected, token, app);
+            return if *app == AppType::Codex {
+                self.review_codex_with_switch(inspected, token, app, state)
+            } else {
+                self.review_app(inspected, token, app)
+            };
         }
+        self.recover_pointer_pinned(
+            inspected, token, app, revision, runtime, &captured, &guard, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_pointer_pinned(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        runtime: Option<&crate::store::AppState>,
+        captured: &AppCapture,
+        guard: &crate::live::engine::AppWriteGuard,
+        generation: Option<&CodexLiveAuthGuard<'_>>,
+    ) -> Result<UpgradeAppReview, AppError> {
         {
             let vault = self.session.read()?;
             self.verify_app_checkpoint_pinned(inspected, &vault)?;
@@ -763,7 +934,12 @@ impl AuthenticatedUpgrade {
             };
             let before = || {
                 self.verify_app_checkpoint_pinned(inspected, &vault)?;
-                if self.capture_app(app, &vault)?.view.revision != revision {
+                if self
+                    .capture_app_with_generation(app, &vault, None, generation)?
+                    .view
+                    .revision
+                    != revision
+                {
                     return Err(source_changed());
                 }
                 Ok(())
@@ -785,7 +961,7 @@ impl AuthenticatedUpgrade {
             let after = || {
                 self.verify_app_checkpoint_pinned(inspected, &vault)?;
                 inspection::verify_primary_identity(&path, &captured.identity)?;
-                let actual = self.capture_app(app, &vault)?;
+                let actual = self.capture_app_with_generation(app, &vault, None, generation)?;
                 if captured.finalized_revision.as_ref() != Some(&actual.view.revision) {
                     return Err(source_changed());
                 }
@@ -798,7 +974,7 @@ impl AuthenticatedUpgrade {
                 db,
                 &self.device,
                 &vault,
-                &guard,
+                guard,
                 app,
                 &operation::PointerRecoveryChecks {
                     before_target: &before,
@@ -809,7 +985,8 @@ impl AuthenticatedUpgrade {
                     before_cleanup: &|live| {
                         self.verify_app_checkpoint_pinned(inspected, &vault)?;
                         inspection::verify_primary_identity(&path, &captured.identity)?;
-                        let actual = self.capture_app_with_state(app, &vault, Some(live))?;
+                        let actual =
+                            self.capture_app_with_generation(app, &vault, Some(live), generation)?;
                         if captured.finalized_revision.as_ref() != Some(&actual.view.revision) {
                             return Err(source_changed());
                         }
@@ -822,7 +999,9 @@ impl AuthenticatedUpgrade {
                 return Err(source_changed());
             }
         }
-        Ok(self.review_app_locked(inspected, token, app)?.view)
+        Ok(self
+            .review_app_locked_with_generation(inspected, token, app, generation)?
+            .view)
     }
 }
 
@@ -837,7 +1016,11 @@ fn capture_app_with_state(
     pinned_state: Option<&crate::mode::state::LiveState>,
     mut settings: crate::settings::AppSettings,
     include_listener: bool,
+    generation: Option<&CodexLiveAuthGuard<'_>>,
 ) -> Result<AppCapture, AppError> {
+    if generation.is_some_and(|g| *app != AppType::Codex || !g.belongs_to(session)) {
+        return Err(source_changed());
+    }
     let root = session.root();
     let local = crate::settings::current_provider_from_settings(&mut settings, app);
     // Cleanup borrows the snapshot already pinned by the original state
@@ -922,6 +1105,10 @@ fn capture_app_with_state(
     let target = pending.flatten().and_then(|pending| {
         operation::published_pointer_target(app.as_str(), pending, &admitted).ok()
     });
+    // A file-writing pending journal belongs to the original recovery owner,
+    // including any manager-proven generation adoption. Completion evidence is
+    // only consumed by a native result or the existing keep-files pointer owner.
+    let generation = generation.filter(|_| pending == Some(None) || target.is_some());
     let compatible = live
         .as_ref()
         .and_then(|live| live.apps.get(app.as_str()))
@@ -956,6 +1143,26 @@ fn capture_app_with_state(
         bound.insert(file.path.clone(), bytes.map(zeroize::Zeroizing::new));
         files.push(input);
     }
+    let managed_owner_needed = *app == AppType::Codex
+        && rows
+            .values()
+            .any(|row| crate::services::provider::codex_direct::managed_account(row).is_some());
+    let proven_generation = if managed_owner_needed {
+        if let Some(generation) = generation {
+            let path = crate::secrets::files::CredentialFile::Codex.path(session);
+            let input = ReviewedInput::capture(path.clone())?;
+            let bytes = crate::config_file_io::read_regular_file(&path, checkpoint::MAX_BYTES)
+                .map_err(|error| AppError::io(&path, error))?;
+            input.verify()?;
+            files.push(input);
+            (generation.native_store_matches(vault, bytes.as_deref()) == Some(true))
+                .then_some(generation)
+        } else {
+            None
+        }
+    } else {
+        generation
+    };
     let catalog = if *app == AppType::Codex {
         bound
             .get(&crate::codex_config::get_codex_config_path())
@@ -1026,7 +1233,7 @@ fn capture_app_with_state(
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
-                crate::services::provider::codex_direct::native_completion_match(
+                crate::services::provider::codex_direct::native_completion_match_with_generation(
                     row,
                     &rows,
                     &settings,
@@ -1034,6 +1241,7 @@ fn capture_app_with_state(
                     pre,
                     written,
                     codex_endpoint.as_ref(),
+                    proven_generation,
                 )
             });
         }
@@ -1041,7 +1249,8 @@ fn capture_app_with_state(
     };
     let client = inspect_candidate(candidate)?;
     // Only a complete native owned-field proof grants admission. Unsupported
-    // Codex auth stores, managed generations and catalog discovery stay unknown.
+    // Unsupported auth stores and catalog discovery remain unknown; managed
+    // generations additionally require the borrowed original manager barrier.
     let target_native_proven = if let Some(row) = target.and_then(|id| rows.get(id)) {
         let proof = inspect_candidate(Some(row))?;
         proof.status == "parsed"
@@ -1206,6 +1415,17 @@ fn capture_app_with_state(
     // Salt private evidence with this session token. No row, path, credential
     // or journal is serialized into the public DTO or a persistent receipt.
     let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
+    let managed_revision = if *app == AppType::Codex
+        && rows
+            .values()
+            .any(|row| crate::services::provider::codex_direct::managed_account(row).is_some())
+    {
+        generation
+            .map(|guard| guard.native_revision(token))
+            .transpose()?
+    } else {
+        None
+    };
     let digest_evidence = |currents: &[String],
                            preference: &Option<String>,
                            local: &Option<String>,
@@ -1232,6 +1452,7 @@ fn capture_app_with_state(
                 &codex_endpoint,
                 &order,
                 projected_listener,
+                &managed_revision,
             ))
             .map_err(|source| AppError::JsonSerialize { source })?,
         );
@@ -1357,6 +1578,7 @@ pub(crate) fn ensure_native_app_write_admitted(
     device: &DeviceStore,
     app: &AppType,
     vault: &RwLockReadGuard<'_, VaultContext>,
+    generation: Option<&CodexLiveAuthGuard<'_>>,
 ) -> Result<(), AppError> {
     match checkpoint::ensure_no_pending_checkpoint(device) {
         Ok(()) => return Ok(()),
@@ -1384,8 +1606,17 @@ pub(crate) fn ensure_native_app_write_admitted(
         vault,
         checkpoint::MAX_BYTES,
     )?;
-    let first =
-        capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings, false)?;
+    let first = capture_app_with_state(
+        device,
+        &db.secrets,
+        &id,
+        app,
+        vault,
+        None,
+        settings,
+        false,
+        generation,
+    )?;
     if !first.view.can_complete_app {
         return Err(AppError::Config("mode.verification_required".into()));
     }
@@ -1395,8 +1626,17 @@ pub(crate) fn ensure_native_app_write_admitted(
         vault,
         checkpoint::MAX_BYTES,
     )?;
-    let second =
-        capture_app_with_state(device, &db.secrets, &id, app, vault, None, settings, false)?;
+    let second = capture_app_with_state(
+        device,
+        &db.secrets,
+        &id,
+        app,
+        vault,
+        None,
+        settings,
+        false,
+        generation,
+    )?;
     if !second.view.can_complete_app || first.view.revision != second.view.revision {
         return Err(source_changed());
     }

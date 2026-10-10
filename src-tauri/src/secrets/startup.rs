@@ -373,10 +373,20 @@ impl StartupCoordinator {
             .map_err(super::error::public_code)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(super) fn review_upgrade_app(
         &self,
         token: &str,
         app: &crate::app_config::AppType,
+    ) -> Result<super::upgrade::UpgradeAppReview, String> {
+        self.review_upgrade_app_with_state(token, app, None)
+    }
+
+    pub(super) fn review_upgrade_app_with_state(
+        &self,
+        token: &str,
+        app: &crate::app_config::AppType,
+        state: Option<&crate::store::AppState>,
     ) -> Result<super::upgrade::UpgradeAppReview, String> {
         let phase = self
             .phase
@@ -389,14 +399,16 @@ impl StartupCoordinator {
             .inspection
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        let mut view = self
+        let review = self
             .upgrade_review
             .lock()
-            .map_err(|_| "secret.startup_unavailable")?
-            .as_ref()
-            .ok_or("secret.startup_unavailable")?
-            .review_app(&inspection, token, app)
-            .map_err(super::error::public_code)?;
+            .map_err(|_| "secret.startup_unavailable")?;
+        let review = review.as_ref().ok_or("secret.startup_unavailable")?;
+        let mut view = match state.filter(|_| *phase == Phase::Ready) {
+            Some(state) => review.review_app_with_state(&inspection, token, app, state),
+            None => review.review_app(&inspection, token, app),
+        }
+        .map_err(super::error::public_code)?;
         if *phase != Phase::Ready {
             view.can_choose_provider = false;
             view.can_choose_mode = false;
@@ -783,7 +795,11 @@ pub(crate) async fn review_startup_upgrade_app(
     tauri::async_runtime::spawn_blocking(move || {
         app.try_state::<StartupCoordinator>()
             .ok_or("secret.startup_unavailable")?
-            .review_upgrade_app(&expected_review_token, &app_type)
+            .review_upgrade_app_with_state(
+                &expected_review_token,
+                &app_type,
+                app.try_state::<crate::store::AppState>().as_deref(),
+            )
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?

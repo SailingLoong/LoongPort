@@ -1572,6 +1572,36 @@ impl<'a> AppWrite<'a> {
         app: &AppType,
         recovery: Option<&AppRecoveryChecks<'_>>,
     ) -> Result<Self, AppError> {
+        if *app == AppType::Codex
+            && recovery.is_none()
+            && crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+                &DeviceStore::for_device(),
+            )
+            .is_err()
+        {
+            return service
+                .codex_manager()
+                .try_with_live_auth_guard(|generation| {
+                    Self::open_mode_pinned(service, app, recovery, Some(generation))
+                });
+        }
+        Self::open_mode_pinned(service, app, recovery, None)
+    }
+
+    pub(crate) fn open_codex_with_recovery(
+        service: &'a crate::services::ProxyService,
+        recovery: Option<&AppRecoveryChecks<'_>>,
+        generation: &crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard<'_>,
+    ) -> Result<Self, AppError> {
+        Self::open_mode_pinned(service, &AppType::Codex, recovery, Some(generation))
+    }
+
+    fn open_mode_pinned(
+        service: &'a crate::services::ProxyService,
+        app: &AppType,
+        recovery: Option<&AppRecoveryChecks<'_>>,
+        generation: Option<&crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard<'_>>,
+    ) -> Result<Self, AppError> {
         let db = service.database();
         if !uses_upstream4_schema(db)? {
             return Err(AppError::Config("upgrade.migration_required".into()));
@@ -1588,7 +1618,9 @@ impl<'a> AppWrite<'a> {
         if let Some(checks) = recovery {
             (checks.admit)(db, &vault)?;
         } else {
-            crate::secrets::upgrade::ensure_native_app_write_admitted(db, &store, app, &vault)?;
+            crate::secrets::upgrade::ensure_native_app_write_admitted(
+                db, &store, app, &vault, generation,
+            )?;
         }
         let mode = super::current::validate_known_mode(&store, &vault, app)?;
         if placeholder
@@ -1606,6 +1638,26 @@ impl<'a> AppWrite<'a> {
             vault,
         })
     }
+    pub(crate) fn begin_codex_mode(
+        service: &'a crate::services::ProxyService,
+        generation: &crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard<'_>,
+    ) -> Result<Self, AppError> {
+        let write = Self::open_codex_with_recovery(service, None, generation)?;
+        if state::pending(&write.store, &write.vault, "codex")?.is_some() {
+            return Err(verification_required());
+        }
+        Ok(write)
+    }
+
+    pub(crate) fn begin_codex(
+        state: &'a AppState,
+        generation: &crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard<'_>,
+    ) -> Result<Self, AppError> {
+        let write = Self::begin_codex_mode(&state.proxy_service, generation)?;
+        super::current::validate_direct_mode(&write.store, &write.vault, &AppType::Codex)?;
+        Ok(write)
+    }
+
     pub(crate) fn begin_mode(
         service: &'a crate::services::ProxyService,
         app: &AppType,

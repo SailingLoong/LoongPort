@@ -21,7 +21,7 @@ use crate::mode::{
     operation::{self, AppWrite, FileChange, OperationReport, RecoveryOutcome},
     state::{self, Contract, PendingTarget},
 };
-use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::{CodexLiveAuthGuard, CodexOAuthManager};
 use crate::secrets::owned_file::DeviceFile;
 use crate::{
     app_config::AppType, codex_config::*, database::Database, error::AppError, provider::Provider,
@@ -43,7 +43,7 @@ pub(crate) fn is_official(provider: &Provider) -> bool {
         || crate::proxy::providers::is_codex_official_provider(provider)
 }
 
-fn managed_account(provider: &Provider) -> Option<String> {
+pub(crate) fn managed_account(provider: &Provider) -> Option<String> {
     ProviderService::managed_codex_oauth_account_id(provider)
 }
 
@@ -488,10 +488,14 @@ pub(crate) fn apply_mode(
     operation: &str,
     mut target: PendingTarget,
 ) -> Result<bool, AppError> {
-    {
-        let write = AppWrite::begin_mode(service, &AppType::Codex)?;
-        read_inputs(&write, &[])?;
-    }
+    crate::rt::block_on(
+        service
+            .codex_manager()
+            .with_live_auth_guard(&[], |generation| {
+                let write = AppWrite::begin_codex_mode(service, generation)?;
+                read_inputs(&write, &[]).map(|_| ())
+            }),
+    )?;
     let prepared = prepare_target(service.codex_manager(), owner, &desired)?;
     let planned = plan_target(service.database(), owner, &desired)?;
     if matches!(desired, Target::Proxy { .. }) {
@@ -519,7 +523,7 @@ pub(crate) fn apply_mode(
                         return Err(invalid());
                     }
                 }
-                let write = AppWrite::begin_mode(service, &AppType::Codex)?;
+                let write = AppWrite::begin_codex_mode(service, generation)?;
                 run_pinned(
                     &write,
                     planned,
@@ -571,11 +575,15 @@ pub(crate) fn apply_target_only(
     operation: &str,
     target: PendingTarget,
 ) -> Result<(), AppError> {
-    crate::rt::block_on(service.codex_manager().with_live_auth_guard(&[], |_| {
-        AppWrite::begin_mode(service, &AppType::Codex)?
-            .run(operation, &[], target)
-            .map(|_| ())
-    }))
+    crate::rt::block_on(
+        service
+            .codex_manager()
+            .with_live_auth_guard(&[], |generation| {
+                AppWrite::begin_codex_mode(service, generation)?
+                    .run(operation, &[], target)
+                    .map(|_| ())
+            }),
+    )
 }
 
 fn table_text(table: &Table) -> String {
@@ -715,7 +723,7 @@ fn run_with_catalog(
                         return Err(invalid());
                     }
                 }
-                let write = AppWrite::begin(state, &AppType::Codex)?;
+                let write = AppWrite::begin_codex(state, generation)?;
                 run_pinned(
                     &write,
                     planned,
@@ -908,6 +916,7 @@ fn preserve_external_catalog(
 /// Read-only admission from the upgrade owner's already-bound five files.
 /// Unknown external discovery or managed-token generation is never a match.
 /// This proves the original writer's owned-file result, not remote login validity.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn native_completion_match(
     provider: &Provider,
     rows: &indexmap::IndexMap<String, Provider>,
@@ -917,23 +926,61 @@ pub(crate) fn native_completion_match(
     written: Option<&state::Written>,
     endpoint: Option<&(String, u16)>,
 ) -> Option<bool> {
-    if managed_account(provider).is_some()
-        || codex_has_catalog_model_specs(&provider.settings_config)
+    native_completion_match_with_generation(
+        provider, rows, settings, vault, pre, written, endpoint, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn native_completion_match_with_generation(
+    provider: &Provider,
+    rows: &indexmap::IndexMap<String, Provider>,
+    settings: &crate::settings::AppSettings,
+    vault: &crate::secrets::VaultContext,
+    pre: Vec<Option<Vec<u8>>>,
+    written: Option<&state::Written>,
+    endpoint: Option<&(String, u16)>,
+    generation: Option<&CodexLiveAuthGuard<'_>>,
+) -> Option<bool> {
+    if codex_has_catalog_model_specs(&provider.settings_config)
         || !row_auth(provider).is_object()
-        || written.is_some_and(|written| {
-            written.validate_for_app(app()).is_err()
-                || written
-                    .codex
-                    .as_ref()
-                    .is_some_and(|codex| codex.auth.is_some())
-        })
+        || written.is_some_and(|written| written.validate_for_app(app()).is_err())
     {
         return None;
     }
     let facts = row_facts_from_providers(rows.values());
     let inputs = parse_inputs(files(), pre, vault, &facts.official_logins).ok()?;
     let text = std::str::from_utf8(inputs.pre[1].as_deref().unwrap_or_default()).ok()?;
-    if inputs.pre[3].is_some() || codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+    if codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+        return None;
+    }
+    let mut prepared = Prepared::default();
+    if let Some(account) = managed_account(provider) {
+        let generation = generation?;
+        let auth = inputs.live_auth.as_ref()?;
+        let intent = written?.codex.as_ref()?.auth.as_ref()?;
+        if !is_official(provider)
+            || !inputs.live_managed
+            || intent.account_id != account
+            || Some(intent.last_refresh_ms) != auth_time(auth)
+            || Some(intent.digest.clone()) != digest(inputs.pre[0].as_deref())
+            || !generation.matches_live_generation(&account, auth)
+        {
+            return Some(false);
+        }
+        // Compare the original marker's full semantic image, including unknown
+        // fields; its account name alone is not proof of a completed write.
+        if parse_json::<Value>(inputs.pre[3].as_deref()?).ok()?
+            != parse_json::<Value>(&codex_managed_oauth_marker_bytes(auth, &account).ok()?).ok()?
+        {
+            return Some(false);
+        }
+        prepared.target_login = Some((account, auth.clone()));
+    } else if inputs.pre[3].is_some()
+        || written
+            .and_then(|w| w.codex.as_ref())
+            .is_some_and(|w| w.auth.is_some())
+    {
         return None;
     }
     let row_doc = provider
@@ -972,7 +1019,7 @@ pub(crate) fn native_completion_match(
     .ok()?;
     let auth = plan_auth(
         &mut planned,
-        &Prepared::default(),
+        &prepared,
         Some(provider),
         &inputs,
         settings.preserve_codex_official_auth_on_switch,
@@ -1164,10 +1211,14 @@ pub(crate) fn switch_to(
 ) -> Result<bool, AppError> {
     // Read-only admission precedes token adoption/network; no held vault guard
     // crosses preparation. The same owner rechecks after prepare, before writes.
-    {
-        let write = AppWrite::begin(state, &AppType::Codex)?;
-        read_inputs(&write, &[])?;
-    }
+    crate::rt::block_on(
+        state
+            .codex_oauth_manager
+            .with_live_auth_guard(&[], |generation| {
+                let write = AppWrite::begin_codex(state, generation)?;
+                read_inputs(&write, &[]).map(|_| ())
+            }),
+    )?;
     let owner = previous.map(Owner::Provider).unwrap_or(Owner::None);
     let prepared = prepare(&state.codex_oauth_manager, &owner, provider)?;
     let planned = plan(&state.db, &owner, provider)?;
@@ -1246,7 +1297,7 @@ pub(crate) fn recover_locked_with_checks(
     let result = crate::rt::block_on(service.codex_manager().with_live_auth_guard(
         &ids,
         |generation| {
-            let write = AppWrite::open_mode_with_recovery(service, &AppType::Codex, checks)?;
+            let write = AppWrite::open_codex_with_recovery(service, checks, generation)?;
             let verify = |pending: &state::Pending, live: Option<&state::LiveState>| {
                 checks.map_or(Ok(()), |checks| {
                     (checks.verify)(&write.vault, pending, live)
@@ -1500,10 +1551,14 @@ pub(crate) fn manage_catalog(state: &AppState, revision: &CatalogRevision) -> Re
         .get_provider_by_id(&revision.provider_id, app())?
         .ok_or_else(invalid)?;
     super::validate_provider_selection(&state.db, &AppType::Codex, &provider.id)?;
-    {
-        let write = AppWrite::begin(state, &AppType::Codex)?;
-        read_inputs(&write, &[])?;
-    }
+    crate::rt::block_on(
+        state
+            .codex_oauth_manager
+            .with_live_auth_guard(&[], |generation| {
+                let write = AppWrite::begin_codex(state, generation)?;
+                read_inputs(&write, &[]).map(|_| ())
+            }),
+    )?;
     revision.verify(
         &provider,
         read_current(&get_codex_config_path())?.as_deref(),
@@ -1529,7 +1584,9 @@ pub(crate) fn restore_catalog(
     crate::rt::block_on(
         state
             .codex_oauth_manager
-            .with_live_auth_guard(&[], |_| restore_catalog_pinned(state, revision, &provider)),
+            .with_live_auth_guard(&[], |generation| {
+                restore_catalog_pinned(state, revision, &provider, generation)
+            }),
     )
 }
 
@@ -1537,8 +1594,9 @@ fn restore_catalog_pinned(
     state: &AppState,
     revision: &CatalogRevision,
     provider: &Provider,
+    generation: &CodexLiveAuthGuard<'_>,
 ) -> Result<(), AppError> {
-    let write = AppWrite::begin(state, &AppType::Codex)?;
+    let write = AppWrite::begin_codex(state, generation)?;
     let Inputs {
         files,
         pre,

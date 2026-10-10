@@ -303,10 +303,62 @@ pub(crate) struct ManagedTokenBundle {
 /// Borrowed facts under the manager's existing lifecycle/account/maps guards.
 /// This is one bounded publication/recovery read, never a second token cache.
 pub(crate) struct CodexLiveAuthGuard<'a> {
+    session: &'a Arc<SecretSession>,
     accounts: &'a HashMap<String, CodexAccountData>,
     access_tokens: &'a HashMap<String, CachedAccessToken>,
 }
 impl CodexLiveAuthGuard<'_> {
+    pub(crate) fn belongs_to(&self, session: &SecretSession) -> bool {
+        std::ptr::eq(self.session.as_ref(), session)
+    }
+
+    /// Authenticate the captured persistence image under the caller's existing
+    /// vault. An active manager alone cannot prove that its generation survived
+    /// a failed save. This read neither reloads nor repairs either owner.
+    pub(crate) fn native_store_matches(
+        &self,
+        vault: &crate::secrets::VaultContext,
+        bytes: Option<&[u8]>,
+    ) -> Option<bool> {
+        let plaintext = CredentialFile::Codex.decode(vault, bytes?).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).ok()?;
+        let store: CodexOAuthStore = serde_json::from_value(value.clone()).ok()?;
+        if store.version != 1
+            || store
+                .accounts
+                .iter()
+                .any(|(id, data)| id.is_empty() || id != &data.account_id)
+            || serde_json::to_value(&store).ok()? != value
+        {
+            return None;
+        }
+        Some(
+            serde_json::to_value(&store.accounts).ok()?
+                == serde_json::to_value(self.accounts).ok()?,
+        )
+    }
+
+    /// Session-salted transient evidence, never another account/token store.
+    pub(crate) fn native_revision(&self, salt: &str) -> Result<String, crate::error::AppError> {
+        use sha2::{Digest, Sha256};
+        let accounts: std::collections::BTreeMap<_, _> = self.accounts.iter().collect();
+        let tokens: std::collections::BTreeMap<_, _> = self
+            .access_tokens
+            .iter()
+            .map(|(id, value)| {
+                (
+                    id,
+                    (&value.token, value.obtained_at_ms, value.expires_at_ms),
+                )
+            })
+            .collect();
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&(salt, accounts, tokens))
+                .map_err(|source| crate::error::AppError::JsonSerialize { source })?,
+        );
+        Ok(hex::encode(Sha256::digest(&*bytes)))
+    }
+
     pub(crate) fn matches_prepared(&self, account: &str, auth: &serde_json::Value) -> bool {
         let Some(stored) = self.accounts.get(account) else {
             return false;
@@ -1547,6 +1599,25 @@ impl CodexOAuthManager {
         (receiver, sender)
     }
 
+    /// Synchronous app admission may run on an async caller's thread. Borrow the
+    /// same owner only when immediately available; never start a nested runtime
+    /// or wait for a refresh while holding the app/vault locks. Original writers
+    /// with an already-held generation pass that guard directly instead.
+    pub(crate) fn try_with_live_auth_guard<T>(
+        &self,
+        action: impl FnOnce(&CodexLiveAuthGuard<'_>) -> Result<T, crate::error::AppError>,
+    ) -> Result<T, crate::error::AppError> {
+        let busy = || crate::error::AppError::Config("mode.verification_required".into());
+        let _lifecycle = self.lifecycle_lock.try_write().map_err(|_| busy())?;
+        let accounts = self.accounts.try_read().map_err(|_| busy())?;
+        let tokens = self.access_tokens.try_read().map_err(|_| busy())?;
+        action(&CodexLiveAuthGuard {
+            session: &self.secrets,
+            accounts: &accounts,
+            access_tokens: &tokens,
+        })
+    }
+
     /// Order is switch owner → lifecycle → sorted account generations → vault.
     /// The action is synchronous and performs no refresh/network/keychain work.
     pub(crate) async fn with_live_auth_guard<T>(
@@ -1572,6 +1643,7 @@ impl CodexOAuthManager {
         }
         let tokens = self.access_tokens.read().await;
         action(&CodexLiveAuthGuard {
+            session: &self.secrets,
             accounts: &accounts,
             access_tokens: &tokens,
         })
