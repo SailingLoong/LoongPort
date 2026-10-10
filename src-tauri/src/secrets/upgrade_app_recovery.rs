@@ -58,6 +58,101 @@ struct AppCapture {
     flags: (bool, bool),
     finalized_revision: Option<String>,
     provider_digests: std::collections::BTreeMap<String, String>,
+    native_pending: Option<crate::mode::state::Pending>,
+    recovery_facts: RecoveryFacts,
+}
+
+/// Only the original target's own fields may change during replay. This is a
+/// transient projection of the same reviewed app facts, not another journal.
+#[derive(Clone, PartialEq)]
+struct RecoveryFacts {
+    live: Option<crate::mode::state::LiveState>,
+    local: Option<String>,
+    currents: Vec<String>,
+    rows: std::collections::BTreeMap<String, String>,
+    unowned_row_fields: serde_json::Value,
+    order: crate::database::order_profiles::OrderSnapshot,
+    flags: (bool, bool),
+    preference: Option<String>,
+    settings: serde_json::Value,
+    codex_endpoint: Option<(String, u16)>,
+}
+impl RecoveryFacts {
+    fn verify_target_changes(
+        &self,
+        mut actual: Self,
+        app: &AppType,
+        target: &crate::mode::state::PendingTarget,
+    ) -> Result<(), AppError> {
+        if let Some(id) = &target.pointer {
+            if actual.local.as_ref() == Some(id) {
+                actual.local = self.local.clone();
+            }
+            if actual.currents == [id.clone()] {
+                actual.currents = self.currents.clone();
+            }
+        }
+        if let Some(row) = &target.saved_row {
+            let planned = operation::saved_provider(row)?;
+            if actual.rows.get(&planned.id) == Some(&Database::provider_update_digest(&planned)?) {
+                if let Some(before) = self.rows.get(&planned.id) {
+                    actual.rows.insert(planned.id, before.clone());
+                }
+            }
+        }
+        let preference = operation::target_model_preference(target).map(|action| match action {
+            crate::mode::state::ModelPreferenceAction::Set { model } => model,
+            crate::mode::state::ModelPreferenceAction::Clear {} => String::new(),
+        });
+        if target
+            .routing_order
+            .as_ref()
+            .is_some_and(|order| actual.order == order.planned)
+        {
+            actual.order = self.order.clone();
+        }
+        if preference.is_some() && actual.preference == preference {
+            actual.preference = self.preference.clone();
+        }
+        if target
+            .state
+            .as_ref()
+            .is_some_and(|mode| actual.flags.0 == mode.is_proxy())
+        {
+            actual.flags.0 = self.flags.0;
+        }
+        let mut before = self.clone();
+        if let (Some(old), Some(now)) = (
+            before
+                .live
+                .as_mut()
+                .and_then(|live| live.apps.get_mut(app.as_str())),
+            actual
+                .live
+                .as_mut()
+                .and_then(|live| live.apps.get_mut(app.as_str())),
+        ) {
+            // The engine compares the exact current journal, including an
+            // authenticated Codex generation adoption, before every mutation.
+            old.pending = None;
+            now.pending = None;
+            if target
+                .state
+                .as_ref()
+                .is_some_and(|mode| now.mode_state() == *mode)
+            {
+                now.set_mode_state(old.mode_state())
+                    .map_err(|_| source_changed())?;
+            }
+            if target.written.is_some() && now.written == target.written {
+                now.written = old.written.clone();
+            }
+        }
+        if actual != before {
+            return Err(source_changed());
+        }
+        Ok(())
+    }
 }
 
 impl AuthenticatedUpgrade {
@@ -437,6 +532,69 @@ impl AuthenticatedUpgrade {
         if captured.view.revision != revision || !captured.view.can_recover_operation {
             return Err(source_changed());
         }
+        if captured.finalized_revision.is_none() {
+            let state = runtime.ok_or_else(source_changed)?;
+            let pending = captured
+                .native_pending
+                .as_ref()
+                .ok_or_else(source_changed)?;
+            // Codex owns manager -> app -> vault lock order. Keep the service
+            // switch lock, but release this query guard before entering it.
+            drop(guard);
+            let verify_identity = |db: &Database, vault: &RwLockReadGuard<'_, VaultContext>| {
+                if !std::sync::Arc::ptr_eq(&db.secrets, &self.session) {
+                    return Err(source_changed());
+                }
+                self.verify_app_checkpoint_pinned(inspected, vault)?;
+                let path = self.root.join(crate::config::DB_FILE_NAME);
+                inspection::verify_primary_identity(&path, &captured.identity)?;
+                inspection::verify_connection_primary_identity(
+                    &*db.conn.lock()?,
+                    &captured.identity,
+                )
+            };
+            let admit = |db: &Database, vault: &RwLockReadGuard<'_, VaultContext>| {
+                verify_identity(db, vault)?;
+                let actual = self.capture_app(app, vault)?;
+                if actual.view.revision != revision
+                    || actual.native_pending.as_ref() != Some(pending)
+                {
+                    return Err(source_changed());
+                }
+                for file in &captured.files {
+                    file.verify()?;
+                }
+                verify_identity(db, vault)
+            };
+            let verify = |vault: &RwLockReadGuard<'_, VaultContext>,
+                          current: &crate::mode::state::Pending,
+                          live: Option<&crate::mode::state::LiveState>| {
+                verify_identity(&state.db, vault)?;
+                if current.op != pending.op || current.target != pending.target {
+                    return Err(source_changed());
+                }
+                let actual = self.capture_app_with_state(app, vault, live)?;
+                captured.recovery_facts.verify_target_changes(
+                    actual.recovery_facts,
+                    app,
+                    &pending.target,
+                )?;
+                verify_identity(&state.db, vault)
+            };
+            operation::failpoint::hit("upgrade:native_recovery_owner")?;
+            crate::mode::controller::recover_locked_with_checks(
+                &state.proxy_service,
+                app,
+                Some(&operation::AppRecoveryChecks {
+                    pending,
+                    admit: &admit,
+                    verify: &verify,
+                }),
+            )?;
+            // Discarded/Abandoned/VerificationRequired retain their original
+            // meaning; only a new read reports the actual app outcome.
+            return self.review_app(inspected, token, app);
+        }
         {
             let vault = self.session.read()?;
             self.verify_app_checkpoint_pinned(inspected, &vault)?;
@@ -606,6 +764,7 @@ fn capture_app_with_state(
         None
     };
     let flags = db.get_proxy_flags_checked(app.as_str())?;
+    let order = crate::database::order_profiles::snapshot(&db, app.as_str())?;
     let preference = crate::proxy::auto_strategy::get_model_pref_checked(&db, app.as_str())?;
     let pointer_consistent = (currents.len() <= 1).then(|| {
         local
@@ -642,12 +801,12 @@ fn capture_app_with_state(
     });
     let mut bound = live_review::BoundFiles::new();
     let mut files = Vec::new();
-    for file in admitted {
+    for file in &admitted {
         let input = ReviewedInput::capture(file.path.clone())?;
         let bytes = crate::config_file_io::read_regular_file(&file.path, checkpoint::MAX_BYTES)
             .map_err(|error| AppError::io(&file.path, error))?;
         input.verify()?;
-        bound.insert(file.path, bytes.map(zeroize::Zeroizing::new));
+        bound.insert(file.path.clone(), bytes.map(zeroize::Zeroizing::new));
         files.push(input);
     }
     let catalog = if *app == AppType::Codex {
@@ -762,6 +921,35 @@ fn capture_app_with_state(
             && !pending.files.is_empty()
             && pending.files.iter().all(|file| file.pre == file.planned)
     });
+    let native_pending = pending
+        .flatten()
+        .filter(|pending| {
+            target.is_none()
+                && compatible
+                // Listener-dependent recovery needs the service lifecycle owner
+                // before the switch lock; this checkpoint seam does not start it.
+                && mode.as_ref().is_some_and(|mode| !mode.attached)
+                && pending.target.state.as_ref().is_none_or(|mode| !mode.attached)
+                && (!pending.files.is_empty()
+                    || pending.target.saved_row.is_some()
+                    || pending.target.model_preference.is_some()
+                    || pending.target.routing_order.is_some()
+                    || pending.target.state.is_some())
+                && operation::validate_pending(app.as_str(), pending, &admitted).is_ok()
+                && crate::settings::read_native_app_settings_with_vault(
+                    app,
+                    session,
+                    vault,
+                    checkpoint::MAX_BYTES,
+                )
+                .is_ok()
+        })
+        .cloned();
+    if let Some(pending) = &native_pending {
+        for staged in pending.files.iter().filter_map(|file| file.staged.as_ref()) {
+            files.push(ReviewedInput::capture(staged.clone())?);
+        }
+    }
     let can_recover_operation = compatible
         && if mode_target.is_some() {
             mode_target_matches
@@ -785,7 +973,8 @@ fn capture_app_with_state(
                 && ((local.as_deref() == Some(id) && (!keep_files_pending || target_native_proven))
                     || forward_pointer_proven)
         })
-        && (currents.len() <= 1 || forward_pointer_proven);
+        && (currents.len() <= 1 || forward_pointer_proven)
+        || native_pending.is_some();
     let can_complete_app = candidate.is_some()
         && client.status == "parsed"
         && client.marker == Some(false)
@@ -887,6 +1076,7 @@ fn capture_app_with_state(
                     settings.unify_codex_session_history,
                 )),
                 &codex_endpoint,
+                &order,
             ))
             .map_err(|source| AppError::JsonSerialize { source })?,
         );
@@ -919,6 +1109,47 @@ fn capture_app_with_state(
         file.verify()?;
     }
     inspection::verify_unchanged(&path, &db_revision)?;
+    let provider_digests = rows
+        .iter()
+        .map(|(id, row)| Database::provider_update_digest(row).map(|digest| (id.clone(), digest)))
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+    let mut settings_evidence =
+        serde_json::to_value(&settings).map_err(|source| AppError::JsonSerialize { source })?;
+    if let Some(fields) = settings_evidence.as_object_mut() {
+        for key in [
+            "currentProviderClaude",
+            "currentProviderCodex",
+            "currentProviderGemini",
+            "currentProviderGrokbuild",
+        ] {
+            fields.remove(key);
+        }
+    }
+    let recovery_facts = RecoveryFacts {
+        live: live.clone(),
+        local: local.clone(),
+        currents: currents.clone(),
+        rows: provider_digests.clone(),
+        unowned_row_fields: serde_json::to_value(
+            rows.iter()
+                .map(|(id, row)| {
+                    (
+                        id,
+                        (
+                            row.in_failover_queue,
+                            row.meta.as_ref().map(|meta| &meta.custom_endpoints),
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .map_err(|source| AppError::JsonSerialize { source })?,
+        order,
+        flags,
+        preference: preference.clone(),
+        settings: settings_evidence,
+        codex_endpoint,
+    };
     Ok(AppCapture {
         view: UpgradeAppReview {
             app_type: app.as_str().into(),
@@ -944,12 +1175,9 @@ fn capture_app_with_state(
         identity,
         flags,
         finalized_revision,
-        provider_digests: rows
-            .iter()
-            .map(|(id, row)| {
-                Database::provider_update_digest(row).map(|digest| (id.clone(), digest))
-            })
-            .collect::<Result<_, _>>()?,
+        provider_digests,
+        native_pending,
+        recovery_facts,
     })
 }
 

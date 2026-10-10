@@ -1190,6 +1190,13 @@ pub(crate) fn recover_pending(state: &AppState) -> Result<Option<RecoveryOutcome
 /// Caller owns the service switch lock. Account preparation remains outside the
 /// pinned vault; the original manager guard covers verification and replay.
 pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOutcome>, AppError> {
+    recover_locked_with_checks(service, None)
+}
+
+pub(crate) fn recover_locked_with_checks(
+    service: &ProxyService,
+    checks: Option<&operation::AppRecoveryChecks<'_>>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
     let db = service.database();
     let (pending, before) = {
         let vault = db.secret_session().read()?;
@@ -1239,7 +1246,20 @@ pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOu
     let result = crate::rt::block_on(service.codex_manager().with_live_auth_guard(
         &ids,
         |generation| {
-            let write = AppWrite::open_mode(service, &AppType::Codex)?;
+            let write = AppWrite::open_mode_with_recovery(service, &AppType::Codex, checks)?;
+            let verify = |pending: &state::Pending, live: Option<&state::LiveState>| {
+                checks.map_or(Ok(()), |checks| {
+                    (checks.verify)(&write.vault, pending, live)
+                })
+            };
+            let finished = |pending: &state::Pending, live: Option<&state::LiveState>| {
+                write.verify_recovered_target(pending, live)
+            };
+            let admission = checks.map(|checks| operation::RecoveryAdmission {
+                expected_pending: checks.pending,
+                verify: &verify,
+                finished: &finished,
+            });
             if state::pending(&write.store, &write.vault, app())?.as_ref() != Some(&pending) {
                 return Err(invalid());
             }
@@ -1286,16 +1306,18 @@ pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOu
                 {
                     return Err(invalid());
                 }
-                return operation::recover(
+                return operation::recover_checked_guarded(
                     &write.store,
                     &write.vault,
                     &write.guard,
                     &[],
                     &|target| write.commit(target),
+                    &|_| Ok(None),
+                    admission.as_ref(),
                 );
             }
             let admitted = files();
-            operation::recover_checked(
+            operation::recover_checked_guarded(
                 &write.store,
                 &write.vault,
                 &write.guard,
@@ -1432,6 +1454,7 @@ pub(crate) fn recover_locked(service: &ProxyService) -> Result<Option<RecoveryOu
                     }
                     Ok(None)
                 },
+                admission.as_ref(),
             )
         },
     ));

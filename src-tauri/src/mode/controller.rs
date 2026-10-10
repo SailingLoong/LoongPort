@@ -544,10 +544,18 @@ pub(crate) fn recover_locked(
     service: &ProxyService,
     app: &AppType,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
+    recover_locked_with_checks(service, app, None)
+}
+
+pub(crate) fn recover_locked_with_checks(
+    service: &ProxyService,
+    app: &AppType,
+    checks: Option<&operation::AppRecoveryChecks<'_>>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
     if *app == AppType::Codex {
-        return codex_direct::recover_locked(service);
+        return codex_direct::recover_locked_with_checks(service, checks);
     }
-    let write = AppWrite::open_mode(service, app)?;
+    let write = AppWrite::open_mode_with_recovery(service, app, checks)?;
     if let Some(pending) = state::pending(&write.store, &write.vault, app.as_str())? {
         operation::verify_saved_row(
             service.database(),
@@ -557,12 +565,27 @@ pub(crate) fn recover_locked(
             &pending.target,
         )?;
     }
-    operation::recover(
+    let verify = |pending: &state::Pending, live: Option<&state::LiveState>| {
+        checks.map_or(Ok(()), |checks| {
+            (checks.verify)(&write.vault, pending, live)
+        })
+    };
+    let finished = |pending: &state::Pending, live: Option<&state::LiveState>| {
+        write.verify_recovered_target(pending, live)
+    };
+    let admission = checks.map(|checks| operation::RecoveryAdmission {
+        expected_pending: checks.pending,
+        verify: &verify,
+        finished: &finished,
+    });
+    operation::recover_checked_guarded(
         &write.store,
         &write.vault,
         &write.guard,
         &files(app)?,
         &|target| write.commit(target),
+        &|_| Ok(None),
+        admission.as_ref(),
     )
 }
 

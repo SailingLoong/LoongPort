@@ -5783,3 +5783,6 @@ pub(crate) fn verify_written_app_binding() {
 
 #[path = "upgrade_codex_native_tests.rs"]
 mod codex_native_tests;
+
+#[path = "upgrade_native_recovery_tests.rs"]
+mod native_recovery_tests;

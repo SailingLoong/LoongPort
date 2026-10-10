@@ -225,6 +225,10 @@ pub struct OrderSnapshot {
     pub priority: Option<String>,
 }
 
+pub(crate) fn snapshot(db: &Database, app: &str) -> Result<OrderSnapshot, AppError> {
+    snapshot_on(&*db.conn.lock()?, app)
+}
+
 fn snapshot_on(conn: &Connection, app: &str) -> Result<OrderSnapshot, AppError> {
     let read = |key: String| -> Result<Option<String>, AppError> {
         Ok(conn

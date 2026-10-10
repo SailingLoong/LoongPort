@@ -310,6 +310,37 @@ pub(crate) fn recover_checked(
     commit_target: CommitTarget<'_>,
     verify_replay: VerifyReplay<'_>,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
+    recover_checked_guarded(
+        store,
+        vault,
+        guard,
+        admitted_files,
+        commit_target,
+        verify_replay,
+        None,
+    )
+}
+
+pub(crate) type RecoveryGuard<'a> =
+    &'a dyn Fn(&Pending, Option<&state::LiveState>) -> Result<(), AppError>;
+
+pub(crate) struct RecoveryAdmission<'a> {
+    pub(crate) expected_pending: &'a Pending,
+    pub(crate) verify: RecoveryGuard<'a>,
+    pub(crate) finished: RecoveryGuard<'a>,
+}
+
+/// The original recovery algorithm, borrowing authenticated startup checks only
+/// for its explicit runtime handoff. Ordinary callers retain their admission.
+pub(crate) fn recover_checked_guarded(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    guard: &AppWriteGuard,
+    admitted_files: &[LiveFile],
+    commit_target: CommitTarget<'_>,
+    verify_replay: VerifyReplay<'_>,
+    admission: Option<&RecoveryAdmission<'_>>,
+) -> Result<Option<RecoveryOutcome>, AppError> {
     recover_checked_with_cleanup(
         store,
         vault,
@@ -320,7 +351,9 @@ pub(crate) fn recover_checked(
         &RecoveryCleanup {
             verify: &|_| Ok(()),
             publish_remaining: true,
-            expected_pending: None,
+            expected_pending: admission.map(|checks| checks.expected_pending),
+            admission: admission.map(|checks| checks.verify),
+            finished: admission.map(|checks| checks.finished),
         },
     )
 }
@@ -329,6 +362,8 @@ struct RecoveryCleanup<'a> {
     verify: &'a dyn Fn(&state::LiveState) -> Result<(), AppError>,
     publish_remaining: bool,
     expected_pending: Option<&'a Pending>,
+    admission: Option<RecoveryGuard<'a>>,
+    finished: Option<RecoveryGuard<'a>>,
 }
 
 fn recover_checked_with_cleanup(
@@ -351,8 +386,24 @@ fn recover_checked_with_cleanup(
         return Err(verification_required());
     }
 
+    let verify = |pending: &Pending| -> Result<(), AppError> {
+        if let Some(check) = cleanup.admission {
+            let live = state::load_app(store, vault, guard.app())?;
+            if live
+                .apps
+                .get(guard.app())
+                .and_then(|entry| entry.pending.as_ref())
+                != Some(pending)
+            {
+                return Err(verification_required());
+            }
+            check(pending, Some(&live))?;
+        }
+        Ok(())
+    };
     validate_pending(guard.app(), &pending, admitted_files)?;
     failpoint::hit("recover:begin")?;
+    verify(&pending)?;
 
     enum At {
         Pre,
@@ -386,8 +437,18 @@ fn recover_checked_with_cleanup(
         .zip(&positions)
         .any(|(file, at)| file.pre != file.planned && matches!(at, At::Planned));
     if !pending.published && !changed_file_published {
-        discard_pending_files(&pending)?;
-        state::set_pending(store, vault, guard.app(), None)?;
+        if let Some(check) = cleanup.admission {
+            // Discard is the original unpublished outcome, never a bypass of
+            // checkpoint identity or the exact authenticated journal.
+            state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
+                check(&pending, Some(live))?;
+                discard_pending_files(&pending)?;
+                check(&pending, Some(live))
+            })?;
+        } else {
+            discard_pending_files(&pending)?;
+            state::set_pending(store, vault, guard.app(), None)?;
+        }
         let paths = elsewhere(&pending, &positions);
         if paths.is_empty() {
             log::info!("[{}] 丢弃未开始发布的操作 {}", guard.app(), pending.op);
@@ -424,12 +485,14 @@ fn recover_checked_with_cleanup(
         }
         // Delete only validated old staging. If persistence fails, the old
         // journal stays blocked and the same current-generation proof can retry.
+        verify(&pending)?;
         discard_staged(&pending.files[index])?;
         pending.files[index].pre = Some(observed.clone());
         pending.files[index].planned = Some(observed);
         pending.files[index].staged = None;
         state::set_pending(store, vault, guard.app(), Some(pending.clone()))?;
         failpoint::hit("recover:adopted")?;
+        verify(&pending)?;
         positions[index] = At::Planned;
     }
     let mut skipped = elsewhere(&pending, &positions);
@@ -437,10 +500,12 @@ fn recover_checked_with_cleanup(
     // publication marker. Recovery must make the forward decision durable before
     // publishing anything or invoking a potentially partial target callback.
     if !pending.published {
-        pending.published = true;
         failpoint::hit("mark")?;
+        verify(&pending)?;
+        pending.published = true;
         state::set_pending(store, vault, guard.app(), Some(pending.clone()))?;
         failpoint::hit("marked")?;
+        verify(&pending)?;
     }
     for (index, (file, at)) in pending.files.iter().zip(&positions).enumerate() {
         if !matches!(at, At::Pre) {
@@ -459,6 +524,7 @@ fn recover_checked_with_cleanup(
             continue;
         }
         failpoint::before_publish(index, &file.path);
+        verify(&pending)?;
         let current = read_current(&file.path)?;
         if digest(current.as_deref()) != file.pre {
             skipped.push(file.path.clone());
@@ -479,7 +545,9 @@ fn recover_checked_with_cleanup(
         }));
     }
     failpoint::hit("recover:target")?;
+    verify(&pending)?;
     commit_target(&pending.target)?;
+    verify(&pending)?;
     let paths = unverified_files(&pending)?;
     if !paths.is_empty() {
         return Ok(Some(RecoveryOutcome::VerificationRequired { paths }));
@@ -487,8 +555,27 @@ fn recover_checked_with_cleanup(
     failpoint::hit("recover:verified")?;
     state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
         (cleanup.verify)(live)?;
+        if let Some(check) = cleanup.admission {
+            check(&pending, Some(live))?;
+            if !unverified_files(&pending)?.is_empty() {
+                return Err(verification_required());
+            }
+        }
+        if let Some(check) = cleanup.finished {
+            check(&pending, Some(live))?;
+        }
         discard_pending_files(&pending)?;
-        (cleanup.verify)(live)
+        (cleanup.verify)(live)?;
+        if let Some(check) = cleanup.admission {
+            check(&pending, Some(live))?;
+            if !unverified_files(&pending)?.is_empty() {
+                return Err(verification_required());
+            }
+        }
+        if let Some(check) = cleanup.finished {
+            check(&pending, Some(live))?;
+        }
+        Ok(())
     })?;
     Ok(Some(RecoveryOutcome::RolledForward))
 }
@@ -850,7 +937,11 @@ fn validate_admitted(files: &[LiveFile]) -> Result<(), AppError> {
 
 /// Validate the complete journal before reading a target or deleting any staging.
 /// A path recovered from disk cannot enlarge the trusted caller's affected files.
-fn validate_pending(app: &str, pending: &Pending, admitted: &[LiveFile]) -> Result<(), AppError> {
+pub(crate) fn validate_pending(
+    app: &str,
+    pending: &Pending,
+    admitted: &[LiveFile],
+) -> Result<(), AppError> {
     validate_operation(app, &pending.op, &pending.target)?;
     validate_admitted(admitted)?;
     if !pending.extra.is_empty() {
@@ -1073,6 +1164,93 @@ struct PointerCommit<'a> {
     verify: &'a dyn Fn(&str) -> Result<(), AppError>,
 }
 
+pub(crate) fn target_model_preference(
+    target: &PendingTarget,
+) -> Option<state::ModelPreferenceAction> {
+    let fallback_clear = target.pointer.is_some()
+        || target
+            .saved_row
+            .as_ref()
+            .is_some_and(|row| row.clear_model_preference);
+    target
+        .model_preference
+        .as_ref()
+        .cloned()
+        .or_else(|| fallback_clear.then_some(state::ModelPreferenceAction::Clear {}))
+}
+
+/// Final readback of the original target owner. The passed state is pinned by
+/// cleanup; never acquire the state lock again while proving these fields.
+fn verify_committed_target(
+    db: &Database,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+    target: &PendingTarget,
+    live: &state::LiveState,
+) -> Result<(), AppError> {
+    if let Some(row) = &target.saved_row {
+        let planned = saved_provider(row)?;
+        let actual = db
+            .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
+            .ok_or_else(verification_required)?;
+        if Database::provider_update_digest(&actual)? != Database::provider_update_digest(&planned)?
+        {
+            return Err(verification_required());
+        }
+    }
+    if let Some(id) = &target.pointer {
+        super::current::verify_direct_pointer(db, app, id)?;
+        let currents: i64 = db.conn.lock()?.query_row(
+            "SELECT COUNT(*) FROM providers WHERE app_type=?1 AND is_current<>0",
+            [app.as_str()],
+            |row| row.get(0),
+        )?;
+        if currents != 1 {
+            return Err(verification_required());
+        }
+    }
+    if let Some(action) = target_model_preference(target) {
+        let expected = match &action {
+            state::ModelPreferenceAction::Clear {} => "",
+            state::ModelPreferenceAction::Set { model } => model.as_str(),
+        };
+        if crate::proxy::auto_strategy::get_model_pref_checked(db, app.as_str())?.as_deref()
+            != Some(expected)
+        {
+            return Err(verification_required());
+        }
+    }
+    if let Some(order) = &target.routing_order {
+        crate::database::order_profiles::verify_prepared(
+            db,
+            app.as_str(),
+            &order.profile_name,
+            &order.provider_ids,
+            &order.before,
+            &order.planned,
+        )?;
+        if crate::database::order_profiles::snapshot(db, app.as_str())? != order.planned {
+            return Err(verification_required());
+        }
+    }
+    let entry = live
+        .apps
+        .get(app.as_str())
+        .ok_or_else(verification_required)?;
+    if target.written.is_some() && entry.written != target.written {
+        return Err(verification_required());
+    }
+    if let Some(mode) = &target.state {
+        if entry.mode_state() != *mode
+            || db.get_proxy_flags_checked(app.as_str())?.0 != mode.is_proxy()
+        {
+            return Err(verification_required());
+        }
+    }
+    Ok(())
+}
+
 fn commit_target_with_pointer(
     db: &Database,
     session: &SecretSession,
@@ -1130,16 +1308,7 @@ fn commit_target_with_pointer(
         db.set_current_provider(app.as_str(), id)?;
         (pointers.verify)(id)?;
     }
-    let fallback_clear = target.pointer.is_some()
-        || target
-            .saved_row
-            .as_ref()
-            .is_some_and(|row| row.clear_model_preference);
-    let action = target
-        .model_preference
-        .as_ref()
-        .cloned()
-        .or_else(|| fallback_clear.then_some(state::ModelPreferenceAction::Clear {}));
+    let action = target_model_preference(target);
     if let Some(action) = action {
         let model = match &action {
             state::ModelPreferenceAction::Clear {} => None,
@@ -1339,8 +1508,25 @@ pub(crate) fn recover_published_pointer(
             verify: checks.before_cleanup,
             publish_remaining: false,
             expected_pending: Some(&pending),
+            admission: None,
+            finished: None,
         },
     )
+}
+
+/// Transient checks borrowed by the explicit startup recovery handoff. These
+/// never grant ordinary begin/run admission or persist another operation state.
+type RecoveryAppAdmission<'a> =
+    &'a dyn Fn(&Database, &RwLockReadGuard<'_, VaultContext>) -> Result<(), AppError>;
+type RecoveryAppVerification<'a> = &'a dyn Fn(
+    &RwLockReadGuard<'_, VaultContext>,
+    &Pending,
+    Option<&state::LiveState>,
+) -> Result<(), AppError>;
+pub(crate) struct AppRecoveryChecks<'a> {
+    pub(crate) pending: &'a Pending,
+    pub(crate) admit: RecoveryAppAdmission<'a>,
+    pub(crate) verify: RecoveryAppVerification<'a>,
 }
 
 /// Upstream per-app transaction context, borrowing the existing session guard.
@@ -1364,6 +1550,13 @@ impl<'a> AppWrite<'a> {
         service: &'a crate::services::ProxyService,
         app: &AppType,
     ) -> Result<Self, AppError> {
+        Self::open_mode_with_recovery(service, app, None)
+    }
+    pub(crate) fn open_mode_with_recovery(
+        service: &'a crate::services::ProxyService,
+        app: &AppType,
+        recovery: Option<&AppRecoveryChecks<'_>>,
+    ) -> Result<Self, AppError> {
         let db = service.database();
         if !uses_upstream4_schema(db)? {
             return Err(AppError::Config("upgrade.migration_required".into()));
@@ -1377,7 +1570,11 @@ impl<'a> AppWrite<'a> {
         let guard = crate::live::engine::lock_app(app.as_str());
         let session = db.secret_session();
         let vault = session.read()?;
-        crate::secrets::upgrade::ensure_native_app_write_admitted(db, &store, app, &vault)?;
+        if let Some(checks) = recovery {
+            (checks.admit)(db, &vault)?;
+        } else {
+            crate::secrets::upgrade::ensure_native_app_write_admitted(db, &store, app, &vault)?;
+        }
         let mode = super::current::validate_known_mode(&store, &vault, app)?;
         if placeholder
             && !(mode.is_proxy() && mode.attached)
@@ -1410,6 +1607,20 @@ impl<'a> AppWrite<'a> {
             return Err(AppError::Config("mode.verification_required".into()));
         }
         Ok(write)
+    }
+    pub(crate) fn verify_recovered_target(
+        &self,
+        pending: &Pending,
+        live: Option<&state::LiveState>,
+    ) -> Result<(), AppError> {
+        verify_committed_target(
+            self.db,
+            self.session,
+            &self.vault,
+            &self.app,
+            &pending.target,
+            live.ok_or_else(verification_required)?,
+        )
     }
     pub(crate) fn commit(&self, target: &PendingTarget) -> Result<(), AppError> {
         commit_target(
