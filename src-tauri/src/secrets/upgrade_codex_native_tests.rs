@@ -359,13 +359,616 @@ fn codex_managed_completion_admits_original_writer() {
         Some("b")
     );
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
-    assert_outgoing_managed_placement_is_still_unproven(&f, &inspected, &review, &token, &runtime);
+    assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
 }
 
-// The existing switch out of managed login writes the third-party row auth to
-// auth.json while clearing its managed marker. Under preserve=true its next
-// self-projection prefers bearer-TOML. Completion must not waive that mismatch.
-fn assert_outgoing_managed_placement_is_still_unproven(
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_proves_original_auth_json_placement() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) = managed_native_runtime(&f);
+    assert!(crate::settings::preserve_codex_official_auth_on_switch());
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    let row = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    let auth: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap())
+            .unwrap();
+    assert!(auth == row.settings_config["auth"]);
+    assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+    let doc: toml::Table = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let route = doc["model_provider"].as_str().unwrap();
+    assert_eq!(
+        doc["model_providers"][route]["requires_openai_auth"].as_bool(),
+        Some(true)
+    );
+    assert!(doc["model_providers"][route]
+        .get("experimental_bearer_token")
+        .is_none());
+    let before = snapshot(f.home.path());
+    let view = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert_eq!(view.has_pending_operation, Some(false));
+    assert!(
+        view.can_complete_app,
+        "completed original outgoing transition must prove its unchanged auth.json placement"
+    );
+    assert!(snapshot(f.home.path()) == before);
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+fn assert_outgoing_native_blocked(
+    f: &Fixture,
+    inspected: &UpgradeInspection,
+    review: &AuthenticatedUpgrade,
+    token: &str,
+    runtime: &crate::store::AppState,
+    label: &str,
+) {
+    let before = snapshot(f.home.path());
+    let result = review.review_app_with_state(inspected, token, &AppType::Codex, runtime);
+    assert!(
+        result.is_err() || !result.unwrap().can_complete_app,
+        "unproved outgoing native state: {label}"
+    );
+    assert!(
+        crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &AppType::Codex)
+            .is_err(),
+        "native admission must remain blocked: {label}"
+    );
+    assert!(
+        snapshot(f.home.path()) == before,
+        "read-only proof wrote: {label}"
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_preserves_original_settings_policy() {
+    for preference in [Some(false), Some(true), None] {
+        let f = Fixture::new();
+        let (inspected, review, token, runtime) = managed_native_runtime(&f);
+        let path = crate::settings::settings_path();
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match preference {
+            Some(value) => settings["preserveCodexOfficialAuthOnSwitch"] = value.into(),
+            None => {
+                settings
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("preserveCodexOfficialAuthOnSwitch");
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(
+            crate::settings::preserve_codex_official_auth_on_switch(),
+            preference.unwrap_or(true)
+        );
+        crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+        assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+        let first = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        let original_settings = std::fs::read(&path).unwrap();
+        let mut changed: serde_json::Value = serde_json::from_slice(&original_settings).unwrap();
+        changed["preserveCodexOfficialAuthOnSwitch"] = (!preference.unwrap_or(true)).into();
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        crate::settings::reload_settings().unwrap();
+        let before = snapshot(f.home.path());
+        let drifted = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        assert!(drifted.can_complete_app);
+        assert_ne!(
+            first.revision, drifted.revision,
+            "placement settings still bind the review"
+        );
+        assert!(snapshot(f.home.path()) == before);
+        std::fs::write(&path, &original_settings).unwrap();
+        crate::settings::reload_settings().unwrap();
+        // A later explicit switch still follows the original policy, rather
+        // than inheriting a new persistent placement from the read-only proof.
+        crate::services::ProviderService::switch(&runtime, AppType::Codex, "a").unwrap();
+        let text = std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+        let doc: toml::Table = text.parse().unwrap();
+        let route = &doc["model_providers"][doc["model_provider"].as_str().unwrap()];
+        assert_eq!(
+            route.get("experimental_bearer_token").is_some(),
+            preference.unwrap_or(true)
+        );
+        assert!(
+            review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_preserves_original_toml_bearer_placement() {
+    for preserve in [true, false] {
+        for retain_login in [true, false] {
+            let f = Fixture::new();
+            let (inspected, review, token, runtime) = managed_native_runtime(&f);
+            let settings_path = crate::settings::settings_path();
+            let mut settings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+            settings["preserveCodexOfficialAuthOnSwitch"] = preserve.into();
+            std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+            crate::settings::reload_settings().unwrap();
+            let auth_path = crate::codex_config::get_codex_auth_path();
+            let mut retained: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+            // The original marker correctly remains when the complete auth
+            // bytes are unchanged. Let the real writer publish a distinct,
+            // well-formed retained login rather than deleting that marker.
+            retained["last_refresh"] = json!("2026-10-10T00:00:01Z");
+            let mut row = runtime
+                .db
+                .get_provider_by_id("b", "codex")
+                .unwrap()
+                .unwrap();
+            row.settings_config["auth"] = if retain_login { retained } else { json!({}) };
+            let mut doc = row.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            doc["model_providers"]["original"]["experimental_bearer_token"] =
+                toml_edit::value("synthetic-toml-key");
+            row.settings_config["config"] = doc.to_string().into();
+            runtime.db.save_provider("codex", &row).unwrap();
+            crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+            let auth: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+            assert!(auth == row.settings_config["auth"]);
+            assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+            let doc: toml::Table =
+                std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+            let route = &doc["model_providers"][doc["model_provider"].as_str().unwrap()];
+            assert_eq!(
+                route["experimental_bearer_token"].as_str(),
+                Some("synthetic-toml-key")
+            );
+            assert_ne!(
+                route
+                    .get("requires_openai_auth")
+                    .and_then(toml::Value::as_bool),
+                Some(true)
+            );
+            let before = snapshot(f.home.path());
+            let view = review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap();
+            assert!(view.can_complete_app,
+                "original TOML bearer placement must stay provable: preserve={preserve}, login={retain_login}");
+            assert!(crate::mode::operation::AppWrite::begin_mode(
+                &runtime.proxy_service,
+                &AppType::Codex
+            )
+            .is_ok());
+            assert!(snapshot(f.home.path()) == before);
+            assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_validates_native_api_key_payload() {
+    let mut unexpected = Vec::new();
+    for preserve in [true, false] {
+        let f = Fixture::new();
+        let (inspected, review, token, runtime) = managed_native_runtime(&f);
+        let settings_path = crate::settings::settings_path();
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        settings["preserveCodexOfficialAuthOnSwitch"] = preserve.into();
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        crate::settings::reload_settings().unwrap();
+        crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+        let original = runtime
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        let path = crate::codex_config::get_codex_auth_path();
+        for (label, field, value) in [
+            ("ChatGPT mode", "auth_mode", json!("chatgpt")),
+            ("headers mode", "auth_mode", json!("headers")),
+            ("unknown mode", "auth_mode", json!("future-mode")),
+            ("malformed mode", "auth_mode", json!(7)),
+            (
+                "personal token material",
+                "personal_access_token",
+                json!("synthetic-personal-token"),
+            ),
+            (
+                "OAuth material",
+                "tokens",
+                json!({"access_token":"synthetic-access"}),
+            ),
+            (
+                "API key embedded newline",
+                "OPENAI_API_KEY",
+                json!("synthetic\nkey"),
+            ),
+            (
+                "API key trailing newline",
+                "OPENAI_API_KEY",
+                json!("synthetic-key\n"),
+            ),
+            (
+                "invalid refresh timestamp",
+                "last_refresh",
+                json!("synthetic-metadata"),
+            ),
+            ("numeric refresh timestamp", "last_refresh", json!(7)),
+            ("numeric token structure", "tokens", json!(7)),
+            ("empty token structure", "tokens", json!({})),
+            (
+                "metadata-only token structure",
+                "tokens",
+                json!({"account_id":"synthetic-account"}),
+            ),
+            ("empty identity structure", "agent_identity", json!({})),
+            (
+                "invalid personal token type",
+                "personal_access_token",
+                json!([]),
+            ),
+            ("invalid Bedrock structure", "bedrock_api_key", json!({})),
+            ("invalid Bedrock keys", "bedrock_access_keys", json!({})),
+        ] {
+            let mut row = original.clone();
+            row.settings_config["auth"]["auth_mode"] = json!("apikey");
+            row.settings_config["auth"][field] = value;
+            runtime.db.save_provider("codex", &row).unwrap();
+            runtime.db.get_all_providers("codex").unwrap();
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&row.settings_config["auth"]).unwrap(),
+            )
+            .unwrap();
+            let before = snapshot(f.home.path());
+            let complete = review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .is_ok_and(|view| view.can_complete_app);
+            let admitted = crate::mode::operation::AppWrite::begin_mode(
+                &runtime.proxy_service,
+                &AppType::Codex,
+            )
+            .is_ok();
+            if complete || admitted {
+                unexpected.push(format!(
+                    "{label}/preserve={preserve}/complete={complete}/admitted={admitted}"
+                ));
+            }
+            assert!(
+                snapshot(f.home.path()) == before,
+                "proof changed fixture bytes: {label}"
+            );
+            assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        }
+        for metadata in [
+            json!({"auth_mode":"apikey", "last_refresh":null, "tokens":null}),
+            json!({"auth_mode":"apikey", "last_refresh":"2026-10-10T00:00:00Z", "unknown_metadata":{"harmless":true}}),
+        ] {
+            let mut row = original.clone();
+            row.settings_config["auth"]
+                .as_object_mut()
+                .unwrap()
+                .extend(metadata.as_object().unwrap().clone());
+            runtime.db.save_provider("codex", &row).unwrap();
+            runtime.db.get_all_providers("codex").unwrap();
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&row.settings_config["auth"]).unwrap(),
+            )
+            .unwrap();
+            assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+        }
+    }
+    assert!(
+        unexpected.is_empty(),
+        "unproved native API-key payload accepted: {unexpected:?}"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_checks_actual_auth_mode_and_full_image() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) = managed_native_runtime(&f);
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    let original = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    let path = crate::codex_config::get_codex_auth_path();
+    let auth = original.settings_config["auth"].clone();
+    for (label, field, value) in [
+        ("chatgpt mode", "auth_mode", json!("chatgpt")),
+        ("headers mode", "auth_mode", json!("headers")),
+        ("unknown mode", "auth_mode", json!("future-mode")),
+        ("malformed mode", "auth_mode", json!(7)),
+        ("PAT presence", "personal_access_token", json!("")),
+        ("Bedrock presence", "bedrock_api_key", json!("")),
+        ("Bedrock access keys", "bedrock_access_keys", json!({})),
+        (
+            "OAuth material",
+            "tokens",
+            json!({"access_token":"synthetic-other-login"}),
+        ),
+        (
+            "agent material",
+            "agent_identity",
+            json!({"token":"synthetic-agent"}),
+        ),
+    ] {
+        let mut row = original.clone();
+        row.settings_config["auth"][field] = value;
+        runtime.db.save_provider("codex", &row).unwrap();
+        runtime.db.get_all_providers("codex").unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&row.settings_config["auth"]).unwrap(),
+        )
+        .unwrap();
+        assert_outgoing_native_blocked(&f, &inspected, &review, &token, &runtime, label);
+    }
+    runtime.db.save_provider("codex", &original).unwrap();
+    runtime.db.get_all_providers("codex").unwrap();
+    for (label, changed) in [
+        ("wrong key", json!({"OPENAI_API_KEY":"synthetic-wrong"})),
+        (
+            "extra auth field",
+            json!({"OPENAI_API_KEY":"synthetic-b","extra":"unbound"}),
+        ),
+        ("missing key", json!({})),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_outgoing_native_blocked(&f, &inspected, &review, &token, &runtime, label);
+    }
+    // Explicit API-key mode and harmless metadata are still interpreted by
+    // the original resolved-mode owner, with full row/native semantic equality.
+    for metadata in [
+        json!({"auth_mode":"apikey"}),
+        json!({"auth_mode":null,"last_refresh":"2026-10-10T00:00:00Z"}),
+    ] {
+        let mut row = original.clone();
+        row.settings_config["auth"]
+            .as_object_mut()
+            .unwrap()
+            .extend(metadata.as_object().unwrap().clone());
+        runtime.db.save_provider("codex", &row).unwrap();
+        runtime.db.get_all_providers("codex").unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&row.settings_config["auth"]).unwrap(),
+        )
+        .unwrap();
+        assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+    }
+    std::fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_rejects_route_and_store_drift() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) = managed_native_runtime(&f);
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    let path = crate::codex_config::get_codex_config_path();
+    let original = std::fs::read_to_string(&path).unwrap();
+    for (label, key, value) in [
+        (
+            "false requires",
+            "requires_openai_auth",
+            toml_edit::value(false),
+        ),
+        (
+            "residual bearer",
+            "experimental_bearer_token",
+            toml_edit::value("synthetic-b"),
+        ),
+        (
+            "competing env",
+            "env_key",
+            toml_edit::value("SYNTHETIC_COMPETING_KEY"),
+        ),
+        (
+            "wrong endpoint",
+            "base_url",
+            toml_edit::value("https://other.example.invalid/v1"),
+        ),
+    ] {
+        let mut doc = original.parse::<toml_edit::DocumentMut>().unwrap();
+        doc["model_providers"]["custom"][key] = value;
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert_outgoing_native_blocked(&f, &inspected, &review, &token, &runtime, label);
+    }
+    for (field, key) in [
+        ("http_headers", "Authorization"),
+        ("env_http_headers", "authorization"),
+        ("auth", "command"),
+        ("aws", "profile"),
+    ] {
+        let mut doc = original.parse::<toml_edit::DocumentMut>().unwrap();
+        let mut extra = toml_edit::Table::new();
+        extra[key] = toml_edit::value("synthetic-competing");
+        doc["model_providers"]["custom"][field] = toml_edit::Item::Table(extra);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert_outgoing_native_blocked(&f, &inspected, &review, &token, &runtime, field);
+    }
+    for (field, value) in [
+        ("model", "synthetic-wrong-model"),
+        ("model_provider", "wrong-selector"),
+        ("cli_auth_credentials_store", "keyring"),
+        ("cli_auth_credentials_store", "auto"),
+        ("cli_auth_credentials_store", "ephemeral"),
+    ] {
+        let mut doc = original.parse::<toml_edit::DocumentMut>().unwrap();
+        doc[field] = toml_edit::value(value);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert_outgoing_native_blocked(&f, &inspected, &review, &token, &runtime, value);
+    }
+    std::fs::write(&path, &original).unwrap();
+    let marker = crate::codex_config::get_codex_managed_oauth_live_auth_marker_path();
+    std::fs::write(
+        &marker,
+        br#"{"version":2,"account_id":"synthetic-completion-account"}"#,
+    )
+    .unwrap();
+    assert_outgoing_native_blocked(
+        &f,
+        &inspected,
+        &review,
+        &token,
+        &runtime,
+        "residual managed marker",
+    );
+    std::fs::remove_file(&marker).unwrap();
+    assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_rejects_competing_row_auth_sources() {
+    for (field, key, requires) in [
+        ("env_key", "", false),
+        ("http_headers", "Authorization", false),
+        ("env_http_headers", "authorization", false),
+        ("auth", "command", false),
+        ("aws", "profile", false),
+        ("http_headers", "Authorization", true),
+        ("env_http_headers", "authorization", true),
+    ] {
+        let f = Fixture::new();
+        let (inspected, review, token, runtime) = managed_native_runtime(&f);
+        let mut row = runtime
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        let mut doc = row.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let value = if key.is_empty() {
+            toml_edit::value("SYNTHETIC_COMPETING_KEY")
+        } else {
+            let mut table = toml_edit::Table::new();
+            table[key] = toml_edit::value("synthetic-competing");
+            toml_edit::Item::Table(table)
+        };
+        doc["model_providers"]["original"][field] = value;
+        if requires {
+            doc["model_providers"]["original"]["requires_openai_auth"] = toml_edit::value(true);
+        }
+        row.settings_config["config"] = doc.to_string().into();
+        runtime.db.save_provider("codex", &row).unwrap();
+        // Even a matching original row and real writer result are outside this
+        // narrow API-key-only proof when the selected route has another owner.
+        crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+        let auth: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap(),
+        )
+        .unwrap();
+        assert!(auth == row.settings_config["auth"]);
+        if requires {
+            // Original Codex auth.json request auth overwrites these headers.
+            // Preserve the existing precedence instead of inventing a blocker.
+            assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+        } else {
+            assert_outgoing_native_blocked(
+                &f,
+                &inspected,
+                &review,
+                &token,
+                &runtime,
+                &format!("{field}/{requires}"),
+            );
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_outgoing_completion_recovers_original_interrupted_placement() {
+    for boundary in ["published:0", "published:1", "published:3", "target"] {
+        let f = Fixture::new();
+        let (inspected, review, token, runtime) = managed_native_runtime(&f);
+        crate::mode::operation::failpoint::crash_at(Some(boundary));
+        let switched = crate::services::ProviderService::switch(&runtime, AppType::Codex, "b");
+        crate::mode::operation::failpoint::crash_at(None);
+        assert!(switched.is_err(), "fault boundary must execute: {boundary}");
+        let session = runtime.db.secrets.clone();
+        drop(runtime);
+        let runtime = crate::store::AppState::new(std::sync::Arc::new(
+            Database::init_with_secrets(session).unwrap(),
+        ))
+        .unwrap();
+        let view = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        assert!(
+            view.can_recover_operation && !view.can_complete_app,
+            "pending original operation at {boundary}"
+        );
+        let recovered = review
+            .recover_app_with_state(
+                &inspected,
+                &token,
+                &AppType::Codex,
+                &view.revision,
+                &runtime,
+            )
+            .unwrap();
+        assert!(
+            recovered.can_complete_app && recovered.has_pending_operation == Some(false),
+            "original recovered readback at {boundary}"
+        );
+        assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
+        let before = snapshot(f.home.path());
+        assert!(review
+            .recover_app_with_state(
+                &inspected,
+                &token,
+                &AppType::Codex,
+                &view.revision,
+                &runtime
+            )
+            .is_err());
+        assert!(
+            snapshot(f.home.path()) == before,
+            "duplicate recovery writes at {boundary}"
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
+// The original writer consumes its outgoing marker. Current native proof must
+// verify that writer's auth.json final image without inventing a past marker.
+fn assert_outgoing_managed_placement_is_proven(
     f: &Fixture,
     inspected: &UpgradeInspection,
     review: &AuthenticatedUpgrade,
@@ -398,14 +1001,17 @@ fn assert_outgoing_managed_placement_is_still_unproven(
         .unwrap();
     assert_eq!(view.has_pending_operation, Some(false));
     assert!(
-        !view.can_complete_app,
-        "marker-sensitive original placement remains unproven"
+        view.can_complete_app,
+        "original completed auth.json placement is proved from current facts"
     );
     assert!(
         crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &AppType::Codex)
-            .is_err()
+            .is_ok()
     );
-    assert_eq!(snapshot(f.home.path()), before);
+    assert!(
+        snapshot(f.home.path()) == before,
+        "outgoing proof must not write"
+    );
 }
 
 #[cfg_attr(test, test)]
@@ -922,7 +1528,7 @@ fn codex_managed_completion_retains_original_native_recovery() {
             .as_deref(),
         Some("b")
     );
-    assert_outgoing_managed_placement_is_still_unproven(&f, &inspected, &review, &token, &runtime);
+    assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
 }
 
 #[cfg_attr(test, test)]

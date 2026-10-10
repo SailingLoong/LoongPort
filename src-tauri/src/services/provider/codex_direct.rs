@@ -863,8 +863,8 @@ fn plan_auth(
     {
         return Err(AppError::Config("codex.auth_store_unavailable".into()));
     }
-    if let RouteWrite::Custom(table) = &mut planned.config.route {
-        if planned.keep_native {
+    if planned.keep_native {
+        if let RouteWrite::Custom(table) = &mut planned.config.route {
             if let Some(kind) = planned.stamp {
                 let login = match codex_config_auth_store_mode(config_text) {
                     CodexAuthStoreMode::File => auth_plan.login_on_disk,
@@ -880,17 +880,26 @@ fn plan_auth(
                     )),
                 );
             }
-        } else if !planned.official
-            && replaces
-            && extract_codex_auth_api_key(&planned.auth).is_some()
-        {
+        }
+    } else {
+        let auth_json = !planned.official && replaces;
+        normalize_direct_auth_placement(planned, auth_json);
+    }
+    Ok(auth_plan)
+}
+
+/// The original direct-route output normalization, shared by the writer and
+/// read-only final-image proof. This does not select a write policy or persist
+/// a second credential state; the writer still uses its original marker rule.
+fn normalize_direct_auth_placement(planned: &mut Planned, auth_json: bool) {
+    if let RouteWrite::Custom(table) = &mut planned.config.route {
+        if auth_json && extract_codex_auth_api_key(&planned.auth).is_some() {
             table.remove("experimental_bearer_token");
             table.insert("requires_openai_auth", toml_edit::value(true));
         } else if matches!(planned.stamp, Some(RouteAuth::Bearer | RouteAuth::EnvKey)) {
             table.remove("requires_openai_auth");
         }
     }
-    Ok(auth_plan)
 }
 
 fn preserve_external_catalog(
@@ -1097,6 +1106,23 @@ pub(crate) fn native_completion_match_with_generation(
         facts,
     )
     .ok()?;
+    // A completed original managed-to-ordinary write consumes its marker and
+    // can leave the row's API key in auth.json. Its valid final image need not
+    // be a fixed point of a later write's marker-sensitive placement policy.
+    // Prove the whole current auth and original route projection instead of
+    // fabricating a historical marker or changing the preservation setting.
+    let direct_auth_json = !planned.official
+        && !planned.keep_native
+        && matches!(planned.stamp, Some(RouteAuth::Bearer))
+        && matches!(planned.config.route, RouteWrite::Custom(_))
+        && crate::codex_config::codex_active_custom_route_uses_auth_json(&inputs.config_doc)
+        && inputs.live_auth.as_ref() == Some(&planned.auth);
+    if direct_auth_json && !crate::codex_config::codex_auth_is_loadable_api_key_only(&planned.auth)
+    {
+        // Do not fall back to the next-write plan: preserve=false would simply
+        // copy this same invalid payload and make equality look like proof.
+        return Some(false);
+    }
     let auth = plan_auth(
         &mut planned,
         &prepared,
@@ -1109,7 +1135,9 @@ pub(crate) fn native_completion_match_with_generation(
         None => inputs.live_auth.as_ref(),
         Some(value) => value.as_ref(),
     };
-    if after_auth != inputs.live_auth.as_ref() {
+    if direct_auth_json {
+        normalize_direct_auth_placement(&mut planned, true);
+    } else if after_auth != inputs.live_auth.as_ref() {
         return Some(false);
     }
     // Missing stash initialization is not a native auth/config mismatch. Its

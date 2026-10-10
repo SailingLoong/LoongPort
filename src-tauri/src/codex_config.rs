@@ -4344,6 +4344,22 @@ fn codex_provider_table_declares_auth(table: &dyn toml_edit::TableLike) -> bool 
                 || table_declares_authorization_header(table.get("env_http_headers"))))
 }
 
+/// Read the selected live placement using the original selector and auth
+/// ownership rules. A planned Bearer alone can also describe a TOML token.
+pub(crate) fn codex_active_custom_route_uses_auth_json(doc: &DocumentMut) -> bool {
+    let Some(id) = active_custom_codex_provider_id(doc) else {
+        return false;
+    };
+    doc.get("model_providers")
+        .and_then(|item| item.as_table_like())
+        .and_then(|providers| providers.get(&id))
+        .and_then(|item| item.as_table_like())
+        .is_some_and(|table| {
+            codex_provider_table_falls_back_to_official_auth(table)
+                && !codex_provider_table_declares_auth(table)
+        })
+}
+
 fn table_declares_authorization_header(item: Option<&toml_edit::Item>) -> bool {
     // header 名在传输层大小写不敏感，TOML 键匹配同样大小写不敏感。
     item.and_then(|item| item.as_table_like())
@@ -10924,6 +10940,39 @@ fn codex_auth_resolved_mode(auth: &serde_json::Map<String, Value>) -> CodexResol
         return CodexResolvedAuthMode::ApiKey;
     }
     CodexResolvedAuthMode::Chatgpt
+}
+
+/// Narrow read-only proof for an API-key-only native payload. Reuse the mode
+/// owner, but also reject known fields that would stop Codex's AuthDotJson
+/// deserialization. Other credential carriers are outside this proof; unknown
+/// metadata remains ignored just as it is by the original serde owner.
+pub(crate) fn codex_auth_is_loadable_api_key_only(auth: &Value) -> bool {
+    let Some(auth) = auth.as_object() else {
+        return false;
+    };
+    let Some(key) = auth.get("OPENAI_API_KEY").and_then(Value::as_str) else {
+        return false;
+    };
+    if codex_auth_resolved_mode(auth) != CodexResolvedAuthMode::ApiKey
+        || key.trim().is_empty()
+        || [
+            "tokens",
+            "agent_identity",
+            "personal_access_token",
+            "bedrock_api_key",
+            "bedrock_access_keys",
+        ]
+        .iter()
+        .any(|field| auth.get(*field).is_some_and(|value| !value.is_null()))
+        || auth.get("last_refresh").is_some_and(|value| {
+            serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone()).is_err()
+        })
+    {
+        return false;
+    }
+    // Codex uses the raw stored key when constructing this header. Trimming
+    // first could hide CR/LF that prevents the real auth from being attached.
+    reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).is_ok()
 }
 
 /// True when Codex would load `auth` as a signed-in OpenAI account for a
