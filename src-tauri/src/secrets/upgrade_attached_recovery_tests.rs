@@ -578,9 +578,37 @@ fn retained_checkpoint_listener_start_rechecks_all_reviewed_facts() {
             match effect {
                 "database" => {
                     let path = root.join(crate::config::DB_FILE_NAME);
+                    let identity = database::inspection::file_revision(&path)
+                        .unwrap()
+                        .primary_identity()
+                        .unwrap();
+                    // Windows SQLite handles deny rename while open. Close only
+                    // this fixture connection, then reconnect to the same path
+                    // after replacement; keep the reviewed identity unchanged.
+                    // Unix still exercises replacement under the original handle.
+                    #[cfg(windows)]
+                    let mut conn = db.conn.lock().unwrap();
+                    #[cfg(windows)]
+                    std::mem::replace(&mut *conn, rusqlite::Connection::open_in_memory().unwrap())
+                        .close()
+                        .unwrap();
                     let old = path.with_extension("synthetic-replaced");
                     std::fs::rename(&path, &old).unwrap();
                     std::fs::copy(&old, &path).unwrap();
+                    assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(&old).unwrap());
+                    assert!(
+                        database::inspection::file_revision(&path)
+                            .unwrap()
+                            .primary_identity()
+                            .unwrap()
+                            != identity,
+                        "replacement fixture must change primary file identity"
+                    );
+                    #[cfg(windows)]
+                    {
+                        *conn = rusqlite::Connection::open(&path).unwrap();
+                        assert_eq!(conn.path().map(std::path::Path::new), Some(path.as_path()));
+                    }
                 }
                 "endpoint" => {
                     db.conn
