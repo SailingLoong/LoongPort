@@ -173,7 +173,76 @@
     "duplicateFailed": "Failed to duplicate provider",
     "needsRouting": "Needs Routing",
     "noRoutingSupport": "No Routing Support",
-    "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again"
+    "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again",
+    "preview": {
+      "preview": "Preview changes",
+      "saveOnly": "Save configuration",
+      "saveAndApply": "Save and apply to current configuration",
+      "fields": "Fields to change",
+      "files": "Affected files",
+      "reading": "Reading configuration and current state…",
+      "reread": "Read again",
+      "sourceUnavailable": "The configuration source could not be verified. Read it again.",
+      "invalidFormat": "The configuration format is invalid. Return to editing.",
+      "readOnly": "A required file is read-only. Saving is unavailable.",
+      "sourceChanged": "The configuration or files changed. Generate a new preview.",
+      "vaultLocked": "Credential storage is locked. Unlock it first.",
+      "pendingOperation": "An original operation needs verification. Recheck it first.",
+      "ownerUnavailable": "The existing configuration or authentication owner cannot prove this write.",
+      "credentialConflict": "A key cannot be deleted and replaced together. Clear its input first.",
+      "unsupported": "A verifiable write plan is unavailable for this configuration.",
+      "savedPreviousDraft": "The original save completed. Your newer draft is still unsaved.",
+      "queryOriginal": "Check original operation",
+      "backToEdit": "Return to editing",
+      "deleteCredential": "Explicitly delete this configuration's key",
+      "deleteCredentialHint": "Only the key identified by this configuration's owner is affected, not account sign-in. Clear the key input before selecting deletion. A blank input alone preserves the current key.",
+      "noPreview": "Generate a preview before confirming the save.",
+      "noLiveWrite": "Only this record is saved. Client files and the current selection stay unchanged.",
+      "plannedOnly": "These changes and preserved fields are planned, not yet written.",
+      "field": {
+        "connection": "Connection fields",
+        "authentication": "Authentication fields",
+        "models": "Model fields",
+        "dedicated": "Configuration-owned fields",
+        "metadata": "Name and configuration metadata"
+      },
+      "file": {
+        "claudeSettings": "Claude settings.json",
+        "codexAuth": "Codex auth.json",
+        "codexConfig": "Codex config.toml",
+        "codexCatalog": "Codex managed model catalog",
+        "managedAuth": "Managed authentication ownership marker",
+        "deviceAuthStash": "Encrypted device authentication stash",
+        "geminiEnv": "Gemini .env",
+        "geminiSettings": "Gemini settings.json",
+        "grokConfig": "Grok Build config.toml"
+      },
+      "change": {
+        "write": "Write",
+        "delete": "Delete",
+        "unchanged": "Unchanged"
+      },
+      "preserve": {
+        "unownedJsonKeys": "Unowned JSON keys and values are planned to be preserved.",
+        "untouchedTomlBytes": "Untouched TOML content is planned to be preserved byte for byte.",
+        "untouchedDotenvBytes": "Untouched dotenv content is planned to be preserved byte for byte.",
+        "sharedSettings": "Shared settings stay unchanged and are not saved with this configuration.",
+        "externalCatalog": "The external catalog is preserved. LoongPort model mappings may not take effect."
+      },
+      "result": {
+        "completed": "The original operation completed and passed readback verification.",
+        "notRecorded": "This save was not recorded in the operation journal.",
+        "pending": "The original operation has not completed.",
+        "partial": "The original operation partially wrote files. Recheck it.",
+        "verificationRequired": "The original operation requires verification of actual files.",
+        "discarded": "The original operation was not published; staging was discarded.",
+        "abandoned": "The source changed and the original operation was abandoned.",
+        "unknown": "The outcome is unknown. Check the original operation.",
+        "conflict": "The request identity conflicts. Check the original operation.",
+        "stale": "The preview expired. Return to editing and preview again.",
+        "blocked": "This configuration cannot be saved now."
+      }
+    }
   },
   "claudeCode": {
     "needsRouting": "Needs Routing",
@@ -4016,7 +4085,14 @@
     "order": "Order",
     "noTiers": "No tiers added yet",
     "outsideChain": "Not in automatic failover",
-    "noSwitchableTier": "No available tier supports the selected model"
+    "noSwitchableTier": "No available tier supports the selected model",
+    "reviewChanges": "Review changes",
+    "reviewChangesDescription": "Confirm the applied list and order below. Tiers left out will not be used for automatic failover. Cancel keeps your draft.",
+    "appliedOrder": "Currently applied order",
+    "proposedOrder": "Order to apply",
+    "requestedSelection": "Requested current tier and model",
+    "noExplicitSelection": "This request does not explicitly select a different current tier or model. Runtime selection is determined by the routing service.",
+    "reviewChanged": "The draft or applied state has changed. Cancel and select Apply changes again to review the latest impact."
   },
   "secrets": {
     "recoveryTitle": "Resume recovery",

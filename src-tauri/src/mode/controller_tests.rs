@@ -4823,3 +4823,830 @@ fn service_constructor_only_migrates_admitted_legacy_schema() {
         assert!(!fixture.runtime.block_on(rebuilt.proxy_service.is_running()));
     }
 }
+
+fn editor_row_target(previous: &Provider, planned: &Provider) -> state::PendingTarget {
+    state::PendingTarget {
+        save_request: Some(state::SaveRequest {
+            id: "33333333-3333-4333-8333-333333333333".into(),
+            provider_id: planned.id.clone(),
+            draft_digest: crate::database::Database::provider_update_digest(planned).unwrap(),
+            revision: "e".repeat(64),
+        }),
+        saved_row: Some(state::SavedRow {
+            before: crate::database::Database::provider_update_digest(previous).unwrap(),
+            provider: crate::database::Database::provider_update_value(planned).unwrap(),
+            clear_model_preference: false,
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_row_save_marks_unchanged_row_in_original_transaction() {
+    let fixture = Fixture::claude();
+    let row = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    assert!(!fixture.state.db.get_user_edited("claude", "b").unwrap());
+    let write =
+        super::operation::AppWrite::begin_mode(&fixture.state.proxy_service, &AppType::Claude)
+            .unwrap();
+    write
+        .run(state::op::APPLY, &[], editor_row_target(&row, &row))
+        .unwrap();
+    assert!(
+        fixture.state.db.get_user_edited("claude", "b").unwrap(),
+        "explicit save owns the original mark even when row contents are equal"
+    );
+    assert_eq!(read_current(&fixture.path).unwrap().unwrap(), br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-key-a","ANTHROPIC_BASE_URL":"https://synthetic-a.invalid","ANTHROPIC_MODEL":"synthetic-model-a"},"unowned":{"keep":true}}"#);
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_row_and_maintenance_mark_roll_back_together() {
+    let fixture = Fixture::claude();
+    let old = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "claude")
+        .unwrap()
+        .unwrap();
+    let mut edited = old.clone();
+    edited.name = "synthetic manual edit".into();
+    fixture.state.db.conn.lock().unwrap().execute_batch("CREATE TRIGGER reject_editor_mark BEFORE UPDATE OF user_edited ON providers WHEN NEW.user_edited=1 BEGIN SELECT RAISE(FAIL,'synthetic editor mark failure'); END;").unwrap();
+    let write =
+        super::operation::AppWrite::begin_mode(&fixture.state.proxy_service, &AppType::Claude)
+            .unwrap();
+    let result = write.run(state::op::APPLY, &[], editor_row_target(&old, &edited));
+    assert!(
+        result.is_err(),
+        "mark failure must fail the same row transaction"
+    );
+    let actual = fixture
+        .state
+        .db
+        .get_provider_by_id_with_vault(
+            "b",
+            "claude",
+            fixture.state.db.secret_session(),
+            &write.vault,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual.name, old.name);
+    assert!(!fixture.state.db.get_user_edited("claude", "b").unwrap());
+    assert!(state::pending(&write.store, &write.vault, "claude")
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+#[serial_test::serial]
+fn gemini_credential_deletion_preserves_original_save_only_and_active_boundary() {
+    for id in ["b", "a"] {
+        let fixture = Fixture::for_app(AppType::Gemini);
+        let native = read_current(&fixture.path).unwrap();
+        let previous = fixture
+            .state
+            .db
+            .get_provider_by_id(id, "gemini")
+            .unwrap()
+            .unwrap();
+        let mut without_key = previous.clone();
+        without_key.settings_config["env"]
+            .as_object_mut()
+            .unwrap()
+            .remove("GEMINI_API_KEY");
+        let result = ProviderService::update(&fixture.state, AppType::Gemini, None, without_key);
+        let after = fixture
+            .state
+            .db
+            .get_provider_by_id(id, "gemini")
+            .unwrap()
+            .unwrap();
+        if id == "b" {
+            assert!(
+                result.is_ok(),
+                "original inactive save permits a structurally valid row without key"
+            );
+            assert!(after.settings_config["env"].get("GEMINI_API_KEY").is_none());
+        } else {
+            assert!(
+                result.is_err(),
+                "active original projector requires the configured API-key credential"
+            );
+            assert_eq!(after.settings_config, previous.settings_config);
+        }
+        assert_eq!(
+            read_current(&fixture.path).unwrap(),
+            native,
+            "neither path switches native authentication mode"
+        );
+        assert!(state::pending(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            "gemini"
+        )
+        .unwrap()
+        .is_none());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn grok_credential_deletion_preserves_original_required_auth_for_all_save_actions() {
+    for id in ["b", "a"] {
+        let fixture = Fixture::for_app(AppType::GrokBuild);
+        let native = read_current(&fixture.path).unwrap();
+        let previous = fixture
+            .state
+            .db
+            .get_provider_by_id(id, "grokbuild")
+            .unwrap()
+            .unwrap();
+        let mut without_key = previous.clone();
+        let mut config = without_key.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        config["model"][id]
+            .as_table_like_mut()
+            .unwrap()
+            .remove("api_key");
+        without_key.settings_config["config"] = json!(config.to_string());
+        let result = ProviderService::update(&fixture.state, AppType::GrokBuild, None, without_key);
+        assert!(
+            result.is_err(),
+            "original Grok save requires api_key or an explicit env_key even when inactive"
+        );
+        let after = fixture
+            .state
+            .db
+            .get_provider_by_id(id, "grokbuild")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.settings_config, previous.settings_config);
+        assert_eq!(read_current(&fixture.path).unwrap(), native);
+        assert!(state::pending(
+            &DeviceStore::for_device(),
+            &fixture.state.db.secret_session().read().unwrap(),
+            "grokbuild"
+        )
+        .unwrap()
+        .is_none());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_initial_read_uses_original_mode_and_safe_request_envelope() {
+    for app in crate::mode::controller::PROXY_APPS {
+        let fixture = Fixture::for_app(app.clone());
+        let before = read_current(&fixture.path).unwrap();
+        let row = fixture
+            .state
+            .db
+            .get_provider_by_id("b", app.as_str())
+            .unwrap()
+            .unwrap();
+        let value = ProviderService::edit_settings(&fixture.state, app.clone(), "b").unwrap();
+        assert!(
+            value["settingsConfig"] == row.settings_config,
+            "original editor read must return the existing settings in its thin envelope"
+        );
+        assert_eq!(value["modeState"]["status"], "ready");
+        assert!(value
+            .get("originalSave")
+            .is_none_or(serde_json::Value::is_null));
+        let target = editor_row_target(&row, &row);
+        let request = target.save_request.clone().unwrap();
+        let store = DeviceStore::for_device();
+        state::set_pending(
+            &store,
+            &fixture.state.db.secret_session().read().unwrap(),
+            app.as_str(),
+            Some(state::Pending {
+                op: state::op::APPLY.into(),
+                files: vec![],
+                target,
+                published: false,
+                extra: Default::default(),
+            }),
+        )
+        .unwrap();
+        let journal = std::fs::read(store.state_path()).unwrap();
+        let value = ProviderService::edit_settings(&fixture.state, app.clone(), "b").unwrap();
+        assert_eq!(value["originalSave"]["app"], app.as_str());
+        assert_eq!(
+            value["originalSave"]["request"],
+            serde_json::to_value(&request).unwrap()
+        );
+        assert_eq!(value["originalSave"]["status"], "pending");
+        let receipt = serde_json::to_string(&value["originalSave"]).unwrap();
+        assert!(!receipt.contains("synthetic-key"));
+        assert!(!receipt.contains("settings_config"));
+        assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+        assert_eq!(read_current(&fixture.path).unwrap(), before);
+
+        // A reopened active editor must still be able to query its original
+        // operation while its native file is a partial/invalid image.
+        let active = fixture
+            .state
+            .db
+            .get_provider_by_id("a", app.as_str())
+            .unwrap()
+            .unwrap();
+        let target = editor_row_target(&active, &active);
+        state::set_pending(
+            &store,
+            &fixture.state.db.secret_session().read().unwrap(),
+            app.as_str(),
+            Some(state::Pending {
+                op: state::op::APPLY.into(),
+                files: vec![],
+                target,
+                published: true,
+                extra: Default::default(),
+            }),
+        )
+        .unwrap();
+        std::fs::write(&fixture.path, b"synthetic partial native [ invalid").unwrap();
+        let journal = std::fs::read(store.state_path()).unwrap();
+        let value = ProviderService::edit_settings(&fixture.state, app.clone(), "a").unwrap();
+        assert!(
+            value["settingsConfig"] == active.settings_config,
+            "partial native files cannot replace the original row while querying a pending save"
+        );
+        assert_eq!(value["originalSave"]["request"]["providerId"], "a");
+        assert!(matches!(
+            value["originalSave"]["status"].as_str(),
+            Some("partial" | "verificationRequired")
+        ));
+        assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+        assert_eq!(
+            read_current(&fixture.path).unwrap().unwrap(),
+            b"synthetic partial native [ invalid"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_normalization_does_not_resolve_grok_environment_credentials() {
+    const NAME: &str = "LOONGPORT_U02_SYNTHETIC_ENV_KEY_73B807E9";
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            std::env::remove_var(NAME);
+        }
+    }
+    assert!(std::env::var_os(NAME).is_none());
+    let _reset = Reset;
+    let fixture = Fixture::for_app(AppType::GrokBuild);
+    let mut row = fixture
+        .state
+        .db
+        .get_provider_by_id("b", "grokbuild")
+        .unwrap()
+        .unwrap();
+    let mut config = row.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    config["model"]["b"]
+        .as_table_like_mut()
+        .unwrap()
+        .remove("api_key");
+    config["model"]["b"]["env_key"] = toml_edit::value(NAME);
+    row.settings_config["config"] = json!(config.to_string());
+    row.meta.get_or_insert_with(Default::default).usage_script = Some(serde_json::from_value(json!({
+        "enabled": false, "language": "javascript", "code": "return {}", "apiKey": "synthetic-env-value"
+    })).unwrap());
+    std::env::set_var(NAME, "synthetic-env-value");
+    let first =
+        ProviderService::prepare_provider_update(&fixture.state, &AppType::GrokBuild, row.clone())
+            .unwrap();
+    std::env::set_var(NAME, "synthetic-env-other");
+    let second =
+        ProviderService::prepare_provider_update(&fixture.state, &AppType::GrokBuild, row).unwrap();
+    assert!(
+        serde_json::to_value(first).unwrap() == serde_json::to_value(second).unwrap(),
+        "pure editor normalization cannot adopt or compare a process environment credential"
+    );
+}
+
+#[test]
+fn editor_codex_delete_uses_original_inline_table_bearer_owner() {
+    let text = "model_provider = \"synthetic\"\nmodel_providers = { synthetic = { name = \"Synthetic\", experimental_bearer_token = \"synthetic-remove\", base_url = \"https://synthetic.invalid\" }, other = { experimental_bearer_token = \"synthetic-keep\" } }\n# untouched\n";
+    let after = crate::codex_config::remove_codex_experimental_bearer_token_if(text, |value| {
+        value == "synthetic-remove"
+    })
+    .unwrap();
+    let doc = after.parse::<toml_edit::DocumentMut>().unwrap();
+    assert!(
+        doc["model_providers"]["synthetic"]
+            .as_table_like()
+            .unwrap()
+            .get("experimental_bearer_token")
+            .is_none(),
+        "explicit removal must reach the original selected inline-table credential"
+    );
+    assert_eq!(
+        doc["model_providers"]["other"]["experimental_bearer_token"].as_str(),
+        Some("synthetic-keep")
+    );
+    assert!(after.ends_with("# untouched\n"));
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_real_preview_confirm_query_closes_original_four_app_save_only() {
+    for app in crate::mode::controller::PROXY_APPS {
+        let fx = Fixture::for_app(app.clone());
+        let mut edited = fx
+            .state
+            .db
+            .get_provider_by_id("b", app.as_str())
+            .unwrap()
+            .unwrap();
+        edited.name = "Synthetic edited name".into();
+        let native = read_current(&fx.path).unwrap();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &app,
+            edited.clone(),
+            "b",
+            "d15d3030-1000-4000-8000-000000000001",
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview["status"], "ready");
+        assert_eq!(preview["action"], "saveOnly");
+        assert!(preview["files"].as_array().unwrap().is_empty());
+        assert!(!preview.to_string().contains("synthetic-key"));
+        assert!(read_current(&fx.path).unwrap() == native);
+        assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
+        assert_eq!(
+            fx.state
+                .db
+                .get_provider_by_id("b", app.as_str())
+                .unwrap()
+                .unwrap()
+                .name,
+            "b"
+        );
+        let request: state::SaveRequest =
+            serde_json::from_value(preview["request"].clone()).unwrap();
+        let result = crate::services::provider::edit::confirm(
+            &fx.state,
+            &app,
+            edited.clone(),
+            "b",
+            request.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result["status"], "completed");
+        assert_eq!(
+            fx.state
+                .db
+                .get_provider_by_id("b", app.as_str())
+                .unwrap()
+                .unwrap()
+                .name,
+            edited.name
+        );
+        assert!(fx.state.db.get_user_edited(app.as_str(), "b").unwrap());
+        assert!(read_current(&fx.path).unwrap() == native);
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let repeated = crate::services::provider::edit::confirm(
+            &fx.state,
+            &app,
+            edited,
+            "b",
+            request.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(repeated["status"], "completed");
+        let queried = crate::services::provider::edit::query(&fx.state, &app, request).unwrap();
+        assert_eq!(queried["status"], "completed");
+        assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_real_claude_preview_conflict_and_original_result_are_read_only() {
+    let fx = Fixture::claude();
+    let mut edited = fx
+        .state
+        .db
+        .get_provider_by_id("a", "claude")
+        .unwrap()
+        .unwrap();
+    edited.settings_config["env"]["ANTHROPIC_MODEL"] = json!("synthetic-edited-model");
+    let preview = crate::services::provider::edit::preview(
+        &fx.state,
+        &AppType::Claude,
+        edited.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-000000000002",
+        false,
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(preview["action"], "saveAndApply");
+    assert_eq!(preview["files"][0]["role"], "claudeSettings");
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    std::fs::write(
+        &fx.path,
+        br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-external-key"}}"#,
+    )
+    .unwrap();
+    let native = read_current(&fx.path).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let result = crate::services::provider::edit::confirm(
+        &fx.state,
+        &AppType::Claude,
+        edited,
+        "a",
+        request.clone(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(result["status"], "stale");
+    assert!(read_current(&fx.path).unwrap() == native);
+    assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
+    let queried =
+        crate::services::provider::edit::query(&fx.state, &AppType::Claude, request).unwrap();
+    assert_eq!(queried["status"], "notRecorded");
+    assert!(!queried.to_string().contains("synthetic-external-key"));
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_real_four_app_direct_save_and_lost_response_query() {
+    for app in crate::mode::controller::PROXY_APPS {
+        let fx = Fixture::for_app(app.clone());
+        let mut edited = fx
+            .state
+            .db
+            .get_provider_by_id("a", app.as_str())
+            .unwrap()
+            .unwrap();
+        match app {
+            AppType::Claude => {
+                edited.settings_config["env"]["ANTHROPIC_MODEL"] = json!("model-edit")
+            }
+            AppType::Gemini => {
+                edited.settings_config["config"]["model"]["name"] = json!("model-edit")
+            }
+            AppType::Codex | AppType::GrokBuild => {
+                let text = edited.settings_config["config"]
+                    .as_str()
+                    .unwrap()
+                    .replace("model-a", "model-edit");
+                edited.settings_config["config"] = json!(text);
+            }
+            _ => unreachable!(),
+        }
+        let before = read_current(&fx.path).unwrap();
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &app,
+            edited.clone(),
+            "a",
+            "d15d3030-1000-4000-8000-000000000003",
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview["status"], "ready");
+        assert_eq!(preview["action"], "saveAndApply");
+        assert!(!preview["files"].as_array().unwrap().is_empty());
+        assert!(read_current(&fx.path).unwrap() == before);
+        assert!(!preview.to_string().contains("synthetic-key"));
+        let request: state::SaveRequest =
+            serde_json::from_value(preview["request"].clone()).unwrap();
+        assert_eq!(
+            crate::services::provider::edit::confirm(
+                &fx.state,
+                &app,
+                edited,
+                "a",
+                request.clone(),
+                false
+            )
+            .unwrap()["status"],
+            "completed"
+        );
+        let all_files = crate::mode::controller::files(&app)
+            .unwrap()
+            .into_iter()
+            .flat_map(|file| read_current(&file.path).unwrap().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&all_files).contains("model-edit"));
+        assert_eq!(
+            crate::services::provider::edit::query(&fx.state, &app, request).unwrap()["status"],
+            "completed"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_real_blank_preserves_and_explicit_delete_keeps_original_auth_boundary() {
+    for active in [false, true] {
+        let fx = Fixture::claude();
+        let id = if active { "a" } else { "b" };
+        let mut edited = fx
+            .state
+            .db
+            .get_provider_by_id(id, "claude")
+            .unwrap()
+            .unwrap();
+        let original = edited.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"].clone();
+        edited.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("  ");
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &AppType::Claude,
+            edited.clone(),
+            id,
+            "d15d3030-1000-4000-8000-000000000004",
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview["status"], "ready");
+        let request: state::SaveRequest =
+            serde_json::from_value(preview["request"].clone()).unwrap();
+        assert_eq!(
+            crate::services::provider::edit::confirm(
+                &fx.state,
+                &AppType::Claude,
+                edited,
+                id,
+                request,
+                false
+            )
+            .unwrap()["status"],
+            "completed"
+        );
+        assert!(
+            fx.state
+                .db
+                .get_provider_by_id(id, "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config["env"]["ANTHROPIC_AUTH_TOKEN"]
+                == original
+        );
+    }
+    for active in [false, true] {
+        let fx = Fixture::for_app(AppType::Gemini);
+        let id = if active { "a" } else { "b" };
+        let edited = fx
+            .state
+            .db
+            .get_provider_by_id(id, "gemini")
+            .unwrap()
+            .unwrap();
+        let native = read_current(&fx.path).unwrap();
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &AppType::Gemini,
+            edited.clone(),
+            id,
+            "d15d3030-1000-4000-8000-000000000005",
+            true,
+        )
+        .unwrap();
+        assert_eq!(preview["status"], if active { "blocked" } else { "ready" });
+        if !active {
+            let request: state::SaveRequest =
+                serde_json::from_value(preview["request"].clone()).unwrap();
+            assert_eq!(
+                crate::services::provider::edit::confirm(
+                    &fx.state,
+                    &AppType::Gemini,
+                    edited,
+                    id,
+                    request,
+                    true
+                )
+                .unwrap()["status"],
+                "completed"
+            );
+            assert!(fx
+                .state
+                .db
+                .get_provider_by_id(id, "gemini")
+                .unwrap()
+                .unwrap()
+                .settings_config["env"]
+                .get("GEMINI_API_KEY")
+                .is_none());
+        }
+        assert!(read_current(&fx.path).unwrap() == native);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_codex_preview_checks_both_declared_bearer_slots() {
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut previous = fx
+        .state
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    previous.settings_config["config"] = json!(format!(
+        "{}experimental_bearer_token = \"synthetic-key-b\"\n",
+        previous.settings_config["config"].as_str().unwrap()
+    ));
+    fx.state.db.save_provider("codex", &previous).unwrap();
+    let before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    for (root_value, delete) in [
+        ("\"synthetic-new-key\"", true),
+        ("\"***masked***\"", false),
+        ("42", false),
+        ("\"synthetic-other-key\"", false),
+    ] {
+        let mut draft = previous.clone();
+        draft.settings_config["config"] = json!(format!(
+            "experimental_bearer_token = {root_value}\n{}",
+            draft.settings_config["config"].as_str().unwrap()
+        ));
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &AppType::Codex,
+            draft,
+            "b",
+            "d15d3030-1000-4000-8000-000000000006",
+            delete,
+        )
+        .unwrap();
+        assert_eq!(
+            preview["status"], "blocked",
+            "declared credential slots must each be validated"
+        );
+        assert!(!preview.to_string().contains("synthetic-"));
+    }
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        before
+    );
+    assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
+    let mut spaced = previous.clone();
+    spaced.settings_config["config"] = json!(spaced.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .replace(
+            "model_provider = \"synthetic\"",
+            "model_provider = \" synthetic \""
+        )
+        .replace(
+            "experimental_bearer_token = \"synthetic-key-b\"",
+            "experimental_bearer_token = \"synthetic-replacement\""
+        ));
+    let preview = crate::services::provider::edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        spaced,
+        "b",
+        "d15d3030-1000-4000-8000-000000000009",
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        preview["status"], "blocked",
+        "preparation must use the original owner's normalized selector"
+    );
+    // Valid duplicate slots preserve blank edits; inactive table bytes stay owned by the draft.
+    previous.settings_config["config"] = json!(format!("experimental_bearer_token = \"synthetic-key-b\"\n{}\n[model_providers.inactive]\nexperimental_bearer_token = \"synthetic-inactive-keep\"\n", previous.settings_config["config"].as_str().unwrap()));
+    fx.state.db.save_provider("codex", &previous).unwrap();
+    let mut draft = previous.clone();
+    draft.settings_config["config"] = json!(draft.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .replace("synthetic-key-b", "  "));
+    draft.settings_config["auth"]["OPENAI_API_KEY"] = json!("");
+    let preview = crate::services::provider::edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "b",
+        "d15d3030-1000-4000-8000-000000000008",
+        false,
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    let request = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        crate::services::provider::edit::confirm(
+            &fx.state,
+            &AppType::Codex,
+            draft,
+            "b",
+            request,
+            false
+        )
+        .unwrap()["status"],
+        "completed"
+    );
+    let saved = fx
+        .state
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    let doc = saved.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert!(doc["experimental_bearer_token"].as_str() == Some("synthetic-key-b"));
+    assert!(
+        doc["model_providers"]["synthetic"]["experimental_bearer_token"].as_str()
+            == Some("synthetic-key-b")
+    );
+    assert!(
+        doc["model_providers"]["inactive"]["experimental_bearer_token"].as_str()
+            == Some("synthetic-inactive-keep")
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn editor_query_reuses_original_unknown_publication_result_without_recovery() {
+    for active in [false, true] {
+        let fx = Fixture::claude();
+        let id = if active { "a" } else { "b" };
+        let mut draft = fx
+            .state
+            .db
+            .get_provider_by_id(id, "claude")
+            .unwrap()
+            .unwrap();
+        draft.name = "Synthetic interrupted edit".into();
+        draft.settings_config["env"]["ANTHROPIC_MODEL"] = json!("synthetic-edited-model");
+        let preview = crate::services::provider::edit::preview(
+            &fx.state,
+            &AppType::Claude,
+            draft.clone(),
+            id,
+            "d15d3030-1000-4000-8000-000000000007",
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview["status"], "ready");
+        let request: state::SaveRequest =
+            serde_json::from_value(preview["request"].clone()).unwrap();
+        {
+            let _fault = Fault::at(if active { "marked" } else { "target" });
+            let result = crate::services::provider::edit::confirm(
+                &fx.state,
+                &AppType::Claude,
+                draft.clone(),
+                id,
+                request.clone(),
+                false,
+            )
+            .unwrap();
+            assert_eq!(result["status"], "verificationRequired");
+        }
+        let before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        let native = read_current(&fx.path).unwrap();
+        for repeat in [false, true] {
+            let result = if repeat {
+                crate::services::provider::edit::confirm(
+                    &fx.state,
+                    &AppType::Claude,
+                    draft.clone(),
+                    id,
+                    request.clone(),
+                    false,
+                )
+            } else {
+                crate::services::provider::edit::query(&fx.state, &AppType::Claude, request.clone())
+            }
+            .unwrap();
+            assert_eq!(result["status"], "verificationRequired");
+        }
+        assert_eq!(
+            crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+            before
+        );
+        assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
+        assert!(read_current(&fx.path).unwrap() == native);
+    }
+}

@@ -1,3 +1,4 @@
+import type { ProviderUpdateInput } from "@/lib/api/providers";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
@@ -787,13 +788,21 @@ function App() {
   const handleEditProvider = async ({
     provider,
     originalId,
-  }: {
-    provider: Provider;
-    originalId?: string;
-  }) => {
-    if (providerWritesBlocked) return;
-    await updateProvider(provider, originalId);
-    setEditingProvider(null);
+    edit,
+  }: ProviderUpdateInput) => {
+    if (providerWritesBlocked && !edit?.queryOnly) {
+      if (edit)
+        return {
+          app: activeApp,
+          request: edit.request,
+          status: "blocked" as const,
+          code: "pendingOperation" as const,
+        };
+      return;
+    }
+    return edit
+      ? updateProvider(provider, originalId, edit)
+      : updateProvider(provider, originalId);
   };
 
   const handleConfirmAction = async () => {

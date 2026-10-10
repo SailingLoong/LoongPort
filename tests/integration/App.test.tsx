@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -25,6 +26,7 @@ import {
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
 
+const editResultMock = vi.hoisted(() => vi.fn());
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
@@ -126,9 +128,18 @@ vi.mock("@/components/relay/AddHubPage", () => ({
 }));
 
 vi.mock("@/components/providers/EditProviderDialog", () => ({
-  EditProviderDialog: ({ open, provider, onSubmit, onOpenChange }: any) =>
+  EditProviderDialog: ({
+    open,
+    provider,
+    onSubmit,
+    onOpenChange,
+    mutationsDisabled,
+  }: any) =>
     open ? (
-      <div data-testid="edit-provider-dialog">
+      <div
+        data-testid="edit-provider-dialog"
+        data-mutations-disabled={String(!!mutationsDisabled)}
+      >
         <button
           onClick={() =>
             onSubmit({
@@ -142,6 +153,32 @@ vi.mock("@/components/providers/EditProviderDialog", () => ({
         >
           confirm-edit
         </button>
+        {[false, true].map((queryOnly) => (
+          <button
+            key={String(queryOnly)}
+            onClick={() => {
+              const request = {
+                id: "094b4732-d3c9-43f4-a123-009293a85273",
+                providerId: provider.id,
+                draftDigest: "a".repeat(64),
+                revision: "b".repeat(64),
+              };
+              void Promise.resolve(
+                onSubmit({
+                  provider,
+                  originalId: provider.id,
+                  edit: {
+                    request,
+                    deleteCredential: false,
+                    ...(queryOnly ? { queryOnly: true } : {}),
+                  },
+                }),
+              ).then(editResultMock);
+            }}
+          >
+            {queryOnly ? "query-original-edit" : "confirm-bound-edit"}
+          </button>
+        ))}
         <button onClick={() => onOpenChange(false)}>close-edit</button>
       </div>
     ) : null,
@@ -212,8 +249,7 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
-const renderApp = () => {
-  const client = new QueryClient();
+const renderApp = (client = new QueryClient()) => {
   // This harness mocks the workspace; seed its successful read in the shared cache.
   for (const app of ["claude", "codex", "gemini", "grok"]) {
     client.setQueryData(["applicationRouting", app], {
@@ -241,6 +277,7 @@ async function selectApplication(name: string) {
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
+    editResultMock.mockReset();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     // Start each independent flow from the persisted application view.
@@ -722,5 +759,99 @@ describe("App integration with MSW", () => {
 
     expect(skillsPanelMocks.openDiscovery).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("unified-skills-panel")).toBeInTheDocument();
+  });
+});
+
+describe("U02 App original result callback", () => {
+  it("returns the original outcome and permits a read-only query while application writes are blocked", async () => {
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+    const row = {
+      id: "u02-app-row",
+      name: "Synthetic App row",
+      settingsConfig: {},
+    };
+    setProviders("claude", { [row.id]: row });
+    setCurrentProviderId("claude", row.id);
+    const confirms = vi.fn();
+    const queries = vi.fn();
+    server.use(
+      http.post(
+        "http://tauri.local/confirm_provider_edit",
+        async ({ request }) => {
+          const input = (await request.json()) as any;
+          confirms();
+          return HttpResponse.json({
+            app: input.app,
+            request: input.request,
+            status: "unknown",
+          });
+        },
+      ),
+      http.post(
+        "http://tauri.local/query_provider_edit",
+        async ({ request }) => {
+          const input = (await request.json()) as any;
+          queries();
+          return HttpResponse.json({
+            app: input.app,
+            request: input.request,
+            status: "completed",
+          });
+        },
+      ),
+    );
+    editResultMock.mockReset();
+    const client = new QueryClient();
+    const view = renderApp(client);
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list").textContent).toContain(
+          row.id,
+        ),
+      );
+      fireEvent.click(screen.getByText("edit"));
+      await screen.findByTestId("edit-provider-dialog");
+      fireEvent.click(screen.getByText("confirm-bound-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "unknown" }),
+        ),
+      );
+      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+      act(() => {
+        client.setQueryData(["applicationRouting", "claude"], {
+          autoFailoverEnabled: false,
+          routingActive: false,
+          modeState: { canWrite: false, status: "pending" },
+        });
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("edit-provider-dialog")).toHaveAttribute(
+          "data-mutations-disabled",
+          "true",
+        ),
+      );
+      fireEvent.click(screen.getByText("confirm-bound-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "blocked" }),
+        ),
+      );
+      fireEvent.click(screen.getByText("query-original-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "completed" }),
+        ),
+      );
+      expect(confirms).toHaveBeenCalledTimes(1);
+      expect(queries).toHaveBeenCalledTimes(1);
+      // The actual dialog, not App's callback, decides whether its draft/session can close.
+      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      await client.cancelQueries();
+      client.clear();
+    }
   });
 });

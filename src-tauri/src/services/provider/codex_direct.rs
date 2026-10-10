@@ -464,19 +464,27 @@ fn plan_target(db: &Database, owner: &Owner<'_>, target: &Target<'_>) -> Result<
         }
     };
     if let Target::Proxy { base_url, .. } = target {
-        if planned.official {
-            planned.config.route = RouteWrite::OfficialProxy {
-                base_url: (*base_url).into(),
-                unified: crate::settings::unify_codex_session_history(),
-            };
-            planned.stamp = None;
-        } else {
-            planned.config.route = RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false));
-            planned.stamp = Some(RouteAuth::Bearer);
-            planned.keep_native = true;
-        }
+        apply_proxy_projection(
+            &mut planned,
+            base_url,
+            crate::settings::unify_codex_session_history(),
+        );
     }
     Ok(planned)
+}
+
+fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
+    if planned.official {
+        planned.config.route = RouteWrite::OfficialProxy {
+            base_url: base_url.into(),
+            unified: unify,
+        };
+        planned.stamp = None;
+    } else {
+        planned.config.route = RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false));
+        planned.stamp = Some(RouteAuth::Bearer);
+        planned.keep_native = true;
+    }
 }
 
 /// The controller borrows the existing manager and five-file writer. Preparation
@@ -1159,19 +1167,20 @@ pub(crate) fn native_completion_match_with_generation(
     Some(actual == after.to_string().parse::<toml::Table>().ok()?)
 }
 
-fn run_pinned(
-    write: &AppWrite<'_>,
+type GuardedFiles = Vec<(LiveFile, Guarded)>;
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_pinned(
+    store: &DeviceStore,
+    vault: &std::sync::RwLockReadGuard<'_, crate::secrets::VaultContext>,
+    inputs: Inputs,
     mut planned: Planned,
     prepared: &Prepared,
     provider: Option<&Provider>,
     revision: Option<&CatalogRevision>,
-    operation: &str,
     mut target: PendingTarget,
-) -> Result<(OperationReport, bool), AppError> {
-    if let Some((account, Some(expected))) = &prepared.outgoing {
-        ensure_codex_live_auth_unchanged_for_managed_account(account, expected)?;
-    }
-    let inputs = read_inputs(write, &planned.facts.official_logins)?;
+    preserve: bool,
+) -> Result<(GuardedFiles, PendingTarget, bool, Option<String>), AppError> {
     let files = &inputs.files;
     let pre = &inputs.pre;
     let live_auth = &inputs.live_auth;
@@ -1205,16 +1214,10 @@ fn run_pinned(
         }
     }
     let stash_file = DeviceFile::registered(STASH_FILENAME)?;
-    let auth_plan = plan_auth(
-        &mut planned,
-        prepared,
-        provider,
-        &inputs,
-        crate::settings::preserve_codex_official_auth_on_switch(),
-    )?;
+    let auth_plan = plan_auth(&mut planned, prepared, provider, &inputs, preserve)?;
     // Keep ownership in the original projector's top-field mechanism; never
     // write/import the external catalog. A takeover needs the bound config image.
-    let existing_written = state::written(&write.store, &write.vault, app())?;
+    let existing_written = state::written(store, vault, app())?;
     if let Some(written) = &existing_written {
         written.validate()?;
     }
@@ -1262,11 +1265,15 @@ fn run_pinned(
     } else {
         pre[3].clone()
     };
+    let stash_semantics = auth_plan
+        .stash
+        .as_ref()
+        .map(sorted_json_bytes)
+        .transpose()?
+        .map(|bytes| digest(Some(&bytes)));
     let stash_after = auth_plan
         .stash
-        .map(|stash| {
-            sorted_json_bytes(&stash).and_then(|bytes| stash_file.encode(&write.vault, &bytes))
-        })
+        .map(|stash| sorted_json_bytes(&stash).and_then(|bytes| stash_file.encode(vault, &bytes)))
         .transpose()?
         .or_else(|| pre[4].clone());
     let after = [
@@ -1276,20 +1283,6 @@ fn run_pinned(
         marker_after,
         stash_after,
     ];
-    let patches = pre
-        .iter()
-        .zip(after)
-        .map(|(pre, after)| guarded(pre.as_deref(), after))
-        .collect::<Vec<_>>();
-    let changes = files
-        .iter()
-        .cloned()
-        .zip(&patches)
-        .map(|(file, patch)| FileChange {
-            file,
-            patch: patch as &dyn LivePatch,
-        })
-        .collect::<Vec<_>>();
     let auth_intent = prepared
         .target_login
         .as_ref()
@@ -1311,8 +1304,202 @@ fn run_pinned(
         }),
         ..Default::default()
     });
-    let report = write.run(operation, &changes, target)?;
-    Ok((report, preserved))
+    let changes = files
+        .iter()
+        .cloned()
+        .zip(
+            pre.iter()
+                .zip(after)
+                .map(|(pre, after)| guarded(pre.as_deref(), after)),
+        )
+        .collect();
+    Ok((changes, target, preserved, stash_semantics.flatten()))
+}
+
+fn run_pinned(
+    write: &AppWrite<'_>,
+    planned: Planned,
+    prepared: &Prepared,
+    provider: Option<&Provider>,
+    revision: Option<&CatalogRevision>,
+    operation: &str,
+    target: PendingTarget,
+) -> Result<(OperationReport, bool), AppError> {
+    if let Some((account, Some(expected))) = &prepared.outgoing {
+        ensure_codex_live_auth_unchanged_for_managed_account(account, expected)?;
+    }
+    let inputs = read_inputs(write, &planned.facts.official_logins)?;
+    let (files, target, preserved, _) = assemble_pinned(
+        &write.store,
+        &write.vault,
+        inputs,
+        planned,
+        prepared,
+        provider,
+        revision,
+        target,
+        crate::settings::preserve_codex_official_auth_on_switch(),
+    )?;
+    let changes = files
+        .iter()
+        .map(|(file, patch)| FileChange {
+            file: file.clone(),
+            patch: patch as &dyn LivePatch,
+        })
+        .collect::<Vec<_>>();
+    Ok((write.run(operation, &changes, target)?, preserved))
+}
+
+/// Read-only editor entry into the same five-file assembly. Unknown discovery
+/// or login generations remain unavailable; no prepare/refresh/adopt is called.
+#[allow(clippy::type_complexity)]
+pub(crate) fn plan_editor_save(
+    service: &ProxyService,
+    owner: &Owner<'_>,
+    desired: Target<'_>,
+    mut target: PendingTarget,
+    request_id: &str,
+) -> Result<(GuardedFiles, PendingTarget, bool, String, String), AppError> {
+    let provider = desired.provider().ok_or_else(invalid)?;
+    if codex_has_catalog_model_specs(&provider.settings_config) {
+        return Err(invalid());
+    }
+    // The legacy outgoing-exclusives fallback logs parse diagnostics. A pure
+    // editor must reject malformed owner input before reaching that fallback.
+    if let Some(previous) = owner.provider() {
+        project(previous)?;
+    }
+    let rows = service.database().get_all_providers(app())?;
+    let settings = crate::settings::get_settings();
+    let projection = project_for_write(provider)?;
+    let endpoint = if is_official(provider) && !settings.unify_codex_session_history {
+        let config = service.database().get_global_proxy_config_existing()?;
+        Some((config.listen_address, config.listen_port))
+    } else {
+        None
+    };
+    let route = direct_route(
+        &projection,
+        settings.unify_codex_session_history,
+        endpoint.as_ref(),
+    )?;
+    let mut planned = plan_projected(
+        owner,
+        provider,
+        projection,
+        route,
+        row_facts_from_providers(rows.values()),
+    )?;
+    if let Target::Proxy { base_url, .. } = desired {
+        apply_proxy_projection(&mut planned, base_url, settings.unify_codex_session_history);
+    }
+    service
+        .codex_manager()
+        .try_with_live_auth_guard(|generation| {
+            let vault = service.database().secret_session().read()?;
+            let store = DeviceStore::for_device();
+            let pre = files()
+                .iter()
+                .map(|file| read_current(&file.path))
+                .collect::<Result<Vec<_>, _>>()?;
+            let text = std::str::from_utf8(pre[1].as_deref().unwrap_or_default())
+                .map_err(|_| invalid())?;
+            if codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+                return Err(invalid());
+            }
+            let catalog = NativeCatalogInputs::capture(provider, text).ok_or_else(invalid)?;
+            let owner_catalog = owner
+                .provider()
+                .map(|row| NativeCatalogInputs::capture(row, text).ok_or_else(invalid))
+                .transpose()?;
+            let inputs = parse_inputs(files(), pre, &vault, &planned.facts.official_logins)?;
+            let mut prepared = Prepared {
+                auth_pre: digest(inputs.pre[0].as_deref()),
+                ..Default::default()
+            };
+            let managed = managed_account(provider).filter(|_| is_official(provider));
+            let outgoing = owner
+                .provider()
+                .and_then(managed_account)
+                .filter(|account| Some(account) != managed.as_ref());
+            let mut store_digest = None;
+            if managed.is_some() || outgoing.is_some() {
+                let path = crate::secrets::files::CredentialFile::Codex
+                    .path(service.database().secret_session());
+                let bytes = crate::config_file_io::read_regular_file(&path, 32 * 1024 * 1024)
+                    .map_err(|error| AppError::io(&path, error))?;
+                if generation.native_store_matches(&vault, bytes.as_deref()) != Some(true) {
+                    return Err(invalid());
+                }
+                store_digest = digest(bytes.as_deref());
+            }
+            if let Some(account) = &managed {
+                let auth = inputs.live_auth.as_ref().ok_or_else(invalid)?;
+                if !inputs.live_managed || !generation.matches_live_generation(account, auth) {
+                    return Err(invalid());
+                }
+                prepared.target_login = Some((account.clone(), auth.clone()));
+            }
+            if let Some(account) = outgoing {
+                let refresh = if let Some(auth) = inputs
+                    .live_auth
+                    .as_ref()
+                    .filter(|auth| codex_live_auth_is_managed_chatgpt_login(auth, &account))
+                {
+                    if !generation.matches_live_generation(&account, auth) {
+                        return Err(invalid());
+                    }
+                    Some(
+                        auth.pointer("/tokens/refresh_token")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                };
+                prepared.outgoing = Some((account, refresh));
+            }
+            if matches!(desired, Target::Proxy { .. }) {
+                target.state.as_mut().ok_or_else(invalid)?.contract =
+                    Some(contract_for_plan(&desired, &planned, managed.as_deref()));
+            }
+            let (files, target, preserved, stash) = assemble_pinned(
+                &store,
+                &vault,
+                inputs,
+                planned,
+                &prepared,
+                Some(provider),
+                None,
+                target,
+                settings.preserve_codex_official_auth_on_switch,
+            )?;
+            let generation_revision = generation.native_revision(request_id)?;
+            let row_versions = rows
+                .values()
+                .map(Database::provider_update_digest)
+                .collect::<Result<Vec<_>, _>>()?;
+            let source = sorted_json_bytes(&serde_json::json!([
+                row_versions,
+                settings.unify_codex_session_history,
+                settings.preserve_codex_official_auth_on_switch,
+                endpoint,
+                catalog.references(),
+                owner_catalog.as_ref().map(NativeCatalogInputs::references),
+                store_digest,
+                generation_revision,
+                stash,
+                target.written
+            ]))?;
+            Ok((
+                files,
+                target,
+                preserved,
+                digest(Some(&source)).ok_or_else(invalid)?,
+                generation_revision,
+            ))
+        })
 }
 
 pub(crate) fn switch_to(

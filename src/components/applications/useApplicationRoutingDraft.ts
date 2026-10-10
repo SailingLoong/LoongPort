@@ -24,6 +24,7 @@ export function useApplicationRoutingDraft(
   const [confirmation, setConfirmation] = useState<{
     name: string;
     change: ApplicationRoutingChange;
+    isCurrent?: () => boolean;
   } | null>(null);
   const pending = useRef(false);
   const lifecycle = useRef(0);
@@ -46,8 +47,14 @@ export function useApplicationRoutingDraft(
   const submit = async (
     change: ApplicationRoutingChange,
     quitChatgpt?: boolean,
+    isCurrent?: () => boolean,
   ) => {
     if (pending.current) return;
+    if (isCurrent && !isCurrent()) {
+      setConfirmation(null);
+      toast.warning(t("applications.reviewChanged"));
+      return;
+    }
     const generation = lifecycle.current;
     pending.current = true;
     setSubmitting(true);
@@ -56,7 +63,7 @@ export function useApplicationRoutingDraft(
       const result = await apply(change, quitChatgpt);
       if (generation !== lifecycle.current) return;
       if (result.status === "confirmationRequired") {
-        setConfirmation({ name: result.targetName, change });
+        setConfirmation({ name: result.targetName, change, isCurrent });
         return;
       }
       if (change.order) discard();
@@ -95,7 +102,8 @@ export function useApplicationRoutingDraft(
     discard,
     cancel: () => setConfirmation(null),
     confirm: (quit: boolean) =>
-      confirmation && void submit(confirmation.change, quit),
+      confirmation &&
+      void submit(confirmation.change, quit, confirmation.isCurrent),
     saveAs: (name: string, ids: string[]) => {
       setProfileName(name);
       setStagedIds(ids);

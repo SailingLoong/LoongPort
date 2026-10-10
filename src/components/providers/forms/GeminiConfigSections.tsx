@@ -125,6 +125,7 @@ GEMINI_MODEL=gemini-3.6-flash`}
 };
 
 interface GeminiConfigSectionProps {
+  redactErrors?: boolean;
   value: string;
   onChange: (value: string) => void;
   configError?: string;
@@ -134,6 +135,7 @@ interface GeminiConfigSectionProps {
  * GeminiConfigSection - Config JSON editor section with common config support
  */
 export const GeminiConfigSection: React.FC<GeminiConfigSectionProps> = ({
+  redactErrors,
   value,
   onChange,
   configError,
@@ -168,6 +170,7 @@ export const GeminiConfigSection: React.FC<GeminiConfigSectionProps> = ({
       </label>
 
       <JsonEditor
+        redactErrors={redactErrors}
         value={value}
         onChange={onChange}
         placeholder={`{

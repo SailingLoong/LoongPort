@@ -113,6 +113,65 @@ fn assert_new(fx: &Fixture) {
     assert_eq!(fx.read(&fx.b), json!({"key": "new"}));
 }
 
+#[test]
+fn provider_save_keeps_original_request_result_after_journal_cleanup() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let row = crate::provider::Provider::with_id(
+        "synthetic-edit".into(),
+        "Synthetic edit".into(),
+        json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-secret"}}),
+        None,
+    );
+    // Decode the new wire-compatible journal shape so the original owner can
+    // demonstrate the missing behavior before the typed field is implemented.
+    let target: PendingTarget = serde_json::from_value(json!({
+        "saved_row": {
+            "before": Database::provider_update_digest(&row).unwrap(),
+            "provider": Database::provider_update_value(&row).unwrap()
+        },
+        "save_request": {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "provider_id": "synthetic-edit",
+            "draft_digest": "a".repeat(64),
+            "revision": "b".repeat(64)
+        }
+    }))
+    .unwrap();
+    let committed = RefCell::new(0);
+    let guard = lock_app(&fx.app);
+    let vault = fx.key.read().unwrap();
+    let result = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target,
+        &|_| {
+            *committed.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "original save operation must accept its bound request"
+    );
+    assert_eq!(*committed.borrow(), 1);
+    assert!(state::pending(&fx.store, &vault, &fx.app)
+        .unwrap()
+        .is_none());
+    let live = serde_json::to_value(state::load_app(&fx.store, &vault, &fx.app).unwrap()).unwrap();
+    assert_eq!(
+        live["apps"]["claude"]["last_save"]["request"]["id"],
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(live["apps"]["claude"]["last_save"]["outcome"], "completed");
+    assert!(!serde_json::to_string(&live["apps"]["claude"]["last_save"])
+        .unwrap()
+        .contains("synthetic-secret"));
+}
+
 /// 改 a、删 b，在 `stage` 之后的某一步崩溃。
 fn write_a_delete_b(fx: &Fixture, crash: &str) -> RefCell<Option<String>> {
     let pointer = RefCell::new(None);
@@ -1326,4 +1385,573 @@ fn u03_recovery_never_clears_a_replacement_journal() {
         state::pending(&fx.store, &vault, &fx.app).unwrap(),
         Some(replacement)
     );
+}
+
+fn bound_editor_target() -> PendingTarget {
+    let row = crate::provider::Provider::with_id(
+        "synthetic-edit".into(),
+        "Synthetic edit".into(),
+        json!({"env": {}}),
+        None,
+    );
+    let digest = Database::provider_update_digest(&row).unwrap();
+    PendingTarget {
+        save_request: Some(state::SaveRequest {
+            id: "22222222-2222-4222-8222-222222222222".into(),
+            provider_id: row.id.clone(),
+            draft_digest: digest.clone(),
+            revision: "c".repeat(64),
+        }),
+        saved_row: Some(state::SavedRow {
+            before: digest,
+            provider: Database::provider_update_value(&row).unwrap(),
+            clear_model_preference: false,
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn repeated_editor_request_returns_original_completed_result_without_writes() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let commits = RefCell::new(0);
+    let target = bound_editor_target();
+    run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target.clone(),
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let before = fs::read(fx.store.state_path()).unwrap();
+    run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target,
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        *commits.borrow(),
+        1,
+        "same editor request must not replay target effects"
+    );
+    assert_eq!(
+        fs::read(fx.store.state_path()).unwrap(),
+        before,
+        "querying the original completed result must not rewrite its receipt"
+    );
+}
+
+#[test]
+fn reused_editor_request_identity_cannot_claim_a_different_draft() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let mut target = bound_editor_target();
+    run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target.clone(),
+        &|_| Ok(()),
+    )
+    .unwrap();
+    let before = fs::read(fx.store.state_path()).unwrap();
+    target.save_request.as_mut().unwrap().draft_digest = "d".repeat(64);
+    let result = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target,
+        &|_| panic!("a changed draft must not reach commit"),
+    );
+    assert!(
+        result.is_err(),
+        "same request id with different draft is a conflict"
+    );
+    assert_eq!(fs::read(fx.store.state_path()).unwrap(), before);
+}
+
+#[test]
+fn discarded_editor_request_cannot_replay_even_when_native_bytes_are_unchanged() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let target = bound_editor_target();
+    failpoint::crash_at(Some("pending"));
+    let started = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target.clone(),
+        &|_| Ok(()),
+    );
+    failpoint::crash_at(None);
+    assert!(started.is_err());
+    assert_eq!(
+        recover(&fx.store, &vault, &guard, &[], &|_| Ok(())).unwrap(),
+        Some(RecoveryOutcome::Discarded)
+    );
+    let live = state::load_app(&fx.store, &vault, &fx.app).unwrap();
+    assert_eq!(
+        live.apps["claude"].last_save.as_ref().unwrap().outcome,
+        state::SaveOutcome::Discarded
+    );
+    let before = fs::read(fx.store.state_path()).unwrap();
+    let repeated = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target,
+        &|_| panic!("discarded request must require a new preview"),
+    );
+    assert!(repeated.is_err());
+    assert_eq!(fs::read(fx.store.state_path()).unwrap(), before);
+}
+
+#[test]
+fn pending_editor_confirmation_never_recovers_or_repeats_side_effects() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let target = bound_editor_target();
+    failpoint::crash_at(Some("pending"));
+    let started = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target.clone(),
+        &|_| Ok(()),
+    );
+    failpoint::crash_at(None);
+    assert!(started.is_err());
+    let before = fs::read(fx.store.state_path()).unwrap();
+    let commits = RefCell::new(0);
+    let repeated = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[],
+        target,
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    assert!(
+        repeated.is_err(),
+        "original pending requires query or explicit recovery"
+    );
+    assert_eq!(*commits.borrow(), 0);
+    assert_eq!(fs::read(fx.store.state_path()).unwrap(), before);
+}
+
+#[test]
+fn editor_receipt_is_bound_to_the_original_app() {
+    let fx = Fixture::new();
+    let vault = fx.key.read().unwrap();
+    let target = bound_editor_target();
+    let commits = RefCell::new(0);
+    for app in ["claude", "gemini"] {
+        let guard = lock_app(app);
+        run(
+            &fx.store,
+            &vault,
+            &guard,
+            state::op::APPLY,
+            &[],
+            target.clone(),
+            &|_| {
+                *commits.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        *commits.borrow(),
+        2,
+        "another app's receipt cannot prove this save"
+    );
+}
+
+#[test]
+fn editor_request_uses_original_frontend_wire_and_rejects_extra_fields() {
+    let wire = json!({
+        "id": "44444444-4444-4444-8444-444444444444",
+        "providerId": "synthetic-edit",
+        "draftDigest": "a".repeat(64),
+        "revision": "b".repeat(64)
+    });
+    let request = serde_json::from_value::<state::SaveRequest>(wire.clone());
+    assert!(
+        request.is_ok(),
+        "original UI request must deserialize without a second identity type"
+    );
+    let request = request.unwrap();
+    request.validate().unwrap();
+    assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+    let mut extra = wire;
+    extra["sourceSecret"] = json!("synthetic-secret");
+    assert!(serde_json::from_value::<state::SaveRequest>(extra).is_err());
+}
+
+#[test]
+fn editor_guarded_save_rejects_changed_preview_content_without_effects() {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let original = fs::read(&fx.a).unwrap();
+    let patch = crate::live::patch::Guarded {
+        expected_pre: digest(Some(&original)),
+        then: crate::live::patch::WholeFile::Write(b"{\"key\":\"new\"}".to_vec()),
+    };
+    fs::write(&fx.a, b"{\"key\":\"external\"}").unwrap();
+    let before = fs::read(&fx.a).unwrap();
+    let commits = RefCell::new(0);
+    let result = run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &[FileChange {
+            file: LiveFile::shared(&fx.a),
+            patch: &patch,
+        }],
+        bound_editor_target(),
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a confirmed edit cannot replan on changed preview content"
+    );
+    assert_eq!(*commits.borrow(), 0);
+    assert_eq!(fs::read(&fx.a).unwrap(), before);
+    assert!(!fx.store.state_path().exists());
+    assert!(fx.temp_files().is_empty());
+}
+
+fn run_editor_source_fixture(
+    fx: &Fixture,
+    commits: &RefCell<usize>,
+) -> Result<OperationReport, AppError> {
+    let patch = set_key("new");
+    let guard = lock_app(&fx.app);
+    let plans = fx
+        .files()
+        .iter()
+        .map(|file| plan(file, &patch).unwrap())
+        .collect::<Vec<_>>();
+    let guarded = plans
+        .iter()
+        .map(|p| crate::live::patch::Guarded {
+            expected_pre: p.pre.clone(),
+            then: crate::live::patch::LivePatch::apply_file(&patch, &p.file.path, p.pre_bytes())
+                .unwrap()
+                .map(crate::live::patch::WholeFile::Write)
+                .unwrap_or(crate::live::patch::WholeFile::Delete),
+        })
+        .collect::<Vec<_>>();
+    run_checked(
+        &fx.store,
+        &fx.key.read().unwrap(),
+        &guard,
+        state::op::APPLY,
+        &plans
+            .iter()
+            .zip(&guarded)
+            .map(|(p, patch)| FileChange {
+                file: p.file.clone(),
+                patch,
+            })
+            .collect::<Vec<_>>(),
+        bound_editor_target(),
+        &RunChecks {
+            commit_target: &|_| {
+                *commits.borrow_mut() += 1;
+                Ok(())
+            },
+            before_cleanup: Some(&|_| Ok(())),
+        },
+    )
+}
+fn editor_source_fixture() -> Fixture {
+    let mut fx = Fixture::new();
+    fx.app = "claude".into();
+    fx
+}
+
+#[test]
+fn editor_source_allows_original_shared_parent_creation_and_restart() {
+    let fx = editor_source_fixture();
+    fs::remove_dir_all(fx.a.parent().unwrap()).unwrap();
+    let commits = RefCell::new(0);
+    failpoint::crash_at(Some("published:0"));
+    let result = run_editor_source_fixture(&fx, &commits);
+    failpoint::crash_at(None);
+    assert!(result.is_err());
+    let reopened = DeviceStore::at(fx.store.root());
+    let outcome = recover(
+        &reopened,
+        &fx.key.read().unwrap(),
+        &lock_app(&fx.app),
+        &fx.files(),
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, Some(RecoveryOutcome::RolledForward));
+    assert_eq!(*commits.borrow(), 1);
+    assert_eq!(fx.read(&fx.a)["key"], "new");
+    assert_eq!(fx.read(&fx.b)["key"], "new");
+    assert!(state::pending(&reopened, &fx.key.read().unwrap(), &fx.app)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn editor_source_noop_witness_drift_after_target_retains_original_pending() {
+    let fx = editor_source_fixture();
+    let witness = fx.b.clone();
+    failpoint::on_boundary(Some(Box::new(move |point| {
+        if point == "target" {
+            fs::write(&witness, b"{\"key\":\"external\"}").unwrap();
+        }
+    })));
+    let change = set_key("new");
+    let no_op = set_key("old");
+    let commits = RefCell::new(0);
+    let result = run_checked(
+        &fx.store,
+        &fx.key.read().unwrap(),
+        &lock_app(&fx.app),
+        state::op::APPLY,
+        &[
+            FileChange {
+                file: LiveFile::shared(&fx.a),
+                patch: &change,
+            },
+            FileChange {
+                file: LiveFile::shared(&fx.b),
+                patch: &no_op,
+            },
+        ],
+        bound_editor_target(),
+        &RunChecks {
+            before_cleanup: Some(&|_| Ok(())),
+            commit_target: &|_| {
+                *commits.borrow_mut() += 1;
+                Ok(())
+            },
+        },
+    );
+    failpoint::on_boundary(None);
+    assert!(
+        result.is_err(),
+        "target callback success cannot clear an unproved no-op witness"
+    );
+    assert_eq!(*commits.borrow(), 1);
+    assert!(state::pending(&fx.store, &fx.key.read().unwrap(), &fx.app)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn editor_original_rename_crash_and_repeat_keep_original_receipt() {
+    for point in ["publish:durability", "published:0", "target"] {
+        let fx = editor_source_fixture();
+        let commits = RefCell::new(0);
+        failpoint::crash_at(Some(point));
+        let result = run_editor_source_fixture(&fx, &commits);
+        failpoint::crash_at(None);
+        assert!(result.is_err());
+        let reopened = DeviceStore::at(fx.store.root());
+        let recover_once = || {
+            recover(
+                &reopened,
+                &fx.key.read().unwrap(),
+                &lock_app(&fx.app),
+                &fx.files(),
+                &|_| {
+                    *commits.borrow_mut() += 1;
+                    Ok(())
+                },
+            )
+        };
+        assert_eq!(
+            recover_once().unwrap(),
+            Some(RecoveryOutcome::RolledForward)
+        );
+        let completed_count = *commits.borrow();
+        assert_eq!(recover_once().unwrap(), None);
+        assert_eq!(*commits.borrow(), completed_count);
+        assert_new(&fx);
+        assert!(fx.temp_files().is_empty());
+        let live = state::load_app(&reopened, &fx.key.read().unwrap(), &fx.app).unwrap();
+        assert_eq!(
+            live.apps[&fx.app].last_save.as_ref().unwrap().outcome,
+            state::SaveOutcome::Completed
+        );
+    }
+}
+
+#[test]
+fn editor_source_created_parent_preserves_absent_noop_witness() {
+    let fx = editor_source_fixture();
+    fs::remove_dir_all(fx.a.parent().unwrap()).unwrap();
+    let set = set_key("new");
+    let delete = crate::live::patch::WholeFile::Delete;
+    let commits = RefCell::new(0);
+    let result = run_checked(
+        &fx.store,
+        &fx.key.read().unwrap(),
+        &lock_app(&fx.app),
+        state::op::APPLY,
+        &[
+            FileChange {
+                file: LiveFile::shared(&fx.a),
+                patch: &set,
+            },
+            FileChange {
+                file: LiveFile::shared(&fx.b),
+                patch: &delete,
+            },
+        ],
+        bound_editor_target(),
+        &RunChecks {
+            before_cleanup: Some(&|_| Ok(())),
+            commit_target: &|_| {
+                *commits.borrow_mut() += 1;
+                Ok(())
+            },
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "original directory creation must preserve the absent sibling witness"
+    );
+    assert_eq!(*commits.borrow(), 1);
+    assert!(!fx.b.exists());
+    assert_eq!(fx.read(&fx.a)["key"], "new");
+}
+
+#[test]
+fn editor_source_last_cleanup_boundary_cannot_mark_drift_completed() {
+    let fx = editor_source_fixture();
+    let change = set_key("new");
+    let calls = RefCell::new(0);
+    let commits = RefCell::new(0);
+    let check = |_: &state::LiveState| {
+        *calls.borrow_mut() += 1;
+        if *calls.borrow() == 2 {
+            fs::write(&fx.b, b"{\"key\":\"external\"}").unwrap();
+        }
+        Ok(())
+    };
+    let result = run_checked(
+        &fx.store,
+        &fx.key.read().unwrap(),
+        &lock_app(&fx.app),
+        state::op::APPLY,
+        &fx.files()
+            .into_iter()
+            .map(|file| FileChange {
+                file,
+                patch: &change,
+            })
+            .collect::<Vec<_>>(),
+        bound_editor_target(),
+        &RunChecks {
+            before_cleanup: Some(&check),
+            commit_target: &|_| {
+                *commits.borrow_mut() += 1;
+                Ok(())
+            },
+        },
+    );
+    assert!(
+        result.is_err(),
+        "the final external check cannot consume a drifted original pending"
+    );
+    assert_eq!(*commits.borrow(), 1);
+    let live = state::load_app(&fx.store, &fx.key.read().unwrap(), &fx.app).unwrap();
+    assert!(live.apps[&fx.app].pending.is_some());
+    assert!(live.apps[&fx.app].last_save.is_none());
+}
+
+#[test]
+fn editor_source_last_recovery_cleanup_retains_drifted_pending() {
+    let fx = editor_source_fixture();
+    let commits = RefCell::new(0);
+    failpoint::crash_at(Some("published:0"));
+    let result = run_editor_source_fixture(&fx, &commits);
+    failpoint::crash_at(None);
+    assert!(result.is_err());
+    let vault = fx.key.read().unwrap();
+    let pending = state::pending(&fx.store, &vault, &fx.app).unwrap().unwrap();
+    let calls = RefCell::new(0);
+    let finished = |_: &Pending, _: Option<&state::LiveState>| {
+        *calls.borrow_mut() += 1;
+        if *calls.borrow() == 2 {
+            fs::write(&fx.b, b"{\"key\":\"external\"}").unwrap();
+        }
+        Ok(())
+    };
+    let outcome = recover_checked_guarded(
+        &fx.store,
+        &vault,
+        &lock_app(&fx.app),
+        &fx.files(),
+        &|_| {
+            *commits.borrow_mut() += 1;
+            Ok(())
+        },
+        &|_| Ok(None),
+        Some(&RecoveryAdmission {
+            expected_pending: &pending,
+            verify: &|_, _| Ok(()),
+            finished: &finished,
+        }),
+    );
+    assert!(outcome.is_err());
+    assert_eq!(*commits.borrow(), 1);
+    let live = state::load_app(&fx.store, &vault, &fx.app).unwrap();
+    assert!(live.apps[&fx.app].pending.is_some());
+    assert!(live.apps[&fx.app].last_save.is_none());
 }

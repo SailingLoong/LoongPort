@@ -173,7 +173,76 @@
     "duplicateFailed": "複製供應商失敗",
     "needsRouting": "需要路由",
     "noRoutingSupport": "不支援路由",
-    "duplicateLiveIdsLoadFailed": "讀取設定中的供應商識別碼失敗，請先修復設定後再試"
+    "duplicateLiveIdsLoadFailed": "讀取設定中的供應商識別碼失敗，請先修復設定後再試",
+    "preview": {
+      "preview": "產生變更預覽",
+      "saveOnly": "儲存設定",
+      "saveAndApply": "儲存並套用至目前設定",
+      "fields": "將變更的欄位",
+      "files": "生效檔案預覽",
+      "reading": "正在讀取設定與目前狀態…",
+      "reread": "重新讀取",
+      "sourceUnavailable": "無法確認設定來源，請重新讀取。",
+      "invalidFormat": "設定格式不正確，請返回編輯。",
+      "readOnly": "相關檔案為唯讀，目前無法儲存。",
+      "sourceChanged": "設定或檔案已變更，請重新產生預覽。",
+      "vaultLocked": "憑據儲存已鎖定，請先解鎖。",
+      "pendingOperation": "有待核對的原操作，請先重新檢查原操作。",
+      "ownerUnavailable": "現有設定或驗證資訊的歸屬無法證實本次寫入，請返回檢查。",
+      "credentialConflict": "無法同時刪除與替換金鑰，請先清空金鑰輸入欄。",
+      "unsupported": "此設定目前無法產生可驗證的寫入計畫。",
+      "savedPreviousDraft": "原儲存已完成；後續編輯的草稿仍未儲存。",
+      "queryOriginal": "檢查原操作",
+      "backToEdit": "返回編輯",
+      "deleteCredential": "明確刪除此設定的金鑰",
+      "deleteCredentialHint": "只處理已確認歸屬於此設定的金鑰，不會登出帳號。請先清空金鑰輸入欄，再選擇刪除；僅留空會保留原值。",
+      "noPreview": "請先產生預覽，再確認儲存。",
+      "noLiveWrite": "僅儲存此設定記錄，不寫入客戶端檔案，也不變更目前選取項目。",
+      "plannedOnly": "以下是計畫中的變更與保留內容，尚未寫入。",
+      "field": {
+        "connection": "連線欄位",
+        "authentication": "身分驗證欄位",
+        "models": "模型欄位",
+        "dedicated": "此設定專用欄位",
+        "metadata": "名稱與設定中繼資料"
+      },
+      "file": {
+        "claudeSettings": "Claude settings.json",
+        "codexAuth": "Codex auth.json",
+        "codexConfig": "Codex config.toml",
+        "codexCatalog": "Codex 託管模型目錄",
+        "managedAuth": "託管驗證資訊歸屬標記",
+        "deviceAuthStash": "裝置加密驗證資訊暫存",
+        "geminiEnv": "Gemini .env",
+        "geminiSettings": "Gemini settings.json",
+        "grokConfig": "Grok Build config.toml"
+      },
+      "change": {
+        "write": "寫入",
+        "delete": "刪除",
+        "unchanged": "保持不變"
+      },
+      "preserve": {
+        "unownedJsonKeys": "計畫保留不屬於此設定的 JSON 鍵和值。",
+        "untouchedTomlBytes": "計畫逐位元組保留未觸及的 TOML 內容。",
+        "untouchedDotenvBytes": "計畫逐位元組保留未觸及的 dotenv 內容。",
+        "sharedSettings": "共用設定保持原值，不隨此設定儲存。",
+        "externalCatalog": "保留外部模型目錄；LoongPort 模型映射可能未生效。"
+      },
+      "result": {
+        "completed": "原操作已完成，並通過重新讀取驗證。",
+        "notRecorded": "本次儲存未記入操作日誌。",
+        "pending": "原操作尚未完成。",
+        "partial": "原操作已部分寫入檔案，請核對原操作。",
+        "verificationRequired": "原操作需要核對實際檔案。",
+        "discarded": "原操作未發布，暫存已捨棄。",
+        "abandoned": "來源已變更，原操作已放棄。",
+        "unknown": "暫時無法確認結果，請檢查原操作。",
+        "conflict": "請求識別資訊衝突，請核對原操作。",
+        "stale": "預覽已過期，請返回編輯並重新預覽。",
+        "blocked": "目前無法儲存此設定。"
+      }
+    }
   },
   "claudeCode": {
     "needsRouting": "需要路由",
@@ -4017,7 +4086,14 @@
     "order": "順序",
     "noTiers": "尚未新增檔位",
     "outsideChain": "未加入自動切換",
-    "noSwitchableTier": "沒有可用於所選模型的檔位"
+    "noSwitchableTier": "沒有可用於所選模型的檔位",
+    "reviewChanges": "確認套用變更",
+    "reviewChangesDescription": "請確認以下已套用清單及順序。不在新清單中的檔位將不參與自動容錯切換。取消會保留草稿。",
+    "appliedOrder": "目前已套用順序",
+    "proposedOrder": "將套用的順序",
+    "requestedSelection": "本次請求的目前檔位與模型",
+    "noExplicitSelection": "本次請求未明確切換目前檔位或模型；執行時實際選用項由路由服務決定。",
+    "reviewChanged": "草稿或已套用狀態已變更。請取消並重新點選「套用變更」，查看最新影響。"
   },
   "secrets": {
     "recoveryTitle": "繼續復原",

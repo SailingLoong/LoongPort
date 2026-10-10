@@ -9,6 +9,7 @@ mod codex_direct_tests;
 mod codex_login;
 #[cfg(any(test, feature = "test-hooks"))]
 mod direct_writer_tests;
+pub(crate) mod edit;
 mod endpoints;
 mod gemini_auth;
 pub(crate) mod gemini_direct;
@@ -5210,7 +5211,13 @@ impl ProviderService {
 
     fn normalize_usage_script_credential_overrides(app_type: &AppType, provider: &mut Provider) {
         let current_credentials = provider.resolve_usage_credentials(app_type);
+        Self::normalize_usage_script_with_credentials(provider, &current_credentials);
+    }
 
+    fn normalize_usage_script_with_credentials(
+        provider: &mut Provider,
+        current_credentials: &(String, String),
+    ) {
         let Some(usage_script) = provider
             .meta
             .as_mut()
@@ -5224,13 +5231,13 @@ impl ProviderService {
         }
 
         if usage_script.api_key.as_deref().is_some_and(|api_key| {
-            Self::should_clear_usage_api_key_override(api_key, &current_credentials)
+            Self::should_clear_usage_api_key_override(api_key, current_credentials)
         }) {
             usage_script.api_key = None;
         }
 
         if usage_script.base_url.as_deref().is_some_and(|base_url| {
-            Self::should_clear_usage_base_url_override(base_url, &current_credentials)
+            Self::should_clear_usage_base_url_override(base_url, current_credentials)
         }) {
             usage_script.base_url = None;
         }
@@ -5572,6 +5579,88 @@ impl ProviderService {
         })
     }
 
+    pub(crate) fn prepare_managed_update(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        mut provider: Provider,
+    ) -> Result<Provider, AppError> {
+        // ## 托管档位**可以**改内容，但**不许改 id**
+        //
+        // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
+        // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
+        // 改成了「已存在的档位只换 sk、保住用户的编辑」（`crate::relay::provider_config::patch_api_key`），
+        // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
+        //
+        // 中转站区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
+        // 那页支持全部字段，我们不重做）。用户点它之前会先看到一道警告：保存后这个档位
+        // 归他自己维护，出问题用「恢复默认配置」退回来。
+        //
+        // ## 但**不许凭空造出一个托管 id**
+        //
+        // id 是托管判据本身（`crate::relay::managed::provider_id_for` 生成的前缀），所以：
+        //
+        // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
+        //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
+        // - 普通 → 托管 id：**伪装成托管项** —— 它会出现在中转站区里，
+        //   而「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
+        //
+        // ⚠️ **判据不能是「id 变了没有」** —— review 抓出那样有个绕过口子：
+        // `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
+        // 自己当原 id（`services/provider/mod.rs:2608`），于是「不是改名」成立、
+        // 守卫不介入，而 `save_provider` 是 **upsert** ⇒ 一条自选的 `loongport-*`
+        // 记录被凭空写进库里。
+        //
+        // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
+        // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
+        // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
+        let existing_managed = if crate::relay::is_managed(&provider.id) {
+            match state
+                .db
+                .get_provider_by_id(&provider.id, app_type.as_str())?
+            {
+                Some(existing) => Some(existing),
+                None => {
+                    return Err(AppError::Message(
+                        "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成"
+                            .to_string(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
+        if let Some(old) = original_id.filter(|old| *old != provider.id) {
+            crate::relay::reject_if_managed(old)?;
+        }
+
+        // 托管档位的站点归属与 sk 由 LoongPort 管，不属于用户可编辑配置。
+        //
+        // 倍率查询会从 `website_url` 定位 `/v1/sub2api/billing`，再从
+        // `settings_config` 提取 sk。若直接保存编辑器提交的整份 Provider，用户只改模型
+        // 也可能因表单 round-trip 丢掉认证 section，结果是倍率/连通检测一起静默失效。
+        // 这里保留这两个 owner 字段，其余配置仍照用户提交的保存。
+        if let Some(existing) = existing_managed {
+            provider.website_url = existing.website_url;
+            if let Some(api_key) =
+                crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
+            {
+                if !crate::relay::provider_config::ensure_api_key(
+                    &mut provider.settings_config,
+                    &app_type,
+                    &api_key,
+                ) {
+                    return Err(AppError::Config(
+                        "托管档位的配置必须是对象，无法保留由 LoongPort 管理的密钥".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(provider)
+    }
+
     pub(crate) fn prepare_provider_update(
         state: &AppState,
         app_type: &AppType,
@@ -5580,11 +5669,11 @@ impl ProviderService {
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(app_type, &mut provider);
         Self::validate_provider_settings(app_type, &provider)?;
+        let modern = app_type.supports_local_proxy()
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?;
         // Adopted writers never re-merge legacy snippets. Stripping equal values
         // here would erase explicitly selected owned fields from the native file.
-        if !app_type.supports_local_proxy()
-            || !crate::mode::operation::uses_upstream4_schema(&state.db)?
-        {
+        if !modern {
             normalize_provider_common_config_for_storage(
                 state.db.as_ref(),
                 app_type,
@@ -5596,7 +5685,23 @@ impl ProviderService {
                 &mut provider.settings_config,
             )?;
         }
-        Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
+        if modern && *app_type == AppType::GrokBuild {
+            // The same preparation also serves the pure editor preview. An
+            // explicit env_key remains a reference; never read/adopt its value.
+            let text = provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str);
+            let credentials = (
+                text.and_then(crate::grok_config::extract_base_url)
+                    .unwrap_or_default(),
+                text.and_then(crate::grok_config::extract_inline_api_key)
+                    .unwrap_or_default(),
+            );
+            Self::normalize_usage_script_with_credentials(&mut provider, &credentials);
+        } else {
+            Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
+        }
 
         Ok(provider)
     }
@@ -7528,6 +7633,69 @@ impl ProviderService {
     /// backend owns the live-vs-database decision and preserves stored model
     /// mappings that a native config cannot represent.
     pub fn edit_settings(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<Value, AppError> {
+        let _switch = app_type.supports_local_proxy().then(|| {
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()))
+        });
+        let modern = app_type.supports_local_proxy()
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?;
+        let (original, pending) = if modern {
+            let vault = state.db.secret_session().read()?;
+            let live = crate::mode::state::load_app(
+                &crate::live::engine::DeviceStore::for_device(),
+                &vault,
+                app_type.as_str(),
+            )?;
+            let entry = live.apps.get(app_type.as_str());
+            (
+                entry
+                    .map(|entry| {
+                        crate::mode::operation::original_save_view(
+                            app_type.as_str(),
+                            entry,
+                            provider_id,
+                        )
+                    })
+                    .transpose()?
+                    .flatten(),
+                entry.is_some_and(|entry| entry.pending.is_some()),
+            )
+        } else {
+            (None, false)
+        };
+        // A partial native image is not a new edit seed. The original request
+        // stays queryable before any write/checkpoint admission is attempted.
+        let settings = if pending {
+            state
+                .db
+                .get_provider_by_id(provider_id, app_type.as_str())?
+                .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?
+                .settings_config
+        } else {
+            Self::edit_settings_content(state, app_type.clone(), provider_id).map_err(|error| {
+                if modern {
+                    AppError::Config("provider.edit_source_unavailable".into())
+                } else {
+                    error
+                }
+            })?
+        };
+        let original = original.map(|view| {
+            serde_json::json!({
+                "app": app_type.as_str(), "request": view.request, "status": view.status,
+            })
+        });
+        Ok(serde_json::json!({
+            "settingsConfig": settings,
+            "modeState": crate::mode::current::read_view(&state.proxy_service, &app_type),
+            "originalSave": original,
+        }))
+    }
+
+    fn edit_settings_content(
         state: &AppState,
         app_type: AppType,
         provider_id: &str,

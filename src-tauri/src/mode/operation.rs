@@ -61,6 +61,48 @@ pub(crate) struct OperationReport {
     pub recovered: Option<RecoveryOutcome>,
 }
 
+/// Read-only projection of the original app journal, without row-equality
+/// inference, recovery, or a second result store. Never includes private intent.
+pub(crate) struct SavedRequestView {
+    pub(crate) request: state::SaveRequest,
+    pub(crate) status: &'static str,
+}
+
+pub(crate) fn original_save_view(
+    app: &str,
+    entry: &state::AppLiveState,
+    provider_id: &str,
+) -> Result<Option<SavedRequestView>, AppError> {
+    state::validate_app_evidence_for_update(app, entry)?;
+    if let Some(pending) = &entry.pending {
+        if let Some(request) = &pending.target.save_request {
+            validate_operation(app, &pending.op, &pending.target)?;
+            if request.provider_id == provider_id {
+                return Ok(Some(SavedRequestView {
+                    request: request.clone(),
+                    status: if pending.published {
+                        "verificationRequired"
+                    } else {
+                        "pending"
+                    },
+                }));
+            }
+        }
+    }
+    Ok(entry
+        .last_save
+        .as_ref()
+        .filter(|receipt| receipt.request.provider_id == provider_id)
+        .map(|receipt| SavedRequestView {
+            request: receipt.request.clone(),
+            status: match receipt.outcome {
+                state::SaveOutcome::Completed => "completed",
+                state::SaveOutcome::Discarded => "discarded",
+                state::SaveOutcome::Abandoned => "abandoned",
+            },
+        }))
+}
+
 /// 执行一次操作。调用方持有这个应用的写锁。
 pub(crate) fn run(
     store: &DeviceStore,
@@ -103,6 +145,28 @@ pub(crate) fn run_checked(
     target: PendingTarget,
     checks: &RunChecks<'_>,
 ) -> Result<OperationReport, AppError> {
+    // Editor confirmations never recover a previous intent or repeat a target
+    // callback. The receipt belongs to the selected app's original envelope.
+    validate_operation(guard.app(), op, &target)?;
+    if let Some(request) = &target.save_request {
+        let live = state::load_app(store, vault, guard.app())?;
+        if let Some(entry) = live.apps.get(guard.app()) {
+            state::validate_app_evidence_for_update(guard.app(), entry)?;
+            if entry.pending.is_some() {
+                return Err(verification_required());
+            }
+            if let Some(receipt) = &entry.last_save {
+                if receipt.request.id == request.id {
+                    if receipt.request != *request
+                        || receipt.outcome != state::SaveOutcome::Completed
+                    {
+                        return Err(verification_required());
+                    }
+                    return Ok(OperationReport::default());
+                }
+            }
+        }
+    }
     let commit_target = checks.commit_target;
     let mut report = OperationReport {
         recovered: if checks.before_cleanup.is_some() {
@@ -128,7 +192,6 @@ pub(crate) fn run_checked(
     ) {
         return Err(verification_required());
     }
-    validate_operation(guard.app(), op, &target)?;
     validate_admitted(&changes.iter().map(|c| c.file.clone()).collect::<Vec<_>>())?;
 
     // 1. 在内存里算好每个文件；任何一个解析失败都不写。
@@ -281,10 +344,19 @@ pub(crate) fn run_checked(
             if !unverified_files(&pending)?.is_empty() {
                 return Err(verification_required());
             }
-            check(live)
+            check(live)?;
+            if !unverified_files(&pending)?.is_empty() {
+                return Err(verification_required());
+            }
+            Ok(())
         })?;
     } else {
-        state::set_pending(store, vault, guard.app(), None)?;
+        state::clear_pending_checked(store, vault, guard.app(), &pending, &|_| {
+            if !unverified_files(&pending)?.is_empty() {
+                return Err(verification_required());
+            }
+            Ok(())
+        })?;
     }
     Ok(report)
 }
@@ -437,19 +509,26 @@ fn recover_checked_with_cleanup(
         .zip(&positions)
         .any(|(file, at)| file.pre != file.planned && matches!(at, At::Planned));
     if !pending.published && !changed_file_published {
+        let paths = elsewhere(&pending, &positions);
+        let outcome = if paths.is_empty() {
+            state::SaveOutcome::Discarded
+        } else {
+            state::SaveOutcome::Abandoned
+        };
         if let Some(check) = cleanup.admission {
             // Discard is the original unpublished outcome, never a bypass of
             // checkpoint identity or the exact authenticated journal.
-            state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
+            state::finish_pending_checked(store, vault, guard.app(), &pending, outcome, &|live| {
                 check(&pending, Some(live))?;
                 discard_pending_files(&pending)?;
                 check(&pending, Some(live))
             })?;
         } else {
             discard_pending_files(&pending)?;
-            state::set_pending(store, vault, guard.app(), None)?;
+            state::finish_pending_checked(store, vault, guard.app(), &pending, outcome, &|_| {
+                Ok(())
+            })?;
         }
-        let paths = elsewhere(&pending, &positions);
         if paths.is_empty() {
             log::info!("[{}] 丢弃未开始发布的操作 {}", guard.app(), pending.op);
             return Ok(Some(RecoveryOutcome::Discarded));
@@ -555,6 +634,9 @@ fn recover_checked_with_cleanup(
     failpoint::hit("recover:verified")?;
     state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
         (cleanup.verify)(live)?;
+        if !unverified_files(&pending)?.is_empty() {
+            return Err(verification_required());
+        }
         if let Some(check) = cleanup.admission {
             check(&pending, Some(live))?;
             if !unverified_files(&pending)?.is_empty() {
@@ -566,6 +648,9 @@ fn recover_checked_with_cleanup(
         }
         discard_pending_files(&pending)?;
         (cleanup.verify)(live)?;
+        if !unverified_files(&pending)?.is_empty() {
+            return Err(verification_required());
+        }
         if let Some(check) = cleanup.admission {
             check(&pending, Some(live))?;
             if !unverified_files(&pending)?.is_empty() {
@@ -574,6 +659,9 @@ fn recover_checked_with_cleanup(
         }
         if let Some(check) = cleanup.finished {
             check(&pending, Some(live))?;
+        }
+        if !unverified_files(&pending)?.is_empty() {
+            return Err(verification_required());
         }
         Ok(())
     })?;
@@ -706,7 +794,27 @@ fn drop_unpublished(
         log::warn!("live staging cleanup requires verification: {error}");
         return;
     }
-    if let Err(err) = state::set_pending(store, vault, guard.app(), None) {
+    // The caller knows publish has not been called. A failed durable mark may
+    // leave either published bit on disk; do not turn this local fact into a
+    // recovery rule for an already-published operation.
+    let clear = (|| {
+        let current =
+            state::pending(store, vault, guard.app())?.ok_or_else(verification_required)?;
+        let mut comparable = current.clone();
+        comparable.published = pending.published;
+        if comparable != *pending {
+            return Err(verification_required());
+        }
+        state::finish_pending_checked(
+            store,
+            vault,
+            guard.app(),
+            &current,
+            state::SaveOutcome::Discarded,
+            &|_| Ok(()),
+        )
+    })();
+    if let Err(err) = clear {
         log::warn!("清除写前意图失败: {err}");
     }
 }
@@ -857,6 +965,16 @@ fn valid_digest(value: &Option<String>) -> bool {
 }
 
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
+    if let Some(request) = &target.save_request {
+        request.validate()?;
+        let row = target.saved_row.as_ref().ok_or_else(invalid_pending)?;
+        if op != state::op::APPLY
+            || !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
+            || request.provider_id != saved_provider(row)?.id
+        {
+            return Err(invalid_pending());
+        }
+    }
     if target.model_preference.is_some() || target.routing_order.is_some() {
         if op != state::op::APPLY || !matches!(app, "claude" | "codex" | "gemini" | "grokbuild") {
             return Err(invalid_pending());
@@ -1210,6 +1328,7 @@ fn verify_committed_target(
             .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
             .ok_or_else(verification_required)?;
         if Database::provider_update_digest(&actual)? != Database::provider_update_digest(&planned)?
+            || (target.save_request.is_some() && !db.get_user_edited(app.as_str(), &planned.id)?)
         {
             return Err(verification_required());
         }
@@ -1305,12 +1424,20 @@ fn commit_target_with_pointer(
     verify_saved_row(db, session, vault, app, target)?;
     if let Some(row) = &target.saved_row {
         let provider = saved_provider(row)?;
-        db.save_provider_with_vault(app.as_str(), &provider, Some(&row.before), session, vault)?;
+        db.save_provider_with_vault(
+            app.as_str(),
+            &provider,
+            Some(&row.before),
+            target.save_request.is_some(),
+            session,
+            vault,
+        )?;
         let current = db
             .get_provider_by_id_with_vault(&provider.id, app.as_str(), session, vault)?
             .ok_or_else(invalid_pending)?;
         if Database::provider_update_digest(&current)?
             != Database::provider_update_digest(&provider)?
+            || (target.save_request.is_some() && !db.get_user_edited(app.as_str(), &provider.id)?)
         {
             return Err(verification_required());
         }
@@ -1706,6 +1833,29 @@ impl<'a> AppWrite<'a> {
         target: PendingTarget,
     ) -> Result<OperationReport, AppError> {
         verify_saved_row(self.db, self.session, &self.vault, &self.app, &target)?;
+        if target.save_request.is_some() {
+            return run_checked(
+                &self.store,
+                &self.vault,
+                &self.guard,
+                op,
+                changes,
+                target.clone(),
+                &RunChecks {
+                    commit_target: &|target| self.commit(target),
+                    before_cleanup: Some(&|live| {
+                        verify_committed_target(
+                            self.db,
+                            self.session,
+                            &self.vault,
+                            &self.app,
+                            &target,
+                            live,
+                        )
+                    }),
+                },
+            );
+        }
         run(
             &self.store,
             &self.vault,

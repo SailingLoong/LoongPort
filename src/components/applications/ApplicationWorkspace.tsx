@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Check,
@@ -13,7 +13,11 @@ import {
 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
-import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
+import type { ApplicationOverview } from "@/lib/api/applicationOverview";
+import type {
+  ApplicationRouting,
+  ApplicationRoutingTier,
+} from "@/lib/api/applicationRouting";
 import type { AccountRoute } from "@/components/shell/navigation";
 import { isProxyAppId } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
@@ -50,6 +54,10 @@ import { useApplicationRouting } from "./useApplicationRouting";
 import { useApplicationRoutingDraft } from "./useApplicationRoutingDraft";
 import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
 import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
+import {
+  ApplicationChangeConfirmDialog,
+  type ApplicationChangeReview,
+} from "./ApplicationChangeConfirmDialog";
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
 
@@ -194,6 +202,31 @@ function supportedModels(tier: ApplicationRoutingTier): string[] {
     ? tier.models
     : [tier.effectiveModel].filter((model): model is string => Boolean(model));
 }
+/** Only facts that can change the reviewed request; routine metric refreshes do not. */
+function applicationReviewFacts(
+  routing: ApplicationRouting | undefined,
+  overview: ApplicationOverview | undefined,
+  profile: string | undefined,
+  failed: boolean,
+) {
+  return JSON.stringify([
+    routing?.chainIds,
+    routing?.model,
+    routing?.autoFailoverEnabled,
+    routing?.routingActive,
+    routing?.modeState,
+    routing?.tiers.map((tier) => [
+      tier.providerId,
+      tier.skipReason,
+      tier.effectiveModel,
+      tier.models,
+    ]),
+    overview?.configurations,
+    profile,
+    failed,
+  ]);
+}
+
 export function ApplicationWorkspace({
   appId,
   providers,
@@ -203,6 +236,9 @@ export function ApplicationWorkspace({
   children,
 }: Props) {
   const { t } = useTranslation();
+  const client = useQueryClient();
+  const [review, setReview] = useState<ApplicationChangeReview | null>(null);
+  const pendingReview = useRef<ApplicationChangeReview | null>(null);
   const model = useApplicationOverview(appId, providers, onSwitchProvider);
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
@@ -350,6 +386,51 @@ export function ApplicationWorkspace({
                 ?.skipReason !== "circuit_open",
           );
   const missingModelCandidate = Boolean(modelFilter && !modelCandidate);
+  // Reuse the source caches at click time too: React may not have rendered their latest update yet.
+  const readReviewFacts = () =>
+    applicationReviewFacts(
+      client.getQueryData<ApplicationRouting>(["applicationRouting", appId]) ??
+        routing.data,
+      client.getQueryData<ApplicationOverview>([
+        "applicationOverview",
+        appId,
+      ]) ?? model.data,
+      client.getQueryData<{ current: string }>(["orderProfiles", appId])
+        ?.current ?? profilesState?.current,
+      Boolean(
+        routing.error ||
+        model.error ||
+        profilesQuery.error ||
+        client.getQueryState(["applicationRouting", appId])?.error ||
+        client.getQueryState(["applicationOverview", appId])?.error ||
+        client.getQueryState(["orderProfiles", appId])?.error,
+      ),
+    );
+  const renderedReviewFacts = applicationReviewFacts(
+    routing.data,
+    model.data,
+    profilesState?.current,
+    Boolean(routing.error || model.error || profilesQuery.error),
+  );
+  const reviewContext = JSON.stringify([
+    appId,
+    search,
+    sort,
+    accountFilter,
+    modelFilter,
+    stagedIds,
+    draft.profileName,
+    draft.showAll,
+    profileName,
+    targetIds,
+    renderedReviewFacts,
+  ]);
+  const latestReviewContext = useRef(reviewContext);
+  latestReviewContext.current = reviewContext;
+  const cancelReview = () => {
+    pendingReview.current = null;
+    setReview(null);
+  };
   const applyOrder = () => {
     if (
       !hasPendingChanges ||
@@ -366,10 +447,28 @@ export function ApplicationWorkspace({
         selection = { providerId: candidate.providerId, model: modelFilter };
       }
     }
-    void draft.submit({
-      order: { profileName, providerIds: targetIds },
-      ...(selection ? { selection } : {}),
-    });
+    if (pendingReview.current) return;
+    const facts = renderedReviewFacts;
+    let current = true;
+    const next: ApplicationChangeReview = {
+      change: {
+        order: { profileName, providerIds: targetIds },
+        ...(selection ? { selection } : {}),
+      },
+      appliedIds,
+      configurations,
+      currentProviderId: currentConfig?.providerId,
+      currentModel,
+      isCurrent: () => {
+        current =
+          current &&
+          latestReviewContext.current === reviewContext &&
+          readReviewFacts() === facts;
+        return current;
+      },
+    };
+    pendingReview.current = next;
+    setReview(next);
   };
   const discardOrder = draft.discard;
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
@@ -894,6 +993,22 @@ export function ApplicationWorkspace({
           {typeof children === "function" ? children(mutationBusy) : children}
         </CollapsibleContent>
       </Collapsible>
+      <ApplicationChangeConfirmDialog
+        review={review}
+        stale={Boolean(review && !review.isCurrent())}
+        disabled={mutationBusy}
+        onCancel={cancelReview}
+        onConfirm={() => {
+          const confirmed = pendingReview.current;
+          if (!confirmed || mutationBusy) return;
+          if (!confirmed.isCurrent()) {
+            setReview({ ...confirmed });
+            return;
+          }
+          cancelReview();
+          void draft.submit(confirmed.change, undefined, confirmed.isCurrent);
+        }}
+      />
       <SwitchTierConfirmDialog
         targetName={draft.confirmation?.name ?? model.confirmation}
         onCancel={draft.confirmation ? draft.cancel : model.cancel}

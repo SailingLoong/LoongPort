@@ -7,6 +7,7 @@ import { Save, Download, Loader2, Package } from "lucide-react";
 import JsonEditor from "@/components/JsonEditor";
 
 interface CommonConfigEditorProps {
+  redactErrors?: boolean;
   commonConfigReadOnly?: boolean;
   value: string;
   onChange: (value: string) => void;
@@ -23,6 +24,7 @@ interface CommonConfigEditorProps {
 }
 
 export function CommonConfigEditor({
+  redactErrors,
   commonConfigReadOnly = false,
   value,
   onChange,
@@ -254,6 +256,7 @@ export function CommonConfigEditor({
           </label>
         </div>
         <JsonEditor
+          redactErrors={redactErrors}
           value={localValue}
           onChange={handleLocalChange}
           placeholder={`{
@@ -347,6 +350,7 @@ export function CommonConfigEditor({
             </div>
           )}
           <JsonEditor
+            redactErrors={redactErrors}
             value={commonConfigSnippet}
             readOnly={commonConfigReadOnly}
             onChange={(value) => {

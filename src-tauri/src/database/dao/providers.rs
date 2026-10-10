@@ -428,7 +428,14 @@ impl Database {
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
         let vault = self.secrets.read()?;
-        self.save_provider_with_vault(app_type, provider, None, self.secrets.as_ref(), &vault)
+        self.save_provider_with_vault(
+            app_type,
+            provider,
+            None,
+            false,
+            self.secrets.as_ref(),
+            &vault,
+        )
     }
 
     /// The existing provider SQL owner, under the operation's pinned generation.
@@ -438,6 +445,7 @@ impl Database {
         app_type: &str,
         provider: &Provider,
         expected: Option<&str>,
+        mark_user_edited: bool,
         session: &crate::secrets::session::SecretSession,
         vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
     ) -> Result<(), AppError> {
@@ -456,6 +464,13 @@ impl Database {
                 .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
             let current_digest = Self::provider_update_digest(&current)?;
             if current_digest == Self::provider_update_digest(provider)? {
+                if mark_user_edited {
+                    tx.execute(
+                        "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
+                        params![provider.id, app_type],
+                    )?;
+                    tx.commit()?;
+                }
                 return Ok(());
             }
             if current_digest != expected {
@@ -557,6 +572,12 @@ impl Database {
             }
         }
 
+        if mark_user_edited {
+            tx.execute(
+                "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
+                params![provider.id, app_type],
+            )?;
+        }
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         // 释放连接锁再追加链成员：note_provider_created 内部要拿同一把锁，
         // conn 守卫活到函数尾的话这里就死锁了。

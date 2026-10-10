@@ -173,7 +173,76 @@
     "duplicateFailed": "复制供应商失败",
     "needsRouting": "需要路由",
     "noRoutingSupport": "不支持路由",
-    "duplicateLiveIdsLoadFailed": "读取配置中的供应商标识失败，请先修复配置后再试"
+    "duplicateLiveIdsLoadFailed": "读取配置中的供应商标识失败，请先修复配置后再试",
+    "preview": {
+      "preview": "生成变更预览",
+      "saveOnly": "保存配置",
+      "saveAndApply": "保存并应用到当前配置",
+      "fields": "将变更字段",
+      "files": "生效文件预览",
+      "reading": "正在读取配置与当前状态…",
+      "reread": "重新读取",
+      "sourceUnavailable": "无法确认配置来源，请重新读取。",
+      "invalidFormat": "配置格式不正确，请返回编辑。",
+      "readOnly": "相关文件只读，当前不能保存。",
+      "sourceChanged": "配置或文件已变化，请重新生成预览。",
+      "vaultLocked": "凭据存储已锁定，请先解锁。",
+      "pendingOperation": "存在待核对的原操作，请先重新检查原操作。",
+      "ownerUnavailable": "现有配置或认证所有者无法证明本次写入，请返回检查。",
+      "credentialConflict": "删除与替换密钥不能同时执行，请先清空密钥输入。",
+      "unsupported": "此配置目前无法生成可验证的写入计划。",
+      "savedPreviousDraft": "原保存已完成；后来编辑的草稿仍未保存。",
+      "queryOriginal": "查询原操作",
+      "backToEdit": "返回编辑",
+      "deleteCredential": "明确删除此配置的密钥",
+      "deleteCredentialHint": "只处理本配置已识别的密钥，不注销账号。先清空密钥输入，再选择删除；仅留空会保留原值。",
+      "noPreview": "生成预览后，再确认保存。",
+      "noLiveWrite": "仅保存此配置记录，不写入客户端文件，不改变当前项。",
+      "plannedOnly": "以下是计划中的更改与保留内容，尚未写入。",
+      "field": {
+        "connection": "连接字段",
+        "authentication": "认证字段",
+        "models": "模型字段",
+        "dedicated": "本配置专用字段",
+        "metadata": "名称与配置元数据"
+      },
+      "file": {
+        "claudeSettings": "Claude settings.json",
+        "codexAuth": "Codex auth.json",
+        "codexConfig": "Codex config.toml",
+        "codexCatalog": "Codex 托管模型目录",
+        "managedAuth": "托管认证归属标记",
+        "deviceAuthStash": "设备加密认证暂存",
+        "geminiEnv": "Gemini .env",
+        "geminiSettings": "Gemini settings.json",
+        "grokConfig": "Grok Build config.toml"
+      },
+      "change": {
+        "write": "写入",
+        "delete": "删除",
+        "unchanged": "保持不变"
+      },
+      "preserve": {
+        "unownedJsonKeys": "计划保留非本配置所有的 JSON 键值。",
+        "untouchedTomlBytes": "计划按字节保留未触及的 TOML 内容。",
+        "untouchedDotenvBytes": "计划按字节保留未触及的 dotenv 内容。",
+        "sharedSettings": "共享设置保持原值，不随此配置保存。",
+        "externalCatalog": "保留外部模型目录；LoongPort 模型映射可能未生效。"
+      },
+      "result": {
+        "completed": "原操作已完成并回读核验。",
+        "notRecorded": "本次保存未记入操作日志。",
+        "pending": "原操作尚未完成。",
+        "partial": "原操作已部分写入，请核对原操作。",
+        "verificationRequired": "原操作需要核对实际文件。",
+        "discarded": "原操作未发布，暂存已丢弃。",
+        "abandoned": "来源已变化，原操作已放弃。",
+        "unknown": "暂时无法确认结果，请查询原操作。",
+        "conflict": "请求身份冲突，请核对原操作。",
+        "stale": "预览已过期，请返回编辑并重新预览。",
+        "blocked": "当前不能保存此配置。"
+      }
+    }
   },
   "claudeCode": {
     "needsRouting": "需要路由",
@@ -4016,7 +4085,14 @@
     "order": "顺序",
     "noTiers": "尚未添加档位",
     "outsideChain": "未加入自动切换",
-    "noSwitchableTier": "没有可用于所选模型的档位"
+    "noSwitchableTier": "没有可用于所选模型的档位",
+    "reviewChanges": "确认应用更改",
+    "reviewChangesDescription": "请确认以下已应用列表及顺序。不在新列表中的档位将不参与自动故障切换。取消会保留草稿。",
+    "appliedOrder": "当前已应用顺序",
+    "proposedOrder": "将应用的顺序",
+    "requestedSelection": "本次请求的当前档位与模型",
+    "noExplicitSelection": "本次请求未明确切换当前档位或模型；运行时实际选用项由路由服务决定。",
+    "reviewChanged": "草稿或已应用状态已变化。请取消并重新点击“应用更改”，查看最新影响。"
   },
   "secrets": {
     "recoveryTitle": "继续恢复",

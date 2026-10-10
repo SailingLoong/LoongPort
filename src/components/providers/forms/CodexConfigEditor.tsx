@@ -4,6 +4,7 @@ import { CodexAuthSection, CodexConfigSection } from "./CodexConfigSections";
 import { CodexCommonConfigModal } from "./CodexCommonConfigModal";
 
 interface CodexConfigEditorProps {
+  redactErrors?: boolean;
   commonConfigReadOnly?: boolean;
   authValue: string;
 
@@ -18,6 +19,8 @@ interface CodexConfigEditorProps {
   onAuthChange: (value: string) => void;
 
   onConfigChange: (value: string) => void;
+
+  onCompactLimitInput?: (valid: boolean) => void;
 
   onAuthBlur?: () => void;
 
@@ -43,6 +46,7 @@ interface CodexConfigEditorProps {
 }
 
 const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
+  redactErrors,
   authValue,
   configValue,
   providerName,
@@ -50,6 +54,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
   isProxyTakeover = false,
   onAuthChange,
   onConfigChange,
+  onCompactLimitInput,
   onAuthBlur,
   useCommonConfig,
   commonConfigReadOnly = false,
@@ -83,6 +88,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
 
       {/* Auth JSON Section */}
       <CodexAuthSection
+        redactErrors={redactErrors}
         value={authValue}
         onChange={onAuthChange}
         onBlur={onAuthBlur}
@@ -94,6 +100,7 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
       <CodexConfigSection
         value={configValue}
         onChange={onConfigChange}
+        onCompactLimitInput={onCompactLimitInput}
         providerName={providerName}
         showRemoteCompaction={showRemoteCompaction}
         useCommonConfig={useCommonConfig}

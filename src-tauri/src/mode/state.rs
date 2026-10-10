@@ -279,6 +279,9 @@ pub struct AppLiveState {
     pub written: Option<Written>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
+    /// Exact result of the most recent editor request, in the original journal owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_save: Option<SaveReceipt>,
     #[serde(default, skip_serializing_if = "StackState::is_empty")]
     pub stack: StackState,
     #[serde(flatten)]
@@ -288,6 +291,7 @@ pub struct AppLiveState {
 impl AppLiveState {
     fn is_empty(&self) -> bool {
         self.pending.is_none()
+            && self.last_save.is_none()
             && self.written.is_none()
             && self.stack.is_empty()
             && self.mode_state() == ModeState::default()
@@ -384,6 +388,51 @@ pub struct PendingFile {
     pub extra: Map<String, Value>,
 }
 
+/// Non-secret association for one explicit editor confirmation. Never a token cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveRequest {
+    pub id: String,
+    #[serde(alias = "provider_id")]
+    pub provider_id: String,
+    #[serde(alias = "draft_digest")]
+    pub draft_digest: String,
+    pub revision: String,
+}
+impl SaveRequest {
+    pub(crate) fn validate(&self) -> Result<(), AppError> {
+        let digest = |s: &str| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if uuid::Uuid::parse_str(&self.id).is_err()
+            || self.provider_id.trim().is_empty()
+            || !digest(&self.draft_digest)
+            || !digest(&self.revision)
+        {
+            return Err(AppError::Config("mode.invalid_save_request".into()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveOutcome {
+    Completed,
+    Discarded,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveReceipt {
+    pub request: SaveRequest,
+    pub outcome: SaveOutcome,
+    pub verified_at_ms: i64,
+}
+
 /// R3 row publication belongs to the same encrypted file intent, not a rollback snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -413,6 +462,8 @@ pub struct RoutingOrderTarget {
 /// 文件都写完之后要落定的状态。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PendingTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_request: Option<SaveRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_preference: Option<ModelPreferenceAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +506,7 @@ impl PendingTarget {
 
     pub fn is_empty(&self) -> bool {
         self.pointer.is_none()
+            && self.save_request.is_none()
             && self.model_preference.is_none()
             && self.routing_order.is_none()
             && self.saved_row.is_none()
@@ -673,6 +725,22 @@ pub(crate) fn clear_pending_checked(
     expected: &Pending,
     check: &dyn Fn(&LiveState) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    finish_pending_checked(store, vault, app, expected, SaveOutcome::Completed, check)
+}
+
+/// Result and pending removal are one authenticated state update. A failed write
+/// leaves the original intent available; a discarded intent is never completed.
+pub(crate) fn finish_pending_checked(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &str,
+    expected: &Pending,
+    outcome: SaveOutcome,
+    check: &dyn Fn(&LiveState) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if let Some(request) = &expected.target.save_request {
+        request.validate()?;
+    }
     update_app_checked(
         store,
         vault,
@@ -686,6 +754,13 @@ pub(crate) fn clear_pending_checked(
         |entry| {
             if entry.pending.as_ref() != Some(expected) {
                 return Err(AppError::Config("mode.verification_required".into()));
+            }
+            if let Some(request) = &expected.target.save_request {
+                entry.last_save = Some(SaveReceipt {
+                    request: request.clone(),
+                    outcome,
+                    verified_at_ms: chrono::Utc::now().timestamp_millis(),
+                });
             }
             entry.pending = None;
             Ok(())
@@ -769,6 +844,12 @@ pub(crate) fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError
     {
         return Err(unsupported_update());
     }
+    if let Some(receipt) = &app.last_save {
+        receipt.request.validate()?;
+        if receipt.verified_at_ms <= 0 {
+            return Err(unsupported_update());
+        }
+    }
     if let Some(pending) = &app.pending {
         if !op::is_known(&pending.op)
             || !pending.extra.is_empty()
@@ -789,6 +870,9 @@ pub(crate) fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError
                 .is_some_and(|value| !value.extra.is_empty())
         {
             return Err(unsupported_update());
+        }
+        if let Some(request) = &pending.target.save_request {
+            request.validate()?;
         }
         if let Some(mode) = &pending.target.state {
             mode.validate_for_update()

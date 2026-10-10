@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,6 +21,7 @@ const LEGACY_MILLION_CONTEXT_WINDOW = 1_000_000;
 const MILLION_CONTEXT_COMPACT_LIMIT = 900_000;
 
 interface CodexAuthSectionProps {
+  redactErrors?: boolean;
   value: string;
   onChange: (value: string) => void;
   onBlur?: () => void;
@@ -31,6 +33,7 @@ interface CodexAuthSectionProps {
  * CodexAuthSection - Auth JSON editor section
  */
 export const CodexAuthSection: React.FC<CodexAuthSectionProps> = ({
+  redactErrors,
   value,
   onChange,
   onBlur,
@@ -72,6 +75,7 @@ export const CodexAuthSection: React.FC<CodexAuthSectionProps> = ({
       </label>
 
       <JsonEditor
+        redactErrors={redactErrors}
         value={value}
         onChange={handleChange}
         placeholder={t("codexConfig.authJsonPlaceholder")}
@@ -101,6 +105,8 @@ export const CodexAuthSection: React.FC<CodexAuthSectionProps> = ({
 interface CodexConfigSectionProps {
   value: string;
   onChange: (value: string) => void;
+  /** Controlled U02 edits report every raw numeric input immediately. */
+  onCompactLimitInput?: (valid: boolean) => void;
   providerName?: string;
   showRemoteCompaction?: boolean;
   useCommonConfig: boolean;
@@ -118,6 +124,7 @@ interface CodexConfigSectionProps {
 export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
   value,
   onChange,
+  onCompactLimitInput,
   providerName,
   showRemoteCompaction = true,
   useCommonConfig,
@@ -234,9 +241,43 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
     [handleLocalChange],
   );
 
+  const compactInputRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    if (!onCompactLimitInput) return;
+    if (compactInputRef.current)
+      compactInputRef.current.value = String(toggleStates.compactLimit);
+    onCompactLimitInput(
+      !toggleStates.contextWindow1M ||
+        (Number.isSafeInteger(toggleStates.compactLimit) &&
+          toggleStates.compactLimit > 0),
+    );
+    // An unrelated model/endpoint/TOML edit must not erase unfinished raw
+    // input. Only the actual compact field or its enabling context can reset it.
+  }, [
+    toggleStates.compactLimit,
+    toggleStates.contextWindow1M,
+    onCompactLimitInput,
+  ]);
+
   const handleCompactLimitChange = useCallback(
     (inputValue: string) => {
       clearTimeout(compactTimerRef.current);
+      if (onCompactLimitInput) {
+        const num = Number(inputValue);
+        const valid =
+          /^[0-9]+$/.test(inputValue) && Number.isSafeInteger(num) && num > 0;
+        onCompactLimitInput(valid);
+        if (valid) {
+          handleLocalChange(
+            setCodexTopLevelInt(
+              localValueRef.current || "",
+              "model_auto_compact_token_limit",
+              num,
+            ),
+          );
+        }
+        return;
+      }
       compactTimerRef.current = setTimeout(() => {
         const num = parseInt(inputValue, 10);
         if (!Number.isNaN(num) && num > 0) {
@@ -250,7 +291,7 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
         }
       }, 500);
     },
-    [handleLocalChange],
+    [handleLocalChange, onCompactLimitInput],
   );
 
   // Cleanup debounce timer
@@ -332,7 +373,8 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
             type="text"
             inputMode="numeric"
             pattern="[0-9]*"
-            key={toggleStates.compactLimit}
+            ref={compactInputRef}
+            key={onCompactLimitInput ? "controlled" : toggleStates.compactLimit}
             defaultValue={toggleStates.compactLimit}
             disabled={!toggleStates.contextWindow1M}
             onChange={(e) => handleCompactLimitChange(e.target.value)}

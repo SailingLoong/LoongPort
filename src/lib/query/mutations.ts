@@ -4,7 +4,13 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { providersApi, sessionsApi, settingsApi, type AppId } from "@/lib/api";
 import type { DeleteSessionOptions } from "@/lib/api/sessions";
-import type { SwitchResult } from "@/lib/api/providers";
+import {
+  completedProviderEdit,
+  matchesProviderEditResult,
+  type ProviderUpdateInput,
+  type ProviderUpdateResult,
+  type SwitchResult,
+} from "@/lib/api/providers";
 import type { Provider, SessionMeta, Settings } from "@/types";
 import {
   extractErrorMessage,
@@ -144,34 +150,62 @@ export const useUpdateProviderMutation = (appId: AppId) => {
   const { t } = useTranslation();
 
   return useMutation({
-    mutationFn: async ({
-      provider,
-      originalId,
-    }: {
-      provider: Provider;
-      originalId?: string;
-    }) => {
-      await providersApi.update(provider, appId, originalId);
-      return provider;
+    mutationFn: async (
+      input: ProviderUpdateInput,
+    ): Promise<ProviderUpdateResult> => {
+      if (input.edit) {
+        try {
+          const result = input.edit.queryOnly
+            ? await providersApi.queryEdit(appId, input.edit.request)
+            : await providersApi.confirmEdit(input, appId);
+          if (matchesProviderEditResult(result, appId, input.edit.request))
+            return result;
+          return { app: appId, request: input.edit.request, status: "unknown" };
+        } catch {
+          // Transport/parser details can contain configuration values. Query the
+          // same request; never fall through to the legacy write or retry it.
+          return { app: appId, request: input.edit.request, status: "unknown" };
+        }
+      }
+      await providersApi.update(input.provider, appId, input.originalId);
+      return input.provider;
     },
-    onSuccess: async (provider, variables) => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
-      await queryClient.invalidateQueries({
-        queryKey: usageKeys.script(provider.id, appId),
-      });
-      if (variables.originalId && variables.originalId !== provider.id) {
+    onSuccess: async (result, variables) => {
+      // mutationFn already verified and pinned the request app before awaiting.
+      // React Query may replace callbacks when the active application changes.
+      const savedApp = "request" in result ? result.app : appId;
+      if (
+        variables.edit &&
+        !completedProviderEdit(result, savedApp, variables.edit.request)
+      )
+        return;
+      const provider = variables.provider;
+      try {
         await queryClient.invalidateQueries({
-          queryKey: usageKeys.script(variables.originalId, appId),
+          queryKey: ["providers", savedApp],
         });
-      }
-      if (appId === "openclaw") {
         await queryClient.invalidateQueries({
-          queryKey: openclawKeys.health,
+          queryKey: usageKeys.script(provider.id, savedApp),
         });
+        if (variables.originalId && variables.originalId !== provider.id) {
+          await queryClient.invalidateQueries({
+            queryKey: usageKeys.script(variables.originalId, savedApp),
+          });
+        }
+        if (savedApp === "openclaw") {
+          await queryClient.invalidateQueries({
+            queryKey: openclawKeys.health,
+          });
+        }
+        if (savedApp === "hermes") {
+          await invalidateHermesProviderCaches(queryClient);
+        }
+      } catch (error) {
+        // A cache read failure cannot undo an already verified native save.
+        if (!variables.edit) throw error;
       }
-      if (appId === "hermes") {
-        await invalidateHermesProviderCaches(queryClient);
-      }
+      // The still-live editor owns U02 success UI; late results only refresh caches.
+      if (variables.edit) return;
       toast.success(
         t("notifications.updateSuccess", {
           defaultValue: "供应商更新成功",
@@ -181,7 +215,8 @@ export const useUpdateProviderMutation = (appId: AppId) => {
         },
       );
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables) => {
+      if (variables.edit) return;
       const rawDetail = extractErrorMessage(error);
       const detail =
         (appId === "pi"
@@ -196,8 +231,8 @@ export const useUpdateProviderMutation = (appId: AppId) => {
         }),
       );
     },
-    onSettled: async () => {
-      if (appId === "pi") {
+    onSettled: async (_result, _error, variables) => {
+      if (!variables.edit && appId === "pi") {
         await invalidatePiProviderCaches(queryClient);
       }
     },

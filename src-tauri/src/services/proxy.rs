@@ -2461,6 +2461,21 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取代理配置失败: {e}"))?;
 
+        self.build_proxy_urls_for_config(config).await
+    }
+
+    pub(crate) async fn build_proxy_urls_existing(&self) -> Result<(String, String), String> {
+        let config = self
+            .db
+            .get_proxy_config_existing()
+            .map_err(|_| "proxy.config_unavailable".to_owned())?;
+        self.build_proxy_urls_for_config(config).await
+    }
+
+    async fn build_proxy_urls_for_config(
+        &self,
+        config: crate::proxy::types::ProxyConfig,
+    ) -> Result<(String, String), String> {
         // listen_address 可能是 0.0.0.0（用于监听所有网卡），但客户端无法用 0.0.0.0 连接；
         // 因此写回到各应用配置时，优先使用本机回环地址。
         let connect_host = match config.listen_address.as_str() {

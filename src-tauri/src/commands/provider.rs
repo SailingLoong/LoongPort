@@ -300,80 +300,10 @@ fn update_provider_internal(
     state: &AppState,
     app_type: AppType,
     original_id: Option<&str>,
-    mut provider: Provider,
+    provider: Provider,
 ) -> Result<bool, AppError> {
-    // ## 托管档位**可以**改内容，但**不许改 id**
-    //
-    // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
-    // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
-    // 改成了「已存在的档位只换 sk、保住用户的编辑」（`crate::relay::provider_config::patch_api_key`），
-    // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
-    //
-    // 中转站区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
-    // 那页支持全部字段，我们不重做）。用户点它之前会先看到一道警告：保存后这个档位
-    // 归他自己维护，出问题用「恢复默认配置」退回来。
-    //
-    // ## 但**不许凭空造出一个托管 id**
-    //
-    // id 是托管判据本身（`crate::relay::managed::provider_id_for` 生成的前缀），所以：
-    //
-    // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
-    //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
-    // - 普通 → 托管 id：**伪装成托管项** —— 它会出现在中转站区里，
-    //   而「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
-    //
-    // ⚠️ **判据不能是「id 变了没有」** —— review 抓出那样有个绕过口子：
-    // `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
-    // 自己当原 id（`services/provider/mod.rs:2608`），于是「不是改名」成立、
-    // 守卫不介入，而 `save_provider` 是 **upsert** ⇒ 一条自选的 `loongport-*`
-    // 记录被凭空写进库里。
-    //
-    // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
-    // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
-    // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
-    let existing_managed = if crate::relay::is_managed(&provider.id) {
-        match state
-            .db
-            .get_provider_by_id(&provider.id, app_type.as_str())?
-        {
-            Some(existing) => Some(existing),
-            None => {
-                return Err(AppError::Message(
-                    "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成"
-                        .to_string(),
-                ));
-            }
-        }
-    } else {
-        None
-    };
-    // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
-    if let Some(old) = original_id.filter(|old| *old != provider.id) {
-        crate::relay::reject_if_managed(old)?;
-    }
-
-    // 托管档位的站点归属与 sk 由 LoongPort 管，不属于用户可编辑配置。
-    //
-    // 倍率查询会从 `website_url` 定位 `/v1/sub2api/billing`，再从
-    // `settings_config` 提取 sk。若直接保存编辑器提交的整份 Provider，用户只改模型
-    // 也可能因表单 round-trip 丢掉认证 section，结果是倍率/连通检测一起静默失效。
-    // 这里保留这两个 owner 字段，其余配置仍照用户提交的保存。
-    if let Some(existing) = existing_managed {
-        provider.website_url = existing.website_url;
-        if let Some(api_key) =
-            crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
-        {
-            if !crate::relay::provider_config::ensure_api_key(
-                &mut provider.settings_config,
-                &app_type,
-                &api_key,
-            ) {
-                return Err(AppError::Config(
-                    "托管档位的配置必须是对象，无法保留由 LoongPort 管理的密钥".to_string(),
-                ));
-            }
-        }
-    }
+    let provider =
+        ProviderService::prepare_managed_update(state, app_type.clone(), original_id, provider)?;
 
     let provider_id = provider.id.clone();
     // `app_type` 下一步会被 move 进 update，先扣出字符串给 set_user_edited 用。
@@ -1758,6 +1688,86 @@ pub fn get_provider_edit_settings(
 ) -> Result<serde_json::Value, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     ProviderService::edit_settings(state.inner(), app_type, &id).map_err(|e| e.to_string())
+}
+
+// These commands expose only redacted editor DTOs. Parser/configuration errors
+// stay inside the existing provider owner, never in IPC error text.
+#[tauri::command]
+pub async fn preview_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    provider: Provider,
+    #[allow(non_snake_case)] originalId: String,
+    #[allow(non_snake_case)] requestId: String,
+    #[allow(non_snake_case)] deleteCredential: bool,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        crate::services::provider::edit::preview(
+            state.inner(),
+            &app,
+            provider,
+            &originalId,
+            &requestId,
+            deleteCredential,
+        )
+        .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn confirm_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    provider: Provider,
+    #[allow(non_snake_case)] originalId: Option<String>,
+    request: crate::mode::state::SaveRequest,
+    #[allow(non_snake_case)] deleteCredential: bool,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        let original = originalId.as_deref().unwrap_or(&provider.id).to_owned();
+        crate::services::provider::edit::confirm(
+            state.inner(),
+            &app,
+            provider,
+            &original,
+            request,
+            deleteCredential,
+        )
+        .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn query_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        crate::services::provider::edit::query(state.inner(), &app, request)
+            .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
 }
 
 #[tauri::command]

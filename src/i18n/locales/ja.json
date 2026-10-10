@@ -173,7 +173,76 @@
     "duplicateFailed": "プロバイダーの複製に失敗しました",
     "needsRouting": "ルーティングが必要",
     "noRoutingSupport": "ルーティング非対応",
-    "duplicateLiveIdsLoadFailed": "設定内のプロバイダー識別子を読み込めませんでした。設定を修正してから再度お試しください"
+    "duplicateLiveIdsLoadFailed": "設定内のプロバイダー識別子を読み込めませんでした。設定を修正してから再度お試しください",
+    "preview": {
+      "preview": "変更をプレビュー",
+      "saveOnly": "設定を保存",
+      "saveAndApply": "保存して現在の設定に適用",
+      "fields": "変更するフィールド",
+      "files": "変更対象ファイルのプレビュー",
+      "reading": "設定と現在の状態を読み込んでいます…",
+      "reread": "再読み込み",
+      "sourceUnavailable": "設定の読み込み元を確認できません。再読み込みしてください。",
+      "invalidFormat": "設定の形式が正しくありません。編集に戻ってください。",
+      "readOnly": "必要なファイルが読み取り専用のため、現在は保存できません。",
+      "sourceChanged": "設定またはファイルが変更されました。プレビューを作成し直してください。",
+      "vaultLocked": "認証情報ストアがロックされています。先にロックを解除してください。",
+      "pendingOperation": "確認が必要な元の操作があります。先にその操作を再確認してください。",
+      "ownerUnavailable": "既存の設定または認証情報の所有関係から、この書き込みの正当性を確認できません。編集に戻って確認してください。",
+      "credentialConflict": "キーの削除と置き換えは同時に実行できません。先にキーの入力欄を空にしてください。",
+      "unsupported": "この設定では、検証可能な書き込み計画を現在作成できません。",
+      "savedPreviousDraft": "元の保存は完了しました。その後に編集した下書きはまだ保存されていません。",
+      "queryOriginal": "元の操作を確認",
+      "backToEdit": "編集に戻る",
+      "deleteCredential": "この設定のキーを明示的に削除",
+      "deleteCredentialHint": "この設定への帰属を確認できたキーのみが対象です。アカウントからはログアウトしません。キーの入力欄を空にしてから削除を選択してください。空欄にするだけなら、現在のキーは保持されます。",
+      "noPreview": "プレビューを作成してから、保存を確定してください。",
+      "noLiveWrite": "この設定レコードのみを保存します。クライアントのファイルには書き込まず、現在の選択も変更しません。",
+      "plannedOnly": "以下は変更・保持の予定です。まだ書き込まれていません。",
+      "field": {
+        "connection": "接続フィールド",
+        "authentication": "認証フィールド",
+        "models": "モデルフィールド",
+        "dedicated": "この設定専用のフィールド",
+        "metadata": "名前と設定のメタデータ"
+      },
+      "file": {
+        "claudeSettings": "Claude settings.json",
+        "codexAuth": "Codex auth.json",
+        "codexConfig": "Codex config.toml",
+        "codexCatalog": "Codex 管理モデルカタログ",
+        "managedAuth": "管理対象の認証情報の所有者マーカー",
+        "deviceAuthStash": "デバイス上の暗号化された認証情報の一時保存領域",
+        "geminiEnv": "Gemini .env",
+        "geminiSettings": "Gemini settings.json",
+        "grokConfig": "Grok Build config.toml"
+      },
+      "change": {
+        "write": "書き込み",
+        "delete": "削除",
+        "unchanged": "変更なし"
+      },
+      "preserve": {
+        "unownedJsonKeys": "この設定に属さない JSON のキーと値を保持する予定です。",
+        "untouchedTomlBytes": "変更対象外の TOML の内容は、バイト単位でそのまま保持する予定です。",
+        "untouchedDotenvBytes": "変更対象外の dotenv の内容は、バイト単位でそのまま保持する予定です。",
+        "sharedSettings": "共有設定は変更せず、この設定と一緒には保存しません。",
+        "externalCatalog": "外部モデルカタログを保持します。LoongPort のモデルマッピングが反映されない可能性があります。"
+      },
+      "result": {
+        "completed": "元の操作は完了し、再読み取りによる検証に合格しました。",
+        "notRecorded": "今回の保存は操作ログに記録されていません。",
+        "pending": "元の操作はまだ完了していません。",
+        "partial": "元の操作で一部のファイルへの書き込みが行われました。元の操作を再確認してください。",
+        "verificationRequired": "元の操作について、実際のファイルを確認する必要があります。",
+        "discarded": "元の操作は反映されず、一時保存データは破棄されました。",
+        "abandoned": "読み込み元が変更されたため、元の操作は中止されました。",
+        "unknown": "結果をまだ確認できません。元の操作を確認してください。",
+        "conflict": "リクエストの識別情報が競合しています。元の操作を確認してください。",
+        "stale": "プレビューの有効期限が切れました。編集に戻り、プレビューを作成し直してください。",
+        "blocked": "現在、この設定は保存できません。"
+      }
+    }
   },
   "claudeCode": {
     "needsRouting": "ルーティングが必要",
@@ -4016,7 +4085,14 @@
     "order": "順序",
     "noTiers": "ティアはまだ追加されていません",
     "outsideChain": "自動切り替えの対象外",
-    "noSwitchableTier": "選択したモデルを利用できるティアがありません"
+    "noSwitchableTier": "選択したモデルを利用できるティアがありません",
+    "reviewChanges": "変更を確認",
+    "reviewChangesDescription": "適用する一覧と順序を確認してください。新しい一覧に含まれない接続設定は自動フェイルオーバーの対象外になります。キャンセルしても下書きは保持されます。",
+    "appliedOrder": "現在適用されている順序",
+    "proposedOrder": "適用する順序",
+    "requestedSelection": "今回指定する現在の接続設定とモデル",
+    "noExplicitSelection": "今回のリクエストでは現在の接続設定やモデルの切り替えを明示的に指定していません。実行時の選択はルーティングサービスが決定します。",
+    "reviewChanged": "下書きまたは適用済みの状態が変わりました。キャンセルして「変更を適用」をもう一度選び、最新の影響を確認してください。"
   },
   "secrets": {
     "recoveryTitle": "復元を続ける",

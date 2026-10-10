@@ -2,8 +2,15 @@ import {
   applicationRoutingApi,
   type ApplicationRouting,
 } from "@/lib/api/applicationRouting";
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { useForm } from "react-hook-form";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+} from "react";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -237,6 +244,9 @@ export interface ProviderFormProps {
   onManageAuthAccounts?: (target: ManagedAuthProvider) => void;
   onSubmittingChange?: (isSubmitting: boolean) => void;
   onSubmitReadyChange?: (isReady: boolean) => void;
+  /** Observes the original draft; never owns another editable copy. */
+  onDraftRevisionChange?: (revision: number) => void;
+  preserveBlankCredential?: boolean;
   initialData?: {
     name?: string;
     websiteUrl?: string;
@@ -275,6 +285,8 @@ function ProviderFormFull({
   onManageUniversalProviders,
   onManageAuthAccounts,
   onSubmittingChange,
+  onDraftRevisionChange,
+  preserveBlankCredential = false,
   initialData,
   showButtons = true,
   isProxyTakeover = false,
@@ -418,7 +430,19 @@ function ProviderFormFull({
   );
 
   const form = useForm<ProviderFormData>({
-    resolver: zodResolver(providerSchema),
+    resolver: async (values, context, options) => {
+      const result = await zodResolver(providerSchema)(
+        values,
+        context,
+        options,
+      );
+      if (onDraftRevisionChange && result.errors.settingsConfig) {
+        result.errors.settingsConfig.message = t(
+          "provider.preview.invalidFormat",
+        );
+      }
+      return result;
+    },
     defaultValues,
     mode: "onSubmit",
   });
@@ -593,6 +617,19 @@ function ProviderFormFull({
       ),
   );
 
+  // Revision/validity only: the original field owns its raw value and the
+  // existing Codex TOML hook remains its sole serialized value owner.
+  const [codexCompactDraft, setCodexCompactDraft] = useState({
+    revision: 0,
+    valid: true,
+  });
+  const handleCompactLimitInput = useCallback((valid: boolean) => {
+    setCodexCompactDraft((previous) => ({
+      revision: previous.revision + 1,
+      valid,
+    }));
+  }, []);
+
   const {
     codexAuth,
     codexConfig,
@@ -651,8 +688,11 @@ function ProviderFormFull({
         : "",
     );
 
-  const { configError: codexConfigError, debouncedValidate } =
-    useCodexTomlValidation();
+  const {
+    configError: codexConfigError,
+    debouncedValidate,
+    validateToml: validateCodexToml,
+  } = useCodexTomlValidation();
 
   const handleCodexConfigChange = useCallback(
     (value: string) => {
@@ -1019,7 +1059,107 @@ function ProviderFormFull({
   const shouldApplyLocalProxyRequestOverrides =
     (appId === "claude" || appId === "codex") && category !== "official";
 
+  const watchedDraft = useWatch({
+    control: form.control,
+    disabled: !onDraftRevisionChange,
+  });
+  // Include raw/invalid input and hidden catalog metadata, not loading or layout.
+  const draftSignature = onDraftRevisionChange
+    ? JSON.stringify([
+        watchedDraft,
+        category,
+        selectedPresetId,
+        activePreset,
+        endpointAutoSelect,
+        localIsFullUrl,
+        pricingConfig,
+        localApiKeyField,
+        localApiFormat,
+        templateValues,
+        apiKey,
+        baseUrl,
+        claudeModel,
+        defaultHaikuModel,
+        defaultHaikuModelName,
+        defaultSonnetModel,
+        defaultSonnetModelName,
+        defaultOpusModel,
+        defaultOpusModelName,
+        defaultFableModel,
+        defaultFableModelName,
+        subagentModel,
+        selectedGitHubAccountId,
+        selectedCodexAccountId,
+        selectedXaiAccountId,
+        hasValidCodexOfficialSelection,
+        codexFastMode,
+        codexChatReasoning,
+        promptCacheRouting,
+        customUserAgent,
+        localProxyHeadersOverride,
+        localProxyBodyOverride,
+        codexAuth,
+        codexConfig,
+        codexCompactDraft,
+        codexApiKey,
+        codexBaseUrl,
+        codexModel,
+        codexCatalogModels,
+        localCodexApiFormat,
+        localCodexAnthropicAuthField,
+        localCodexImpersonateClaudeCode,
+        localCodexMaxOutputTokens,
+        geminiEnv,
+        geminiConfig,
+        geminiApiKey,
+        geminiBaseUrl,
+        geminiModel,
+        useCommonConfig,
+        commonConfigSnippet,
+        useCodexCommonConfigFlag,
+        codexCommonConfigSnippet,
+        useGeminiCommonConfigFlag,
+        geminiCommonConfigSnippet,
+      ])
+    : "";
+  const draftRevision = useRef({ signature: draftSignature, value: 0 });
+  const pendingSoftRevision = useRef<number | null>(null);
+  const acceptedSoftRevision = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (draftRevision.current.signature !== draftSignature) {
+      draftRevision.current = {
+        signature: draftSignature,
+        value: draftRevision.current.value + 1,
+      };
+    }
+    onDraftRevisionChange?.(draftRevision.current.value);
+  }, [draftSignature, onDraftRevisionChange]);
+
   const handleSubmit = async (values: ProviderFormData) => {
+    // Check the actual hook-owned raw inputs before any normalizer or legacy
+    // fallback can turn them into a different, apparently valid preview draft.
+    if (onDraftRevisionChange) {
+      try {
+        if (appId === "codex") {
+          if (!codexCompactDraft.valid) throw new Error("invalidFormat");
+          const auth = JSON.parse(codexAuth);
+          if (
+            !auth ||
+            typeof auth !== "object" ||
+            Array.isArray(auth) ||
+            !validateCodexToml(codexConfig)
+          )
+            throw new Error("invalidFormat");
+        } else if (appId === "gemini") {
+          const config = geminiConfig.trim() ? JSON.parse(geminiConfig) : {};
+          if (!config || typeof config !== "object" || Array.isArray(config))
+            throw new Error("invalidFormat");
+        }
+      } catch {
+        toast.error(t("provider.preview.invalidFormat"));
+        return;
+      }
+    }
     const overridesResult = shouldApplyLocalProxyRequestOverrides
       ? buildLocalProxyRequestOverrides(
           localProxyHeadersOverride,
@@ -1028,10 +1168,12 @@ function ProviderFormFull({
       : {};
     if (overridesResult.error) {
       toast.error(
-        t("providerForm.localProxyRequestOverridesInvalid", {
-          defaultValue: `本地代理请求覆盖格式错误：${overridesResult.error}`,
-          error: overridesResult.error,
-        }),
+        onDraftRevisionChange
+          ? t("provider.preview.invalidFormat")
+          : t("providerForm.localProxyRequestOverridesInvalid", {
+              defaultValue: `本地代理请求覆盖格式错误：${overridesResult.error}`,
+              error: overridesResult.error,
+            }),
       );
       return;
     }
@@ -1292,7 +1434,8 @@ function ProviderFormFull({
           !isCopilotProvider &&
           !isClaudeCodexOauthProvider &&
           !isXaiOauthProvider &&
-          !apiKey.trim()
+          !apiKey.trim() &&
+          !(preserveBlankCredential && isEditMode)
         ) {
           issues.push(
             t("providerForm.apiKeyRequired", {
@@ -1310,7 +1453,11 @@ function ProviderFormFull({
             }),
           );
         }
-        if (!isXaiOauthProvider && !codexApiKey.trim()) {
+        if (
+          !isXaiOauthProvider &&
+          !codexApiKey.trim() &&
+          !(preserveBlankCredential && isEditMode)
+        ) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1325,7 +1472,7 @@ function ProviderFormFull({
             }),
           );
         }
-        if (!geminiApiKey.trim()) {
+        if (!geminiApiKey.trim() && !(preserveBlankCredential && isEditMode)) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1335,7 +1482,14 @@ function ProviderFormFull({
       }
     }
 
-    if (issues.length > 0) {
+    if (
+      issues.length > 0 &&
+      !(
+        onDraftRevisionChange &&
+        acceptedSoftRevision.current === draftRevision.current.value
+      )
+    ) {
+      pendingSoftRevision.current = draftRevision.current.value;
       // 弹确认框让用户决定是否仍要保存
       setSoftIssues(issues);
       setPendingFormValues(values);
@@ -1352,10 +1506,12 @@ function ProviderFormFull({
   ) => {
     if (overridesResult.error) {
       toast.error(
-        t("providerForm.localProxyRequestOverridesInvalid", {
-          defaultValue: `本地代理请求覆盖格式错误：${overridesResult.error}`,
-          error: overridesResult.error,
-        }),
+        onDraftRevisionChange
+          ? t("provider.preview.invalidFormat")
+          : t("providerForm.localProxyRequestOverridesInvalid", {
+              defaultValue: `本地代理请求覆盖格式错误：${overridesResult.error}`,
+              error: overridesResult.error,
+            }),
       );
       return;
     }
@@ -1406,6 +1562,10 @@ function ProviderFormFull({
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
+        if (onDraftRevisionChange) {
+          toast.error(t("provider.preview.invalidFormat"));
+          return;
+        }
         settingsConfig = values.settingsConfig.trim();
       }
     } else if (appId === "gemini") {
@@ -1418,6 +1578,10 @@ function ProviderFormFull({
         };
         settingsConfig = JSON.stringify(combined);
       } catch (err) {
+        if (onDraftRevisionChange) {
+          toast.error(t("provider.preview.invalidFormat"));
+          return;
+        }
         settingsConfig = values.settingsConfig.trim();
       }
     } else if (
@@ -2377,6 +2541,7 @@ function ProviderFormFull({
           {appId === "codex" ? (
             <>
               <CodexConfigEditor
+                redactErrors={!!onDraftRevisionChange}
                 commonConfigReadOnly={commonConfigReadOnly}
                 authValue={codexAuth}
                 configValue={codexConfig}
@@ -2385,6 +2550,9 @@ function ProviderFormFull({
                 isProxyTakeover={isProxyTakeover}
                 onAuthChange={setCodexAuth}
                 onConfigChange={handleCodexConfigChange}
+                onCompactLimitInput={
+                  onDraftRevisionChange ? handleCompactLimitInput : undefined
+                }
                 useCommonConfig={useCodexCommonConfigFlag}
                 onCommonConfigToggle={handleCodexCommonConfigToggle}
                 commonConfigSnippet={codexCommonConfigSnippet}
@@ -2393,8 +2561,16 @@ function ProviderFormFull({
                 }
                 onCommonConfigErrorClear={clearCodexCommonConfigError}
                 commonConfigError={codexCommonConfigError}
-                authError={codexAuthError}
-                configError={codexConfigError}
+                authError={
+                  onDraftRevisionChange && codexAuthError
+                    ? t("provider.preview.invalidFormat")
+                    : codexAuthError
+                }
+                configError={
+                  onDraftRevisionChange && codexConfigError
+                    ? t("provider.preview.invalidFormat")
+                    : codexConfigError
+                }
                 onExtract={handleCodexExtract}
                 isExtracting={isCodexExtracting}
               />
@@ -2403,6 +2579,7 @@ function ProviderFormFull({
           ) : appId === "gemini" ? (
             <>
               <GeminiConfigEditor
+                redactErrors={!!onDraftRevisionChange}
                 commonConfigReadOnly={commonConfigReadOnly}
                 envValue={geminiEnv}
                 configValue={geminiConfig}
@@ -2417,7 +2594,11 @@ function ProviderFormFull({
                 onCommonConfigErrorClear={clearGeminiCommonConfigError}
                 commonConfigError={geminiCommonConfigError}
                 envError={envError}
-                configError={geminiConfigError}
+                configError={
+                  onDraftRevisionChange && geminiConfigError
+                    ? t("provider.preview.invalidFormat")
+                    : geminiConfigError
+                }
                 onExtract={handleGeminiExtract}
                 isExtracting={isGeminiExtracting}
               />
@@ -2505,6 +2686,7 @@ function ProviderFormFull({
           ) : (
             <>
               <CommonConfigEditor
+                redactErrors={!!onDraftRevisionChange}
                 commonConfigReadOnly={commonConfigReadOnly}
                 value={form.getValues("settingsConfig")}
                 onChange={(value) => form.setValue("settingsConfig", value)}
@@ -2587,16 +2769,46 @@ function ProviderFormFull({
             setPendingLocalProxyRequestOverridesResult(null);
             return;
           }
+          if (
+            onDraftRevisionChange &&
+            pendingSoftRevision.current !== draftRevision.current.value
+          ) {
+            setSoftIssues(null);
+            setPendingFormValues(null);
+            setPendingLocalProxyRequestOverridesResult(null);
+            toast.error(t("provider.preview.sourceChanged"));
+            return;
+          }
           setIsConfirmSubmitting(true);
           try {
-            await performSubmit(values, overridesResult);
+            if (onDraftRevisionChange) {
+              const version = draftRevision.current.value;
+              acceptedSoftRevision.current = version;
+              // Re-run the original hard resolver. Cached values must not be
+              // combined with newer independent hook state.
+              await form.handleSubmit(async (current) => {
+                if (draftRevision.current.value !== version) {
+                  toast.error(t("provider.preview.sourceChanged"));
+                  return;
+                }
+                await handleSubmit(current);
+              })();
+            } else {
+              await performSubmit(values, overridesResult);
+            }
             setSoftIssues(null);
             setPendingFormValues(null);
             setPendingLocalProxyRequestOverridesResult(null);
           } catch (error) {
-            console.error("[ProviderForm] soft-confirm submit failed:", error);
+            if (!onDraftRevisionChange)
+              console.error(
+                "[ProviderForm] soft-confirm submit failed:",
+                error,
+              );
+            else toast.error(t("provider.preview.sourceUnavailable"));
             // 保留确认框和 pending values，让用户可以重试或取消
           } finally {
+            acceptedSoftRevision.current = null;
             setIsConfirmSubmitting(false);
           }
         }}

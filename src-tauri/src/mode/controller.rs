@@ -442,21 +442,8 @@ pub(crate) fn save_row_locked(
     provider: &Provider,
     clear_model_preference: bool,
 ) -> Result<(), AppError> {
-    if previous.id != provider.id {
-        return Err(invalid());
-    }
-    crate::proxy::application_routing::blocked_tier_ids_checked(service.database(), app.as_str())?;
-    let before = mode(service, app)?;
-    let in_use = current::provider_for(service.database(), app, current::Purpose::InUse)?;
-    let row = SavedRow {
-        before: Database::provider_update_digest(previous)?,
-        provider: Database::provider_update_value(provider)?,
-        clear_model_preference: clear_model_preference && in_use.as_deref() == Some(&provider.id),
-    };
-    let target = PendingTarget {
-        saved_row: Some(row),
-        ..Default::default()
-    };
+    let (before, in_use, target) =
+        save_row_target(service, app, previous, provider, clear_model_preference)?;
     if in_use.as_deref() != Some(provider.id.as_str()) || (before.is_proxy() && !before.attached) {
         write_target_only(service, app, op::APPLY, target)?;
         return Ok(());
@@ -813,4 +800,247 @@ pub(crate) async fn stop_if_unused(service: &ProxyService) -> Result<(), String>
         service.stop().await?;
     }
     Ok(())
+}
+
+fn save_row_target(
+    service: &ProxyService,
+    app: &AppType,
+    previous: &Provider,
+    provider: &Provider,
+    clear_model_preference: bool,
+) -> Result<(ModeState, Option<String>, PendingTarget), AppError> {
+    if previous.id != provider.id {
+        return Err(invalid());
+    }
+    crate::proxy::application_routing::blocked_tier_ids_checked(service.database(), app.as_str())?;
+    let before = {
+        let vault = service.database().secret_session().read()?;
+        let store = DeviceStore::for_device();
+        if state::pending(&store, &vault, app.as_str())?.is_some() {
+            return Err(invalid());
+        }
+        current::validate_known_mode(&store, &vault, app)?
+    };
+    let in_use = current::provider_for(service.database(), app, current::Purpose::InUse)?;
+    let row = SavedRow {
+        before: Database::provider_update_digest(previous)?,
+        provider: Database::provider_update_value(provider)?,
+        clear_model_preference: clear_model_preference
+            && in_use.as_deref() == Some(provider.id.as_str()),
+    };
+    let target = PendingTarget {
+        saved_row: Some(row),
+        ..Default::default()
+    };
+    Ok((before, in_use, target))
+}
+
+/// A request-local plan, not a second draft or persistent operation owner.
+pub(crate) struct SaveRowPlan {
+    pub(crate) files: Vec<(LiveFile, crate::live::patch::Guarded)>,
+    pub(crate) target: PendingTarget,
+    pub(crate) revision: String,
+    pub(crate) preserved_catalog: bool,
+    pub(crate) generation: Option<String>,
+}
+
+fn planned_patch(
+    file: LiveFile,
+    patch: &dyn crate::live::patch::LivePatch,
+) -> Result<(LiveFile, crate::live::patch::Guarded), AppError> {
+    let pre = crate::live::engine::read_current(&file.path)?;
+    let after = patch
+        .apply_file(&file.path, pre.as_deref())
+        .map_err(|_| invalid())?;
+    Ok((
+        file,
+        crate::live::patch::Guarded {
+            expected_pre: crate::live::engine::digest(pre.as_deref()),
+            then: after
+                .map(crate::live::patch::WholeFile::Write)
+                .unwrap_or(crate::live::patch::WholeFile::Delete),
+        },
+    ))
+}
+
+pub(crate) fn plan_row_save(
+    service: &ProxyService,
+    app: &AppType,
+    previous: &Provider,
+    provider: &Provider,
+    request_id: &str,
+) -> Result<SaveRowPlan, AppError> {
+    let changed = crate::relay::provider_config::selected_model(app, &previous.settings_config)
+        != crate::relay::provider_config::selected_model(app, &provider.settings_config);
+    let (before, in_use, mut target) = save_row_target(service, app, previous, provider, changed)?;
+    let live_state = {
+        let vault = service.database().secret_session().read()?;
+        state::load_app(&DeviceStore::for_device(), &vault, app.as_str())?
+    };
+    let entry = live_state.apps.get(app.as_str()).ok_or_else(invalid)?;
+    state::validate_app_evidence_for_update(app.as_str(), entry)?;
+    let direct = current::provider_for(service.database(), app, current::Purpose::Direct)?;
+    let mut files = vec![];
+    let mut preserved_catalog = false;
+    let mut generation = None;
+    let mut codex_revision = None;
+    let mut endpoint = None;
+    if in_use.as_deref() == Some(provider.id.as_str()) && (!before.is_proxy() || before.attached) {
+        let live = LiveNow::of(service, app, &before)?;
+        if before.is_proxy() {
+            admit(service, app, provider)?;
+            endpoint = Some(
+                futures::executor::block_on(service.build_proxy_urls_existing())
+                    .map_err(|_| invalid())?
+                    .0,
+            );
+            target.state = Some(before.clone());
+        }
+        match app {
+            AppType::Claude => {
+                let projection = endpoint
+                    .as_ref()
+                    .map(|url| claude_proxy_projection(provider, url))
+                    .unwrap_or_else(|| ClaudeProjection::of(&provider.settings_config));
+                if let Some(next) = &mut target.state {
+                    next.contract = Some(contract::claude(&projection));
+                }
+                files.push(planned_patch(
+                    claude_direct::settings_file(),
+                    &direct_patch(live.claude_owner().as_ref(), &projection),
+                )?);
+            }
+            AppType::Gemini => {
+                let projection = match &endpoint {
+                    Some(url) => gemini_proxy_projection(provider, url),
+                    None => gemini_direct::projection(provider)?,
+                };
+                if let Some(next) = &mut target.state {
+                    next.contract = Some(contract::gemini(&projection));
+                }
+                files.push(planned_patch(
+                    gemini_direct::env_file(),
+                    &projection.env_patch(),
+                )?);
+                files.push(planned_patch(
+                    gemini_direct::settings_file(),
+                    &projection.settings_patch(),
+                )?);
+            }
+            AppType::GrokBuild => {
+                let projection = match &endpoint {
+                    Some(url) => grok_proxy_projection(provider, url)?,
+                    None => grok_direct::projection(provider)?,
+                };
+                if let Some(next) = &mut target.state {
+                    next.contract = Some(contract::grok(&projection));
+                }
+                target.written = Some(state::Written {
+                    tables: projection.written_tables(),
+                    ..Default::default()
+                });
+                let patch = crate::live::project::grok::GrokConfigPatch::direct(
+                    &projection,
+                    grok_direct::retired_tables_from_written(
+                        entry.written.as_ref(),
+                        live.direct_owner(),
+                    ),
+                    PROXY_TOKEN_PLACEHOLDER,
+                );
+                files.push(planned_patch(
+                    grok_direct::config_file(),
+                    &crate::live::patch::toml::TomlSteps(vec![&patch]),
+                )?);
+            }
+            AppType::Codex => {
+                let url = endpoint
+                    .as_ref()
+                    .map(|url| format!("{}/v1", url.trim_end_matches('/')));
+                let desired = match &url {
+                    Some(url) => codex_direct::Target::Proxy {
+                        route: provider,
+                        base_url: url,
+                    },
+                    None => codex_direct::Target::Direct(Some(provider)),
+                };
+                let output = codex_direct::plan_editor_save(
+                    service,
+                    &live.codex_owner(),
+                    desired,
+                    target,
+                    request_id,
+                )?;
+                files = output.0;
+                target = output.1;
+                preserved_catalog = output.2;
+                codex_revision = Some(output.3);
+                generation = Some(output.4);
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    // Hash only the original inputs actually used by this plan. No durable
+    // before-image framework; confirmed files use the existing Guarded patch.
+    let file_versions = files
+        .iter()
+        .map(|(file, patch)| (&file.path, file.private, &patch.expected_pre))
+        .collect::<Vec<_>>();
+    let source = serde_json::to_vec(&(
+        request_id,
+        app.as_str(),
+        service.database().secret_session().root(),
+        &target.saved_row,
+        &before,
+        &in_use,
+        &direct,
+        entry,
+        &file_versions,
+        &endpoint,
+        &codex_revision,
+        crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+    ))
+    .map_err(|source| AppError::JsonSerialize { source })?;
+    Ok(SaveRowPlan {
+        files,
+        target,
+        revision: crate::live::engine::sha256_hex(&source),
+        preserved_catalog,
+        generation,
+    })
+}
+
+pub(crate) fn consume_row_save(
+    service: &ProxyService,
+    app: &AppType,
+    plan: SaveRowPlan,
+    request: state::SaveRequest,
+) -> Result<(), AppError> {
+    let mut target = plan.target;
+    target.save_request = Some(request.clone());
+    if plan.files.is_empty() {
+        return write_target_only(service, app, op::APPLY, target);
+    }
+    let changes = plan
+        .files
+        .iter()
+        .map(|(file, patch)| operation::FileChange {
+            file: file.clone(),
+            patch: patch as &dyn crate::live::patch::LivePatch,
+        })
+        .collect::<Vec<_>>();
+    if let Some(expected) = plan.generation {
+        return service
+            .codex_manager()
+            .try_with_live_auth_guard(|generation| {
+                if generation.native_revision(&request.id)? != expected {
+                    return Err(invalid());
+                }
+                AppWrite::begin_codex_mode(service, generation)?
+                    .run(op::APPLY, &changes, target)
+                    .map(|_| ())
+            });
+    }
+    AppWrite::begin_mode(service, app)?
+        .run(op::APPLY, &changes, target)
+        .map(|_| ())
 }

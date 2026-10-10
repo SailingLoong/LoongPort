@@ -1048,7 +1048,7 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     Ok(s)
 }
 
-fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
+pub(crate) fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
     doc.get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
@@ -3699,9 +3699,9 @@ pub fn remove_codex_experimental_bearer_token_if(
     if let Some(provider_id) = active_codex_model_provider_id(&doc) {
         if let Some(provider_table) = doc
             .get_mut("model_providers")
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
             .and_then(|table| table.get_mut(provider_id.as_str()))
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
         {
             let should_remove = provider_table
                 .get("experimental_bearer_token")

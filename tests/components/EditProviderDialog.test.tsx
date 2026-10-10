@@ -19,7 +19,10 @@ let submitReadyCallbacks: Array<(isReady: boolean) => void> = [];
 
 vi.mock("@/lib/api", () => ({
   providersApi: {
-    getEditSettings: apiMocks.getEditSettings,
+    getEditSettings: async (...args: unknown[]) => ({
+      settingsConfig: (await apiMocks.getEditSettings(...args)) ?? {},
+      modeState: null,
+    }),
   },
 }));
 
@@ -193,6 +196,9 @@ describe("EditProviderDialog", () => {
       });
     });
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "common.save" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));
@@ -253,7 +259,7 @@ describe("EditProviderDialog", () => {
     };
     const { rerender } = render(<EditProviderDialog open {...props} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "manage-auth" }));
+    fireEvent.click(await screen.findByRole("button", { name: "manage-auth" }));
     expect(screen.getByTestId("auth-settings-panel")).toHaveTextContent(
       "codex_oauth",
     );
@@ -288,6 +294,9 @@ describe("EditProviderDialog", () => {
       />,
     );
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "common.save" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -320,6 +329,9 @@ describe("EditProviderDialog", () => {
       />,
     );
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "common.save" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -363,6 +375,9 @@ describe("EditProviderDialog", () => {
       />,
     );
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "common.save" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));

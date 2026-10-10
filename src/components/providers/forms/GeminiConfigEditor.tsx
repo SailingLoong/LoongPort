@@ -3,6 +3,7 @@ import { GeminiEnvSection, GeminiConfigSection } from "./GeminiConfigSections";
 import { GeminiCommonConfigModal } from "./GeminiCommonConfigModal";
 
 interface GeminiConfigEditorProps {
+  redactErrors?: boolean;
   commonConfigReadOnly?: boolean;
   envValue: string;
   configValue: string;
@@ -22,6 +23,7 @@ interface GeminiConfigEditorProps {
 }
 
 const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
+  redactErrors,
   envValue,
   configValue,
   onEnvChange,
@@ -63,6 +65,7 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
 
       {/* Config JSON Section */}
       <GeminiConfigSection
+        redactErrors={redactErrors}
         value={configValue}
         onChange={onConfigChange}
         configError={configError}
