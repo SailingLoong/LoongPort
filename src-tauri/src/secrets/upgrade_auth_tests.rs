@@ -4630,6 +4630,313 @@ fn u03_gemini_retained_checkpoint_admits_actual_native_owner_and_keeps_sync_paus
 
 #[test]
 #[serial_test::serial]
+fn u03_grok_retained_checkpoint_uses_original_native_and_written_owners() {
+    use crate::app_config::AppType;
+    use crate::mode::state::{self, Mode};
+    let config = |id: &str| {
+        format!("[models]\ndefault = '{id}'\n[model.{id}]\nmodel = 'synthetic-{id}'\nname = 'Synthetic {id}'\nbase_url = 'https://{id}.example.invalid/v1'\napi_key = 'synthetic-key-{id}'\napi_backend = 'responses'\ncontext_window = 200000\n")
+    };
+    for scenario in ["direct", "proxy", "missing"] {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        for id in ["a", "b"] {
+            db.save_provider(
+                "grokbuild",
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    format!("Synthetic {id}"),
+                    serde_json::json!({"config":config(id)}),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        if scenario != "missing" {
+            db.set_current_provider("grokbuild", "a").unwrap();
+        }
+        drop(db);
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_grokbuild: (scenario != "missing").then(|| "a".into()),
+            ..Default::default()
+        });
+        let saved_mode = if scenario == "proxy" {
+            "proxy"
+        } else {
+            "direct"
+        };
+        f.write_raw_mode(format!(r#"{{"version":1,"apps":{{"grokbuild":{{"mode":"{saved_mode}","attached":false,"proxy_route":"a"}},"codex":{{"mode":"future-mode","opaque":900719925474099312345}}}}}}"#).as_bytes());
+        let path = crate::grok_config::get_grok_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("# synthetic-user\n{}\n[ui]\ntheme = 'keep'\n[model.mine]\nmodel = 'synthetic-user'\napi_key = 'synthetic-user-key'\n[mcp_servers.local]\ncommand = 'synthetic'\n", config("a"))).unwrap();
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let session = review.runtime_session(&inspected, &token).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = std::sync::Arc::new(Database::init_with_secrets(session.clone()).unwrap());
+        assert!(std::sync::Arc::ptr_eq(&db.secrets, &session));
+        let runtime = crate::store::AppState::new(db).unwrap();
+        if scenario == "missing" {
+            let view = review
+                .review_app(&inspected, &token, &AppType::GrokBuild)
+                .unwrap();
+            assert!(view.can_choose_provider);
+            assert_eq!(
+                view.keep_files_providers
+                    .iter()
+                    .map(|row| row.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["a"]
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let chosen = review
+                .select_provider(
+                    &inspected,
+                    &token,
+                    &AppType::GrokBuild,
+                    &view.revision,
+                    "a",
+                    &runtime,
+                )
+                .unwrap();
+            assert!(chosen.can_complete_app);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(
+            review
+                .review_app(&inspected, &token, &AppType::GrokBuild)
+                .unwrap()
+                .can_complete_app
+        );
+        let before = snapshot(f.home.path());
+        drop(
+            crate::mode::operation::AppWrite::begin_mode(
+                &runtime.proxy_service,
+                &AppType::GrokBuild,
+            )
+            .unwrap(),
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        state::update_app(&f.device, &session.read().unwrap(), "grokbuild", |entry| {
+            entry.written =
+                Some(serde_json::from_value(serde_json::json!({"codex":{"version":1}})).unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let foreign_written = snapshot(f.home.path());
+        assert!(
+            !review
+                .review_app(&inspected, &token, &AppType::GrokBuild)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(crate::mode::operation::AppWrite::begin_mode(
+            &runtime.proxy_service,
+            &AppType::GrokBuild
+        )
+        .is_err());
+        assert_eq!(snapshot(f.home.path()), foreign_written);
+        state::update_app(&f.device, &session.read().unwrap(), "grokbuild", |entry| {
+            entry.written = None;
+            Ok(())
+        })
+        .unwrap();
+        if saved_mode == "direct" {
+            crate::services::ProviderService::switch(&runtime, AppType::GrokBuild, "b").unwrap();
+            let native = std::fs::read(&path).unwrap();
+            let mut doc = std::str::from_utf8(&native)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            assert_eq!(doc["models"]["default"].as_str(), Some("b"));
+            assert!(doc["model"].get("a").is_none());
+            assert_eq!(
+                doc["model"]["mine"]["api_key"].as_str(),
+                Some("synthetic-user-key")
+            );
+            assert_eq!(doc["ui"]["theme"].as_str(), Some("keep"));
+            assert_eq!(
+                doc["mcp_servers"]["local"]["command"].as_str(),
+                Some("synthetic")
+            );
+            assert_eq!(
+                runtime
+                    .db
+                    .get_current_provider("grokbuild")
+                    .unwrap()
+                    .as_deref(),
+                Some("b")
+            );
+            assert_eq!(
+                crate::settings::get_current_provider_ready(&AppType::GrokBuild)
+                    .unwrap()
+                    .as_deref(),
+                Some("b")
+            );
+            assert_eq!(
+                state::written(&f.device, &session.read().unwrap(), "grokbuild")
+                    .unwrap()
+                    .unwrap()
+                    .tables,
+                vec!["b"]
+            );
+            assert!(
+                review
+                    .review_app(&inspected, &token, &AppType::GrokBuild)
+                    .unwrap()
+                    .can_complete_app
+            );
+
+            // Whole-table proof must reject an obsolete credential beside the
+            // otherwise correct row, without rewriting the native input.
+            doc["model"]["b"]["env_key"] = toml_edit::value("SYNTHETIC_OLD_KEY");
+            std::fs::write(&path, doc.to_string()).unwrap();
+            let changed = snapshot(f.home.path());
+            assert!(
+                !review
+                    .review_app(&inspected, &token, &AppType::GrokBuild)
+                    .unwrap()
+                    .can_complete_app
+            );
+            assert!(crate::mode::operation::AppWrite::begin_mode(
+                &runtime.proxy_service,
+                &AppType::GrokBuild
+            )
+            .is_err());
+            assert_eq!(snapshot(f.home.path()), changed);
+            std::fs::write(&path, &native).unwrap();
+
+            // The authoritative original Written owner also requires removal
+            // of retired tables, even when models.default already names b.
+            let old = config("a").parse::<toml_edit::DocumentMut>().unwrap();
+            doc = std::str::from_utf8(&native).unwrap().parse().unwrap();
+            doc["model"]
+                .as_table_like_mut()
+                .unwrap()
+                .insert("a", old["model"]["a"].clone());
+            std::fs::write(&path, doc.to_string()).unwrap();
+            state::update_app(&f.device, &session.read().unwrap(), "grokbuild", |entry| {
+                entry.written.as_mut().unwrap().tables.push("a".into());
+                Ok(())
+            })
+            .unwrap();
+            let changed = snapshot(f.home.path());
+            let stale = review
+                .review_app(&inspected, &token, &AppType::GrokBuild)
+                .unwrap();
+            assert_eq!(stale.stored_fields_match, Some(true));
+            assert!(!stale.can_complete_app);
+            assert_eq!(snapshot(f.home.path()), changed);
+            std::fs::write(&path, &native).unwrap();
+            assert!(
+                review
+                    .review_app(&inspected, &token, &AppType::GrokBuild)
+                    .unwrap()
+                    .can_complete_app
+            );
+
+            // A later row refresh is preserved and cannot be admitted as if
+            // its credentials had already been published to the native file.
+            let mut row = runtime
+                .db
+                .get_provider_by_id("b", "grokbuild")
+                .unwrap()
+                .unwrap();
+            row.settings_config["config"] = serde_json::json!(
+                config("b").replace("synthetic-key-b", "synthetic-refreshed-key")
+            );
+            runtime.db.save_provider("grokbuild", &row).unwrap();
+            // A WAL reader can move SQLite's transient read mark after this
+            // explicit row write. Compare every durable file (including WAL),
+            // retain the index's presence, and separately verify logical DB data.
+            let shm = f
+                .root
+                .join(format!("{}-shm", crate::config::DB_FILE_NAME))
+                .strip_prefix(f.home.path())
+                .unwrap()
+                .to_path_buf();
+            let stable_snapshot = || {
+                use sha2::Digest;
+                snapshot(f.home.path())
+                    .into_iter()
+                    .map(|(path, bytes)| {
+                        let digest = if path == shm {
+                            "sqlite-wal-index".to_owned()
+                        } else {
+                            hex::encode(sha2::Sha256::digest(bytes))
+                        };
+                        (path, digest)
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let changed = stable_snapshot();
+            let database = Database::content_digest(&runtime.db.conn.lock().unwrap()).unwrap();
+            assert!(
+                !review
+                    .review_app(&inspected, &token, &AppType::GrokBuild)
+                    .unwrap()
+                    .can_complete_app
+            );
+            assert!(crate::mode::operation::AppWrite::begin_mode(
+                &runtime.proxy_service,
+                &AppType::GrokBuild
+            )
+            .is_err());
+            assert_eq!(stable_snapshot(), changed);
+            assert_eq!(
+                Database::content_digest(&runtime.db.conn.lock().unwrap()).unwrap(),
+                database
+            );
+            assert_eq!(
+                runtime
+                    .db
+                    .get_provider_by_id("b", "grokbuild")
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                row.settings_config
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+        }
+        let mode = state::mode_state(&f.device, &session.read().unwrap(), "grokbuild").unwrap();
+        assert_eq!(
+            mode.mode,
+            Some(if saved_mode == "proxy" {
+                Mode::Proxy
+            } else {
+                Mode::Direct
+            })
+        );
+        assert!(!mode.attached);
+        assert_eq!(mode.proxy_route.as_deref(), Some("a"));
+        assert!(
+            state::pending(&f.device, &session.read().unwrap(), "grokbuild")
+                .unwrap()
+                .is_none()
+        );
+        let before = snapshot(f.home.path());
+        assert!(crate::mode::operation::AppWrite::begin_mode(
+            &runtime.proxy_service,
+            &AppType::Codex
+        )
+        .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        assert_eq!(
+            checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap()).unwrap(),
+            review.view(&inspected).unwrap().checkpoint_id
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
     use crate::app_config::AppType;
     for (source, failure) in [

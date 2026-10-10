@@ -544,11 +544,28 @@ fn capture_app_with_state(
             pending == Some(None) && pointer_consistent == Some(true) && detached_mode_verified
         })
         .and_then(|id| rows.get(id));
-    let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
-    // Only a complete native owned-field proof grants admission. Codex and
-    // Grok remain unresolved until their route/catalog or cleanup is proven.
+    let written = live
+        .as_ref()
+        .and_then(|live| live.apps.get(app.as_str()))
+        .and_then(|entry| entry.written.as_ref());
+    let inspect_candidate = |row: Option<&crate::provider::Provider>| {
+        let retired = (*app == AppType::GrokBuild
+            && compatible
+            && written.is_none_or(|written| written.codex.is_none()))
+        .then(|| crate::services::provider::grok_direct::retired_tables_from_written(written, row));
+        live_review::inspect_with_grok_retired(
+            app,
+            &bound,
+            row,
+            catalog_present,
+            retired.as_deref(),
+        )
+    };
+    let client = inspect_candidate(candidate)?;
+    // Only a complete native owned-field proof grants admission. Codex remains
+    // unresolved until its route, auth, and catalog ownership are proven.
     let target_native_proven = if let Some(row) = target.and_then(|id| rows.get(id)) {
-        let proof = live_review::inspect(app, &bound, Some(row), catalog_present)?;
+        let proof = inspect_candidate(Some(row))?;
         proof.status == "parsed"
             && proof.marker == Some(false)
             && proof.native_completion_match == Some(true)
@@ -618,7 +635,7 @@ fn capture_app_with_state(
             {
                 continue;
             }
-            let facts = live_review::inspect(app, &bound, Some(row), catalog_present)?;
+            let facts = inspect_candidate(Some(row))?;
             if facts.status == "parsed"
                 && facts.marker == Some(false)
                 && facts.native_completion_match == Some(true)

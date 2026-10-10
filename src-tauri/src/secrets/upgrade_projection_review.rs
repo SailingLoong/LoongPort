@@ -10,6 +10,28 @@ pub(super) fn compare(app: &AppType, candidate: Option<&Provider>, live: &Value)
     compare_inner(app, candidate, live).ok().flatten()
 }
 
+pub(super) fn grok_native_completion_match(
+    candidate: Option<&Provider>,
+    live: &Value,
+    retired_tables: &[String],
+) -> Option<bool> {
+    let projection = crate::services::provider::grok_direct::projection(candidate?).ok()?;
+    let text = live.get("config")?.as_str()?;
+    let actual = text.parse::<toml::Table>().ok()?;
+    let mut planned = text.parse::<toml_edit::DocumentMut>().ok()?;
+    // Apply the original writer to an in-memory document. Equality proves its
+    // complete owned table, default, and retired/placeholder cleanup while
+    // retaining unrelated user tables. No native file is written here.
+    project::grok::GrokConfigPatch::direct(
+        &projection,
+        retired_tables.to_vec(),
+        project::claude::PROXY_TOKEN_PLACEHOLDER,
+    )
+    .apply_to(std::path::Path::new("config.toml"), &mut planned)
+    .ok()?;
+    Some(actual == planned.to_string().parse::<toml::Table>().ok()?)
+}
+
 pub(super) fn native_completion_match(
     app: &AppType,
     candidate: Option<&Provider>,
@@ -204,4 +226,56 @@ fn codex_declared_fields(candidate: &Provider, live: &Value) -> Result<Option<bo
     // No known declared-field conflict is not a complete route/auth/catalog
     // proof. Null remains unresolved, never a successful full Codex plan.
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grok_native_official_proof_requires_original_writer_cleanup() {
+        let mut official = Provider::with_id(
+            "synthetic-official".into(),
+            "Synthetic official".into(),
+            serde_json::json!({}),
+            None,
+        );
+        official.category = Some("official".into());
+        let user = "[model.mine]\napi_key = 'synthetic-user-key'\n[ui]\ntheme = 'keep'\n";
+        let live = |text: &str| serde_json::json!({"config":text});
+        let retired = vec!["old".to_string()];
+        assert_eq!(
+            grok_native_completion_match(Some(&official), &live(user), &retired),
+            Some(true)
+        );
+        for stale in [
+            "[models]\ndefault = 'old'\n".to_string(),
+            "[model.old]\napi_key = 'synthetic-retired-key'\n".to_string(),
+            format!(
+                "[model.proxy]\napi_key = '{}'\n",
+                project::claude::PROXY_TOKEN_PLACEHOLDER
+            ),
+            "[models]\n".to_string(),
+        ] {
+            assert_eq!(
+                grok_native_completion_match(
+                    Some(&official),
+                    &live(&format!("{stale}{user}")),
+                    &retired,
+                ),
+                Some(false)
+            );
+        }
+        for invalid in ["model = 1", "models = 1", "[model"] {
+            assert_eq!(
+                grok_native_completion_match(Some(&official), &live(invalid), &retired),
+                None
+            );
+        }
+        // The partial source review has no captured Written ownership context.
+        assert_eq!(
+            native_completion_match(&AppType::GrokBuild, Some(&official), &live(user)),
+            None
+        );
+    }
 }

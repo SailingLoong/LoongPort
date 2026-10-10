@@ -52,17 +52,26 @@ pub(crate) fn retired_tables(
     vault: &RwLockReadGuard<'_, VaultContext>,
     live_owner: Option<&Provider>,
 ) -> Result<Vec<String>, AppError> {
-    if let Some(written) = state::written(store, vault, app())? {
-        return Ok(written.tables);
+    let written = state::written(store, vault, app())?;
+    Ok(retired_tables_from_written(written.as_ref(), live_owner))
+}
+
+/// Reuse the writer's retirement rules with an already captured state record.
+pub(crate) fn retired_tables_from_written(
+    written: Option<&Written>,
+    live_owner: Option<&Provider>,
+) -> Vec<String> {
+    if let Some(written) = written {
+        return written.tables.clone();
     }
     let Some(owner) = live_owner.filter(|owner| !is_official(owner)) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     if let Ok(projection) = projection(owner) {
-        return Ok(projection.written_tables());
+        return projection.written_tables();
     }
     // 行本身过不了校验（比如旧版回填把默认模型改成了内置的），就按行里写的名字删。
-    Ok(owner
+    owner
         .settings_config
         .get("config")
         .and_then(|config| config.as_str())
@@ -76,7 +85,7 @@ pub(crate) fn retired_tables(
                 .map(str::to_string)
         })
         .into_iter()
-        .collect())
+        .collect()
 }
 
 /// 切到 `target`：同一个操作里写 live、改指针、记下写的表。`live_owner` 是 live 现在

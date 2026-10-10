@@ -48,6 +48,16 @@ pub(super) fn inspect(
     candidate: Option<&crate::provider::Provider>,
     managed_catalog_present: Option<bool>,
 ) -> Result<LiveFacts, AppError> {
+    inspect_with_grok_retired(app, files, candidate, managed_catalog_present, None)
+}
+
+pub(super) fn inspect_with_grok_retired(
+    app: &AppType,
+    files: &BoundFiles,
+    candidate: Option<&crate::provider::Provider>,
+    managed_catalog_present: Option<bool>,
+    grok_retired: Option<&[String]>,
+) -> Result<LiveFacts, AppError> {
     let (present, parsed) = match app {
         AppType::Claude => {
             let data = bytes(files, &crate::config::get_claude_settings_path())?;
@@ -123,6 +133,13 @@ pub(super) fn inspect(
                         .flatten(),
                     native_completion_match: owned_values_known
                         .then(|| {
+                            if *app == AppType::GrokBuild {
+                                return super::projection_review::grok_native_completion_match(
+                                    candidate,
+                                    &value,
+                                    grok_retired?,
+                                );
+                            }
                             super::projection_review::native_completion_match(
                                 app, candidate, &value,
                             )
