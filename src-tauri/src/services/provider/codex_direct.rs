@@ -913,6 +913,83 @@ fn preserve_external_catalog(
     preserved
 }
 
+/// Transient evidence from the original directory/file inspection owner. No
+/// catalog policy, content import, discovery or persistent state is created.
+pub(crate) struct NativeCatalogInputs {
+    base: std::path::PathBuf,
+    row_digest: Option<String>,
+    live_digest: Option<String>,
+    references: Vec<(
+        std::path::PathBuf,
+        crate::database::inspection::SourceRevision,
+    )>,
+}
+
+impl NativeCatalogInputs {
+    pub(crate) fn capture(provider: &Provider, live: &str) -> Option<Self> {
+        // The original planner discovers CLI/cache model sources when specs are
+        // present. Completion is read-only and cannot invent that generation.
+        if codex_has_catalog_model_specs(&provider.settings_config) {
+            return None;
+        }
+        let row = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let base = get_codex_config_dir();
+        let mut references = Vec::new();
+        for text in [row, live] {
+            let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+            if let Some(pointer) = doc.get(MODEL_CATALOG_JSON) {
+                if pointer.as_str()?.trim().is_empty() {
+                    return None;
+                }
+            }
+            if let Some(path) = cc_switch_catalog_reference_path(text, &base) {
+                // Capture the original reference, not just the resolved target.
+                // This owner rejects symlink/reparse components and binds every
+                // ancestor, file identity/content, and genuine absence.
+                let revision = crate::database::inspection::file_revision(&path).ok()?;
+                resolve_cc_switch_catalog_path(text, &base)?;
+                crate::database::inspection::verify_unchanged(&path, &revision).ok()?;
+                if !references.iter().any(|(seen, _)| seen == &path) {
+                    references.push((path, revision));
+                }
+            }
+        }
+        Some(Self {
+            base,
+            row_digest: digest(Some(row.as_bytes())),
+            live_digest: digest(Some(live.as_bytes())),
+            references,
+        })
+    }
+
+    pub(crate) fn references(
+        &self,
+    ) -> &[(
+        std::path::PathBuf,
+        crate::database::inspection::SourceRevision,
+    )] {
+        &self.references
+    }
+
+    fn matches(&self, provider: &Provider, live: &str) -> bool {
+        let row = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.base == get_codex_config_dir()
+            && self.row_digest == digest(Some(row.as_bytes()))
+            && self.live_digest == digest(Some(live.as_bytes()))
+            && self.references.iter().all(|(path, revision)| {
+                crate::database::inspection::verify_unchanged(path, revision).is_ok()
+            })
+    }
+}
+
 /// Read-only admission from the upgrade owner's already-bound five files.
 /// Unknown external discovery or managed-token generation is never a match.
 /// This proves the original writer's owned-file result, not remote login validity.
@@ -927,7 +1004,7 @@ pub(crate) fn native_completion_match(
     endpoint: Option<&(String, u16)>,
 ) -> Option<bool> {
     native_completion_match_with_generation(
-        provider, rows, settings, vault, pre, written, endpoint, None,
+        provider, rows, settings, vault, pre, written, endpoint, None, None,
     )
 }
 
@@ -941,6 +1018,7 @@ pub(crate) fn native_completion_match_with_generation(
     written: Option<&state::Written>,
     endpoint: Option<&(String, u16)>,
     generation: Option<&CodexLiveAuthGuard<'_>>,
+    catalog_inputs: Option<&NativeCatalogInputs>,
 ) -> Option<bool> {
     if codex_has_catalog_model_specs(&provider.settings_config)
         || !row_auth(provider).is_object()
@@ -990,18 +1068,20 @@ pub(crate) fn native_completion_match_with_generation(
         .unwrap_or("")
         .parse::<toml_edit::DocumentMut>()
         .ok()?;
-    // Managed current/legacy names require directory ownership, which can
-    // depend on symlinks outside these bound bytes. Leave them unresolved before
-    // invoking the original filesystem-aware planner. Ordinary external names
-    // are rejected by that resolver before any stat/canonicalize or content read.
+    // A bound-byte-only caller still cannot prove managed-name path ownership.
+    // Runtime review lends original directory evidence for both row and live.
+    if catalog_inputs.is_some_and(|inputs| !inputs.matches(provider, text)) {
+        return None;
+    }
     for doc in [&row_doc, &inputs.config_doc] {
         if let Some(pointer) = doc.get(MODEL_CATALOG_JSON) {
             let pointer = pointer.as_str()?.trim();
             if pointer.is_empty()
-                || std::path::Path::new(pointer)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_our_model_catalog_filename)
+                || (catalog_inputs.is_none()
+                    && std::path::Path::new(pointer)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(is_our_model_catalog_filename))
             {
                 return None;
             }
@@ -1045,6 +1125,9 @@ pub(crate) fn native_completion_match_with_generation(
         .config
         .apply_to(&inputs.files[1].path, &mut after)
         .ok()?;
+    if catalog_inputs.is_some_and(|inputs| !inputs.matches(provider, text)) {
+        return None;
+    }
     Some(actual == after.to_string().parse::<toml::Table>().ok()?)
 }
 

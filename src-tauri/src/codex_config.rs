@@ -3275,6 +3275,17 @@ pub(crate) fn resolve_cc_switch_catalog_path(
     config_text: &str,
     base_dir: &Path,
 ) -> Option<PathBuf> {
+    let resolved = cc_switch_catalog_reference_path(config_text, base_dir)?;
+    resolve_cc_switch_catalog_reference(&resolved, base_dir)
+}
+
+/// Original lexical owner decision, before filesystem resolution. Upgrade
+/// review uses this same reference to bind its directory/file identity; a
+/// canonical target alone would lose the original symlink alias.
+pub(crate) fn cc_switch_catalog_reference_path(
+    config_text: &str,
+    base_dir: &Path,
+) -> Option<PathBuf> {
     if config_text.trim().is_empty() {
         return None;
     }
@@ -3317,12 +3328,16 @@ pub(crate) fn resolve_cc_switch_catalog_path(
         return None;
     }
 
+    Some(resolved)
+}
+
+fn resolve_cc_switch_catalog_reference(resolved: &Path, base_dir: &Path) -> Option<PathBuf> {
     // 词法包含不等于运行时包含：配置目录内的符号链接（如 ~/.codex/link ->
     // /etc）能让 `link/cc-switch-model-catalog.json` 通过上面的检查，读取却
     // 落到目录外。文件存在时把真实路径 canonicalize 出来再校验一次，并把
     // canonical 路径返回给调用方——后续读取不再经过 symlink 组件。
     if resolved.exists() {
-        let canonical = match fs::canonicalize(&resolved) {
+        let canonical = match fs::canonicalize(resolved) {
             Ok(path) => path,
             Err(error) => {
                 log::warn!(
@@ -3348,7 +3363,7 @@ pub(crate) fn resolve_cc_switch_catalog_path(
         return Some(canonical);
     }
 
-    Some(resolved)
+    Some(resolved.to_path_buf())
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the

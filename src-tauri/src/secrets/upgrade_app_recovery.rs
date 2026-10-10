@@ -55,6 +55,7 @@ enum KeepFilesChoice<'a> {
 struct AppCapture {
     view: UpgradeAppReview,
     files: Vec<ReviewedInput>,
+    catalog_references: std::collections::BTreeSet<std::path::PathBuf>,
     identity: inspection::DatabaseIdentity,
     flags: (bool, bool),
     finalized_revision: Option<String>,
@@ -805,6 +806,21 @@ impl AuthenticatedUpgrade {
                 if current.op != pending.op || current.target != pending.target {
                     return Err(source_changed());
                 }
+                // Native files may legitimately change through this original
+                // journal. Additional catalog inputs are not its write targets
+                // and must retain the same source at every replay boundary.
+                for file in &captured.files {
+                    if captured.catalog_references.contains(&file.path)
+                        && !pending.files.iter().any(|owned| {
+                            // Use the original lexical path comparison in both
+                            // directions (also handles Windows case and `.`).
+                            crate::config::path_is_within(&owned.path, &file.path)
+                                && crate::config::path_is_within(&file.path, &owned.path)
+                        })
+                    {
+                        file.verify()?;
+                    }
+                }
                 // EXIT/DETACH may replace attached state before cleanup. Keep
                 // checking the original listener facts through that same replay.
                 let actual = self.capture_recovery_app(
@@ -1189,6 +1205,41 @@ fn capture_app_with_state(
     } else {
         None
     };
+    // Bind row references as well as live references to the same original
+    // directory/file owner. A failed capture stays unknown for that row; it
+    // never turns a resolver error or symlink into an external-owner claim.
+    let mut codex_catalog_inputs = std::collections::BTreeMap::new();
+    let mut catalog_references = std::collections::BTreeSet::new();
+    if *app == AppType::Codex {
+        if let Some(text) = bound
+            .get(&crate::codex_config::get_codex_config_path())
+            .and_then(|bytes| bytes.as_ref())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        {
+            for row in rows.values() {
+                let captured =
+                    crate::services::provider::codex_direct::NativeCatalogInputs::capture(
+                        row, text,
+                    );
+                if let Some(captured) = &captured {
+                    for (path, revision) in captured.references() {
+                        catalog_references.insert(path.clone());
+                        if let Some(existing) = files.iter().find(|input| input.path == *path) {
+                            if existing.revision != *revision {
+                                return Err(source_changed());
+                            }
+                        } else {
+                            files.push(ReviewedInput {
+                                path: path.clone(),
+                                revision: revision.clone(),
+                            });
+                        }
+                    }
+                }
+                codex_catalog_inputs.insert(row.id.clone(), captured);
+            }
+        }
+    }
     // A detached Proxy keeps its route, but its native files represent the
     // independent direct pointer. Verify those files without changing mode.
     let detached_mode_verified = compatible
@@ -1242,6 +1293,7 @@ fn capture_app_with_state(
                     written,
                     codex_endpoint.as_ref(),
                     proven_generation,
+                    codex_catalog_inputs.get(&row.id).and_then(Option::as_ref),
                 )
             });
         }
@@ -1249,7 +1301,7 @@ fn capture_app_with_state(
     };
     let client = inspect_candidate(candidate)?;
     // Only a complete native owned-field proof grants admission. Unsupported
-    // Unsupported auth stores and catalog discovery remain unknown; managed
+    // auth stores and catalog discovery remain unknown; managed
     // generations additionally require the borrowed original manager barrier.
     let target_native_proven = if let Some(row) = target.and_then(|id| rows.get(id)) {
         let proof = inspect_candidate(Some(row))?;
@@ -1560,6 +1612,7 @@ fn capture_app_with_state(
             mode_route_providers,
         },
         files,
+        catalog_references,
         identity,
         flags,
         finalized_revision,

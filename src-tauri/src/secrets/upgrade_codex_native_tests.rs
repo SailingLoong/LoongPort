@@ -1042,3 +1042,607 @@ fn codex_managed_completion_recovers_cross_account_and_restart() {
     assert_eq!(snapshot(f.home.path()), before);
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
 }
+
+fn set_catalog_row(runtime: &crate::store::AppState, id: &str, pointer: &str) {
+    let mut row = runtime.db.get_provider_by_id(id, "codex").unwrap().unwrap();
+    let mut doc = row.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    doc["model_catalog_json"] = toml_edit::value(pointer);
+    row.settings_config["config"] = doc.to_string().into();
+    runtime.db.save_provider("codex", &row).unwrap();
+    // Establish the original SQLite reader's latest WAL read mark before any
+    // byte-for-byte no-write snapshot. No SHM/file differences are excluded.
+    runtime.db.get_all_providers("codex").unwrap();
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_accepts_original_removed_row_pointer() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    for pointer in [
+        "loongport-model-catalog.json",
+        "cc-switch-model-catalog.json",
+        "missing/loongport-model-catalog.json",
+    ] {
+        set_catalog_row(&runtime, "a", pointer);
+        let before = snapshot(f.home.path());
+        let view = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        assert!(
+            view.can_complete_app,
+            "original writer removes row-only managed pointer without specs: {pointer}"
+        );
+        assert!(
+            snapshot(f.home.path()) == before,
+            "source bytes must remain unchanged"
+        );
+        drop(
+            crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &AppType::Codex)
+                .unwrap(),
+        );
+        assert!(
+            snapshot(f.home.path()) == before,
+            "source bytes must remain unchanged"
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+    // With no model specs, an owned live pointer is not the writer's result.
+    let path = crate::codex_config::get_codex_config_path();
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("model_catalog_json = 'loongport-model-catalog.json'\n{config}"),
+    )
+    .unwrap();
+    let before = snapshot(f.home.path());
+    assert!(
+        !review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app
+    );
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_preserves_lexically_external_managed_name() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let path = crate::codex_config::get_codex_config_path();
+    let config = std::fs::read_to_string(&path).unwrap();
+    let external = f.home.path().join("outside/loongport-model-catalog.json");
+    std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+    // A directory rather than a valid catalog: the proof must not open/import it.
+    std::fs::create_dir(&external).unwrap();
+    for pointer in [
+        external.to_string_lossy().to_string(),
+        "../outside/cc-switch-model-catalog.json".into(),
+    ] {
+        set_catalog_row(&runtime, "a", &pointer);
+        let pointer = serde_json::to_string(&pointer).unwrap();
+        std::fs::write(&path, format!("model_catalog_json = {pointer}\n{config}")).unwrap();
+        let before = snapshot(f.home.path());
+        let view = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        assert!(
+            view.can_complete_app,
+            "original lexical owner treats same basename outside directory as external"
+        );
+        drop(
+            crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &AppType::Codex)
+                .unwrap(),
+        );
+        assert!(
+            snapshot(f.home.path()) == before,
+            "source bytes must remain unchanged"
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_binds_row_directory_identity() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let directory = crate::codex_config::get_codex_config_dir().join("catalog-owner");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("loongport-model-catalog.json"),
+        b"synthetic catalog bytes",
+    )
+    .unwrap();
+    set_catalog_row(&runtime, "a", "catalog-owner/loongport-model-catalog.json");
+    let first = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    std::fs::rename(&directory, directory.with_extension("old")).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::copy(
+        directory
+            .with_extension("old")
+            .join("loongport-model-catalog.json"),
+        directory.join("loongport-model-catalog.json"),
+    )
+    .unwrap();
+    let before = snapshot(f.home.path());
+    let changed = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert_ne!(
+        first.revision, changed.revision,
+        "same catalog bytes under a replaced original directory are a new source"
+    );
+    assert!(changed.can_complete_app);
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_binds_row_content_and_absence() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let directory = crate::codex_config::get_codex_config_dir().join("catalog-owner");
+    let path = directory.join("cc-switch-model-catalog.json");
+    set_catalog_row(&runtime, "a", "catalog-owner/cc-switch-model-catalog.json");
+    let absent = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    let parent = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert_ne!(
+        absent.revision, parent.revision,
+        "new referenced ancestor must change revision"
+    );
+    std::fs::write(&path, b"first synthetic catalog").unwrap();
+    let present = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert_ne!(parent.revision, present.revision);
+    std::fs::write(&path, b"second synthetic catalog").unwrap();
+    let before = snapshot(f.home.path());
+    let content = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert_ne!(present.revision, content.revision);
+    assert!(content.can_complete_app);
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_keeps_unbound_aliases_unknown() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let directory = crate::codex_config::get_codex_config_dir();
+    let invalid = directory.join("invalid/loongport-model-catalog.json");
+    std::fs::create_dir_all(&invalid).unwrap();
+    set_catalog_row(&runtime, "a", "invalid/loongport-model-catalog.json");
+    let before = snapshot(f.home.path());
+    assert!(
+        !review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app
+    );
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+    #[cfg(unix)]
+    {
+        let outside = f.home.path().join("outside-catalog");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("alias")).unwrap();
+        set_catalog_row(&runtime, "a", "alias/loongport-model-catalog.json");
+        let before = snapshot(f.home.path());
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(
+            snapshot(f.home.path()) == before,
+            "source bytes must remain unchanged"
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_rejects_stale_keep_files_choice() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let directory = crate::codex_config::get_codex_config_dir().join("choice-catalog");
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("loongport-model-catalog.json");
+    std::fs::write(&path, b"first synthetic catalog").unwrap();
+    set_catalog_row(&runtime, "a", "choice-catalog/loongport-model-catalog.json");
+    runtime
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE providers SET is_current=0 WHERE app_type='codex'",
+            [],
+        )
+        .unwrap();
+    crate::settings::set_current_provider(&AppType::Codex, None).unwrap();
+    let mut view = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert!(view.can_choose_provider && !view.can_complete_app);
+    assert_eq!(
+        view.keep_files_providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    for change in 0..3 {
+        match change {
+            0 => std::fs::write(&path, b"second synthetic catalog").unwrap(),
+            1 => {
+                let replacement = directory.join("replacement");
+                std::fs::copy(&path, &replacement).unwrap();
+                std::fs::rename(&replacement, &path).unwrap();
+            }
+            _ => {
+                let old = directory.with_extension("old");
+                std::fs::rename(&directory, &old).unwrap();
+                std::fs::create_dir(&directory).unwrap();
+                std::fs::copy(old.join("loongport-model-catalog.json"), &path).unwrap();
+            }
+        }
+        let before = snapshot(f.home.path());
+        assert!(review
+            .select_provider(
+                &inspected,
+                &token,
+                &AppType::Codex,
+                &view.revision,
+                "a",
+                &runtime
+            )
+            .is_err());
+        assert!(
+            snapshot(f.home.path()) == before,
+            "stale choice must have no side effects"
+        );
+        let fresh = review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap();
+        assert!(fresh.can_choose_provider);
+        assert_ne!(fresh.revision, view.revision);
+        view = fresh;
+    }
+    let native = std::fs::read(crate::codex_config::get_codex_config_path()).unwrap();
+    let auth = std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap();
+    let catalog = std::fs::read(&path).unwrap();
+    let selected = review
+        .select_provider(
+            &inspected,
+            &token,
+            &AppType::Codex,
+            &view.revision,
+            "a",
+            &runtime,
+        )
+        .unwrap();
+    assert!(selected.can_complete_app);
+    assert_eq!(
+        std::fs::read(crate::codex_config::get_codex_config_path()).unwrap(),
+        native
+    );
+    assert_eq!(
+        std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap(),
+        auth
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), catalog);
+    let before = snapshot(f.home.path());
+    assert!(review
+        .select_provider(
+            &inspected,
+            &token,
+            &AppType::Codex,
+            &view.revision,
+            "a",
+            &runtime
+        )
+        .is_err());
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_keeps_original_managed_generation_boundary() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) = managed_native_runtime(&f);
+    set_catalog_row(&runtime, "managed", "old/cc-switch-model-catalog.json");
+    let before = snapshot(f.home.path());
+    assert!(
+        !review
+            .review_app(&inspected, &token, &AppType::Codex)
+            .unwrap()
+            .can_complete_app
+    );
+    assert!(
+        review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app
+    );
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "managed").unwrap();
+    let config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert!(
+        config.get("model_catalog_json").is_none(),
+        "original writer really removes the row-only pointer"
+    );
+    assert!(
+        review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app
+    );
+    let mut row = runtime
+        .db
+        .get_provider_by_id("managed", "codex")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-model"}]});
+    runtime.db.save_provider("codex", &row).unwrap();
+    let before = snapshot(f.home.path());
+    assert!(
+        !review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app
+    );
+    assert_eq!(
+        snapshot(f.home.path()),
+        before,
+        "discovery-dependent model specs remain unknown"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_retains_late_drift_before_pointer() {
+    let f = Fixture::new();
+    let app = AppType::Codex;
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &app);
+    let directory = crate::codex_config::get_codex_config_dir().join("late-catalog");
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("loongport-model-catalog.json");
+    std::fs::write(&path, b"first synthetic catalog").unwrap();
+    set_catalog_row(&runtime, "a", "late-catalog/loongport-model-catalog.json");
+    runtime
+        .db
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE providers SET is_current=0 WHERE app_type='codex'",
+            [],
+        )
+        .unwrap();
+    crate::settings::set_current_provider(&app, None).unwrap();
+    // Clearing the DB pointer advances its WAL. Warm the original read owner
+    // before the late-boundary no-write observation, without excluding SHM.
+    runtime.db.get_all_providers("codex").unwrap();
+    let view = review
+        .review_app_with_state(&inspected, &token, &app, &runtime)
+        .unwrap();
+    assert!(view.can_choose_provider);
+    let changed = path.clone();
+    let home = f.home.path().to_path_buf();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let captured = seen.clone();
+    crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |at| {
+        if at == "upgrade:provider_target" && captured.borrow().is_none() {
+            std::fs::write(&changed, b"late external edit to owned source").unwrap();
+            *captured.borrow_mut() = Some(snapshot(&home));
+        }
+    })));
+    let result = review.select_provider(&inspected, &token, &app, &view.revision, "a", &runtime);
+    crate::mode::operation::failpoint::on_boundary(None);
+    assert!(result.is_err());
+    let after = snapshot(f.home.path());
+    let seen = seen.borrow();
+    let before = seen.as_ref().unwrap();
+    let differences = before
+        .iter()
+        .filter(|(path, bytes)| after.get(*path) != Some(*bytes))
+        .map(|(path, bytes)| {
+            (
+                path,
+                after.get(path).map(|actual| {
+                    actual
+                        .iter()
+                        .zip(bytes)
+                        .enumerate()
+                        .filter_map(|(i, (a, b))| (a != b).then_some(i))
+                        .collect::<Vec<_>>()
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        after == *before,
+        "late drift stops before pointer; changed paths/byte offsets only: {differences:?}"
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&app).unwrap(),
+        None
+    );
+    let fresh = review
+        .review_app_with_state(&inspected, &token, &app, &runtime)
+        .unwrap();
+    assert_eq!(fresh.has_pending_operation, Some(true));
+    assert!(!fresh.can_complete_app && fresh.can_recover_operation);
+    let before = snapshot(f.home.path());
+    assert!(review
+        .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
+        .is_err());
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+    let recovered = review
+        .recover_app_with_state(&inspected, &token, &app, &fresh.revision, &runtime)
+        .unwrap();
+    assert!(recovered.can_complete_app);
+    assert_eq!(recovered.has_pending_operation, Some(false));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"late external edit to owned source"
+    );
+    let before = snapshot(f.home.path());
+    assert!(review
+        .recover_app_with_state(&inspected, &token, &app, &fresh.revision, &runtime)
+        .is_err());
+    assert!(
+        snapshot(f.home.path()) == before,
+        "source bytes must remain unchanged"
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_native_recovery_rejects_reference_drift() {
+    for boundary in ["recover:begin", "recover:target"] {
+        let f = Fixture::new();
+        let app = AppType::Codex;
+        let (inspected, review, token, runtime) =
+            super::native_recovery_tests::native_runtime(&f, &app);
+        let directory = crate::codex_config::get_codex_config_dir().join("native-catalog");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("loongport-model-catalog.json");
+        std::fs::write(&path, b"first synthetic catalog").unwrap();
+        set_catalog_row(&runtime, "a", "native-catalog/loongport-model-catalog.json");
+        crate::mode::operation::failpoint::crash_at(Some("published:1"));
+        let interrupted = crate::services::ProviderService::switch(&runtime, app.clone(), "b");
+        crate::mode::operation::failpoint::crash_at(None);
+        assert!(interrupted.is_err());
+        let view = review
+            .review_app_with_state(&inspected, &token, &app, &runtime)
+            .unwrap();
+        assert!(view.can_recover_operation && !view.can_complete_app);
+        let changed = path.clone();
+        let home = f.home.path().to_path_buf();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let captured = seen.clone();
+        crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |at| {
+            if at == boundary && captured.borrow().is_none() {
+                std::fs::write(&changed, b"late native reference drift").unwrap();
+                *captured.borrow_mut() = Some(snapshot(&home));
+            }
+        })));
+        let result =
+            review.recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime);
+        crate::mode::operation::failpoint::on_boundary(None);
+        assert!(
+            result.is_err(),
+            "original native journal must reject non-journal catalog drift at {boundary}"
+        );
+        assert!(
+            snapshot(f.home.path()) == *seen.borrow().as_ref().unwrap(),
+            "no later mutation after catalog drift at {boundary}"
+        );
+        assert!(crate::mode::state::pending(
+            &f.device,
+            &runtime.db.secret_session().read().unwrap(),
+            "codex"
+        )
+        .unwrap()
+        .is_some());
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_catalog_completion_preserves_original_catalog_journal_writes() {
+    let f = Fixture::new();
+    let app = AppType::Codex;
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &app);
+    let path = crate::codex_config::get_codex_model_catalog_path();
+    let old = br#"{"models":[]}"#;
+    std::fs::write(&path, old).unwrap();
+    set_catalog_row(&runtime, "a", "./loongport-model-catalog.json");
+    let mut target = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    target.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-b","displayName":"Synthetic B","contextWindow":32768}]});
+    runtime.db.save_provider("codex", &target).unwrap();
+    crate::mode::operation::failpoint::crash_at(Some("published:1"));
+    let interrupted = crate::services::ProviderService::switch(&runtime, app.clone(), "b");
+    crate::mode::operation::failpoint::crash_at(None);
+    assert!(interrupted.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), old);
+    let view = review
+        .review_app_with_state(&inspected, &token, &app, &runtime)
+        .unwrap();
+    assert!(view.can_recover_operation);
+    let recovered = review
+        .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
+        .unwrap();
+    assert_eq!(recovered.has_pending_operation, Some(false));
+    assert!(
+        !recovered.can_complete_app,
+        "generated specs still need their discovery-generation proof"
+    );
+    assert!(
+        std::fs::read(&path).unwrap() != old,
+        "original catalog journal write must be allowed"
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&app)
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert!(crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &app).is_err());
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
