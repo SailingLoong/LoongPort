@@ -10,6 +10,13 @@ use std::sync::RwLockReadGuard;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct UpgradeProviderChoice {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct UpgradeAppReview {
     pub(crate) app_type: String,
     pub(crate) revision: String,
@@ -23,6 +30,10 @@ pub(crate) struct UpgradeAppReview {
     pub(crate) default_takeover: bool,
     pub(crate) can_complete_app: bool,
     pub(crate) can_start_upgrade: bool,
+    pub(crate) direct_provider_resolution: &'static str,
+    pub(crate) retained_provider_id: Option<String>,
+    pub(crate) keep_files_providers: Vec<UpgradeProviderChoice>,
+    pub(crate) can_choose_provider: bool,
 }
 
 struct AppCapture {
@@ -31,6 +42,7 @@ struct AppCapture {
     live: Option<crate::mode::state::LiveState>,
     identity: inspection::DatabaseIdentity,
     finalized_revision: Option<String>,
+    provider_digests: std::collections::BTreeMap<String, String>,
 }
 
 impl AuthenticatedUpgrade {
@@ -151,6 +163,120 @@ impl AuthenticatedUpgrade {
         Ok(self.review_app_locked(inspected, token, app)?.view)
     }
 
+    pub(crate) fn select_provider(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        provider_id: &str,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+        let guard = crate::live::engine::lock_app(app.as_str());
+        if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session) {
+            return Err(source_changed());
+        }
+        let captured = self.review_app_locked(inspected, token, app)?;
+        if captured.view.revision != revision
+            || !captured.view.can_choose_provider
+            || !captured
+                .view
+                .keep_files_providers
+                .iter()
+                .any(|p| p.id == provider_id)
+        {
+            return Err(source_changed());
+        }
+        {
+            let vault = self.session.read()?;
+            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            let path = self.root.join(crate::config::DB_FILE_NAME);
+            inspection::verify_primary_identity(&path, &captured.identity)?;
+            {
+                let conn = state.db.conn.lock()?;
+                inspection::verify_connection_primary_identity(&conn, &captured.identity)?;
+            }
+            // Refresh the original runtime owner under this same Vault guard.
+            // Fresh unrelated settings must survive the selected pointer write.
+            crate::settings::reload_settings_with_vault(&self.session, &vault)?;
+            if self.capture_app(app, &vault)?.view.revision != revision {
+                return Err(source_changed());
+            }
+            let admitted = crate::mode::controller::files(app)?;
+            let mut patches = Vec::new();
+            for file in &admitted {
+                let bytes =
+                    crate::config_file_io::read_regular_file(&file.path, checkpoint::MAX_BYTES)
+                        .map_err(|error| AppError::io(&file.path, error))?;
+                patches.push(crate::live::patch::Guarded {
+                    expected_pre: crate::live::engine::digest(bytes.as_deref()),
+                    then: bytes
+                        .map(crate::live::patch::WholeFile::Write)
+                        .unwrap_or(crate::live::patch::WholeFile::Delete),
+                });
+            }
+            for file in &captured.files {
+                file.verify()?;
+            }
+            let changes = admitted
+                .into_iter()
+                .zip(&patches)
+                .map(|(file, patch)| operation::FileChange { file, patch })
+                .collect::<Vec<_>>();
+            let target = crate::mode::state::PendingTarget::pointer(Some(provider_id.to_owned()));
+            operation::run(
+                &self.device,
+                &vault,
+                &guard,
+                crate::mode::state::op::APPLY,
+                &changes,
+                target.clone(),
+                &|actual| {
+                    if actual != &target {
+                        return Err(source_changed());
+                    }
+                    self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                    inspection::verify_primary_identity(&path, &captured.identity)?;
+                    operation::failpoint::hit("upgrade:provider_target")?;
+                    let verify_provider = || {
+                        let row = state
+                            .db
+                            .get_provider_by_id_with_vault(
+                                provider_id,
+                                app.as_str(),
+                                &self.session,
+                                &vault,
+                            )?
+                            .ok_or_else(source_changed)?;
+                        if captured.provider_digests.get(provider_id)
+                            != Some(&Database::provider_update_digest(&row)?)
+                        {
+                            return Err(source_changed());
+                        }
+                        for file in &captured.files {
+                            file.verify()?;
+                        }
+                        Ok(())
+                    };
+                    verify_provider()?;
+                    operation::commit_target(
+                        &state.db,
+                        &self.session,
+                        &self.device,
+                        &vault,
+                        app,
+                        actual,
+                    )?;
+                    verify_provider()?;
+                    self.verify_app_checkpoint_pinned(inspected, &vault)
+                },
+            )?;
+        }
+        Ok(self.review_app_locked(inspected, token, app)?.view)
+    }
+
     pub(crate) fn recover_app(
         &self,
         inspected: &UpgradeInspection,
@@ -158,6 +284,34 @@ impl AuthenticatedUpgrade {
         app: &AppType,
         revision: &str,
     ) -> Result<UpgradeAppReview, AppError> {
+        self.recover_app_with_runtime(inspected, token, app, revision, None)
+    }
+
+    pub(crate) fn recover_app_with_state(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
+        self.recover_app_with_runtime(inspected, token, app, revision, Some(state))
+    }
+
+    fn recover_app_with_runtime(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        runtime: Option<&crate::store::AppState>,
+    ) -> Result<UpgradeAppReview, AppError> {
+        let _switch = runtime.map(|state| {
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()))
+        });
+        if runtime.is_some_and(|state| !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session)) {
+            return Err(source_changed());
+        }
         let guard = crate::live::engine::lock_app(app.as_str());
         let captured = self.review_app_locked(inspected, token, app)?;
         if captured.view.revision != revision || !captured.view.can_recover_operation {
@@ -168,14 +322,48 @@ impl AuthenticatedUpgrade {
             self.verify_app_checkpoint_pinned(inspected, &vault)?;
             let path = self.root.join(crate::config::DB_FILE_NAME);
             crate::mode::operation::failpoint::hit("recover:database_open")?;
-            let db = Database::from_connection(
-                rusqlite::Connection::open_with_flags(
-                    &path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-                )?,
-                self.session.clone(),
-            );
+            let reopened = if runtime.is_none() {
+                Some(Database::from_connection(
+                    rusqlite::Connection::open_with_flags(
+                        &path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                    )?,
+                    self.session.clone(),
+                ))
+            } else {
+                None
+            };
+            let db = runtime
+                .map(|state| state.db.as_ref())
+                .or(reopened.as_ref())
+                .ok_or_else(source_changed)?;
             inspection::verify_primary_identity(&path, &captured.identity)?;
+            {
+                let conn = db.conn.lock()?;
+                inspection::verify_connection_primary_identity(&conn, &captured.identity)?;
+            }
+            let runtime_ready = runtime.is_some()
+                && crate::settings::read_native_app_settings_with_vault(
+                    app,
+                    &self.session,
+                    &vault,
+                    checkpoint::MAX_BYTES,
+                )
+                .is_ok();
+            if runtime_ready {
+                crate::settings::reload_settings_with_vault(&self.session, &vault)?;
+            }
+            let publish_pointer = |id: &str| {
+                if !runtime_ready {
+                    return Err(source_changed());
+                }
+                crate::settings::set_current_provider_with_vault(
+                    app,
+                    Some(id),
+                    &self.session,
+                    &vault,
+                )
+            };
             let before = || {
                 self.verify_app_checkpoint_pinned(inspected, &vault)?;
                 if self.capture_app(app, &vault)?.view.revision != revision {
@@ -210,7 +398,7 @@ impl AuthenticatedUpgrade {
                 Ok(())
             };
             let outcome = operation::recover_published_pointer(
-                &db,
+                db,
                 &self.device,
                 &vault,
                 &guard,
@@ -218,6 +406,8 @@ impl AuthenticatedUpgrade {
                 &operation::PointerRecoveryChecks {
                     before_target: &before,
                     pointer: &pointer,
+                    publish_pointer: runtime_ready
+                        .then_some(&publish_pointer as &dyn Fn(&str) -> Result<(), AppError>),
                     after_target: &after,
                     before_cleanup: &|live| {
                         if Some(live) != captured.live.as_ref() {
@@ -300,17 +490,6 @@ fn capture_app_with_state(
         .as_ref()
         .and_then(|live| live.apps.get(app.as_str()))
         .is_some_and(|entry| crate::mode::state::validate_app_for_update(entry).is_ok());
-    let can_recover_operation = compatible
-        && mode.as_ref().is_some_and(|mode| {
-            !mode.attached
-                && (mode.mode == Some(Mode::Direct)
-                    || mode
-                        .proxy_route
-                        .as_ref()
-                        .is_some_and(|id| rows.contains_key(id)))
-        })
-        && target.is_some_and(|id| local.as_deref() == Some(id) && rows.contains_key(id))
-        && currents.len() <= 1;
     let mut bound = live_review::BoundFiles::new();
     let mut files = Vec::new();
     for file in admitted {
@@ -368,35 +547,119 @@ fn capture_app_with_state(
     let client = live_review::inspect(app, &bound, candidate, catalog_present)?;
     // Only a complete native owned-field proof grants admission. Codex and
     // Grok remain unresolved until their route/catalog or cleanup is proven.
+    let target_native_proven = if let Some(row) = target.and_then(|id| rows.get(id)) {
+        let proof = live_review::inspect(app, &bound, Some(row), catalog_present)?;
+        proof.status == "parsed"
+            && proof.marker == Some(false)
+            && proof.native_completion_match == Some(true)
+    } else {
+        false
+    };
+    let forward_pointer_proven = target_native_proven
+        && mode
+            .as_ref()
+            .is_some_and(|mode| mode.mode == Some(Mode::Direct))
+        && preference.as_ref().is_none_or(String::is_empty)
+        && crate::settings::read_native_app_settings_with_vault(
+            app,
+            session,
+            vault,
+            checkpoint::MAX_BYTES,
+        )
+        .is_ok();
+    // The original no-op APPLY witnesses identify a keep-files pointer intent.
+    // A newer row must still match the native files even if its pointer was
+    // published before the interruption. Empty legacy intents retain their path.
+    let keep_files_pending = pending.flatten().is_some_and(|pending| {
+        pending.op == crate::mode::state::op::APPLY
+            && !pending.files.is_empty()
+            && pending.files.iter().all(|file| file.pre == file.planned)
+    });
+    let can_recover_operation = compatible
+        && mode.as_ref().is_some_and(|mode| {
+            !mode.attached
+                && (mode.mode == Some(Mode::Direct)
+                    || mode
+                        .proxy_route
+                        .as_ref()
+                        .is_some_and(|id| rows.contains_key(id)))
+        })
+        && target.is_some_and(|id| {
+            rows.contains_key(id)
+                && ((local.as_deref() == Some(id) && (!keep_files_pending || target_native_proven))
+                    || forward_pointer_proven)
+        })
+        && (currents.len() <= 1 || forward_pointer_proven);
     let can_complete_app = candidate.is_some()
         && client.status == "parsed"
         && client.marker == Some(false)
         && client.native_completion_match == Some(true);
+    let direct_provider_resolution = super::staged_review::direct_provider_resolution(
+        local.as_deref(),
+        &currents.iter().map(String::as_str).collect::<Vec<_>>(),
+        |id| rows.contains_key(id),
+    );
+    let retained_provider_id = (direct_provider_resolution == "preserved")
+        .then(|| local.clone().or_else(|| currents.first().cloned()))
+        .flatten();
+    let mut keep_files_providers = Vec::new();
+    if compatible
+        && preference.as_ref().is_none_or(String::is_empty)
+        && pending == Some(None)
+        && mode
+            .as_ref()
+            .is_some_and(|mode| mode.mode == Some(Mode::Direct) && !mode.attached)
+        && pointer_consistent != Some(true)
+    {
+        for row in rows.values() {
+            if retained_provider_id
+                .as_ref()
+                .is_some_and(|id| id != &row.id)
+            {
+                continue;
+            }
+            let facts = live_review::inspect(app, &bound, Some(row), catalog_present)?;
+            if facts.status == "parsed"
+                && facts.marker == Some(false)
+                && facts.native_completion_match == Some(true)
+            {
+                keep_files_providers.push(UpgradeProviderChoice {
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                });
+            }
+        }
+    }
+    let can_choose_provider = !keep_files_providers.is_empty();
+    let retained_provider_id = retained_provider_id
+        .filter(|id| keep_files_providers.iter().any(|choice| &choice.id == id));
     // Salt private evidence with this session token. No row, path, credential
     // or journal is serialized into the public DTO or a persistent receipt.
     let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
-    let digest_evidence =
-        |currents: &[String], preference: &Option<String>| -> Result<String, AppError> {
-            let bytes = zeroize::Zeroizing::new(
-                serde_json::to_vec(&(
-                    token,
-                    app.as_str(),
-                    &live,
-                    &local,
-                    currents,
-                    &rows,
-                    flags,
-                    preference,
-                    &revisions,
-                    &identity,
-                ))
-                .map_err(|source| AppError::JsonSerialize { source })?,
-            );
-            Ok(hex::encode(Sha256::digest(&*bytes)))
-        };
-    let revision = digest_evidence(&currents, &preference)?;
+    let digest_evidence = |currents: &[String],
+                           preference: &Option<String>,
+                           local: &Option<String>|
+     -> Result<String, AppError> {
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&(
+                token,
+                app.as_str(),
+                &live,
+                local,
+                currents,
+                &rows,
+                flags,
+                preference,
+                &revisions,
+                &identity,
+            ))
+            .map_err(|source| AppError::JsonSerialize { source })?,
+        );
+        Ok(hex::encode(Sha256::digest(&*bytes)))
+    };
+    let revision = digest_evidence(&currents, &preference, &local)?;
     let finalized_revision = target
-        .map(|id| digest_evidence(&[id.to_owned()], &Some(String::new())))
+        .map(|id| digest_evidence(&[id.to_owned()], &Some(String::new()), &Some(id.to_owned())))
         .transpose()?;
     for file in &files {
         file.verify()?;
@@ -416,11 +679,21 @@ fn capture_app_with_state(
             default_takeover: false,
             can_complete_app,
             can_start_upgrade: false,
+            direct_provider_resolution,
+            retained_provider_id,
+            keep_files_providers,
+            can_choose_provider,
         },
         files,
         live,
         identity,
         finalized_revision,
+        provider_digests: rows
+            .iter()
+            .map(|(id, row)| {
+                Database::provider_update_digest(row).map(|digest| (id.clone(), digest))
+            })
+            .collect::<Result<_, _>>()?,
     })
 }
 

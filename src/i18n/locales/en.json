@@ -4532,6 +4532,7 @@
     }
   },
   "startupUpgrade": {
+    "nativeProvider": "Provider matching the client files",
     "continue": "Continue to workbench",
     "reviewApps": "Review upgrade apps",
     "title": "Upgrade and recovery review",

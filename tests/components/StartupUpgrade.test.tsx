@@ -79,6 +79,118 @@ function serve(view = review(), overrides: Record<string, object> = {}) {
 }
 
 describe("StartupUpgrade", () => {
+  it("requires an explicit provider draft for conflict and submits only the original keep-files action", async () => {
+    serve(review(), {
+      claude: {
+        directProviderResolution: "conflict",
+        retainedProviderId: null,
+        keepFilesProviders: [
+          { id: "synthetic-native", name: "Synthetic native" },
+        ],
+        canChooseProvider: true,
+        pointerConsistent: false,
+      },
+    });
+    render(<StartupUpgrade />);
+    const card = await screen.findByRole("region", { name: "Claude Code" });
+    const button = await within(card).findByRole("button", {
+      name: "startupUpgrade.keepFiles",
+    });
+    expect(button).toBeDisabled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "select_startup_upgrade_provider",
+      expect.anything(),
+    );
+    fireEvent.click(
+      within(card).getByRole("button", { name: "Synthetic native" }),
+    );
+    expect(button).toBeEnabled();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "select_startup_upgrade_provider")
+        return appReview("claude", { canCompleteApp: true });
+      if (command === "review_startup_upgrade_app")
+        return appReview((args as { appType: string }).appType);
+      if (command === "get_startup_upgrade_review") return review();
+      throw new Error("synthetic unexpected action");
+    });
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("select_startup_upgrade_provider", {
+        expectedReviewToken: "synthetic-review",
+        appType: "claude",
+        expectedAppRevision: "synthetic-claude-revision",
+        providerId: "synthetic-native",
+      }),
+    );
+    expect(
+      within(card).getByText("startupUpgrade.mode.direct"),
+    ).toBeInTheDocument();
+  });
+
+  it("queries a lost provider-selection response and never replays the choice", async () => {
+    let selected = false;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "get_startup_upgrade_review") return review();
+      if (command === "review_startup_upgrade_app") {
+        const app = (args as { appType: string }).appType;
+        return appReview(
+          app,
+          app === "claude" && !selected
+            ? {
+                directProviderResolution: "missing",
+                retainedProviderId: null,
+                keepFilesProviders: [
+                  { id: "synthetic-native", name: "Synthetic native" },
+                ],
+                canChooseProvider: true,
+                pointerConsistent: false,
+              }
+            : {},
+        );
+      }
+      if (command === "select_startup_upgrade_provider") {
+        selected = true;
+        throw new Error("synthetic lost response");
+      }
+      throw new Error("synthetic unexpected action");
+    });
+    render(<StartupUpgrade />);
+    const card = await screen.findByRole("region", { name: "Claude Code" });
+    fireEvent.click(
+      await within(card).findByRole("button", { name: "Synthetic native" }),
+    );
+    fireEvent.click(
+      within(card).getByRole("button", { name: "startupUpgrade.keepFiles" }),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(
+            ([command]) => command === "select_startup_upgrade_provider",
+          ),
+      ).toHaveLength(1),
+    );
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(
+            ([command, args]) =>
+              command === "review_startup_upgrade_app" &&
+              (args as { appType: string }).appType === "claude",
+          ).length,
+      ).toBeGreaterThan(1),
+    );
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "select_startup_upgrade_provider",
+        ),
+    ).toHaveLength(1);
+  });
+
   it("uses the original recovery form after publication leaves a generation intent", async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "get_startup_upgrade_review")

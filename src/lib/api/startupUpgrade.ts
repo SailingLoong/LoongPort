@@ -23,6 +23,11 @@ export interface UpgradeAppReview {
   defaultTakeover: boolean;
   canCompleteApp: boolean;
   canStartUpgrade: boolean;
+  directProviderResolution:
+    "preserved" | "missing" | "conflict" | "verification_required";
+  retainedProviderId: string | null;
+  keepFilesProviders: { id: string; name: string }[];
+  canChooseProvider: boolean;
 }
 
 export interface UpgradeSourceAppFacts {
@@ -68,6 +73,18 @@ export const startupUpgradeApi = {
     invoke<UpgradeAppReview>("review_startup_upgrade_app", {
       expectedReviewToken,
       appType,
+    }),
+  selectProvider: (
+    expectedReviewToken: string,
+    appType: UpgradeApp,
+    expectedAppRevision: string,
+    providerId: string,
+  ) =>
+    invoke<UpgradeAppReview>("select_startup_upgrade_provider", {
+      expectedReviewToken,
+      appType,
+      expectedAppRevision,
+      providerId,
     }),
   recoverApp: (
     expectedReviewToken: string,

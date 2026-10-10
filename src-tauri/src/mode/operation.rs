@@ -1105,9 +1105,12 @@ pub(crate) fn published_pointer_target<'a>(
         .ok_or_else(verification_required)
 }
 
+type PointerCallback<'a> = &'a dyn Fn(&str) -> Result<(), AppError>;
+
 pub(crate) struct PointerRecoveryChecks<'a> {
     pub(crate) before_target: &'a dyn Fn() -> Result<(), AppError>,
     pub(crate) pointer: &'a dyn Fn(&str) -> Result<(), AppError>,
+    pub(crate) publish_pointer: Option<PointerCallback<'a>>,
     pub(crate) after_target: &'a dyn Fn() -> Result<(), AppError>,
     pub(crate) before_cleanup: &'a dyn Fn(&state::LiveState) -> Result<(), AppError>,
 }
@@ -1147,7 +1150,7 @@ pub(crate) fn recover_published_pointer(
     if !super::current::provider_exists(db, app, id)? {
         return Err(verification_required());
     }
-    (checks.pointer)(id)?;
+    (checks.before_target)()?;
     recover_checked_with_cleanup(
         store,
         vault,
@@ -1163,7 +1166,7 @@ pub(crate) fn recover_published_pointer(
                 app,
                 target,
                 &PointerCommit {
-                    publish: checks.pointer,
+                    publish: checks.publish_pointer.unwrap_or(checks.pointer),
                     verify: &|id| {
                         if db.get_current_provider(app.as_str())?.as_deref() != Some(id) {
                             return Err(verification_required());

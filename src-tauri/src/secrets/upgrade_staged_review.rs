@@ -109,21 +109,11 @@ pub(super) fn source_facts(
                 None => "missing",
             }
         } else {
-            match local.as_ref() {
-                Some(id)
-                    if !providers.iter().any(|(candidate, _)| candidate == id)
-                        || current.len() > 1
-                        || (current.len() == 1 && current[0] != id) =>
-                {
-                    "conflict"
-                }
-                Some(_) => "preserved",
-                None => match current.len() {
-                    0 => "missing",
-                    1 => "preserved",
-                    _ => "conflict",
-                },
-            }
+            direct_provider_resolution(
+                local.as_deref(),
+                &current.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+                |id| providers.iter().any(|(candidate, _)| candidate == id),
+            )
         };
         let rows = Database::get_all_providers_on_connection(conn, vault, app.as_str())?;
         let selected = local
@@ -223,4 +213,25 @@ fn mode_resolution(
         return "conflict";
     }
     "preserved"
+}
+
+/// Both original source cards and runtime cards retain the same direct-pointer facts.
+pub(super) fn direct_provider_resolution(
+    local: Option<&str>,
+    current: &[&str],
+    exists: impl Fn(&str) -> bool,
+) -> &'static str {
+    match local {
+        Some(id)
+            if !exists(id) || current.len() > 1 || (current.len() == 1 && current[0] != id) =>
+        {
+            "conflict"
+        }
+        Some(_) => "preserved",
+        None => match current.len() {
+            0 => "missing",
+            1 => "preserved",
+            _ => "conflict",
+        },
+    }
 }

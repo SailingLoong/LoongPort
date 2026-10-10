@@ -4627,3 +4627,283 @@ fn u03_gemini_retained_checkpoint_admits_actual_native_owner_and_keeps_sync_paus
         );
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
+    use crate::app_config::AppType;
+    for (source, failure) in [
+        ("missing", None),
+        ("conflict", None),
+        ("missing", Some("target-before-pointer")),
+        ("conflict", Some("target-before-pointer")),
+        ("missing", Some("row-drift")),
+        ("missing", Some("credentials-after-pointer")),
+        ("multiple", None),
+        ("multiple", Some("target-before-pointer")),
+        ("preserved", None),
+    ] {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        let config = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-key-a","ANTHROPIC_BASE_URL":"https://a.example.invalid"}});
+        for id in ["a", "b"] {
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    format!("Synthetic {id}"),
+                    if id == "a" {
+                        config.clone()
+                    } else {
+                        serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-key-b"}})
+                    },
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        if source == "conflict" {
+            db.set_current_provider("claude", "b").unwrap();
+        } else if source == "multiple" {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE providers SET is_current=1 WHERE app_type='claude'",
+                    [],
+                )
+                .unwrap();
+        } else if source == "preserved" {
+            db.set_current_provider("claude", "a").unwrap();
+        }
+        drop(db);
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_claude: (source == "conflict").then(|| "missing-row".into()),
+            ..Default::default()
+        });
+        f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#);
+        let path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let session = review.runtime_session(&inspected, &token).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            Database::init_with_secrets(session.clone()).unwrap(),
+        ))
+        .unwrap();
+        let view = review
+            .review_app(&inspected, &token, &AppType::Claude)
+            .unwrap();
+        assert_eq!(
+            view.direct_provider_resolution,
+            if source == "multiple" {
+                "conflict"
+            } else {
+                source
+            }
+        );
+        if source == "preserved" {
+            assert_eq!(view.retained_provider_id.as_deref(), Some("a"));
+        }
+        assert!(view.can_choose_provider);
+        assert_eq!(
+            view.keep_files_providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        if source == "missing" && failure.is_none() {
+            let coordinator = crate::secrets::startup::StartupCoordinator::new(
+                f.root.clone(),
+                inspect(&f.root, &f.device).unwrap(),
+            );
+            let before = snapshot(f.home.path());
+            assert_eq!(
+                coordinator
+                    .select_upgrade_provider(&token, &AppType::Claude, &view.revision, "a", &state)
+                    .err()
+                    .as_deref(),
+                Some("secret.locked")
+            );
+            assert_eq!(snapshot(f.home.path()), before);
+        }
+        let before = snapshot(f.home.path());
+        assert!(review
+            .select_provider(&inspected, &token, &AppType::Claude, "stale", "a", &state)
+            .is_err());
+        assert!(review
+            .select_provider(
+                &inspected,
+                &token,
+                &AppType::Claude,
+                &view.revision,
+                "b",
+                &state
+            )
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        // An unrelated owned setting changes after the runtime cache was loaded.
+        // Pointer publication must refresh that original cache without losing it.
+        let settings_path = crate::settings::settings_path();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        document["language"] = serde_json::json!("ja");
+        std::fs::write(&settings_path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let native = std::fs::read(&path).unwrap();
+        if failure == Some("target-before-pointer") {
+            crate::mode::operation::failpoint::crash_at(Some("upgrade:provider_target"));
+        } else if failure == Some("credentials-after-pointer") {
+            crate::mode::operation::failpoint::crash_at(Some("target"));
+        } else if failure == Some("row-drift") {
+            let path = f.root.join(crate::config::DB_FILE_NAME);
+            crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+                if point == "upgrade:provider_target" {
+                    rusqlite::Connection::open(&path).unwrap().execute(
+                        "UPDATE providers SET name='Externally changed' WHERE app_type='claude' AND id='a'", [],
+                    ).unwrap();
+                }
+            })));
+        }
+        let selected = review.select_provider(
+            &inspected,
+            &token,
+            &AppType::Claude,
+            &view.revision,
+            "a",
+            &state,
+        );
+        crate::mode::operation::failpoint::crash_at(None);
+        crate::mode::operation::failpoint::on_boundary(None);
+        if failure == Some("credentials-after-pointer") {
+            assert!(selected.is_err());
+            let mut refreshed = state.db.get_provider_by_id("a", "claude").unwrap().unwrap();
+            refreshed.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] =
+                serde_json::json!("synthetic-refreshed-key");
+            state.db.save_provider("claude", &refreshed).unwrap();
+            let before = snapshot(f.home.path());
+            let current = review
+                .review_app(&inspected, &token, &AppType::Claude)
+                .unwrap();
+            assert!(!current.can_recover_operation);
+            assert!(!current.can_complete_app);
+            assert!(review
+                .recover_app(&inspected, &token, &AppType::Claude, &current.revision)
+                .is_err());
+            assert_eq!(snapshot(f.home.path()), before);
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+            assert_eq!(
+                state
+                    .db
+                    .get_provider_by_id("a", "claude")
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                refreshed.settings_config
+            );
+            assert!(
+                crate::mode::state::pending(&f.device, &session.read().unwrap(), "claude")
+                    .unwrap()
+                    .is_some()
+            );
+            continue;
+        }
+        if failure == Some("row-drift") {
+            assert!(selected.is_err());
+            assert_eq!(
+                crate::settings::get_current_provider_ready(&AppType::Claude).unwrap(),
+                None
+            );
+            assert_eq!(state.db.get_current_provider("claude").unwrap(), None);
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+            assert!(
+                crate::mode::state::pending(&f.device, &session.read().unwrap(), "claude")
+                    .unwrap()
+                    .is_some()
+            );
+            continue;
+        }
+        let result = if failure.is_some() {
+            assert!(selected.is_err());
+            let pending =
+                crate::mode::state::pending(&f.device, &session.read().unwrap(), "claude")
+                    .unwrap()
+                    .unwrap();
+            assert!(pending.published);
+            assert!(pending.files.iter().all(|file| file.pre == file.planned));
+            let pending_view = review
+                .review_app(&inspected, &token, &AppType::Claude)
+                .unwrap();
+            assert!(pending_view.can_recover_operation);
+            assert!(!pending_view.can_choose_provider);
+            assert!(review
+                .recover_app(&inspected, &token, &AppType::Claude, &view.revision)
+                .is_err());
+            review
+                .recover_app_with_state(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &pending_view.revision,
+                    &state,
+                )
+                .unwrap()
+        } else {
+            selected.unwrap()
+        };
+        assert!(result.can_complete_app);
+        assert_eq!(
+            crate::settings::get_settings().language.as_deref(),
+            Some("ja")
+        );
+        assert!(
+            crate::mode::state::load_app(&f.device, &session.read().unwrap(), "codex").is_err()
+        );
+        let raw = f
+            .device
+            .read_device(
+                &session.read().unwrap(),
+                &crate::secrets::owned_file::DeviceFile::registered(
+                    crate::secrets::owned_file::DEVICE_STATE_FILE,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(std::str::from_utf8(&raw)
+            .unwrap()
+            .contains("900719925474099312345"));
+        assert_eq!(std::fs::read(&path).unwrap(), native);
+        assert_eq!(
+            crate::settings::get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            state.db.get_current_provider("claude").unwrap().as_deref(),
+            Some("a")
+        );
+        assert!(
+            crate::mode::state::pending(&f.device, &session.read().unwrap(), "claude")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude")
+                .unwrap()
+                .mode,
+            Some(crate::mode::state::Mode::Direct)
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}

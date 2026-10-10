@@ -4532,6 +4532,7 @@
     }
   },
   "startupUpgrade": {
+    "nativeProvider": "クライアントファイルに対応するプロバイダー",
     "continue": "ワークベンチへ進む",
     "reviewApps": "アップグレード中のアプリを確認",
     "title": "アップグレードと復旧の確認",

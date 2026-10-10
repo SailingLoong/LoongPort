@@ -389,26 +389,33 @@ impl StartupCoordinator {
             .inspection
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        self.upgrade_review
+        let mut view = self
+            .upgrade_review
             .lock()
             .map_err(|_| "secret.startup_unavailable")?
             .as_ref()
             .ok_or("secret.startup_unavailable")?
             .review_app(&inspection, token, app)
-            .map_err(super::error::public_code)
+            .map_err(super::error::public_code)?;
+        if *phase != Phase::Ready {
+            view.can_choose_provider = false;
+        }
+        Ok(view)
     }
 
-    pub(super) fn recover_upgrade_app(
+    pub(super) fn select_upgrade_provider(
         &self,
         token: &str,
         app: &crate::app_config::AppType,
         revision: &str,
+        provider_id: &str,
+        state: &crate::store::AppState,
     ) -> Result<super::upgrade::UpgradeAppReview, String> {
         let phase = self
             .phase
             .lock()
             .map_err(|_| "secret.startup_unavailable")?;
-        if !matches!(*phase, Phase::UpgradeReview | Phase::Ready) {
+        if *phase != Phase::Ready {
             return Err("secret.locked".into());
         }
         let inspection = self
@@ -420,8 +427,60 @@ impl StartupCoordinator {
             .map_err(|_| "secret.startup_unavailable")?
             .as_ref()
             .ok_or("secret.startup_unavailable")?
-            .recover_app(&inspection, token, app, revision)
+            .select_provider(&inspection, token, app, revision, provider_id, state)
             .map_err(super::error::public_code)
+    }
+
+    pub(super) fn recover_upgrade_app(
+        &self,
+        token: &str,
+        app: &crate::app_config::AppType,
+        revision: &str,
+    ) -> Result<super::upgrade::UpgradeAppReview, String> {
+        self.recover_upgrade_app_with_runtime(token, app, revision, None)
+    }
+
+    pub(super) fn recover_upgrade_app_with_state(
+        &self,
+        token: &str,
+        app: &crate::app_config::AppType,
+        revision: &str,
+        state: &crate::store::AppState,
+    ) -> Result<super::upgrade::UpgradeAppReview, String> {
+        self.recover_upgrade_app_with_runtime(token, app, revision, Some(state))
+    }
+
+    fn recover_upgrade_app_with_runtime(
+        &self,
+        token: &str,
+        app: &crate::app_config::AppType,
+        revision: &str,
+        state: Option<&crate::store::AppState>,
+    ) -> Result<super::upgrade::UpgradeAppReview, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if state.is_some() && *phase != Phase::Ready {
+            return Err("secret.locked".into());
+        }
+        if !matches!(*phase, Phase::UpgradeReview | Phase::Ready) {
+            return Err("secret.locked".into());
+        }
+        let inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let review = self
+            .upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let review = review.as_ref().ok_or("secret.startup_unavailable")?;
+        match state {
+            Some(state) => review.recover_app_with_state(&inspection, token, app, revision, state),
+            None => review.recover_app(&inspection, token, app, revision),
+        }
+        .map_err(super::error::public_code)
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -703,6 +762,35 @@ pub(crate) async fn review_startup_upgrade_app(
 
 #[cfg(feature = "gui")]
 #[tauri::command]
+pub(crate) async fn select_startup_upgrade_provider(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+    app_type: crate::app_config::AppType,
+    expected_app_revision: String,
+    provider_id: String,
+) -> Result<super::upgrade::UpgradeAppReview, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        let state = app
+            .try_state::<crate::store::AppState>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.select_upgrade_provider(
+            &expected_review_token,
+            &app_type,
+            &expected_app_revision,
+            &provider_id,
+            &state,
+        )
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
 pub(crate) async fn recover_startup_upgrade_app(
     app: tauri::AppHandle,
     expected_review_token: String,
@@ -711,9 +799,23 @@ pub(crate) async fn recover_startup_upgrade_app(
 ) -> Result<super::upgrade::UpgradeAppReview, String> {
     let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
     tauri::async_runtime::spawn_blocking(move || {
-        app.try_state::<StartupCoordinator>()
-            .ok_or("secret.startup_unavailable")?
-            .recover_upgrade_app(&expected_review_token, &app_type, &expected_app_revision)
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        if let Some(state) = app.try_state::<crate::store::AppState>() {
+            coordinator.recover_upgrade_app_with_state(
+                &expected_review_token,
+                &app_type,
+                &expected_app_revision,
+                &state,
+            )
+        } else {
+            coordinator.recover_upgrade_app(
+                &expected_review_token,
+                &app_type,
+                &expected_app_revision,
+            )
+        }
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?

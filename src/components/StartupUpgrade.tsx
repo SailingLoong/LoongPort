@@ -31,6 +31,7 @@ function UpgradeAppCard({
   const { t } = useTranslation();
   const [view, setView] = useState<UpgradeAppReview | null>(null);
   const [fresh, setFresh] = useState(false);
+  const [providerDraft, setProviderDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const busyRef = useRef(false);
@@ -39,6 +40,7 @@ function UpgradeAppCard({
   async function query() {
     const sequence = ++request.current;
     setFresh(false);
+    setProviderDraft(null);
     try {
       const next = await startupUpgradeApi.queryApp(token, app.id);
       if (sequence !== request.current) return;
@@ -60,9 +62,20 @@ function UpgradeAppCard({
     };
   }, [token, app.id]);
 
-  async function act(recover: boolean) {
+  async function act(recover: boolean, chooseProvider = false) {
     if (busyRef.current) return;
     if (recover && (!fresh || !view?.canRecoverOperation || !view.revision))
+      return;
+    const providerId = view?.retainedProviderId ?? providerDraft;
+    if (
+      chooseProvider &&
+      (!fresh ||
+        !view?.canChooseProvider ||
+        !providerId ||
+        !view.keepFilesProviders?.some(
+          (provider) => provider.id === providerId,
+        ))
+    )
       return;
     busyRef.current = true;
     setBusy(true);
@@ -70,7 +83,19 @@ function UpgradeAppCard({
     setFresh(false);
     const sequence = ++request.current;
     try {
-      if (recover && view) {
+      if (chooseProvider && view && providerId) {
+        const next = await startupUpgradeApi.selectProvider(
+          token,
+          app.id,
+          view.revision,
+          providerId,
+        );
+        if (sequence !== request.current) return;
+        if (next.appType !== app.id) throw new Error("upgrade.source_changed");
+        setView(next);
+        setProviderDraft(null);
+        setFresh(true);
+      } else if (recover && view) {
         const next = await startupUpgradeApi.recoverApp(
           token,
           app.id,
@@ -133,6 +158,46 @@ function UpgradeAppCard({
       <p className="text-sm text-muted-foreground">
         {t("startupUpgrade.noTakeover")}
       </p>
+      {view?.canChooseProvider === true && (
+        <div className="space-y-2">
+          <p className="text-sm font-medium">
+            {t("startupUpgrade.nativeProvider")}
+          </p>
+          {view.retainedProviderId ? (
+            <p className="text-sm">
+              {
+                view.keepFilesProviders.find(
+                  (provider) => provider.id === view.retainedProviderId,
+                )?.name
+              }
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {view.keepFilesProviders.map((provider) => (
+                <Button
+                  key={provider.id}
+                  variant={
+                    providerDraft === provider.id ? "default" : "outline"
+                  }
+                  disabled={busy || !fresh}
+                  aria-pressed={providerDraft === provider.id}
+                  onClick={() => setProviderDraft(provider.id)}
+                >
+                  {provider.name}
+                </Button>
+              ))}
+            </div>
+          )}
+          <Button
+            disabled={
+              busy || !fresh || !(view.retainedProviderId ?? providerDraft)
+            }
+            onClick={() => void act(false, true)}
+          >
+            {t("startupUpgrade.keepFiles")}
+          </Button>
+        </div>
+      )}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {t("startupUpgrade.appQueryFailed")}

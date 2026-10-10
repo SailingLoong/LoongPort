@@ -1357,9 +1357,13 @@ impl SettingsStore {
         // Match mutate's lock order so reload cannot replace a newer in-memory write
         // with a stale file snapshot.
         let vault = self.session.read()?;
+        self.reload_pinned(&vault)
+    }
+
+    fn reload_pinned(&self, vault: &VaultContext) -> Result<(), AppError> {
         let mut state = self.state.write()?;
         let loaded = match fs::read(&self.path) {
-            Ok(bytes) => decode_runtime_settings_document(&bytes, &vault, self.session.root())
+            Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())
                 .map(|(settings, _)| settings),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(AppSettings::default())
@@ -1723,6 +1727,24 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
     mutate_settings(|settings| {
         settings.unify_codex_migrate_existing = None;
     })
+}
+
+/// Refresh the original unlocked cache while its caller retains the Vault guard.
+pub(crate) fn reload_settings_with_vault(
+    session: &SecretSession,
+    vault: &VaultContext,
+) -> Result<(), AppError> {
+    let store = settings_store()
+        .read()?
+        .unlocked
+        .clone()
+        .ok_or_else(|| AppError::Config("secret.locked".into()))?;
+    if !std::ptr::eq(session, store.session.as_ref()) {
+        return Err(AppError::Config("settings.session_mismatch".into()));
+    }
+    session.ensure_available()?;
+    store.reload_pinned(vault)?;
+    refresh_bootstrap_from(&store)
 }
 
 /// 从文件重新加载设置到内存缓存
