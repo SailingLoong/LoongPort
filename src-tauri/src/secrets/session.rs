@@ -214,6 +214,9 @@ impl SecretSession {
     }
 
     pub(crate) fn complete_migration(&self) -> Result<(), AppError> {
+        if !self.migration_pending()? {
+            return Ok(());
+        }
         let vault = self.read()?;
         let mut saved = read_metadata(&self.root)?;
         saved.migration_state = seal_migration_state(&vault, &MigrationState::Complete)?;
@@ -332,6 +335,48 @@ mod tests {
         fn remove(&self, vault: &str, key: &str) -> Result<(), KeyStoreError> {
             self.0.lock().unwrap().remove(&format!("{vault}/{key}"));
             Ok(())
+        }
+    }
+
+    #[test]
+    fn migration_completion_publishes_pending_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryKeys::default();
+        let session = SecretSession::open(dir.path(), &store, None).unwrap();
+        assert!(session.migration_pending().unwrap());
+        session.complete_migration().unwrap();
+        assert!(!session.migration_pending().unwrap());
+        let completed = std::fs::read(dir.path().join("vault.json")).unwrap();
+        session.complete_migration().unwrap();
+        assert!(std::fs::read(dir.path().join("vault.json")).unwrap() == completed);
+        authenticate_existing(dir.path(), &store, None).unwrap();
+    }
+
+    #[test]
+    fn migration_completion_rejects_unverified_state_without_writes() {
+        for case in ["damaged", "unknown", "wrong_identity"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryKeys::default();
+            let session = SecretSession::open(dir.path(), &store, None).unwrap();
+            let mut saved = read_metadata(dir.path()).unwrap();
+            saved.migration_state = match case {
+                "damaged" => "synthetic-invalid-envelope".into(),
+                "unknown" => session
+                    .read()
+                    .unwrap()
+                    .seal(&["local", "migration-state"], br#"{"phase":"future"}"#)
+                    .unwrap(),
+                "wrong_identity" => session
+                    .read()
+                    .unwrap()
+                    .seal(&["synthetic-other-owner"], br#"{"phase":"complete"}"#)
+                    .unwrap(),
+                _ => unreachable!(),
+            };
+            write_metadata(dir.path(), &saved).unwrap();
+            let before = std::fs::read(dir.path().join("vault.json")).unwrap();
+            assert!(session.complete_migration().is_err(), "{case}");
+            assert!(std::fs::read(dir.path().join("vault.json")).unwrap() == before);
         }
     }
 

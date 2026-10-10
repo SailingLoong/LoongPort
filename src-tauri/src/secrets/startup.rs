@@ -1380,6 +1380,7 @@ mod upgrade_handoff_tests {
         device: DeviceStore,
         native: PathBuf,
         home: TestHome,
+        store: MemoryKeyStore,
     }
     impl Fixture {
         fn new() -> Self {
@@ -1452,6 +1453,7 @@ mod upgrade_handoff_tests {
                 device,
                 native,
                 home,
+                store,
             }
         }
         fn session(&self) -> Arc<SecretSession> {
@@ -1691,6 +1693,67 @@ mod upgrade_handoff_tests {
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(after[field].get(), peer, "{field}");
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_runtime_migration_completion_preserves_verified_checkpoint() {
+        let f = Fixture::new();
+        let vault_path = f.coordinator.root.join("vault.json");
+        let vault_before = std::fs::read(&vault_path).unwrap();
+        let checkpoint_before = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                assert!(!session.migration_pending().unwrap());
+                crate::settings::unlock_settings(session.clone()).unwrap();
+                let _db = Database::init_with_secrets(session.clone()).unwrap();
+                // The real initialize_runtime calls this after opening its owners,
+                // including when the original migration was already complete.
+                session.complete_migration().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let vault_unchanged = std::fs::read(&vault_path).unwrap() == vault_before;
+        let checkpoint_verified = f.coordinator.upgrade_view().is_ok();
+        assert!(
+            vault_unchanged && checkpoint_verified,
+            "already-complete runtime migration must preserve vault and checkpoint: vault_unchanged={vault_unchanged}, checkpoint_verified={checkpoint_verified}"
+        );
+        assert!(
+            f.coordinator
+                .review_upgrade_app(&f.token, &AppType::Claude)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(
+            !f.coordinator
+                .review_upgrade_app(&f.token, &AppType::Codex)
+                .unwrap()
+                .can_complete_app
+        );
+        let session = f.session();
+        let checkpoint_id = checkpoint::verified_database_id(
+            &f.coordinator.root,
+            &f.device,
+            &session.read().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let restarted = StartupCoordinator::new(
+            f.coordinator.root.clone(),
+            crate::secrets::upgrade::inspect(&f.coordinator.root, &f.device).unwrap(),
+        );
+        let authenticated = restarted.authenticate_upgrade(None, &f.store).unwrap();
+        assert_eq!(authenticated.status, "database_verified");
+        assert_eq!(
+            authenticated.checkpoint_id.as_deref(),
+            Some(checkpoint_id.as_str())
+        );
+        assert!(restarted.verify_runtime_admission_blocked());
+        assert!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap() == checkpoint_before
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
     }
 
     #[test]
