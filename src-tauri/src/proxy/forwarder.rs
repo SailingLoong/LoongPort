@@ -4050,6 +4050,11 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn authenticated_redirect_forwarder_blocks_cross_origin_redirects() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::authenticated_redirect_forwarder_blocks_cross_origin_redirects",
+        ) {
+            return;
+        }
         use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
         init_logger();
         use crate::proxy::redirect_test_support::MockServer;

@@ -89,7 +89,7 @@ async fn handle_request(
     axum::Json(serde_json::json!({"data": [{"id": "synthetic-model"}]})).into_response()
 }
 
-/// Isolate process-global proxy/environment mutations from parallel lib tests.
+/// Isolate process-global proxy/environment/logging state from parallel lib tests.
 /// Returns true in the parent after the one exact original test has passed.
 pub(crate) fn run_in_isolated_process(test_name: &str) -> bool {
     const CHILD_TEST: &str = "LOONGPORT_AUTH_REDIRECT_TEST_CHILD";

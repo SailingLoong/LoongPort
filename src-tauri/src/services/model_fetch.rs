@@ -428,6 +428,11 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn authenticated_redirect_model_fetch_redirect_error_omits_url_credentials() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "services::model_fetch::tests::authenticated_redirect_model_fetch_redirect_error_omits_url_credentials",
+        ) {
+            return;
+        }
         use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
         init_logger();
         use crate::proxy::redirect_test_support::MockServer;
