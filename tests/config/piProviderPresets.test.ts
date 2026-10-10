@@ -100,6 +100,20 @@ describe("Pi provider presets", () => {
     expect(models.every((model) => model.contextWindow === 272_000)).toBe(true);
   });
 
+  // #7956/#8044 适配版：火山各套餐端点不同，Agent Plan 曾误用 Coding Plan 的端点
+  it("points each Volcengine plan at its own Ark endpoint", () => {
+    const endpoints = Object.fromEntries(
+      piProviderPresets
+        .filter((preset) => preset.name.startsWith("火山"))
+        .map((preset) => [preset.name, preset.settingsConfig.baseUrl]),
+    );
+
+    expect(endpoints).toEqual({
+      "火山 Agent Plan": "https://ark.cn-beijing.volces.com/api/plan/v3",
+      "火山 Coding Plan": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    });
+  });
+
   it("keeps provider-specific OpenAI compatibility metadata", () => {
     const preset = (name: string) => {
       const found = piProviderPresets.find((item) => item.name === name);

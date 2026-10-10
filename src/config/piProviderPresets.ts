@@ -456,12 +456,33 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
     icon: "claudecn",
   },
   {
-    name: "火山Agentplan",
+    // #8044：Agent Plan 有自己的端点（此前误用 Coding Plan 的 /api/coding/v3）
+    name: "火山 Agent Plan",
     providerKey: "loongport-agentplan",
+    websiteUrl: "https://www.volcengine.com/activity/agentplan",
+    apiKeyUrl: "https://www.volcengine.com/activity/agentplan",
+    settingsConfig: {
+      name: "火山 Agent Plan",
+      baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      api: "openai-completions",
+      apiKey: "",
+      models: [
+        piModel("volcengine/ark-code-latest", {
+          id: "ark-code-latest",
+        }),
+      ],
+    },
+    category: "cn_official",
+    icon: "huoshan",
+    iconColor: "#3370FF",
+  },
+  {
+    name: "火山 Coding Plan",
+    providerKey: "loongport-codingplan",
     websiteUrl: "https://www.volcengine.com/activity/codingplan",
     apiKeyUrl: "https://www.volcengine.com/activity/codingplan",
     settingsConfig: {
-      name: "火山Agentplan",
+      name: "火山 Coding Plan",
       baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
       api: "openai-completions",
       apiKey: "",
