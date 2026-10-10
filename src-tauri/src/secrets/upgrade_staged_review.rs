@@ -174,7 +174,7 @@ pub(super) fn source_facts(
     Ok(facts)
 }
 
-fn mode_resolution(
+pub(super) fn mode_resolution(
     live: &LiveState,
     app: &AppType,
     known: Option<&crate::mode::state::ModeState>,

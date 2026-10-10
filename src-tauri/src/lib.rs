@@ -1736,6 +1736,7 @@ pub fn run() {
             secrets::startup::review_startup_upgrade_ownership,
             secrets::startup::review_startup_upgrade_app,
             secrets::startup::select_startup_upgrade_provider,
+            secrets::startup::select_startup_upgrade_mode,
             secrets::startup::recover_startup_upgrade_app,
             secrets::startup::recover_startup_operation,
             secrets::startup::preview_secret_reset,

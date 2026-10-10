@@ -28,6 +28,8 @@ export interface UpgradeAppReview {
   retainedProviderId: string | null;
   keepFilesProviders: { id: string; name: string }[];
   canChooseProvider: boolean;
+  canChooseMode: boolean;
+  modeRouteProviders: { id: string; name: string }[];
 }
 
 export interface UpgradeSourceAppFacts {
@@ -85,6 +87,18 @@ export const startupUpgradeApi = {
       appType,
       expectedAppRevision,
       providerId,
+    }),
+  selectMode: (
+    expectedReviewToken: string,
+    appType: UpgradeApp,
+    expectedAppRevision: string,
+    choice: { mode: "direct" | "proxy"; proxyRoute: string | null },
+  ) =>
+    invoke<UpgradeAppReview>("select_startup_upgrade_mode", {
+      expectedReviewToken,
+      appType,
+      expectedAppRevision,
+      choice,
     }),
   recoverApp: (
     expectedReviewToken: string,

@@ -34,13 +34,27 @@ pub(crate) struct UpgradeAppReview {
     pub(crate) retained_provider_id: Option<String>,
     pub(crate) keep_files_providers: Vec<UpgradeProviderChoice>,
     pub(crate) can_choose_provider: bool,
+    pub(crate) can_choose_mode: bool,
+    pub(crate) mode_route_providers: Vec<UpgradeProviderChoice>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UpgradeModeChoice {
+    pub(crate) mode: Mode,
+    pub(crate) proxy_route: Option<String>,
+}
+
+enum KeepFilesChoice<'a> {
+    Provider(&'a str),
+    Mode(&'a UpgradeModeChoice),
 }
 
 struct AppCapture {
     view: UpgradeAppReview,
     files: Vec<ReviewedInput>,
-    live: Option<crate::mode::state::LiveState>,
     identity: inspection::DatabaseIdentity,
+    flags: (bool, bool),
     finalized_revision: Option<String>,
     provider_digests: std::collections::BTreeMap<String, String>,
 }
@@ -172,6 +186,44 @@ impl AuthenticatedUpgrade {
         provider_id: &str,
         state: &crate::store::AppState,
     ) -> Result<UpgradeAppReview, AppError> {
+        self.select_keep_files(
+            inspected,
+            token,
+            app,
+            revision,
+            KeepFilesChoice::Provider(provider_id),
+            state,
+        )
+    }
+
+    pub(crate) fn select_mode(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        choice: &UpgradeModeChoice,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
+        self.select_keep_files(
+            inspected,
+            token,
+            app,
+            revision,
+            KeepFilesChoice::Mode(choice),
+            state,
+        )
+    }
+
+    fn select_keep_files(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        revision: &str,
+        choice: KeepFilesChoice<'_>,
+        state: &crate::store::AppState,
+    ) -> Result<UpgradeAppReview, AppError> {
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
         let guard = crate::live::engine::lock_app(app.as_str());
@@ -179,8 +231,38 @@ impl AuthenticatedUpgrade {
             return Err(source_changed());
         }
         let captured = self.review_app_locked(inspected, token, app)?;
+        let (provider_id, selected_mode) = match choice {
+            KeepFilesChoice::Provider(id) if captured.view.can_choose_provider => (id, None),
+            KeepFilesChoice::Mode(choice) if captured.view.can_choose_mode => {
+                let id = captured
+                    .view
+                    .retained_provider_id
+                    .as_deref()
+                    .ok_or_else(source_changed)?;
+                if (choice.mode == Mode::Direct && choice.proxy_route.is_some())
+                    || (choice.mode == Mode::Proxy
+                        && !choice.proxy_route.as_ref().is_some_and(|route| {
+                            captured
+                                .view
+                                .mode_route_providers
+                                .iter()
+                                .any(|provider| &provider.id == route)
+                        }))
+                {
+                    return Err(source_changed());
+                }
+                (
+                    id,
+                    Some(crate::mode::state::ModeState {
+                        mode: Some(choice.mode),
+                        proxy_route: choice.proxy_route.clone(),
+                        ..Default::default()
+                    }),
+                )
+            }
+            _ => return Err(source_changed()),
+        };
         if captured.view.revision != revision
-            || !captured.view.can_choose_provider
             || !captured
                 .view
                 .keep_files_providers
@@ -225,52 +307,89 @@ impl AuthenticatedUpgrade {
                 .zip(&patches)
                 .map(|(file, patch)| operation::FileChange { file, patch })
                 .collect::<Vec<_>>();
-            let target = crate::mode::state::PendingTarget::pointer(Some(provider_id.to_owned()));
-            operation::run(
+            let mut target = selected_mode
+                .map(crate::mode::state::PendingTarget::mode)
+                .unwrap_or_default();
+            target.pointer = Some(provider_id.to_owned());
+            let verify_provider = || {
+                for id in std::iter::once(provider_id).chain(
+                    target
+                        .state
+                        .as_ref()
+                        .and_then(|mode| mode.proxy_route.as_deref()),
+                ) {
+                    let row = state
+                        .db
+                        .get_provider_by_id_with_vault(id, app.as_str(), &self.session, &vault)?
+                        .ok_or_else(source_changed)?;
+                    if captured.provider_digests.get(id)
+                        != Some(&Database::provider_update_digest(&row)?)
+                    {
+                        return Err(source_changed());
+                    }
+                }
+                for file in &captured.files {
+                    file.verify()?;
+                }
+                Ok(())
+            };
+            let verify_cleanup = |live: &crate::mode::state::LiveState| {
+                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                inspection::verify_primary_identity(&path, &captured.identity)?;
+                {
+                    let conn = state.db.conn.lock()?;
+                    inspection::verify_connection_primary_identity(&conn, &captured.identity)?;
+                }
+                verify_provider()?;
+                let actual = self.capture_app_with_state(app, &vault, Some(live))?;
+                let mode = target.state.as_ref().ok_or_else(source_changed)?;
+                if live
+                    .apps
+                    .get(app.as_str())
+                    .map(|entry| entry.mode_state())
+                    .as_ref()
+                    != Some(mode)
+                    || actual.flags != (mode.is_proxy(), captured.flags.1)
+                    || actual.view.pointer_consistent != Some(true)
+                    || !actual.view.can_recover_operation
+                    || actual.finalized_revision.as_ref() != Some(&actual.view.revision)
+                {
+                    return Err(source_changed());
+                }
+                self.verify_app_checkpoint_pinned(inspected, &vault)
+            };
+            operation::run_checked(
                 &self.device,
                 &vault,
                 &guard,
                 crate::mode::state::op::APPLY,
                 &changes,
                 target.clone(),
-                &|actual| {
-                    if actual != &target {
-                        return Err(source_changed());
-                    }
-                    self.verify_app_checkpoint_pinned(inspected, &vault)?;
-                    inspection::verify_primary_identity(&path, &captured.identity)?;
-                    operation::failpoint::hit("upgrade:provider_target")?;
-                    let verify_provider = || {
-                        let row = state
-                            .db
-                            .get_provider_by_id_with_vault(
-                                provider_id,
-                                app.as_str(),
-                                &self.session,
-                                &vault,
-                            )?
-                            .ok_or_else(source_changed)?;
-                        if captured.provider_digests.get(provider_id)
-                            != Some(&Database::provider_update_digest(&row)?)
-                        {
+                &operation::RunChecks {
+                    commit_target: &|actual| {
+                        if actual != &target {
                             return Err(source_changed());
                         }
-                        for file in &captured.files {
-                            file.verify()?;
+                        self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                        inspection::verify_primary_identity(&path, &captured.identity)?;
+                        operation::failpoint::hit("upgrade:provider_target")?;
+                        if target.state.is_some() {
+                            operation::failpoint::hit("upgrade:mode_target")?;
                         }
-                        Ok(())
-                    };
-                    verify_provider()?;
-                    operation::commit_target(
-                        &state.db,
-                        &self.session,
-                        &self.device,
-                        &vault,
-                        app,
-                        actual,
-                    )?;
-                    verify_provider()?;
-                    self.verify_app_checkpoint_pinned(inspected, &vault)
+                        verify_provider()?;
+                        let commit = if actual.state.is_some() {
+                            operation::commit_upgrade_mode_choice
+                        } else {
+                            operation::commit_target
+                        };
+                        commit(&state.db, &self.session, &self.device, &vault, app, actual)?;
+                        verify_provider()?;
+                        self.verify_app_checkpoint_pinned(inspected, &vault)
+                    },
+                    before_cleanup: target.state.as_ref().map(|_| {
+                        &verify_cleanup
+                            as &dyn Fn(&crate::mode::state::LiveState) -> Result<(), AppError>
+                    }),
                 },
             )?;
         }
@@ -410,9 +529,6 @@ impl AuthenticatedUpgrade {
                         .then_some(&publish_pointer as &dyn Fn(&str) -> Result<(), AppError>),
                     after_target: &after,
                     before_cleanup: &|live| {
-                        if Some(live) != captured.live.as_ref() {
-                            return Err(source_changed());
-                        }
                         self.verify_app_checkpoint_pinned(inspected, &vault)?;
                         inspection::verify_primary_identity(&path, &captured.identity)?;
                         let actual = self.capture_app_with_state(app, &vault, Some(live))?;
@@ -490,6 +606,24 @@ fn capture_app_with_state(
         .as_ref()
         .and_then(|live| live.apps.get(app.as_str()))
         .is_some_and(|entry| crate::mode::state::validate_app_for_update(entry).is_ok());
+    let missing_mode = live.as_ref().is_some_and(|live| {
+        super::staged_review::mode_resolution(live, app, mode.as_ref()) == "missing"
+            && operation::mode_choice_source_matches(
+                live,
+                app,
+                &crate::mode::state::ModeState {
+                    mode: Some(Mode::Direct),
+                    ..Default::default()
+                },
+            )
+    });
+    let mode_target = pending
+        .flatten()
+        .and_then(|pending| pending.target.state.as_ref());
+    let mode_target_matches = mode_target.is_some_and(|target| {
+        live.as_ref()
+            .is_some_and(|live| operation::mode_choice_source_matches(live, app, target))
+    });
     let mut bound = live_review::BoundFiles::new();
     let mut files = Vec::new();
     for file in admitted {
@@ -550,7 +684,7 @@ fn capture_app_with_state(
         .and_then(|entry| entry.written.as_ref());
     let inspect_candidate = |row: Option<&crate::provider::Provider>| {
         let retired = (*app == AppType::GrokBuild
-            && compatible
+            && (compatible || missing_mode)
             && written.is_none_or(|written| written.codex.is_none()))
         .then(|| crate::services::provider::grok_direct::retired_tables_from_written(written, row));
         live_review::inspect_with_grok_retired(
@@ -573,9 +707,10 @@ fn capture_app_with_state(
         false
     };
     let forward_pointer_proven = target_native_proven
-        && mode
-            .as_ref()
-            .is_some_and(|mode| mode.mode == Some(Mode::Direct))
+        && (mode_target_matches
+            || mode
+                .as_ref()
+                .is_some_and(|mode| mode.mode == Some(Mode::Direct)))
         && preference.as_ref().is_none_or(String::is_empty)
         && crate::settings::read_native_app_settings_with_vault(
             app,
@@ -593,13 +728,22 @@ fn capture_app_with_state(
             && pending.files.iter().all(|file| file.pre == file.planned)
     });
     let can_recover_operation = compatible
-        && mode.as_ref().is_some_and(|mode| {
-            !mode.attached
-                && (mode.mode == Some(Mode::Direct)
-                    || mode
-                        .proxy_route
-                        .as_ref()
-                        .is_some_and(|id| rows.contains_key(id)))
+        && if mode_target.is_some() {
+            mode_target_matches
+        } else {
+            mode.as_ref().is_some_and(|mode| {
+                !mode.attached
+                    && (mode.mode == Some(Mode::Direct)
+                        || mode
+                            .proxy_route
+                            .as_ref()
+                            .is_some_and(|id| rows.contains_key(id)))
+            })
+        }
+        && mode_target.is_none_or(|mode| {
+            mode.proxy_route
+                .as_ref()
+                .is_none_or(|id| rows.contains_key(id))
         })
         && target.is_some_and(|id| {
             rows.contains_key(id)
@@ -619,6 +763,22 @@ fn capture_app_with_state(
     let retained_provider_id = (direct_provider_resolution == "preserved")
         .then(|| local.clone().or_else(|| currents.first().cloned()))
         .flatten();
+    let mode_native_proven = missing_mode
+        && local.as_ref().is_some_and(|id| !id.is_empty())
+        && pointer_consistent == Some(true)
+        && local
+            .as_ref()
+            .and_then(|id| rows.get(id))
+            .is_some_and(|row| {
+                inspect_candidate(Some(row)).is_ok_and(|facts| {
+                    facts.status == "parsed"
+                        && facts.marker == Some(false)
+                        && facts.native_completion_match == Some(true)
+                })
+            });
+    let can_choose_mode = mode_native_proven
+        && pending.flatten().is_none()
+        && preference.as_ref().is_none_or(String::is_empty);
     let mut keep_files_providers = Vec::new();
     if compatible
         && preference.as_ref().is_none_or(String::is_empty)
@@ -648,6 +808,25 @@ fn capture_app_with_state(
         }
     }
     let can_choose_provider = !keep_files_providers.is_empty();
+    if can_choose_mode {
+        if let Some(row) = local.as_ref().and_then(|id| rows.get(id)) {
+            keep_files_providers.push(UpgradeProviderChoice {
+                id: row.id.clone(),
+                name: row.name.clone(),
+            });
+        }
+    }
+    let mode_route_providers = if can_choose_mode {
+        rows.values()
+            .filter(|row| !row.id.is_empty())
+            .map(|row| UpgradeProviderChoice {
+                id: row.id.clone(),
+                name: row.name.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let retained_provider_id = retained_provider_id
         .filter(|id| keep_files_providers.iter().any(|choice| &choice.id == id));
     // Salt private evidence with this session token. No row, path, credential
@@ -655,17 +834,19 @@ fn capture_app_with_state(
     let revisions: Vec<_> = files.iter().map(|input| &input.revision).collect();
     let digest_evidence = |currents: &[String],
                            preference: &Option<String>,
-                           local: &Option<String>|
+                           local: &Option<String>,
+                           projected_live: &Option<crate::mode::state::LiveState>,
+                           projected_flags: (bool, bool)|
      -> Result<String, AppError> {
         let bytes = zeroize::Zeroizing::new(
             serde_json::to_vec(&(
                 token,
                 app.as_str(),
-                &live,
+                projected_live,
                 local,
                 currents,
                 &rows,
-                flags,
+                projected_flags,
                 preference,
                 &revisions,
                 &identity,
@@ -674,9 +855,28 @@ fn capture_app_with_state(
         );
         Ok(hex::encode(Sha256::digest(&*bytes)))
     };
-    let revision = digest_evidence(&currents, &preference, &local)?;
+    let revision = digest_evidence(&currents, &preference, &local, &live, flags)?;
     let finalized_revision = target
-        .map(|id| digest_evidence(&[id.to_owned()], &Some(String::new()), &Some(id.to_owned())))
+        .map(|id| {
+            let mut projected = live.clone();
+            let mut projected_flags = flags;
+            if let Some(target) = mode_target {
+                projected
+                    .as_mut()
+                    .and_then(|live| live.apps.get_mut(app.as_str()))
+                    .ok_or_else(source_changed)?
+                    .set_mode_state(target.clone())
+                    .map_err(|_| source_changed())?;
+                projected_flags.0 = target.is_proxy();
+            }
+            digest_evidence(
+                &[id.to_owned()],
+                &Some(String::new()),
+                &Some(id.to_owned()),
+                &projected,
+                projected_flags,
+            )
+        })
         .transpose()?;
     for file in &files {
         file.verify()?;
@@ -700,10 +900,12 @@ fn capture_app_with_state(
             retained_provider_id,
             keep_files_providers,
             can_choose_provider,
+            can_choose_mode,
+            mode_route_providers,
         },
         files,
-        live,
         identity,
+        flags,
         finalized_revision,
         provider_digests: rows
             .iter()

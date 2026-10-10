@@ -4532,6 +4532,12 @@
     }
   },
   "startupUpgrade": {
+    "chooseModeLabel": "Choose the missing mode",
+    "chooseMode": {
+      "direct": "Choose Direct",
+      "proxy": "Choose Proxy"
+    },
+    "chooseProxyRouteLabel": "Choose the proxy route",
     "nativeProvider": "Provider matching the client files",
     "continue": "Continue to workbench",
     "reviewApps": "Review upgrade apps",

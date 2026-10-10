@@ -71,14 +71,54 @@ pub(crate) fn run(
     target: PendingTarget,
     commit_target: CommitTarget<'_>,
 ) -> Result<OperationReport, AppError> {
-    let mut report = OperationReport {
-        recovered: recover(
-            store,
-            vault,
-            guard,
-            &changes.iter().map(|c| c.file.clone()).collect::<Vec<_>>(),
+    run_checked(
+        store,
+        vault,
+        guard,
+        op,
+        changes,
+        target,
+        &RunChecks {
             commit_target,
-        )?,
+            before_cleanup: None,
+        },
+    )
+}
+
+type StateCheck<'a> = &'a dyn Fn(&state::LiveState) -> Result<(), AppError>;
+
+pub(crate) struct RunChecks<'a> {
+    pub(crate) commit_target: CommitTarget<'a>,
+    pub(crate) before_cleanup: Option<StateCheck<'a>>,
+}
+
+/// The explicit choice binds cleanup to its own original journal and final
+/// state proof. Ordinary operations keep their existing recovery behavior.
+pub(crate) fn run_checked(
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    guard: &AppWriteGuard,
+    op: &str,
+    changes: &[FileChange<'_>],
+    target: PendingTarget,
+    checks: &RunChecks<'_>,
+) -> Result<OperationReport, AppError> {
+    let commit_target = checks.commit_target;
+    let mut report = OperationReport {
+        recovered: if checks.before_cleanup.is_some() {
+            if state::pending(store, vault, guard.app())?.is_some() {
+                return Err(verification_required());
+            }
+            None
+        } else {
+            recover(
+                store,
+                vault,
+                guard,
+                &changes.iter().map(|c| c.file.clone()).collect::<Vec<_>>(),
+                commit_target,
+            )?
+        },
         ..OperationReport::default()
     };
 
@@ -235,7 +275,17 @@ pub(crate) fn run(
     if !unverified_files(&pending)?.is_empty() {
         return Err(verification_required());
     }
-    state::set_pending(store, vault, guard.app(), None)?;
+    if let Some(check) = checks.before_cleanup {
+        state::clear_pending_checked(store, vault, guard.app(), &pending, &|live| {
+            check(live)?;
+            if !unverified_files(&pending)?.is_empty() {
+                return Err(verification_required());
+            }
+            check(live)
+        })?;
+    } else {
+        state::set_pending(store, vault, guard.app(), None)?;
+    }
     Ok(report)
 }
 
@@ -953,6 +1003,7 @@ pub(crate) fn commit_target(
         app,
         target,
         &PointerCommit {
+            mode_choice: false,
             publish: &|id| {
                 crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)
             },
@@ -961,7 +1012,67 @@ pub(crate) fn commit_target(
     )
 }
 
+/// Explicit startup choice uses the original APPLY journal, never ordinary
+/// inferred initialization. Native files and the reliable pointer are pinned
+/// by the authenticated caller before this original target owner is entered.
+pub(crate) fn commit_upgrade_mode_choice(
+    db: &Database,
+    session: &SecretSession,
+    store: &DeviceStore,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    app: &AppType,
+    target: &PendingTarget,
+) -> Result<(), AppError> {
+    commit_target_with_pointer(
+        db,
+        session,
+        store,
+        vault,
+        app,
+        target,
+        &PointerCommit {
+            mode_choice: true,
+            publish: &|id| {
+                crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)
+            },
+            verify: &|id| super::current::verify_direct_pointer(db, app, id),
+        },
+    )
+}
+
+/// Missing is a clean original subtree; an already equal target is admitted
+/// only for readback of the same published journal after a partial commit.
+pub(crate) fn mode_choice_source_matches(
+    live: &state::LiveState,
+    app: &AppType,
+    target: &state::ModeState,
+) -> bool {
+    if !live.extra.is_empty()
+        || target.mode.is_none()
+        || target.attached
+        || target.contract.is_some()
+        || !target.extra.is_empty()
+        || (target.mode == Some(state::Mode::Direct) && target.proxy_route.is_some())
+        || (target.mode == Some(state::Mode::Proxy)
+            && target.proxy_route.as_ref().is_none_or(String::is_empty))
+    {
+        return false;
+    }
+    let Some(entry) = live.apps.get(app.as_str()) else {
+        return true;
+    };
+    state::validate_app_for_update(entry).is_ok()
+        && !entry.stack.enabled
+        && entry.written.as_ref().is_none_or(|written| match app {
+            AppType::GrokBuild => written.codex.is_none(),
+            AppType::Codex => written.codex.is_some() && written.tables.is_empty(),
+            _ => false,
+        })
+        && (entry.mode_state() == state::ModeState::default() || entry.mode_state() == *target)
+}
+
 struct PointerCommit<'a> {
+    mode_choice: bool,
     publish: &'a dyn Fn(&str) -> Result<(), AppError>,
     verify: &'a dyn Fn(&str) -> Result<(), AppError>,
 }
@@ -986,7 +1097,24 @@ fn commit_target_with_pointer(
     {
         return Err(AppError::Config("mode.verification_required".into()));
     }
-    super::current::validate_known_mode(store, vault, app)?;
+    if pointers.mode_choice {
+        let live = state::load_app(store, vault, app.as_str())?;
+        let mode = target.state.as_ref().ok_or_else(verification_required)?;
+        let pending = live
+            .apps
+            .get(app.as_str())
+            .and_then(|entry| entry.pending.as_ref())
+            .ok_or_else(verification_required)?;
+        if &pending.target != target
+            || !mode_choice_source_matches(&live, app, mode)
+            || published_pointer_target(app.as_str(), pending, &super::controller::files(app)?)
+                .is_err()
+        {
+            return Err(verification_required());
+        }
+    } else {
+        super::current::validate_known_mode(store, vault, app)?;
+    }
     verify_saved_row(db, session, vault, app, target)?;
     if let Some(row) = &target.saved_row {
         let provider = saved_provider(row)?;
@@ -1064,8 +1192,14 @@ fn commit_target_with_pointer(
                 .set_mode_state(mode.clone())
                 .map_err(|_| invalid_pending())
         })?;
+        if pointers.mode_choice {
+            failpoint::hit("upgrade:mode_state")?;
+        }
         let (_, failover) = db.get_proxy_flags_checked(app.as_str())?;
         db.set_proxy_flags_sync(app.as_str(), mode.is_proxy(), failover)?;
+        if pointers.mode_choice {
+            failpoint::hit("upgrade:mode_flags")?;
+        }
         if state::mode_state(store, vault, app.as_str())? != *mode
             || db.get_proxy_flags_checked(app.as_str())? != (mode.is_proxy(), failover)
         {
@@ -1088,7 +1222,6 @@ pub(crate) fn published_pointer_target<'a>(
     if !pending.published
         || !unverified_files(pending)?.is_empty()
         || !matches!(pending.op.as_str(), state::op::SWITCH | state::op::APPLY)
-        || target.state.is_some()
         || target.written.is_some()
         || target.stack.is_some()
         || target.saved_row.is_some()
@@ -1097,6 +1230,27 @@ pub(crate) fn published_pointer_target<'a>(
         || !target.extra.is_empty()
     {
         return Err(verification_required());
+    }
+    if let Some(mode) = &target.state {
+        // This shape is exclusively the original explicit keep-files choice.
+        // No subset of witnesses or staged write can claim a mode-only intent.
+        if pending.op != state::op::APPLY
+            || admitted.is_empty()
+            || pending.files.len() != admitted.len()
+            || pending
+                .files
+                .iter()
+                .any(|file| file.pre != file.planned || file.staged.is_some())
+            || mode.mode.is_none()
+            || mode.attached
+            || mode.contract.is_some()
+            || !mode.extra.is_empty()
+            || (mode.mode == Some(state::Mode::Direct) && mode.proxy_route.is_some())
+            || (mode.mode == Some(state::Mode::Proxy)
+                && mode.proxy_route.as_ref().is_none_or(String::is_empty))
+        {
+            return Err(verification_required());
+        }
     }
     target
         .pointer
@@ -1135,7 +1289,14 @@ pub(crate) fn recover_published_pointer(
     let pending = state::pending(store, vault, app.as_str())?.ok_or_else(verification_required)?;
     let admitted = super::controller::files(app)?;
     let id = published_pointer_target(app.as_str(), &pending, &admitted)?;
-    let mode = super::current::validate_known_mode(store, vault, app)?;
+    let mode = if let Some(mode) = &pending.target.state {
+        if checks.publish_pointer.is_none() || !mode_choice_source_matches(&live, app, mode) {
+            return Err(verification_required());
+        }
+        mode.clone()
+    } else {
+        super::current::validate_known_mode(store, vault, app)?
+    };
     if mode.attached
         || (mode.mode == Some(state::Mode::Proxy)
             && !mode
@@ -1166,6 +1327,7 @@ pub(crate) fn recover_published_pointer(
                 app,
                 target,
                 &PointerCommit {
+                    mode_choice: pending.target.state.is_some(),
                     publish: checks.publish_pointer.unwrap_or(checks.pointer),
                     verify: &|id| {
                         if db.get_current_provider(app.as_str())?.as_deref() != Some(id) {

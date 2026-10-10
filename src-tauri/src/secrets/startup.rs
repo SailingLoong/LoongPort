@@ -399,6 +399,7 @@ impl StartupCoordinator {
             .map_err(super::error::public_code)?;
         if *phase != Phase::Ready {
             view.can_choose_provider = false;
+            view.can_choose_mode = false;
         }
         Ok(view)
     }
@@ -428,6 +429,34 @@ impl StartupCoordinator {
             .as_ref()
             .ok_or("secret.startup_unavailable")?
             .select_provider(&inspection, token, app, revision, provider_id, state)
+            .map_err(super::error::public_code)
+    }
+
+    pub(super) fn select_upgrade_mode(
+        &self,
+        token: &str,
+        app: &crate::app_config::AppType,
+        revision: &str,
+        choice: &super::upgrade::UpgradeModeChoice,
+        state: &crate::store::AppState,
+    ) -> Result<super::upgrade::UpgradeAppReview, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::Ready {
+            return Err("secret.locked".into());
+        }
+        let inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        self.upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .as_ref()
+            .ok_or("secret.startup_unavailable")?
+            .select_mode(&inspection, token, app, revision, choice, state)
             .map_err(super::error::public_code)
     }
 
@@ -782,6 +811,35 @@ pub(crate) async fn select_startup_upgrade_provider(
             &app_type,
             &expected_app_revision,
             &provider_id,
+            &state,
+        )
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn select_startup_upgrade_mode(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+    app_type: crate::app_config::AppType,
+    expected_app_revision: String,
+    choice: super::upgrade::UpgradeModeChoice,
+) -> Result<super::upgrade::UpgradeAppReview, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        let state = app
+            .try_state::<crate::store::AppState>()
+            .ok_or("secret.startup_unavailable")?;
+        coordinator.select_upgrade_mode(
+            &expected_review_token,
+            &app_type,
+            &expected_app_revision,
+            &choice,
             &state,
         )
     })

@@ -647,4 +647,6 @@ impl AuthenticatedUpgrade {
 
 #[path = "upgrade_app_recovery.rs"]
 mod app_recovery;
-pub(crate) use app_recovery::{ensure_native_app_write_admitted, UpgradeAppReview};
+pub(crate) use app_recovery::{
+    ensure_native_app_write_admitted, UpgradeAppReview, UpgradeModeChoice,
+};

@@ -5214,3 +5214,476 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
         assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn u03_mode_choice_missing_requires_explicit_choice_and_preserves_native_provider() {
+    use crate::mode::state::Mode;
+    missing_mode_cases(&[
+        (Mode::Direct, None),
+        (Mode::Proxy, None),
+        (Mode::Direct, Some("upgrade:mode_target")),
+        (Mode::Proxy, Some("upgrade:mode_target")),
+        (Mode::Direct, Some("upgrade:mode_state")),
+        (Mode::Proxy, Some("upgrade:mode_state")),
+        (Mode::Direct, Some("upgrade:mode_flags")),
+        (Mode::Proxy, Some("upgrade:mode_flags")),
+        (Mode::Direct, Some("credentials")),
+        (Mode::Proxy, Some("credentials")),
+        (Mode::Proxy, Some("cleanup-drift")),
+    ]);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_mode_choice_first_cleanup_preserves_drift_or_replacement() {
+    use crate::mode::state::Mode;
+    missing_mode_cases(&[
+        (Mode::Proxy, Some("initial-drift")),
+        (Mode::Proxy, Some("initial-replacement")),
+        (Mode::Proxy, Some("initial-flags")),
+    ]);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_mode_choice_late_written_preserves_pending() {
+    missing_mode_cases(&[(crate::mode::state::Mode::Proxy, Some("initial-written"))]);
+}
+
+fn missing_mode_cases(cases: &[(crate::mode::state::Mode, Option<&str>)]) {
+    use crate::{
+        app_config::AppType,
+        mode::state::{self, Mode},
+    };
+    for &(mode, failure) in cases {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let db = Database::from_connection(
+            rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+        );
+        let config = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-mode-key","ANTHROPIC_BASE_URL":"https://mode.example.invalid"}});
+        for id in ["a", "b"] {
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    format!("Synthetic {id}"),
+                    if id == "a" {
+                        config.clone()
+                    } else {
+                        serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-route-key"}})
+                    },
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "a").unwrap();
+        db.set_proxy_flags_sync("claude", false, true).unwrap();
+        drop(db);
+        f.write_settings(&crate::settings::AppSettings {
+            current_provider_claude: Some("a".into()),
+            ..Default::default()
+        });
+        f.write_raw_mode(if mode == Mode::Direct {
+            br#"{"version":1,"apps":{"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        } else { br#"{"version":1,"apps":{"claude":{},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"# });
+        let path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let native = std::fs::read(&path).unwrap();
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let session = review.runtime_session(&inspected, &token).unwrap();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let runtime = crate::store::AppState::new(std::sync::Arc::new(
+            Database::init_with_secrets(session.clone()).unwrap(),
+        ))
+        .unwrap();
+        let fingerprint = || {
+            use sha2::Digest;
+            snapshot(f.home.path())
+                .into_iter()
+                .map(|(path, bytes)| (path, hex::encode(sha2::Sha256::digest(bytes))))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = fingerprint();
+        let view = review
+            .review_app(&inspected, &token, &AppType::Claude)
+            .unwrap();
+        assert_eq!(view.saved_mode, None);
+        assert!(!view.can_complete_app);
+        assert!(!view.can_choose_provider);
+        assert!(crate::mode::operation::AppWrite::begin_mode(
+            &runtime.proxy_service,
+            &AppType::Claude
+        )
+        .is_err());
+        assert_eq!(fingerprint(), before);
+        assert!(view.can_choose_mode);
+        assert_eq!(view.retained_provider_id.as_deref(), Some("a"));
+        let choice = UpgradeModeChoice {
+            mode,
+            proxy_route: (mode == Mode::Proxy).then(|| "b".into()),
+        };
+        for invalid in [
+            UpgradeModeChoice {
+                mode: Mode::Proxy,
+                proxy_route: None,
+            },
+            UpgradeModeChoice {
+                mode: Mode::Proxy,
+                proxy_route: Some("absent".into()),
+            },
+            UpgradeModeChoice {
+                mode: Mode::Direct,
+                proxy_route: Some("a".into()),
+            },
+        ] {
+            assert!(review
+                .select_mode(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &view.revision,
+                    &invalid,
+                    &runtime
+                )
+                .is_err());
+        }
+        assert!(review
+            .select_mode(
+                &inspected,
+                &token,
+                &AppType::Claude,
+                "stale",
+                &choice,
+                &runtime
+            )
+            .is_err());
+        assert!(review
+            .select_mode(
+                &inspected,
+                "stale",
+                &AppType::Claude,
+                &view.revision,
+                &choice,
+                &runtime
+            )
+            .is_err());
+        assert_eq!(fingerprint(), before);
+        if matches!(
+            failure,
+            Some("initial-drift" | "initial-replacement" | "initial-flags" | "initial-written")
+        ) {
+            let device = f.device.clone();
+            let original = f.vault.clone();
+            let drift = failure == Some("initial-drift");
+            let flags = failure == Some("initial-flags");
+            let written = failure == Some("initial-written");
+            let database = runtime.db.clone();
+            crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+                if point == "target" {
+                    if flags {
+                        database
+                            .set_proxy_flags_sync("claude", false, true)
+                            .unwrap();
+                        return;
+                    }
+                    let vault = std::sync::RwLock::new(original.clone());
+                    state::update_app(&device, &vault.read().unwrap(), "claude", |entry| {
+                        if written {
+                            entry.written = Some(state::Written::default());
+                        } else if drift {
+                            entry.proxy_route = Some("a".into());
+                        } else {
+                            entry.pending.as_mut().unwrap().target.pointer = Some("b".into());
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            })));
+        } else if failure.is_some() {
+            crate::mode::operation::failpoint::crash_at(Some(
+                if matches!(failure, Some("credentials" | "cleanup-drift")) {
+                    "target"
+                } else {
+                    failure.unwrap()
+                },
+            ));
+        }
+        let selected = review.select_mode(
+            &inspected,
+            &token,
+            &AppType::Claude,
+            &view.revision,
+            &choice,
+            &runtime,
+        );
+        crate::mode::operation::failpoint::crash_at(None);
+        crate::mode::operation::failpoint::on_boundary(None);
+        if matches!(
+            failure,
+            Some("initial-drift" | "initial-replacement" | "initial-flags" | "initial-written")
+        ) {
+            assert!(
+                selected.is_err(),
+                "first cleanup must retain drift or replacement"
+            );
+            let pending = state::pending(&f.device, &session.read().unwrap(), "claude")
+                .unwrap()
+                .unwrap();
+            assert!(pending.published);
+            assert_eq!(
+                pending.target.pointer.as_deref(),
+                Some(if failure == Some("initial-replacement") {
+                    "b"
+                } else {
+                    "a"
+                })
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+            if failure == Some("initial-written") {
+                let current = review
+                    .review_app(&inspected, &token, &AppType::Claude)
+                    .unwrap();
+                assert!(!current.can_recover_operation);
+                assert!(!current.can_complete_app);
+            }
+            continue;
+        }
+        let result = if let Some(failure) = failure {
+            assert!(selected.is_err(), "expected boundary {failure}");
+            let pending = state::pending(&f.device, &session.read().unwrap(), "claude")
+                .unwrap()
+                .unwrap();
+            assert!(pending.published);
+            assert!(pending.files.iter().all(|file| file.pre == file.planned));
+            assert_eq!(pending.target.state.as_ref().unwrap().mode, Some(mode));
+            if failure == "upgrade:mode_state" {
+                assert_eq!(
+                    state::mode_state(&f.device, &session.read().unwrap(), "claude")
+                        .unwrap()
+                        .mode,
+                    Some(mode)
+                );
+                assert_eq!(
+                    runtime.db.get_proxy_flags_checked("claude").unwrap(),
+                    (false, true)
+                );
+            }
+            if failure == "credentials" {
+                let mut row = runtime
+                    .db
+                    .get_provider_by_id("a", "claude")
+                    .unwrap()
+                    .unwrap();
+                row.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] =
+                    serde_json::json!("synthetic-refreshed-mode-key");
+                runtime.db.save_provider("claude", &row).unwrap();
+                let digest = Database::content_digest(&runtime.db.conn.lock().unwrap()).unwrap();
+                let current = review
+                    .review_app(&inspected, &token, &AppType::Claude)
+                    .unwrap();
+                assert!(!current.can_recover_operation);
+                assert!(!current.can_complete_app);
+                assert!(review
+                    .recover_app_with_state(
+                        &inspected,
+                        &token,
+                        &AppType::Claude,
+                        &current.revision,
+                        &runtime
+                    )
+                    .is_err());
+                assert_eq!(
+                    Database::content_digest(&runtime.db.conn.lock().unwrap()).unwrap(),
+                    digest
+                );
+                assert_eq!(
+                    runtime
+                        .db
+                        .get_provider_by_id("a", "claude")
+                        .unwrap()
+                        .unwrap()
+                        .settings_config,
+                    row.settings_config
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), native);
+                assert_eq!(
+                    state::pending(&f.device, &session.read().unwrap(), "claude")
+                        .unwrap()
+                        .as_ref(),
+                    Some(&pending)
+                );
+                continue;
+            }
+            let current = review
+                .review_app(&inspected, &token, &AppType::Claude)
+                .unwrap();
+            assert!(current.can_recover_operation);
+            assert!(!current.can_choose_mode);
+            assert!(review
+                .recover_app_with_state(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &view.revision,
+                    &runtime
+                )
+                .is_err());
+            let before = fingerprint();
+            assert!(review
+                .recover_app(&inspected, &token, &AppType::Claude, &current.revision)
+                .is_err());
+            assert_eq!(fingerprint(), before);
+            if failure == "cleanup-drift" {
+                let device = f.device.clone();
+                let original = f.vault.clone();
+                crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+                    if point == "recover:verified" {
+                        let vault = std::sync::RwLock::new(original.clone());
+                        state::update_app(&device, &vault.read().unwrap(), "claude", |entry| {
+                            entry.proxy_route = Some("a".into());
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })));
+                let recovered = review.recover_app_with_state(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &current.revision,
+                    &runtime,
+                );
+                crate::mode::operation::failpoint::on_boundary(None);
+                assert!(recovered.is_err());
+                assert_eq!(
+                    state::pending(&f.device, &session.read().unwrap(), "claude")
+                        .unwrap()
+                        .as_ref(),
+                    Some(&pending)
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), native);
+                continue;
+            }
+            review
+                .recover_app_with_state(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &current.revision,
+                    &runtime,
+                )
+                .unwrap()
+        } else {
+            selected.unwrap()
+        };
+        assert!(result.can_complete_app);
+        assert!(!result.can_choose_mode);
+        let saved = state::mode_state(&f.device, &session.read().unwrap(), "claude").unwrap();
+        assert_eq!(saved.mode, Some(mode));
+        assert!(!saved.attached);
+        assert!(saved.contract.is_none());
+        assert_eq!(saved.proxy_route, choice.proxy_route);
+        assert_eq!(
+            runtime.db.get_proxy_flags_checked("claude").unwrap(),
+            (mode == Mode::Proxy, true)
+        );
+        assert_eq!(
+            crate::settings::get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            runtime
+                .db
+                .get_current_provider("claude")
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), native);
+        assert!(
+            state::pending(&f.device, &session.read().unwrap(), "claude")
+                .unwrap()
+                .is_none()
+        );
+        let before = fingerprint();
+        assert!(review
+            .select_mode(
+                &inspected,
+                &token,
+                &AppType::Claude,
+                &result.revision,
+                &choice,
+                &runtime
+            )
+            .is_err());
+        assert_eq!(fingerprint(), before);
+        let raw = f
+            .device
+            .read_device(
+                &session.read().unwrap(),
+                &crate::secrets::owned_file::DeviceFile::registered(
+                    crate::secrets::owned_file::DEVICE_STATE_FILE,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(std::str::from_utf8(&raw)
+            .unwrap()
+            .contains("900719925474099312345"));
+        assert!(crate::mode::operation::AppWrite::begin_mode(
+            &runtime.proxy_service,
+            &AppType::Codex
+        )
+        .is_err());
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
+#[test]
+fn u03_mode_choice_source_rejects_foreign_written_context() {
+    use crate::{
+        app_config::AppType,
+        mode::{
+            operation,
+            state::{AppLiveState, LiveState, Mode, ModeState, Written},
+        },
+    };
+    let target = ModeState {
+        mode: Some(Mode::Direct),
+        ..Default::default()
+    };
+    let mut live = LiveState::default();
+    live.apps.insert(
+        "codex".into(),
+        AppLiveState {
+            written: Some(Written {
+                tables: vec!["synthetic-grok-table".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(!operation::mode_choice_source_matches(
+        &live,
+        &AppType::Codex,
+        &target
+    ));
+    for app in [AppType::Claude, AppType::Gemini] {
+        live.apps
+            .insert(app.as_str().into(), live.apps["codex"].clone());
+        assert!(!operation::mode_choice_source_matches(&live, &app, &target));
+    }
+}

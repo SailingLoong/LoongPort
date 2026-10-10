@@ -4532,6 +4532,12 @@
     }
   },
   "startupUpgrade": {
+    "chooseModeLabel": "选择缺失的模式",
+    "chooseMode": {
+      "direct": "选择直连",
+      "proxy": "选择代理"
+    },
+    "chooseProxyRouteLabel": "选择代理路由",
     "nativeProvider": "客户端文件对应的供应商",
     "continue": "继续进入工作台",
     "reviewApps": "核验升级中的应用",

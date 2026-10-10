@@ -752,7 +752,7 @@ pub(crate) mod auth_tests;
 #[path = "upgrade_review_session.rs"]
 mod review_session;
 pub(crate) use review_session::{
-    ensure_native_app_write_admitted, AuthenticatedUpgrade, UpgradeAppReview,
+    ensure_native_app_write_admitted, AuthenticatedUpgrade, UpgradeAppReview, UpgradeModeChoice,
 };
 
 #[path = "upgrade_staged_review.rs"]

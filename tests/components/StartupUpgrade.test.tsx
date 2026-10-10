@@ -79,6 +79,137 @@ function serve(view = review(), overrides: Record<string, object> = {}) {
 }
 
 describe("StartupUpgrade", () => {
+  it.each(["direct", "proxy"])(
+    "requires an explicit missing mode and independent route draft for %s",
+    async (mode) => {
+      serve(review(), {
+        claude: {
+          savedMode: null,
+          canChooseMode: true,
+          canChooseProvider: false,
+          retainedProviderId: "synthetic-direct",
+          keepFilesProviders: [
+            { id: "synthetic-direct", name: "Synthetic direct" },
+          ],
+          modeRouteProviders: [
+            { id: "synthetic-direct", name: "Synthetic direct" },
+            { id: "synthetic-route", name: "Synthetic route" },
+          ],
+        },
+      });
+      render(<StartupUpgrade />);
+      const card = await screen.findByRole("region", { name: "Claude Code" });
+      const apply = await within(card).findByRole("button", {
+        name: "startupUpgrade.keepFiles",
+      });
+      const direct = within(card).getByRole("button", {
+        name: "startupUpgrade.chooseMode.direct",
+      });
+      const proxy = within(card).getByRole("button", {
+        name: "startupUpgrade.chooseMode.proxy",
+      });
+      expect(direct).toHaveAttribute("aria-pressed", "false");
+      expect(proxy).toHaveAttribute("aria-pressed", "false");
+      expect(apply).toBeDisabled();
+      expect(invoke).not.toHaveBeenCalledWith(
+        "select_startup_upgrade_mode",
+        expect.anything(),
+      );
+      fireEvent.click(mode === "direct" ? direct : proxy);
+      if (mode === "proxy") {
+        expect(apply).toBeDisabled();
+        expect(
+          within(card).getByRole("button", { name: "Synthetic direct" }),
+        ).toHaveAttribute("aria-pressed", "false");
+        fireEvent.click(
+          within(card).getByRole("button", { name: "Synthetic route" }),
+        );
+      }
+      expect(apply).toBeEnabled();
+      const original = vi.mocked(invoke).getMockImplementation()!;
+      vi.mocked(invoke).mockImplementation(async (command, args) =>
+        command === "select_startup_upgrade_mode"
+          ? appReview("claude", {
+              savedMode: mode,
+              canCompleteApp: true,
+              canChooseMode: false,
+            })
+          : original(command, args),
+      );
+      fireEvent.click(apply);
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("select_startup_upgrade_mode", {
+          expectedReviewToken: "synthetic-review",
+          appType: "claude",
+          expectedAppRevision: "synthetic-claude-revision",
+          choice: {
+            mode,
+            proxyRoute: mode === "proxy" ? "synthetic-route" : null,
+          },
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          within(card).queryByRole("button", {
+            name: "startupUpgrade.chooseMode.direct",
+          }),
+        ).not.toBeInTheDocument(),
+      );
+    },
+  );
+
+  it("queries a lost mode-choice response without replaying the original intent", async () => {
+    serve(review(), {
+      claude: {
+        savedMode: null,
+        canChooseMode: true,
+        retainedProviderId: "synthetic-direct",
+        keepFilesProviders: [
+          { id: "synthetic-direct", name: "Synthetic direct" },
+        ],
+        modeRouteProviders: [],
+      },
+    });
+    render(<StartupUpgrade />);
+    const card = await screen.findByRole("region", { name: "Claude Code" });
+    fireEvent.click(
+      await within(card).findByRole("button", {
+        name: "startupUpgrade.chooseMode.direct",
+      }),
+    );
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "select_startup_upgrade_mode")
+        throw new Error("synthetic lost response");
+      if (
+        command === "review_startup_upgrade_app" &&
+        (args as { appType: string }).appType === "claude"
+      )
+        return appReview("claude", {
+          hasPendingOperation: true,
+          canRecoverOperation: true,
+          canChooseMode: false,
+        });
+      return original(command, args);
+    });
+    fireEvent.click(
+      within(card).getByRole("button", { name: "startupUpgrade.keepFiles" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(card).getByRole("button", { name: "startupUpgrade.recover" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "select_startup_upgrade_mode",
+        ),
+    ).toHaveLength(1);
+    expect(recoveries()).toHaveLength(0);
+  });
+
   it("requires an explicit provider draft for conflict and submits only the original keep-files action", async () => {
     serve(review(), {
       claude: {

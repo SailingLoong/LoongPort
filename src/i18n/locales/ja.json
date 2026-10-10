@@ -4532,6 +4532,12 @@
     }
   },
   "startupUpgrade": {
+    "chooseModeLabel": "未設定のモードを選択",
+    "chooseMode": {
+      "direct": "直接接続を選択",
+      "proxy": "プロキシを選択"
+    },
+    "chooseProxyRouteLabel": "プロキシのルートを選択",
     "nativeProvider": "クライアントファイルに対応するプロバイダー",
     "continue": "ワークベンチへ進む",
     "reviewApps": "アップグレード中のアプリを確認",

@@ -4533,6 +4533,12 @@
     }
   },
   "startupUpgrade": {
+    "chooseModeLabel": "選擇缺失的模式",
+    "chooseMode": {
+      "direct": "選擇直連",
+      "proxy": "選擇代理"
+    },
+    "chooseProxyRouteLabel": "選擇代理路由",
     "nativeProvider": "用戶端檔案對應的供應商",
     "continue": "繼續進入工作台",
     "reviewApps": "核驗升級中的應用",

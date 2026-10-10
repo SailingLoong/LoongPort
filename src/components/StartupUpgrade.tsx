@@ -32,6 +32,8 @@ function UpgradeAppCard({
   const [view, setView] = useState<UpgradeAppReview | null>(null);
   const [fresh, setFresh] = useState(false);
   const [providerDraft, setProviderDraft] = useState<string | null>(null);
+  const [modeDraft, setModeDraft] = useState<"direct" | "proxy" | null>(null);
+  const [routeDraft, setRouteDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const busyRef = useRef(false);
@@ -41,6 +43,8 @@ function UpgradeAppCard({
     const sequence = ++request.current;
     setFresh(false);
     setProviderDraft(null);
+    setModeDraft(null);
+    setRouteDraft(null);
     try {
       const next = await startupUpgradeApi.queryApp(token, app.id);
       if (sequence !== request.current) return;
@@ -62,7 +66,10 @@ function UpgradeAppCard({
     };
   }, [token, app.id]);
 
-  async function act(recover: boolean, chooseProvider = false) {
+  async function act(action: "query" | "recover" | "provider" | "mode") {
+    const recover = action === "recover";
+    const chooseProvider = action === "provider";
+    const chooseMode = action === "mode";
     if (busyRef.current) return;
     if (recover && (!fresh || !view?.canRecoverOperation || !view.revision))
       return;
@@ -77,13 +84,41 @@ function UpgradeAppCard({
         ))
     )
       return;
+    if (
+      chooseMode &&
+      (!fresh ||
+        !view?.canChooseMode ||
+        !modeDraft ||
+        !view.retainedProviderId ||
+        (modeDraft === "proxy" &&
+          !view.modeRouteProviders?.some(
+            (provider) => provider.id === routeDraft,
+          )))
+    )
+      return;
     busyRef.current = true;
     setBusy(true);
     setError(false);
     setFresh(false);
     const sequence = ++request.current;
     try {
-      if (chooseProvider && view && providerId) {
+      if (chooseMode && view && modeDraft) {
+        const next = await startupUpgradeApi.selectMode(
+          token,
+          app.id,
+          view.revision,
+          {
+            mode: modeDraft,
+            proxyRoute: modeDraft === "proxy" ? routeDraft : null,
+          },
+        );
+        if (sequence !== request.current) return;
+        if (next.appType !== app.id) throw new Error("upgrade.source_changed");
+        setView(next);
+        setModeDraft(null);
+        setRouteDraft(null);
+        setFresh(true);
+      } else if (chooseProvider && view && providerId) {
         const next = await startupUpgradeApi.selectProvider(
           token,
           app.id,
@@ -158,7 +193,7 @@ function UpgradeAppCard({
       <p className="text-sm text-muted-foreground">
         {t("startupUpgrade.noTakeover")}
       </p>
-      {view?.canChooseProvider === true && (
+      {(view?.canChooseProvider === true || view?.canChooseMode === true) && (
         <div className="space-y-2">
           <p className="text-sm font-medium">
             {t("startupUpgrade.nativeProvider")}
@@ -188,11 +223,62 @@ function UpgradeAppCard({
               ))}
             </div>
           )}
+          {view.canChooseMode === true && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">
+                {t("startupUpgrade.chooseModeLabel")}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {(["direct", "proxy"] as const).map((mode) => (
+                  <Button
+                    key={mode}
+                    variant={modeDraft === mode ? "default" : "outline"}
+                    disabled={busy || !fresh}
+                    aria-pressed={modeDraft === mode}
+                    onClick={() => {
+                      setModeDraft(mode);
+                      setRouteDraft(null);
+                    }}
+                  >
+                    {t(`startupUpgrade.chooseMode.${mode}`)}
+                  </Button>
+                ))}
+              </div>
+              {modeDraft === "proxy" && (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">
+                    {t("startupUpgrade.chooseProxyRouteLabel")}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {view.modeRouteProviders.map((provider) => (
+                      <Button
+                        key={provider.id}
+                        variant={
+                          routeDraft === provider.id ? "default" : "outline"
+                        }
+                        disabled={busy || !fresh}
+                        aria-pressed={routeDraft === provider.id}
+                        onClick={() => setRouteDraft(provider.id)}
+                      >
+                        {provider.name}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <Button
             disabled={
-              busy || !fresh || !(view.retainedProviderId ?? providerDraft)
+              busy ||
+              !fresh ||
+              !(view.retainedProviderId ?? providerDraft) ||
+              (view.canChooseMode === true &&
+                (!modeDraft || (modeDraft === "proxy" && !routeDraft)))
             }
-            onClick={() => void act(false, true)}
+            onClick={() =>
+              void act(view.canChooseMode === true ? "mode" : "provider")
+            }
           >
             {t("startupUpgrade.keepFiles")}
           </Button>
@@ -207,13 +293,13 @@ function UpgradeAppCard({
         <Button
           variant="outline"
           disabled={busy}
-          onClick={() => void act(false)}
+          onClick={() => void act("query")}
         >
           {t("startupUpgrade.recheck")}
         </Button>
         <Button
           disabled={busy || !fresh || view?.canRecoverOperation !== true}
-          onClick={() => void act(true)}
+          onClick={() => void act("recover")}
         >
           {t("startupUpgrade.recover")}
         </Button>
