@@ -424,10 +424,125 @@ fn native_codex_projection_rejects_auth_policy_drift_from_ready_owner() {
     assert_eq!(fs::read(settings_path()).unwrap(), before);
 }
 
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_app_projection_retains_session_history_policy_without_writes() {
+    for value in [Some(false), Some(true), None] {
+        for native in [false, true] {
+            let _home = crate::secrets::testing::TestHome::new().unwrap();
+            let session = SecretSession::from_context(
+                crate::config::get_app_config_dir(),
+                VaultContext::generate().unwrap(),
+            );
+            let mut document = serde_json::json!({"currentProviderCodex":"synthetic-current"});
+            if let Some(value) = value {
+                document["unifyCodexSessionHistory"] = value.into();
+            }
+            fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+            fs::write(settings_path(), serde_json::to_vec(&document).unwrap()).unwrap();
+            if native {
+                unlock_settings(session.clone()).unwrap();
+            }
+            let before = fs::read(settings_path()).unwrap();
+            let vault = session.read().unwrap();
+            let selected = read_app_settings_with_vault(
+                &AppType::Codex,
+                &session,
+                &vault,
+                1024 * 1024,
+                native,
+            )
+            .unwrap();
+            assert_eq!(selected.unify_codex_session_history, value.unwrap_or(true));
+            assert_eq!(
+                selected.current_provider_codex.as_deref(),
+                Some("synthetic-current")
+            );
+            assert_eq!(fs::read(settings_path()).unwrap(), before);
+            if !native {
+                assert!(get_current_provider_ready(&AppType::Codex).is_err());
+            }
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn codex_app_projection_rejects_malformed_history_policy_without_blocking_peers() {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
+    let session = SecretSession::from_context(
+        crate::config::get_app_config_dir(),
+        VaultContext::generate().unwrap(),
+    );
+    fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+    for invalid in [
+        serde_json::json!("future"),
+        serde_json::json!(null),
+        serde_json::json!({}),
+    ] {
+        let document = serde_json::json!({"unifyCodexSessionHistory":invalid,
+            "currentProviderClaude":"synthetic-peer", "currentProviderCodex":"synthetic-codex"});
+        fs::write(settings_path(), serde_json::to_vec(&document).unwrap()).unwrap();
+        let before = fs::read(settings_path()).unwrap();
+        let vault = session.read().unwrap();
+        assert!(
+            read_upgrade_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024)
+                .is_err()
+        );
+        let selected =
+            read_upgrade_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+                .unwrap();
+        assert_eq!(
+            selected.current_provider_claude.as_deref(),
+            Some("synthetic-peer")
+        );
+        assert_eq!(fs::read(settings_path()).unwrap(), before);
+        assert!(get_current_provider_ready(&AppType::Claude).is_err());
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn native_codex_projection_rejects_session_history_policy_drift_from_ready_owner() {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
+    let session = SecretSession::from_context(
+        crate::config::get_app_config_dir(),
+        VaultContext::generate().unwrap(),
+    );
+    fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+    fs::write(settings_path(), br#"{"unifyCodexSessionHistory":true}"#).unwrap();
+    unlock_settings(session.clone()).unwrap();
+    fs::write(settings_path(), br#"{"unifyCodexSessionHistory":false}"#).unwrap();
+    let before = fs::read(settings_path()).unwrap();
+    let vault = session.read().unwrap();
+    assert!(
+        matches!(read_native_app_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024),
+        Err(AppError::Config(code)) if code == "upgrade.source_changed")
+    );
+    assert!(
+        read_native_app_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+            .is_ok()
+    );
+    assert!(get_settings().unify_codex_session_history);
+    assert_eq!(fs::read(settings_path()).unwrap(), before);
+}
+
 /// The external headless runner invokes actual production persistence code.
 #[cfg(feature = "test-hooks")]
 pub(crate) fn run() {
-    let cases: [(&str, fn()); 11] = [
+    let cases: [(&str, fn()); 14] = [
+        (
+            "Codex session history projection",
+            codex_app_projection_retains_session_history_policy_without_writes,
+        ),
+        (
+            "Codex malformed session history",
+            codex_app_projection_rejects_malformed_history_policy_without_blocking_peers,
+        ),
+        (
+            "Codex session history drift",
+            native_codex_projection_rejects_session_history_policy_drift_from_ready_owner,
+        ),
         (
             "Codex auth preservation projection",
             codex_app_projection_retains_auth_preservation_policy_without_writes,

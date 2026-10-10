@@ -235,12 +235,18 @@ struct RowFacts {
 }
 
 fn row_facts(db: &Database) -> Result<RowFacts, AppError> {
+    Ok(row_facts_from_providers(
+        db.get_all_providers(app())?.values(),
+    ))
+}
+
+fn row_facts_from_providers<'a>(providers: impl Iterator<Item = &'a Provider>) -> RowFacts {
     let mut facts = RowFacts {
         retired: Vec::new(),
         third_party_keys: Vec::new(),
         official_logins: Vec::new(),
     };
-    for provider in db.get_all_providers(app())?.values() {
+    for provider in providers {
         let auth = provider.settings_config.get("auth");
         if is_official(provider) {
             if managed_account(provider).is_none() {
@@ -296,7 +302,7 @@ fn row_facts(db: &Database) -> Result<RowFacts, AppError> {
             });
         }
     }
-    Ok(facts)
+    facts
 }
 
 fn row_auth(provider: &Provider) -> Value {
@@ -327,21 +333,34 @@ pub(crate) fn plan(
     provider: &Provider,
 ) -> Result<Planned, AppError> {
     let projection = project_for_write(provider)?;
-    let official = is_official(provider);
+    let unify = crate::settings::unify_codex_session_history();
+    let endpoint = if is_official(provider) && !unify {
+        let config = crate::rt::block_on(db.get_global_proxy_config())?;
+        Some((config.listen_address, config.listen_port))
+    } else {
+        None
+    };
+    let route = direct_route(&projection, unify, endpoint.as_ref())?;
+    plan_projected(owner, provider, projection, route, row_facts(db)?)
+}
+
+fn direct_route(
+    projection: &CodexProjection,
+    unify: bool,
+    endpoint: Option<&(String, u16)>,
+) -> Result<(RouteWrite, Option<RouteAuth>), AppError> {
     let (route, stamp) = match &projection.route {
-        Route::Official if crate::settings::unify_codex_session_history() => {
-            (RouteWrite::OfficialMirror, None)
-        }
+        Route::Official if unify => (RouteWrite::OfficialMirror, None),
         Route::Official => {
-            let config = crate::rt::block_on(db.get_global_proxy_config())?;
-            let address = if config.listen_address.contains(':') {
-                format!("[{}]", config.listen_address)
+            let (address, port) = endpoint.ok_or_else(invalid)?;
+            let address = if address.contains(':') {
+                format!("[{address}]")
             } else {
-                config.listen_address
+                address.clone()
             };
             (
                 RouteWrite::Official {
-                    dormant_base_url: format!("http://{address}:{}/v1", config.listen_port),
+                    dormant_base_url: format!("http://{address}:{port}/v1"),
                 },
                 None,
             )
@@ -356,6 +375,17 @@ pub(crate) fn plan(
         ),
         Route::Default => (RouteWrite::Default, None),
     };
+    Ok((route, stamp))
+}
+
+fn plan_projected(
+    owner: &Owner<'_>,
+    provider: &Provider,
+    projection: CodexProjection,
+    (route, stamp): (RouteWrite, Option<RouteAuth>),
+    facts: RowFacts,
+) -> Result<Planned, AppError> {
+    let official = is_official(provider);
     let catalog = plan_codex_model_catalog(
         &provider.settings_config,
         &projection.catalog_input_text(),
@@ -364,7 +394,6 @@ pub(crate) fn plan(
     )?
     .map(|v| sorted_json_bytes(&v))
     .transpose()?;
-    let facts = row_facts(db)?;
     let config = CodexConfigPatch {
         top: projection.top.clone(),
         nested: projection.nested.clone(),
@@ -715,6 +744,18 @@ fn read_inputs(write: &AppWrite<'_>, official_logins: &[Value]) -> Result<Inputs
         .iter()
         .map(|file| read_current(&file.path))
         .collect::<Result<Vec<_>, _>>()?;
+    parse_inputs(files, pre, &write.vault, official_logins)
+}
+
+fn parse_inputs(
+    files: Vec<LiveFile>,
+    pre: Vec<Option<Vec<u8>>>,
+    vault: &crate::secrets::VaultContext,
+    official_logins: &[Value],
+) -> Result<Inputs, AppError> {
+    if pre.len() != files.len() {
+        return Err(invalid());
+    }
     let live_auth: Option<Value> = pre[0].as_deref().map(parse_json).transpose()?;
     if live_auth.as_ref().is_some_and(|v| !v.is_object()) {
         return Err(invalid());
@@ -751,7 +792,7 @@ fn read_inputs(write: &AppWrite<'_>, official_logins: &[Value]) -> Result<Inputs
     let stash_file = DeviceFile::registered(STASH_FILENAME)?;
     let stash = match &pre[4] {
         Some(bytes) => {
-            let mut stash: LoginStash = parse_json(&stash_file.decode(&write.vault, bytes)?)?;
+            let mut stash: LoginStash = parse_json(&stash_file.decode(vault, bytes)?)?;
             stash.initialized = true;
             stash
         }
@@ -767,59 +808,26 @@ fn read_inputs(write: &AppWrite<'_>, official_logins: &[Value]) -> Result<Inputs
     })
 }
 
-fn run_pinned(
-    write: &AppWrite<'_>,
-    mut planned: Planned,
+fn plan_auth(
+    planned: &mut Planned,
     prepared: &Prepared,
     provider: Option<&Provider>,
-    revision: Option<&CatalogRevision>,
-    operation: &str,
-    mut target: PendingTarget,
-) -> Result<(OperationReport, bool), AppError> {
-    if let Some((account, Some(expected))) = &prepared.outgoing {
-        ensure_codex_live_auth_unchanged_for_managed_account(account, expected)?;
-    }
-    let Inputs {
-        files,
-        pre,
-        live_auth,
-        config_doc,
-        live_managed,
-        stash,
-    } = read_inputs(write, &planned.facts.official_logins)?;
-    if let Some(revision) = revision {
-        revision.verify(provider.ok_or_else(invalid)?, pre[1].as_deref())?;
-    }
-    if digest(pre[0].as_deref()) != prepared.auth_pre {
-        return Err(invalid());
-    }
-    if let Some((account, None)) = &prepared.outgoing {
-        if live_auth
-            .as_ref()
-            .is_some_and(|auth| codex_live_auth_is_managed_chatgpt_login(auth, account))
-        {
-            return Err(invalid());
-        }
-    }
-    if let (Some((account, target)), Some(live)) = (&prepared.target_login, &live_auth) {
-        if codex_live_auth_is_managed_chatgpt_login(live, account) {
-            let order = auth_time(live)
-                .zip(auth_time(target))
-                .map(|(live, target)| live.cmp(&target));
-            if order == Some(std::cmp::Ordering::Greater)
-                || (live.get("tokens") != target.get("tokens")
-                    && order != Some(std::cmp::Ordering::Less))
-            {
-                return Err(invalid());
-            }
-        }
-    }
+    inputs: &Inputs,
+    preserve: bool,
+) -> Result<codex_login::AuthPlan, AppError> {
+    let live_auth = &inputs.live_auth;
+    let live_managed = inputs.live_managed;
     let config_text =
-        std::str::from_utf8(pre[1].as_deref().unwrap_or_default()).map_err(|_| invalid())?;
-    let stash_file = DeviceFile::registered(STASH_FILENAME)?;
+        std::str::from_utf8(inputs.pre[1].as_deref().unwrap_or_default()).map_err(|_| invalid())?;
     let replaces = !planned.keep_native
-        && provider
-            .is_some_and(|p| codex_live_write_replaces_auth(p.category.as_deref(), &planned.auth));
+        && provider.is_some_and(|p| {
+            codex_live_write_replaces_auth_with_policy(
+                p.category.as_deref(),
+                &planned.auth,
+                preserve,
+                inputs.pre[3].is_some(),
+            )
+        });
     let auth_target = match &prepared.target_login {
         Some((_, auth)) => AuthTarget::Managed { auth },
         None if planned.keep_native => AuthTarget::ProxyThirdParty,
@@ -836,7 +844,7 @@ fn run_pinned(
         third_party_keys: &planned.facts.third_party_keys,
         leaving_official: planned.leaving_official.as_ref(),
         target: auth_target,
-        stash,
+        stash: inputs.stash.clone(),
     });
     // Keep LoongPort's existing auth.json versus bearer-TOML placement rule.
     if !planned.official && replaces {
@@ -874,6 +882,178 @@ fn run_pinned(
             table.remove("requires_openai_auth");
         }
     }
+    Ok(auth_plan)
+}
+
+fn preserve_external_catalog(
+    planned: &mut Planned,
+    doc: &toml_edit::DocumentMut,
+    base: &std::path::Path,
+) -> bool {
+    let external = external_catalog(doc, base);
+    let preserved = row_catalog_pointer(&planned.config.top).is_none()
+        && external.is_some()
+        && external.and_then(TomlValue::as_str) != planned.outgoing_catalog.as_deref();
+    if preserved {
+        planned
+            .config
+            .top
+            .push((MODEL_CATALOG_JSON.into(), external.unwrap().clone()));
+        planned.config.catalog = false;
+        planned.catalog = None;
+    }
+    preserved
+}
+
+/// Read-only admission from the upgrade owner's already-bound five files.
+/// Unknown external discovery or managed-token generation is never a match.
+/// This proves the original writer's owned-file result, not remote login validity.
+pub(crate) fn native_completion_match(
+    provider: &Provider,
+    rows: &indexmap::IndexMap<String, Provider>,
+    settings: &crate::settings::AppSettings,
+    vault: &crate::secrets::VaultContext,
+    pre: Vec<Option<Vec<u8>>>,
+    written: Option<&state::Written>,
+    endpoint: Option<&(String, u16)>,
+) -> Option<bool> {
+    if managed_account(provider).is_some()
+        || codex_has_catalog_model_specs(&provider.settings_config)
+        || !row_auth(provider).is_object()
+        || written.is_some_and(|written| {
+            written.validate_for_app(app()).is_err()
+                || written
+                    .codex
+                    .as_ref()
+                    .is_some_and(|codex| codex.auth.is_some())
+        })
+    {
+        return None;
+    }
+    let facts = row_facts_from_providers(rows.values());
+    let inputs = parse_inputs(files(), pre, vault, &facts.official_logins).ok()?;
+    let text = std::str::from_utf8(inputs.pre[1].as_deref().unwrap_or_default()).ok()?;
+    if inputs.pre[3].is_some() || codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+        return None;
+    }
+    let row_doc = provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .parse::<toml_edit::DocumentMut>()
+        .ok()?;
+    // Managed current/legacy names require directory ownership, which can
+    // depend on symlinks outside these bound bytes. Leave them unresolved before
+    // invoking the original filesystem-aware planner. Ordinary external names
+    // are rejected by that resolver before any stat/canonicalize or content read.
+    for doc in [&row_doc, &inputs.config_doc] {
+        if let Some(pointer) = doc.get(MODEL_CATALOG_JSON) {
+            let pointer = pointer.as_str()?.trim();
+            if pointer.is_empty()
+                || std::path::Path::new(pointer)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_our_model_catalog_filename)
+            {
+                return None;
+            }
+        }
+    }
+    let projection = project_for_write(provider).ok()?;
+    let route = direct_route(&projection, settings.unify_codex_session_history, endpoint).ok()?;
+    let mut planned = plan_projected(
+        &Owner::Provider(provider),
+        provider,
+        projection,
+        route,
+        facts,
+    )
+    .ok()?;
+    let auth = plan_auth(
+        &mut planned,
+        &Prepared::default(),
+        Some(provider),
+        &inputs,
+        settings.preserve_codex_official_auth_on_switch,
+    )
+    .ok()?;
+    let after_auth = match &auth.auth {
+        None => inputs.live_auth.as_ref(),
+        Some(value) => value.as_ref(),
+    };
+    if after_auth != inputs.live_auth.as_ref() {
+        return Some(false);
+    }
+    // Missing stash initialization is not a native auth/config mismatch. Its
+    // authenticated contents still participate in the original login plan.
+    preserve_external_catalog(
+        &mut planned,
+        &inputs.config_doc,
+        inputs.files[1].path.parent()?,
+    );
+    let actual = text.parse::<toml::Table>().ok()?;
+    let mut after = inputs.config_doc.clone();
+    planned
+        .config
+        .apply_to(&inputs.files[1].path, &mut after)
+        .ok()?;
+    Some(actual == after.to_string().parse::<toml::Table>().ok()?)
+}
+
+fn run_pinned(
+    write: &AppWrite<'_>,
+    mut planned: Planned,
+    prepared: &Prepared,
+    provider: Option<&Provider>,
+    revision: Option<&CatalogRevision>,
+    operation: &str,
+    mut target: PendingTarget,
+) -> Result<(OperationReport, bool), AppError> {
+    if let Some((account, Some(expected))) = &prepared.outgoing {
+        ensure_codex_live_auth_unchanged_for_managed_account(account, expected)?;
+    }
+    let inputs = read_inputs(write, &planned.facts.official_logins)?;
+    let files = &inputs.files;
+    let pre = &inputs.pre;
+    let live_auth = &inputs.live_auth;
+    let config_doc = &inputs.config_doc;
+    let live_managed = inputs.live_managed;
+    if let Some(revision) = revision {
+        revision.verify(provider.ok_or_else(invalid)?, pre[1].as_deref())?;
+    }
+    if digest(pre[0].as_deref()) != prepared.auth_pre {
+        return Err(invalid());
+    }
+    if let Some((account, None)) = &prepared.outgoing {
+        if live_auth
+            .as_ref()
+            .is_some_and(|auth| codex_live_auth_is_managed_chatgpt_login(auth, account))
+        {
+            return Err(invalid());
+        }
+    }
+    if let (Some((account, target)), Some(live)) = (&prepared.target_login, &live_auth) {
+        if codex_live_auth_is_managed_chatgpt_login(live, account) {
+            let order = auth_time(live)
+                .zip(auth_time(target))
+                .map(|(live, target)| live.cmp(&target));
+            if order == Some(std::cmp::Ordering::Greater)
+                || (live.get("tokens") != target.get("tokens")
+                    && order != Some(std::cmp::Ordering::Less))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    let stash_file = DeviceFile::registered(STASH_FILENAME)?;
+    let auth_plan = plan_auth(
+        &mut planned,
+        prepared,
+        provider,
+        &inputs,
+        crate::settings::preserve_codex_official_auth_on_switch(),
+    )?;
     // Keep ownership in the original projector's top-field mechanism; never
     // write/import the external catalog. A takeover needs the bound config image.
     let existing_written = state::written(&write.store, &write.vault, app())?;
@@ -883,12 +1063,14 @@ fn run_pinned(
     let mut catalog_evidence = existing_written
         .and_then(|w| w.codex)
         .and_then(|c| c.catalog);
-    let external_value = external_catalog(&config_doc, files[1].path.parent().ok_or_else(invalid)?);
+    let external_value = external_catalog(config_doc, files[1].path.parent().ok_or_else(invalid)?);
     let external = external_value.and_then(TomlValue::as_str);
     let preserved = revision.is_none()
-        && row_catalog_pointer(&planned.config.top).is_none()
-        && external.is_some()
-        && external != planned.outgoing_catalog.as_deref();
+        && preserve_external_catalog(
+            &mut planned,
+            config_doc,
+            files[1].path.parent().ok_or_else(invalid)?,
+        );
     if let Some(revision) = revision {
         if planned.catalog.is_none() || row_catalog_pointer(&planned.config.top).is_some() {
             return Err(AppError::Config(
@@ -905,13 +1087,6 @@ fn run_pinned(
             managed_pointer: crate::live::project::codex::CATALOG_FILENAME.into(),
             extra: Default::default(),
         });
-    } else if preserved {
-        planned
-            .config
-            .top
-            .push((MODEL_CATALOG_JSON.into(), external_value.unwrap().clone()));
-        planned.config.catalog = false;
-        planned.catalog = None;
     }
     let auth_after = match auth_plan.auth {
         None => pre[0].clone(),
@@ -949,7 +1124,8 @@ fn run_pinned(
         .map(|(pre, after)| guarded(pre.as_deref(), after))
         .collect::<Vec<_>>();
     let changes = files
-        .into_iter()
+        .iter()
+        .cloned()
         .zip(&patches)
         .map(|(file, patch)| FileChange {
             file,
@@ -1399,3 +1575,7 @@ fn restore_catalog_pinned(
     )?;
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "codex_native_proof_tests.rs"]
+mod native_proof_tests;

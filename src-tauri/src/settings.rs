@@ -1942,7 +1942,11 @@ fn read_app_settings_with_vault(
             fields.retain(|field, _| {
                 field == pointer_field
                     || field == directory_field
-                    || (*app == AppType::Codex && field == "preserveCodexOfficialAuthOnSwitch")
+                    || (*app == AppType::Codex
+                        && matches!(
+                            field.as_str(),
+                            "preserveCodexOfficialAuthOnSwitch" | "unifyCodexSessionHistory"
+                        ))
                     || PROTECTED_SETTINGS_FIELDS.contains(&field.as_str())
             });
             let projected = zeroize::Zeroizing::new(
@@ -1958,8 +1962,9 @@ fn read_app_settings_with_vault(
         current_provider_from_settings(ready, app)
             != current_provider_from_settings(&mut settings, app)
             || (*app == AppType::Codex
-                && ready.preserve_codex_official_auth_on_switch
-                    != settings.preserve_codex_official_auth_on_switch)
+                && (ready.preserve_codex_official_auth_on_switch
+                    != settings.preserve_codex_official_auth_on_switch
+                    || ready.unify_codex_session_history != settings.unify_codex_session_history))
     }) {
         return Err(AppError::Config("upgrade.source_changed".into()));
     }

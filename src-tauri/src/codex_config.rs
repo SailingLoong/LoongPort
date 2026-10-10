@@ -4157,13 +4157,23 @@ pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(),
 /// 回答的是同一个问题——「这次写入动没动 auth.json」——必须消费同一份答案，
 /// 各自重推一遍就是两处判据漂移的起点（官方目标的旧清理闸正是这么长出来的）。
 pub fn codex_live_write_replaces_auth(category: Option<&str>, auth: &Value) -> bool {
+    codex_live_write_replaces_auth_with_policy(
+        category,
+        auth,
+        crate::settings::preserve_codex_official_auth_on_switch(),
+        get_codex_managed_oauth_live_auth_marker_path().exists(),
+    )
+}
+
+/// The same placement rule for callers that already bound settings and marker bytes.
+pub(crate) fn codex_live_write_replaces_auth_with_policy(
+    category: Option<&str>,
+    auth: &Value,
+    preserve: bool,
+    managed_marker: bool,
+) -> bool {
     (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && (!crate::settings::preserve_codex_official_auth_on_switch()
-                // live auth 带 ownership marker = 它是托管 Codex 账号的登录，不是用户
-                // 自己的 ChatGPT 登录缓存 ——「preserve」不适用，切走时按托管事务
-                // 语义整体替换 auth.json，随后的 clear_outgoing 才能收干净。
-                || get_codex_managed_oauth_live_auth_marker_path().exists()))
+        || (category != Some("official") && (!preserve || managed_marker))
 }
 
 /// Route a Codex live write between full auth+config or config-only.
@@ -10990,6 +11000,11 @@ pub(crate) fn codex_managed_oauth_marker_bytes(
     })
 }
 
+/// Whether the original catalog planner would need external model discovery.
+pub(crate) fn codex_has_catalog_model_specs(settings: &Value) -> bool {
+    !codex_catalog_model_specs(settings).is_empty()
+}
+
 /// Upstream planner boundary, using LoongPort's existing capability projection.
 /// No catalog/config file is written here.
 pub(crate) fn plan_codex_model_catalog(
@@ -10998,7 +11013,7 @@ pub(crate) fn plan_codex_model_catalog(
     profile: CodexCatalogToolProfile,
     provider: &crate::provider::Provider,
 ) -> Result<Option<Value>, AppError> {
-    if codex_catalog_model_specs(settings).is_empty() {
+    if !codex_has_catalog_model_specs(settings) {
         return Ok(None);
     }
     Ok(

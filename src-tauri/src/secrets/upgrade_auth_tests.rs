@@ -5780,3 +5780,6 @@ mod written_tests;
 pub(crate) fn verify_written_app_binding() {
     written_tests::verify();
 }
+
+#[path = "upgrade_codex_native_tests.rs"]
+mod codex_native_tests;

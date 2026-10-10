@@ -5,6 +5,7 @@ use crate::{
     app_config::AppType,
     mode::{current, operation, state::Mode},
 };
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::sync::RwLockReadGuard;
 
@@ -591,6 +592,19 @@ fn capture_app_with_state(
             .collect::<Result<Vec<_>, _>>()?;
         (rows, ids)
     };
+    // Official non-unified routes retain a dormant custom table at the
+    // original global listener endpoint. Read only the captured database.
+    let codex_endpoint = if *app == AppType::Codex && !settings.unify_codex_session_history {
+        let conn = db.conn.lock()?;
+        conn.query_row(
+            "SELECT listen_address, listen_port FROM proxy_config WHERE app_type='claude'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u16>(1)?)),
+        )
+        .optional()?
+    } else {
+        None
+    };
     let flags = db.get_proxy_flags_checked(app.as_str())?;
     let preference = crate::proxy::auto_strategy::get_model_pref_checked(&db, app.as_str())?;
     let pointer_consistent = (currents.len() <= 1).then(|| {
@@ -689,17 +703,39 @@ fn capture_app_with_state(
             && (compatible || missing_mode)
             && written.is_none_or(|written| written.codex.is_none()))
         .then(|| crate::services::provider::grok_direct::retired_tables_from_written(written, row));
-        live_review::inspect_with_grok_retired(
+        let mut facts = live_review::inspect_with_grok_retired(
             app,
             &bound,
             row,
             catalog_present,
             retired.as_deref(),
-        )
+        )?;
+        if *app == AppType::Codex {
+            facts.native_completion_match = row.and_then(|row| {
+                let pre = crate::services::provider::codex_direct::files()
+                    .iter()
+                    .map(|file| {
+                        live_review::bytes(&bound, &file.path)
+                            .map(|bytes| bytes.map(<[u8]>::to_vec))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                crate::services::provider::codex_direct::native_completion_match(
+                    row,
+                    &rows,
+                    &settings,
+                    vault,
+                    pre,
+                    written,
+                    codex_endpoint.as_ref(),
+                )
+            });
+        }
+        Ok::<_, AppError>(facts)
     };
     let client = inspect_candidate(candidate)?;
-    // Only a complete native owned-field proof grants admission. Codex remains
-    // unresolved until its route, auth, and catalog ownership are proven.
+    // Only a complete native owned-field proof grants admission. Unsupported
+    // Codex auth stores, managed generations and catalog discovery stay unknown.
     let target_native_proven = if let Some(row) = target.and_then(|id| rows.get(id)) {
         let proof = inspect_candidate(Some(row))?;
         proof.status == "parsed"
@@ -846,6 +882,11 @@ fn capture_app_with_state(
                 preference,
                 &revisions,
                 &identity,
+                (*app == AppType::Codex).then_some((
+                    settings.preserve_codex_official_auth_on_switch,
+                    settings.unify_codex_session_history,
+                )),
+                &codex_endpoint,
             ))
             .map_err(|source| AppError::JsonSerialize { source })?,
         );
