@@ -299,6 +299,55 @@ impl Database {
         })
     }
 
+    /// Validate a sync image against the existing authenticated receiver.
+    /// Ordinary imports keep their original ceiling; only an existing exact
+    /// upstream4 receiver can stage the same tuple without a schema migration.
+    pub(crate) fn validate_sync_snapshot_for_current(
+        &self,
+        sql: &str,
+        expected: &VaultMetadata,
+        vault: &VaultContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let current = self.secrets.read()?;
+        let conn = self.conn.lock()?;
+        super::vault::check_identity(&conn, &current)?;
+        let version = Self::get_user_version(&conn)?;
+        let loongport = super::loongport_schema::read_stored_version(&conn)?;
+        if version <= super::SCHEMA_VERSION {
+            super::vault::preflight_connection(&conn)?;
+            drop(conn);
+            drop(current);
+            return Self::validate_sync_snapshot(sql, expected, vault);
+        }
+        if version != super::UPSTREAM4_SCHEMA_VERSION
+            || loongport != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config("secret.database_version_too_new".into()));
+        }
+        drop(conn);
+        Self::validate_sync_source(vault, expected)?;
+        let connection = Self::stage_import_sql(sql, true)?;
+        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        if Self::get_user_version(&connection)? != version
+            || super::loongport_schema::read_stored_version(&connection)? != loongport
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        let source = VaultContext::from_key(expected.clone(), vault.export_key())
+            .map_err(crate::secrets::inventory::secret_error)?;
+        crate::secrets::inventory::validate_database(&connection, &source)?;
+        crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
+        super::vault::stamp(&connection, vault)?;
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: vault.metadata().clone(),
+        })
+    }
+
     /// Preserve device-local rows under the incoming key while the transition
     /// engine holds the current session generation and database connection.
     pub(crate) fn prepare_sync_join(
