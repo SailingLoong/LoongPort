@@ -707,10 +707,7 @@ fn capture_app_with_state(
         false
     };
     let forward_pointer_proven = target_native_proven
-        && (mode_target_matches
-            || mode
-                .as_ref()
-                .is_some_and(|mode| mode.mode == Some(Mode::Direct)))
+        && (mode_target_matches || detached_mode_verified)
         && preference.as_ref().is_none_or(String::is_empty)
         && crate::settings::read_native_app_settings_with_vault(
             app,
@@ -780,12 +777,9 @@ fn capture_app_with_state(
         && pending.flatten().is_none()
         && preference.as_ref().is_none_or(String::is_empty);
     let mut keep_files_providers = Vec::new();
-    if compatible
+    if detached_mode_verified
         && preference.as_ref().is_none_or(String::is_empty)
         && pending == Some(None)
-        && mode
-            .as_ref()
-            .is_some_and(|mode| mode.mode == Some(Mode::Direct) && !mode.attached)
         && pointer_consistent != Some(true)
     {
         for row in rows.values() {

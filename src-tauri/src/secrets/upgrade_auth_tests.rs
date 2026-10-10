@@ -4938,6 +4938,16 @@ fn u03_grok_retained_checkpoint_uses_original_native_and_written_owners() {
 #[test]
 #[serial_test::serial]
 fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
+    keep_files_provider_choice_preserves_saved_mode(crate::mode::state::Mode::Direct);
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_detached_proxy_provider_choice_preserves_original_mode_route_and_flags() {
+    keep_files_provider_choice_preserves_saved_mode(crate::mode::state::Mode::Proxy);
+}
+
+fn keep_files_provider_choice_preserves_saved_mode(saved_mode: crate::mode::state::Mode) {
     use crate::app_config::AppType;
     for (source, failure) in [
         ("missing", None),
@@ -4949,7 +4959,17 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
         ("multiple", None),
         ("multiple", Some("target-before-pointer")),
         ("preserved", None),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        [
+            ("blocked-attached", None),
+            ("blocked-missing-route", None),
+            ("blocked-deleted-route", None),
+        ]
+        .into_iter()
+        .filter(|_| saved_mode == crate::mode::state::Mode::Proxy),
+    ) {
         let f = Fixture::new();
         publish_resume_fixture(&f);
         let db = Database::from_connection(
@@ -4987,12 +5007,28 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
         } else if source == "preserved" {
             db.set_current_provider("claude", "a").unwrap();
         }
+        let original_flags = (
+            saved_mode == crate::mode::state::Mode::Proxy,
+            source == "conflict",
+        );
+        db.set_proxy_flags_sync("claude", original_flags.0, original_flags.1)
+            .unwrap();
         drop(db);
         f.write_settings(&crate::settings::AppSettings {
             current_provider_claude: (source == "conflict").then(|| "missing-row".into()),
             ..Default::default()
         });
-        f.write_raw_mode(br#"{"version":1,"apps":{"claude":{"mode":"direct"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#);
+        f.write_raw_mode(if source == "blocked-attached" {
+            br#"{"version":1,"apps":{"claude":{"mode":"proxy","proxy_route":"b","attached":true},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        } else if source == "blocked-missing-route" {
+            br#"{"version":1,"apps":{"claude":{"mode":"proxy"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        } else if source == "blocked-deleted-route" {
+            br#"{"version":1,"apps":{"claude":{"mode":"proxy","proxy_route":"deleted-row"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        } else if saved_mode == crate::mode::state::Mode::Proxy {
+            br#"{"version":1,"apps":{"claude":{"mode":"proxy","proxy_route":"b"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        } else {
+            br#"{"version":1,"apps":{"claude":{"mode":"direct"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#
+        });
         let path = crate::config::get_claude_settings_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -5007,9 +5043,48 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
             Database::init_with_secrets(session.clone()).unwrap(),
         ))
         .unwrap();
+        let original_mode =
+            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude").unwrap();
         let view = review
             .review_app(&inspected, &token, &AppType::Claude)
             .unwrap();
+        assert_eq!(view.saved_mode, Some(saved_mode));
+        assert!(!view.can_choose_mode);
+        if source.starts_with("blocked-") {
+            assert!(!view.can_choose_provider);
+            assert!(!view.can_complete_app);
+            assert!(!view.can_recover_operation);
+            assert!(view.keep_files_providers.is_empty());
+            let before = snapshot(f.home.path());
+            let native = std::fs::read(&path).unwrap();
+            let database = Database::content_digest(&state.db.conn.lock().unwrap()).unwrap();
+            assert!(review
+                .select_provider(
+                    &inspected,
+                    &token,
+                    &AppType::Claude,
+                    &view.revision,
+                    "a",
+                    &state
+                )
+                .is_err());
+            assert_eq!(snapshot(f.home.path()), before);
+            assert_eq!(std::fs::read(&path).unwrap(), native);
+            assert_eq!(
+                Database::content_digest(&state.db.conn.lock().unwrap()).unwrap(),
+                database
+            );
+            assert_eq!(
+                crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude")
+                    .unwrap(),
+                original_mode
+            );
+            assert_eq!(
+                state.db.get_proxy_flags_checked("claude").unwrap(),
+                original_flags
+            );
+            continue;
+        }
         assert_eq!(
             view.direct_provider_resolution,
             if source == "multiple" {
@@ -5091,6 +5166,14 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
         );
         crate::mode::operation::failpoint::crash_at(None);
         crate::mode::operation::failpoint::on_boundary(None);
+        assert_eq!(
+            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude").unwrap(),
+            original_mode
+        );
+        assert_eq!(
+            state.db.get_proxy_flags_checked("claude").unwrap(),
+            original_flags
+        );
         if failure == Some("credentials-after-pointer") {
             assert!(selected.is_err());
             let mut refreshed = state.db.get_provider_by_id("a", "claude").unwrap().unwrap();
@@ -5206,10 +5289,12 @@ fn u03_keep_files_provider_choice_uses_original_pending_and_settings_owner() {
                 .is_none()
         );
         assert_eq!(
-            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude")
-                .unwrap()
-                .mode,
-            Some(crate::mode::state::Mode::Direct)
+            crate::mode::state::mode_state(&f.device, &session.read().unwrap(), "claude").unwrap(),
+            original_mode
+        );
+        assert_eq!(
+            state.db.get_proxy_flags_checked("claude").unwrap(),
+            original_flags
         );
         assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
     }
