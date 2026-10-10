@@ -18,7 +18,7 @@ pub async fn fetch_models_with_token(
     token: &str,
     account_id: &str,
 ) -> Result<Vec<FetchedModel>, String> {
-    let client = crate::proxy::http_client::get();
+    let client = crate::proxy::http_client::get_authenticated()?;
     let response = client
         .get(CODEX_OAUTH_MODELS_URL)
         .query(&[("client_version", CODEX_OAUTH_CLIENT_VERSION)])
@@ -28,7 +28,7 @@ pub async fn fetch_models_with_token(
         .timeout(Duration::from_secs(CODEX_OAUTH_FETCH_TIMEOUT_SECS))
         .send()
         .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+        .map_err(|e| format!("Request failed: {}", e.without_url()))?;
 
     let status = response.status();
     if !status.is_success() {

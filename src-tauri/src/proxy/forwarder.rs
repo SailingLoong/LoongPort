@@ -2550,7 +2550,8 @@ impl RequestForwarder {
             log::debug!(
                 "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
             );
-            let client = super::http_client::get();
+            let client =
+                super::http_client::get_authenticated().map_err(ProxyError::ForwardFailed)?;
             let mut request = client.request(method.clone(), &url);
             if request_is_streaming {
                 // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
@@ -4043,6 +4044,160 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
             model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_forwarder_blocks_cross_origin_redirects() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::authenticated_redirect_forwarder_blocks_cross_origin_redirects",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        let forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        let mut provider = test_provider_with_type(None);
+        provider.settings_config = json!({
+            "base_url": source.base_url,
+            "api_key": "fake-forwarder-canary",
+        });
+        let adapter = super::super::providers::CodexAdapter::new();
+        assert!(!should_preserve_exact_header_case(
+            adapter.name(),
+            &provider,
+            None,
+            false
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cf-aig-authorization",
+            HeaderValue::from_static("fake-gateway-canary"),
+        );
+        headers.insert(
+            "x-private-token",
+            HeaderValue::from_static("fake-custom-canary"),
+        );
+        let mut crossed = Vec::new();
+        for status in [301, 302, 303, 307, 308] {
+            source.clear();
+            target.clear();
+            source.redirect(
+                "/v1/responses",
+                status,
+                &format!("{}/final?key=fake-location-canary", target.base_url),
+            );
+            let result = forwarder
+                .forward_attempt(
+                    &AppType::Codex,
+                    &http::Method::POST,
+                    &provider,
+                    "/v1/responses?key=fake-query-canary",
+                    &json!({"model": "synthetic-model", "input": "fake-body-canary"}),
+                    &headers,
+                    &Extensions::new(),
+                    &adapter,
+                )
+                .await;
+            let first = source.received();
+            assert_eq!(first.len(), 1);
+            assert_eq!(
+                first[0].headers["authorization"],
+                "Bearer fake-forwarder-canary"
+            );
+            assert_eq!(
+                first[0].headers["cf-aig-authorization"],
+                "fake-gateway-canary"
+            );
+            assert_eq!(first[0].headers["x-private-token"], "fake-custom-canary");
+            if !target.received().is_empty() || result.is_ok() {
+                crossed.push((status, target.received()));
+            } else if let Err(error) = result {
+                let error = error.to_string();
+                for canary in [
+                    "fake-forwarder-canary",
+                    "fake-gateway-canary",
+                    "fake-custom-canary",
+                    "fake-query-canary",
+                    "fake-location-canary",
+                ] {
+                    assert!(
+                        !error.contains(canary),
+                        "credential in forwarder error: {error}"
+                    );
+                }
+            }
+        }
+        assert!(
+            crossed.is_empty(),
+            "forwarded requests crossed origin: {crossed:?}"
+        );
+        let logged = captured_logs();
+        assert!(logged.contains(">>> 请求目标:"));
+        for canary in [
+            "fake-forwarder-canary",
+            "fake-gateway-canary",
+            "fake-custom-canary",
+            "fake-query-canary",
+            "fake-location-canary",
+            "fake-body-canary",
+        ] {
+            assert!(
+                !logged.contains(canary),
+                "credential in captured log: {canary}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_forwarder_preserves_same_origin_post_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let forwarder = test_forwarder(Duration::from_secs(5), Duration::from_secs(5));
+        let mut provider = test_provider_with_type(None);
+        provider.settings_config = json!({
+            "base_url": source.base_url,
+            "api_key": "fake-forwarder-canary",
+        });
+        let adapter = super::super::providers::CodexAdapter::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cf-aig-authorization",
+            HeaderValue::from_static("fake-gateway-canary"),
+        );
+        for status in [307, 308] {
+            source.clear();
+            source.redirect("/v1/responses", status, "/final");
+            let result = forwarder
+                .forward_attempt(
+                    &AppType::Codex,
+                    &http::Method::POST,
+                    &provider,
+                    "/v1/responses",
+                    &json!({"model": "synthetic-model", "input": "fake-body-canary"}),
+                    &headers,
+                    &Extensions::new(),
+                    &adapter,
+                )
+                .await;
+            assert!(result.is_ok());
+            let requests = source.received();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[1].method, http::Method::POST);
+            assert_eq!(requests[1].body, requests[0].body);
+            assert_eq!(
+                requests[1].headers["authorization"],
+                "Bearer fake-forwarder-canary"
+            );
+            assert_eq!(
+                requests[1].headers["cf-aig-authorization"],
+                "fake-gateway-canary"
+            );
         }
     }
 

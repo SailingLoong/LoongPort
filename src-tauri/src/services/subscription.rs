@@ -342,7 +342,7 @@ const KNOWN_TIERS: &[&str] = &[
 /// 成功值）；确定性失败（鉴权/非 2xx/响应体非法 JSON）返回 `Ok(success:false)`。
 /// codex/gemini 两个查询函数遵守同一约定。
 async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
-    let client = crate::proxy::http_client::get();
+    let client = crate::proxy::http_client::get_authenticated()?;
 
     let resp = client
         .get("https://api.anthropic.com/api/oauth/usage")
@@ -355,7 +355,7 @@ async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, Str
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => return Err(format!("Network error: {}", e.without_url())),
     };
 
     let status = resp.status();
@@ -681,7 +681,7 @@ pub(crate) async fn query_codex_quota(
     tool_label: &str,
     expired_message: &str,
 ) -> Result<SubscriptionQuota, String> {
-    let client = crate::proxy::http_client::get();
+    let client = crate::proxy::http_client::get_authenticated()?;
 
     let mut req = client
         .get("https://chatgpt.com/backend-api/wham/usage")
@@ -695,7 +695,7 @@ pub(crate) async fn query_codex_quota(
 
     let resp = match req.timeout(std::time::Duration::from_secs(15)).send().await {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => return Err(format!("Network error: {}", e.without_url())),
     };
 
     let status = resp.status();
@@ -1058,7 +1058,7 @@ fn classify_gemini_model(model_id: &str) -> &str {
 /// 1. loadCodeAssist → 获取 cloudaicompanionProject
 /// 2. retrieveUserQuota → 获取按模型分桶的配额数据
 async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
-    let client = crate::proxy::http_client::get();
+    let client = crate::proxy::http_client::get_authenticated()?;
 
     // ── Step 1: loadCodeAssist 获取项目 ID ──
     let load_resp = client
@@ -1077,7 +1077,12 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
 
     let load_resp = match load_resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error (loadCodeAssist): {e}")),
+        Err(e) => {
+            return Err(format!(
+                "Network error (loadCodeAssist): {}",
+                e.without_url()
+            ))
+        }
     };
 
     let load_status = load_resp.status();
@@ -1136,7 +1141,12 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
 
     let quota_resp = match quota_resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error (retrieveUserQuota): {e}")),
+        Err(e) => {
+            return Err(format!(
+                "Network error (retrieveUserQuota): {}",
+                e.without_url()
+            ))
+        }
     };
 
     let quota_status = quota_resp.status();

@@ -246,7 +246,14 @@ struct RequestConfig {
 /// 发送 HTTP 请求
 async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<String, AppError> {
     // 使用全局 HTTP 客户端（已包含代理配置）
-    let client = crate::proxy::http_client::get();
+    let client = if config.headers.is_empty()
+        && !crate::proxy::http_client::url_has_credentials(&config.url)
+    {
+        crate::proxy::http_client::get()
+    } else {
+        // Scripts may use arbitrary credential header names, not just Authorization.
+        crate::proxy::http_client::get_authenticated().map_err(AppError::Message)?
+    };
     // 约束超时范围，防止异常配置导致长时间阻塞（最小 2 秒，最大 30 秒）
     let request_timeout = std::time::Duration::from_secs(timeout_secs.clamp(2, 30));
 
@@ -275,6 +282,7 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
 
     // 发送请求
     let resp = req.send().await.map_err(|e| {
+        let e = e.without_url();
         AppError::localized(
             "usage_script.request_failed",
             format!("请求失败: {e}"),
@@ -597,6 +605,95 @@ fn is_loopback_host(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_usage_script_blocks_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        let mut crossed = Vec::new();
+        for status in [301, 302, 303, 307, 308] {
+            source.clear();
+            target.clear();
+            source.redirect("/usage", status, &format!("{}/final", target.base_url));
+            let config = RequestConfig {
+                url: format!("{}/usage?key=fake-script-query-canary", source.base_url),
+                method: "GET".to_string(),
+                headers: HashMap::from([
+                    (
+                        "cf-aig-authorization".to_string(),
+                        "fake-script-gateway".to_string(),
+                    ),
+                    ("x-api-key".to_string(), "fake-script-api-key".to_string()),
+                    (
+                        "x-goog-api-key".to_string(),
+                        "fake-script-google-key".to_string(),
+                    ),
+                    (
+                        "x-private-token".to_string(),
+                        "fake-script-private-key".to_string(),
+                    ),
+                ]),
+                body: None,
+            };
+            let result = send_http_request(&config, 5).await;
+            let first = source.received();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].headers["x-api-key"], "fake-script-api-key");
+            if !target.received().is_empty() || result.is_ok() {
+                crossed.push((status, target.received()));
+            } else if let Err(error) = result {
+                assert!(!error.to_string().contains("fake-script-query-canary"));
+            }
+        }
+        assert!(
+            crossed.is_empty(),
+            "script credentials crossed origin: {crossed:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_usage_script_url_userinfo_is_authenticated() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/usage", 302, &format!("{}/final", target.base_url));
+        let url = source
+            .base_url
+            .replace("http://", "http://fake-user:fake-password@");
+        let config = RequestConfig {
+            url: format!("{url}/usage"),
+            method: "GET".into(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let result = send_http_request(&config, 2).await;
+        assert!(source.received()[0].headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Basic "));
+        assert!(target.received().is_empty());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_ordinary_usage_script_retains_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/public", 302, &format!("{}/final", target.base_url));
+        let config = RequestConfig {
+            url: format!("{}/public", source.base_url),
+            method: "GET".to_string(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        assert!(send_http_request(&config, 5).await.is_ok());
+        assert_eq!(target.received().len(), 1);
+    }
 
     #[test]
     fn test_https_bypass_prevention() {

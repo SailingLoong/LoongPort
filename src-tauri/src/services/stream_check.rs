@@ -195,7 +195,11 @@ impl StreamCheckService {
             None => Self::resolve_base_url(app_type, provider)?,
         };
 
-        let client = crate::proxy::http_client::get();
+        let client = if crate::proxy::http_client::url_has_credentials(&base_url) {
+            crate::proxy::http_client::get_authenticated().map_err(AppError::Message)?
+        } else {
+            crate::proxy::http_client::get()
+        };
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
         let ua = Self::custom_user_agent(provider);
 
@@ -207,6 +211,8 @@ impl StreamCheckService {
         // 只在**托管档位**上做：判据要 sk，而那套形状只有托管项保证有；
         // 用户手工建的 provider 密钥可能在任意位置。
         if checked.success && crate::relay::is_managed(&provider.id) {
+            let client =
+                crate::proxy::http_client::get_authenticated().map_err(AppError::Message)?;
             if let Some(verdict) =
                 Self::probe_models(&client, app_type, provider, &base_url, timeout, ua).await
             {
@@ -441,9 +447,9 @@ impl StreamCheckService {
         if e.is_timeout() {
             AppError::Message("Request timeout".to_string())
         } else if e.is_connect() {
-            AppError::Message(format!("Connection failed: {e}"))
+            AppError::Message(format!("Connection failed: {}", e.without_url()))
         } else {
-            AppError::Message(e.to_string())
+            AppError::Message(e.without_url().to_string())
         }
     }
 
@@ -543,6 +549,87 @@ impl StreamCheckService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_stream_check_userinfo_error_is_redacted() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect(
+            "/fake-path-canary",
+            302,
+            &format!("{}/fake-location-canary", target.base_url),
+        );
+        let url = source
+            .base_url
+            .replace("http://", "http://fake-user:fake-password@");
+        let provider = make_provider(serde_json::json!({}));
+        let result = StreamCheckService::check_once(
+            &AppType::Codex,
+            &provider,
+            &StreamCheckConfig::default(),
+            Some(format!("{url}/fake-path-canary?key=fake-query-canary")),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("redirect"));
+        for canary in [
+            "fake-path-canary",
+            "fake-query-canary",
+            "fake-location-canary",
+            "fake-user",
+            "fake-password",
+        ] {
+            assert!(
+                !result.message.contains(canary),
+                "URL credential in final result: {}",
+                result.message
+            );
+        }
+        assert!(source.received()[0].headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Basic "));
+        assert!(target.received().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_stream_check_managed_models_are_guarded() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/v1/models", 302, &format!("{}/final", target.base_url));
+        let mut provider = make_provider(
+            serde_json::json!({"env": {"ANTHROPIC_AUTH_TOKEN": "fake-managed-canary"}}),
+        );
+        provider.id = "loongport-0123456789abcdef".into();
+        let result = StreamCheckService::check_once(
+            &AppType::Claude,
+            &provider,
+            &StreamCheckConfig::default(),
+            Some(format!("{}/v1", source.base_url)),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "ordinary reachability remains valid");
+        assert!(
+            result.model_probe.is_none(),
+            "blocked model probe is unknown, not expired or unusable"
+        );
+        let requests = source.received();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert_eq!(
+            requests[1].headers["authorization"],
+            "Bearer fake-managed-canary"
+        );
+        assert!(target.received().is_empty());
+    }
 
     fn make_provider(settings_config: serde_json::Value) -> Provider {
         Provider::with_id(

@@ -20,7 +20,7 @@ pub mod verdict;
 pub(crate) const MODEL_VERIFICATION_ENABLED: bool = true;
 
 #[cfg(test)]
-mod privacy_tests;
+pub(crate) mod privacy_tests;
 
 #[cfg(test)]
 mod live_sweep_tests;

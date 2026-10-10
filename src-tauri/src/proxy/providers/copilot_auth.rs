@@ -830,7 +830,8 @@ impl CopilotAuthManager {
 
         log::info!("[CopilotAuth] 获取账号 {account_id} 的 Copilot 可用模型");
 
-        let response = crate::proxy::http_client::get()
+        let response = crate::proxy::http_client::get_authenticated()
+            .map_err(CopilotAuthError::NetworkError)?
             .get(&models_url)
             .header("Authorization", format!("Bearer {copilot_token}"))
             .header("Content-Type", "application/json")
@@ -840,7 +841,8 @@ impl CopilotAuthManager {
             .header("user-agent", COPILOT_USER_AGENT)
             .header("x-github-api-version", COPILOT_API_VERSION)
             .send()
-            .await?;
+            .await
+            .map_err(|e| CopilotAuthError::NetworkError(e.without_url().to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -917,7 +919,8 @@ impl CopilotAuthManager {
 
         log::info!("[CopilotAuth] 获取账号 {account_id} 的 Copilot 使用量");
 
-        let response = crate::proxy::http_client::get()
+        let response = crate::proxy::http_client::get_authenticated()
+            .map_err(CopilotAuthError::NetworkError)?
             .get(copilot_usage_url(&domain))
             .header("Authorization", format!("token {github_token}"))
             .header("Content-Type", "application/json")
@@ -926,7 +929,8 @@ impl CopilotAuthManager {
             .header("user-agent", COPILOT_USER_AGENT)
             .header("x-github-api-version", COPILOT_API_VERSION)
             .send()
-            .await?;
+            .await
+            .map_err(|e| CopilotAuthError::NetworkError(e.without_url().to_string()))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(CopilotAuthError::GitHubTokenInvalid);
@@ -1031,7 +1035,8 @@ impl CopilotAuthManager {
 
         log::debug!("[CopilotAuth] 为账号 {account_id} 惰性拉取动态 API 端点");
 
-        let response = crate::proxy::http_client::get()
+        let response = crate::proxy::http_client::get_authenticated()
+            .map_err(CopilotAuthError::NetworkError)?
             .get(copilot_usage_url(&domain))
             .header("Authorization", format!("token {github_token}"))
             .header("Content-Type", "application/json")
@@ -1040,7 +1045,8 @@ impl CopilotAuthManager {
             .header("user-agent", COPILOT_USER_AGENT)
             .header("x-github-api-version", COPILOT_API_VERSION)
             .send()
-            .await?;
+            .await
+            .map_err(|e| CopilotAuthError::NetworkError(e.without_url().to_string()))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(CopilotAuthError::GitHubTokenInvalid);

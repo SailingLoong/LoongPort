@@ -92,7 +92,7 @@ pub async fn fetch_models(
     let candidates = build_models_url_candidates(base_url, is_full_url, models_url_override)?;
     let headers =
         build_model_fetch_headers(api_key, api_format, user_agent.as_ref(), request_headers)?;
-    let client = crate::proxy::http_client::get();
+    let client = crate::proxy::http_client::get_authenticated()?;
     let mut last_err: Option<String> = None;
     let mut known_secrets = vec![api_key.to_string()];
     if let Some(request_headers) = request_headers {
@@ -111,7 +111,7 @@ pub async fn fetch_models(
         let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
-                return Err(format!("Request failed: {e}"));
+                return Err(format!("Request failed: {}", e.without_url()));
             }
         };
 
@@ -341,6 +341,260 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_blocks_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        let custom = BTreeMap::from([
+            (
+                "cf-aig-authorization".to_string(),
+                "fake-gateway-canary".to_string(),
+            ),
+            (
+                "x-private-token".to_string(),
+                "fake-custom-canary".to_string(),
+            ),
+        ]);
+        let mut crossed = Vec::new();
+        for status in [301, 302, 303, 307, 308] {
+            for (format, header, expected) in [
+                (
+                    "openai-responses",
+                    "authorization",
+                    "Bearer fake-provider-canary",
+                ),
+                ("anthropic-messages", "x-api-key", "fake-provider-canary"),
+                (
+                    "google-generative-ai",
+                    "x-goog-api-key",
+                    "fake-provider-canary",
+                ),
+            ] {
+                source.clear();
+                target.clear();
+                source.redirect("/v1/models", status, &format!("{}/final", target.base_url));
+                let result = fetch_models(
+                    &source.base_url,
+                    "fake-provider-canary",
+                    false,
+                    None,
+                    None,
+                    Some(format),
+                    Some(&custom),
+                )
+                .await;
+                let first = source.received();
+                assert_eq!(first.len(), 1);
+                assert_eq!(first[0].headers[header], expected);
+                assert_eq!(
+                    first[0].headers["cf-aig-authorization"],
+                    "fake-gateway-canary"
+                );
+                if !target.received().is_empty() || result.is_ok() {
+                    crossed.push((status, format, target.received()));
+                }
+            }
+        }
+        assert!(
+            crossed.is_empty(),
+            "authenticated requests crossed origin: {crossed:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_blocks_header_only_cross_origin() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        let custom = BTreeMap::from([("x-private-token".into(), "fake-header-only-canary".into())]);
+        for status in [301, 302, 303, 307, 308] {
+            source.clear();
+            source.redirect("/v1/models", status, &format!("{}/final", target.base_url));
+            let result =
+                fetch_models(&source.base_url, "", false, None, None, None, Some(&custom)).await;
+            assert_eq!(
+                source.received()[0].headers["x-private-token"],
+                "fake-header-only-canary"
+            );
+            assert!(result.is_err());
+            assert!(target.received().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_redirect_error_omits_url_credentials() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "services::model_fetch::tests::authenticated_redirect_model_fetch_redirect_error_omits_url_credentials",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let path = "/fake-path-canary";
+        source.redirect(path, 302, &format!("{path}?key=fake-query-canary"));
+        let url = format!("{}{path}?key=fake-query-canary", source.base_url);
+        let error = fetch_models(
+            &source.base_url,
+            "fake-path-canary",
+            false,
+            Some(&url),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !error.contains("fake-path-canary"),
+            "path credential in error: {error}"
+        );
+        assert!(
+            !error.contains("fake-query-canary"),
+            "query credential in error: {error}"
+        );
+        let logged = captured_logs();
+        assert!(logged.contains("[ModelFetch] Trying endpoint:"));
+        for canary in ["fake-path-canary", "fake-query-canary"] {
+            assert!(
+                !logged.contains(canary),
+                "credential in captured log: {canary}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_preserves_same_origin_redirects_and_header_only_auth(
+    ) {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let custom = BTreeMap::from([
+            (
+                "cf-aig-authorization".to_string(),
+                "fake-gateway-canary".to_string(),
+            ),
+            ("x-api-key".to_string(), "fake-anthropic-canary".to_string()),
+            (
+                "x-goog-api-key".to_string(),
+                "fake-google-canary".to_string(),
+            ),
+            (
+                "x-private-token".to_string(),
+                "fake-custom-canary".to_string(),
+            ),
+        ]);
+        for status in [301, 302, 303, 307, 308] {
+            for location in ["/final".to_string(), format!("{}/final", source.base_url)] {
+                source.clear();
+                source.redirect("/v1/models", status, &location);
+                let models =
+                    fetch_models(&source.base_url, "", false, None, None, None, Some(&custom))
+                        .await
+                        .unwrap();
+                assert_eq!(models[0].id, "synthetic-model");
+                let requests = source.received();
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[1].uri.path(), "/final");
+                for (name, value) in &custom {
+                    assert_eq!(requests[1].headers[name], value.as_str());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_retains_ten_redirect_limit() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        for hop in 0..11 {
+            source.redirect(&format!("/hop/{hop}"), 302, &format!("/hop/{}", hop + 1));
+        }
+        let ten = format!("{}/hop/1", source.base_url);
+        assert!(fetch_models(
+            &source.base_url,
+            "fake-canary",
+            false,
+            Some(&ten),
+            None,
+            None,
+            None
+        )
+        .await
+        .is_ok());
+        assert_eq!(source.received().len(), 11);
+        source.clear();
+        let eleven = format!("{}/hop/0", source.base_url);
+        assert!(fetch_models(
+            &source.base_url,
+            "fake-canary",
+            false,
+            Some(&eleven),
+            None,
+            None,
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(source.received().len(), 11);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_blocks_hostname_change() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let alternate_host = source.base_url.replace("127.0.0.1", "localhost");
+        source.redirect("/v1/models", 302, &format!("{alternate_host}/final"));
+        let result = fetch_models(
+            &source.base_url,
+            "fake-canary",
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            source.received().len(),
+            1,
+            "different hostname was followed"
+        );
+        assert!(result.unwrap_err().contains("redirect"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_model_fetch_blocks_scheme_change_before_tls() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let alternate_scheme = source.base_url.replacen("http://", "https://", 1);
+        source.redirect("/v1/models", 302, &format!("{alternate_scheme}/final"));
+        let error = fetch_models(
+            &source.base_url,
+            "fake-canary",
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(source.received().len(), 1);
+        assert!(
+            error.contains("redirect"),
+            "must reject in redirect policy, not TLS: {error}"
+        );
+    }
 
     #[test]
     fn model_fetch_headers_follow_pi_api_format() {

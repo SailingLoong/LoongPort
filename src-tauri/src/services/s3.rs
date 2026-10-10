@@ -332,7 +332,7 @@ pub(crate) async fn test_connection(creds: &S3Credentials) -> Result<(), AppErro
         )
     })?;
 
-    let client = http_client::get();
+    let client = http_client::get_authenticated().map_err(AppError::Message)?;
     let body_hash = sha256_hex(b"");
     let mut headers = reqwest::header::HeaderMap::new();
     sign_request(
@@ -400,7 +400,7 @@ pub(crate) async fn put_object_conditional(
     })?;
 
     let (condition_name, condition_value) = condition.header()?;
-    let client = http_client::get();
+    let client = http_client::get_authenticated().map_err(AppError::Message)?;
     let body_hash = sha256_hex(&bytes);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
@@ -457,7 +457,7 @@ pub(crate) async fn get_object(
         )
     })?;
 
-    let client = http_client::get();
+    let client = http_client::get_authenticated().map_err(AppError::Message)?;
     let body_hash = sha256_hex(b"");
     let mut headers = reqwest::header::HeaderMap::new();
     sign_request(
@@ -523,7 +523,7 @@ pub(crate) async fn head_object(
         )
     })?;
 
-    let client = http_client::get();
+    let client = http_client::get_authenticated().map_err(AppError::Message)?;
     let body_hash = sha256_hex(b"");
     let mut headers = reqwest::header::HeaderMap::new();
     sign_request(
@@ -652,6 +652,27 @@ mod tests {
             build_bucket_url(&creds),
             "https://storage.example.com/data/"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_redirect_s3_blocks_cross_origin_redirects() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        source.redirect("/fake-bucket/", 307, &format!("{}/final", target.base_url));
+        let creds = test_creds(&source.base_url, "us-east-1", "fake-bucket");
+        let result = test_connection(&creds).await;
+        let requests = source.received();
+        assert!(requests[0].headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("AWS4-HMAC-SHA256"));
+        assert!(
+            target.received().is_empty(),
+            "signed S3 request crossed origin"
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -987,7 +1008,8 @@ pub(crate) async fn delete_object_conditional(
         creds,
         chrono::Utc::now(),
     );
-    let response = http_client::get()
+    let response = http_client::get_authenticated()
+        .map_err(AppError::Message)?
         .delete(url.as_str())
         .headers(headers)
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
