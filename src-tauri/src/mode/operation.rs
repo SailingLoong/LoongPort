@@ -824,9 +824,10 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
             | state::op::CATALOG
     ) || !target.extra.is_empty()
         || target.stack.is_some()
-        || target.written.as_ref().is_some_and(|written| {
-            written.validate().is_err() || (written.codex.is_some() && app != "codex")
-        })
+        || target
+            .written
+            .as_ref()
+            .is_some_and(|written| written.validate_for_app(app).is_err())
     {
         return Err(invalid_pending());
     }
@@ -1061,13 +1062,8 @@ pub(crate) fn mode_choice_source_matches(
     let Some(entry) = live.apps.get(app.as_str()) else {
         return true;
     };
-    state::validate_app_for_update(entry).is_ok()
+    state::validate_app_evidence_for_update(app.as_str(), entry).is_ok()
         && !entry.stack.enabled
-        && entry.written.as_ref().is_none_or(|written| match app {
-            AppType::GrokBuild => written.codex.is_none(),
-            AppType::Codex => written.codex.is_some() && written.tables.is_empty(),
-            _ => false,
-        })
         && (entry.mode_state() == state::ModeState::default() || entry.mode_state() == *target)
 }
 
@@ -1088,12 +1084,10 @@ fn commit_target_with_pointer(
 ) -> Result<(), AppError> {
     if target.stack.is_some()
         || !target.extra.is_empty()
-        || (target.written.is_some() && !matches!(app, AppType::GrokBuild | AppType::Codex))
-        || target.written.as_ref().is_some_and(|w| {
-            w.validate().is_err()
-                || (w.codex.is_some() && *app != AppType::Codex)
-                || (*app == AppType::Codex && (w.codex.is_none() || !w.tables.is_empty()))
-        })
+        || target
+            .written
+            .as_ref()
+            .is_some_and(|written| written.validate_for_app(app.as_str()).is_err())
     {
         return Err(AppError::Config("mode.verification_required".into()));
     }
@@ -1285,7 +1279,7 @@ pub(crate) fn recover_published_pointer(
         .apps
         .get(app.as_str())
         .ok_or_else(verification_required)?;
-    state::validate_app_for_update(entry)?;
+    state::validate_app_evidence_for_update(app.as_str(), entry)?;
     let pending = state::pending(store, vault, app.as_str())?.ok_or_else(verification_required)?;
     let admitted = super::controller::files(app)?;
     let id = published_pointer_target(app.as_str(), &pending, &admitted)?;

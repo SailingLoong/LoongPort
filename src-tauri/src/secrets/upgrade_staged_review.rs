@@ -192,7 +192,7 @@ pub(super) fn mode_resolution(
         || entry
             .written
             .as_ref()
-            .is_some_and(|written| written.validate().is_err())
+            .is_some_and(|written| written.validate_for_app(app.as_str()).is_err())
     {
         return "verification_required";
     }

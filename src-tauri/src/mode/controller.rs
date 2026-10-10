@@ -717,7 +717,7 @@ pub(crate) fn needs_listener(service: &ProxyService) -> Result<bool, AppError> {
             Err(_) => return Ok(true),
         };
         let entry = selected.apps.get(name).ok_or_else(invalid)?;
-        if state::validate_app_for_update(entry).is_err()
+        if state::validate_app_evidence_for_update(name, entry).is_err()
             || entry.mode.is_none()
             || entry.stack.enabled
             || entry.attached

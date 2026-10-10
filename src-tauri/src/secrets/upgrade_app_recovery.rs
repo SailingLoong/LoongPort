@@ -605,7 +605,9 @@ fn capture_app_with_state(
     let compatible = live
         .as_ref()
         .and_then(|live| live.apps.get(app.as_str()))
-        .is_some_and(|entry| crate::mode::state::validate_app_for_update(entry).is_ok());
+        .is_some_and(|entry| {
+            crate::mode::state::validate_app_evidence_for_update(app.as_str(), entry).is_ok()
+        });
     let missing_mode = live.as_ref().is_some_and(|live| {
         super::staged_review::mode_resolution(live, app, mode.as_ref()) == "missing"
             && operation::mode_choice_source_matches(

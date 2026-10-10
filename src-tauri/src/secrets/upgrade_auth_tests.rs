@@ -5772,3 +5772,11 @@ fn u03_mode_choice_source_rejects_foreign_written_context() {
         assert!(!operation::mode_choice_source_matches(&live, &app, &target));
     }
 }
+
+#[path = "upgrade_written_tests.rs"]
+mod written_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_written_app_binding() {
+    written_tests::verify();
+}

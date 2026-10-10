@@ -169,6 +169,21 @@ pub struct CatalogTakeover {
 }
 
 impl Written {
+    /// Known evidence belongs to its original native writer, not just this
+    /// generic serialization envelope. Absence is handled by the app caller.
+    pub(crate) fn validate_for_app(&self, app: &str) -> Result<(), AppError> {
+        self.validate()?;
+        let matches = match app {
+            "codex" => self.codex.is_some() && self.tables.is_empty(),
+            "grokbuild" => self.codex.is_none(),
+            _ => false,
+        };
+        if !matches {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), AppError> {
         let invalid = || AppError::Config("mode.verification_required".into());
         if !self.extra.is_empty() {
@@ -721,6 +736,23 @@ fn validate_change(before: &LiveState, after: &LiveState) -> Result<(), AppError
         if before.apps.get(app) != Some(new) {
             validate_app_for_update(new)?;
         }
+    }
+    Ok(())
+}
+
+/// App-local write admission also binds both saved and pending evidence.
+/// Generic storage validation stays permissive for untouched peer subtrees.
+pub(crate) fn validate_app_evidence_for_update(
+    name: &str,
+    app: &AppLiveState,
+) -> Result<(), AppError> {
+    validate_app_for_update(app)?;
+    for written in app.written.iter().chain(
+        app.pending
+            .iter()
+            .filter_map(|pending| pending.target.written.as_ref()),
+    ) {
+        written.validate_for_app(name)?;
     }
     Ok(())
 }
