@@ -1482,8 +1482,13 @@ mod upgrade_handoff_tests {
         );
         std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
         let native_before = std::fs::read(&f.native).unwrap();
+        let settings_before = std::fs::read(&path).unwrap();
         f.coordinator
             .run_upgrade_attempt(&f.token, |session| {
+                let legacy_allowed = session.migration_pending().map_err(|e| e.to_string())?;
+                crate::secrets::migration::prepare_files(&session, legacy_allowed)
+                    .map_err(|e| e.to_string())?;
+                assert!(std::fs::read(&path).unwrap() == settings_before);
                 crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
                 Database::init_with_secrets(session).map_err(|e| e.to_string())?;
                 Ok(())
@@ -1657,6 +1662,10 @@ mod upgrade_handoff_tests {
                     .is_err(),
                 "{case}"
             );
+            assert!(
+                crate::secrets::migration::prepare_files(&session, false).is_err(),
+                "{case}"
+            );
             assert!(crate::settings::unlock_settings(session).is_err(), "{case}");
             assert_eq!(snapshot(f.home.path()), before, "{case}");
         }
@@ -1681,7 +1690,9 @@ mod upgrade_handoff_tests {
                 serde_json::value::RawValue::from_string(peer.into()).unwrap(),
             );
             std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
-            crate::settings::unlock_settings(f.session()).unwrap();
+            let session = f.session();
+            crate::secrets::migration::prepare_files(&session, false).unwrap();
+            crate::settings::unlock_settings(session).unwrap();
             crate::settings::reload_settings().unwrap();
             assert!(
                 crate::settings::get_current_provider_ready(&app).is_err(),
@@ -1697,6 +1708,42 @@ mod upgrade_handoff_tests {
 
     #[test]
     #[serial_test::serial]
+    fn u03_preflight_preserves_original_legacy_settings_migration() {
+        let _home = TestHome::new().unwrap();
+        let root = crate::config::get_app_config_dir();
+        let store = MemoryKeyStore::default();
+        let session = SecretSession::open(&root, &store, None).unwrap();
+        let settings = crate::settings::AppSettings {
+            webdav_sync: Some(crate::settings::WebDavSyncSettings {
+                base_url: "https://synthetic.example.invalid".into(),
+                password: "synthetic-legacy-credential".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let path = crate::settings::settings_path();
+        let plaintext = serde_json::to_vec(&settings).unwrap();
+        std::fs::write(&path, &plaintext).unwrap();
+        assert!(
+            crate::settings::decode_settings_with_vault(&plaintext, &session.read().unwrap())
+                .is_err()
+        );
+        assert!(crate::secrets::migration::prepare_files(&session, false).is_err());
+        assert!(std::fs::read(&path).unwrap() == plaintext);
+        assert!(session.migration_pending().unwrap());
+        crate::secrets::migration::prepare_files(&session, true).unwrap();
+        let encrypted = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&encrypted).contains("synthetic-legacy-credential"));
+        let restored =
+            crate::settings::decode_settings_with_vault(&encrypted, &session.read().unwrap())
+                .unwrap();
+        assert!(restored.webdav_sync.unwrap().password == "synthetic-legacy-credential");
+        crate::secrets::migration::prepare_files(&session, true).unwrap();
+        assert!(std::fs::read(&path).unwrap() == encrypted);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn u03_runtime_migration_completion_preserves_verified_checkpoint() {
         let f = Fixture::new();
         let vault_path = f.coordinator.root.join("vault.json");
@@ -1705,6 +1752,7 @@ mod upgrade_handoff_tests {
         f.coordinator
             .run_upgrade_attempt(&f.token, |session| {
                 assert!(!session.migration_pending().unwrap());
+                crate::secrets::migration::prepare_files(&session, false).unwrap();
                 crate::settings::unlock_settings(session.clone()).unwrap();
                 let _db = Database::init_with_secrets(session.clone()).unwrap();
                 // The real initialize_runtime calls this after opening its owners,

@@ -971,6 +971,14 @@ fn decode_runtime_settings_document(
     Ok((settings, unowned))
 }
 
+pub(crate) fn validate_runtime_settings_with_vault(
+    bytes: &[u8],
+    vault: &VaultContext,
+    root: &Path,
+) -> Result<(), AppError> {
+    decode_runtime_settings_document(bytes, vault, root).map(|_| ())
+}
+
 fn validate_selected_pointer_at(path: &Path, app: &AppType) -> Result<(), AppError> {
     let field = match app {
         AppType::Claude => UPGRADE_APP_POINTER_FIELDS[0],
