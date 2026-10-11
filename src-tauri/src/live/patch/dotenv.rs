@@ -147,6 +147,22 @@ pub(crate) fn literal_owned_entries(
     text: &str,
     owns: fn(&str) -> bool,
 ) -> Option<Vec<(String, Option<String>)>> {
+    let mut result: Vec<(String, Option<String>)> = Vec::new();
+    for (key, value) in literal_owned_occurrences(text, owns)? {
+        if let Some(entry) = result.iter_mut().find(|(existing, _)| *existing == key) {
+            entry.1 = value;
+        } else {
+            result.push((key, value));
+        }
+    }
+    Some(result)
+}
+
+/// Keep each original assignment when editing needs to preserve unknown duplicates.
+pub(crate) fn literal_owned_occurrences(
+    text: &str,
+    owns: fn(&str) -> bool,
+) -> Option<Vec<(String, Option<String>)>> {
     let (lines, error) = logical_lines(text);
     if error.is_some() {
         return None;
@@ -164,11 +180,7 @@ pub(crate) fn literal_owned_entries(
         } else {
             None
         };
-        if let Some(entry) = result.iter_mut().find(|(existing, _)| existing == key) {
-            entry.1 = value;
-        } else {
-            result.push((key.to_owned(), value));
-        }
+        result.push((key.to_owned(), value));
     }
     Some(result)
 }

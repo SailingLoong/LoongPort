@@ -92,3 +92,41 @@ describe("locale coverage", () => {
     },
   );
 });
+
+describe("Gemini shared settings locale coverage", () => {
+  const keys = [
+    "title",
+    "description",
+    "manageMcp",
+    "envEditor",
+    "settingsEditor",
+    "preservedEnv",
+    "importDescription",
+    "invalidFormat",
+    "files.title",
+    "files.geminiEnv",
+    "files.geminiSettings",
+    "files.write",
+    "files.unchanged",
+  ];
+  it.each([["en", en], ...locales] as const)(
+    "covers both Gemini original formats, preserved values, import, and preview labels in %s",
+    (_name, tree) => {
+      const translations = flattenStrings(tree);
+      for (const key of keys) {
+        expect(
+          translations.get(`geminiSharedSettings.${key}`)?.trim(),
+          key,
+        ).toBeTruthy();
+      }
+      expect(tree.geminiSharedSettings.envEditor).toContain(".env");
+      expect(tree.geminiSharedSettings.settingsEditor).toContain(
+        "settings.json",
+      );
+      expect(tree.geminiSharedSettings.files.geminiEnv).toBe(".env");
+      expect(tree.geminiSharedSettings.files.geminiSettings).toBe(
+        "settings.json",
+      );
+    },
+  );
+});

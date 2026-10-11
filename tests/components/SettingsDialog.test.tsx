@@ -37,9 +37,17 @@ const claudeShared = vi.hoisted(() => ({
   getImport: vi.fn(),
   previewImport: vi.fn(),
 }));
+const geminiShared = vi.hoisted(() => ({
+  get: vi.fn(),
+  preview: vi.fn(),
+  save: vi.fn(),
+  result: vi.fn(),
+  getImport: vi.fn(),
+  previewImport: vi.fn(),
+}));
 vi.mock("@/lib/api/config", () => ({
   getSharedSettingsApi: (app: string) =>
-    app === "claude" ? claudeShared : shared,
+    app === "gemini" ? geminiShared : app === "claude" ? claudeShared : shared,
   getClaudeSharedSettings: claudeShared.get,
   previewClaudeSharedSettings: claudeShared.preview,
   saveClaudeSharedSettings: claudeShared.save,
@@ -61,11 +69,13 @@ vi.mock("@/components/JsonEditor", () => ({
     ariaLabel,
     language,
     showFormat,
+    showValidation,
   }: any) => (
     <textarea
       aria-label={ariaLabel}
       data-language={language}
       data-show-format={String(showFormat)}
+      data-show-validation={String(showValidation)}
       value={value}
       readOnly={readOnly}
       onChange={(event) => onChange(event.target.value)}
@@ -1272,6 +1282,430 @@ describe("SettingsPage Component", () => {
         screen.getByRole("button", { name: "codexSharedSettings.reload" }),
       );
       await waitFor(() => expect(claudeShared.get).toHaveBeenCalledTimes(2));
+    });
+  });
+
+  describe("Gemini shared settings", () => {
+    const request = {
+      id: "gemini-shared-1",
+      scope: "geminiSharedSettings",
+      draftDigest: "gemini-digest",
+      revision: "gemini-revision",
+    };
+    const initial = {
+      env: '# shared preferences\nGEMINI_CLI_THEME="default"\n',
+      settings: '{ "ui": { "theme": "default" }, "large": 9007199254740993 }\n',
+    };
+    const edited = {
+      env: '# shared preferences\nGEMINI_CLI_THEME="dark"\n',
+      settings: '{ "ui": { "theme": "dark" }, "large": 9007199254740993 }\n',
+    };
+    const imported = {
+      env: '# fresh live\nGEMINI_CLI_THEME="light"\n',
+      settings: '{ "fresh": true, "large": 9007199254740993 }\n',
+    };
+    const changes = [
+      {
+        role: "geminiEnv",
+        field: "GEMINI_CLI_THEME",
+        before: '"default"',
+        after: '"dark"',
+      },
+      {
+        role: "geminiSettings",
+        field: "ui.theme",
+        before: '"default"',
+        after: '"dark"',
+      },
+    ];
+    const files = [
+      { role: "geminiEnv", change: "write" },
+      { role: "geminiSettings", change: "unchanged" },
+    ];
+    beforeEach(() => {
+      geminiShared.get.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        config: { ...initial },
+        originalSave: null,
+      });
+      geminiShared.preview.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        request,
+        changes,
+        files,
+      });
+      geminiShared.save
+        .mockReset()
+        .mockResolvedValue({ app: "gemini", request, status: "completed" });
+      geminiShared.result
+        .mockReset()
+        .mockResolvedValue({ app: "gemini", request, status: "pending" });
+      geminiShared.getImport.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        fields: [
+          {
+            path: ["GEMINI_CLI_THEME"],
+            field: "GEMINI_CLI_THEME",
+            value: '"light"',
+          },
+        ],
+      });
+      geminiShared.previewImport.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        request,
+        config: imported,
+        changes: [
+          { role: "geminiEnv", field: "GEMINI_CLI_THEME", after: '"light"' },
+        ],
+        files,
+      });
+    });
+    async function openGemini() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "geminiSharedSettings.title" }),
+      );
+      const env = await screen.findByRole("textbox", {
+        name: "geminiSharedSettings.envEditor",
+      });
+      const settings = await screen.findByRole("textbox", {
+        name: "geminiSharedSettings.settingsEditor",
+      });
+      await waitFor(() => expect(env).toHaveValue(initial.env));
+      expect(settings).toHaveValue(initial.settings);
+      return { env, settings };
+    }
+    function changeEditors(editors: {
+      env: HTMLElement;
+      settings: HTMLElement;
+    }) {
+      fireEvent.change(editors.env, { target: { value: edited.env } });
+      fireEvent.change(editors.settings, {
+        target: { value: edited.settings },
+      });
+    }
+    async function previewGemini() {
+      const editors = await openGemini();
+      changeEditors(editors);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      );
+      await screen.findByText("codexSharedSettings.versionCheck");
+      return editors;
+    }
+    async function selectGeminiImport() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: "GEMINI_CLI_THEME",
+      });
+      expect(option).not.toBeChecked();
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+    }
+    it("opens two original-format Gemini editors and saves exact text with role-labelled file outcomes", async () => {
+      renderSettingsPage();
+      const editors = await previewGemini();
+      expect(editors.env).toHaveAttribute("data-language", "javascript");
+      expect(editors.settings).toHaveAttribute("data-language", "json");
+      for (const editor of Object.values(editors)) {
+        expect(editor).toHaveAttribute("data-show-format", "false");
+        expect(editor).toHaveAttribute("data-show-validation", "false");
+      }
+      expect(
+        screen.getByText("geminiSharedSettings.preservedEnv"),
+      ).toBeVisible();
+      const fileList = within(
+        screen.getByRole("list", { name: "geminiSharedSettings.files.title" }),
+      );
+      const envFile = within(
+        fileList
+          .getByText("geminiSharedSettings.files.geminiEnv")
+          .closest("li")!,
+      );
+      expect(
+        envFile.getByText("geminiSharedSettings.files.write"),
+      ).toBeVisible();
+      const settingsFile = within(
+        fileList
+          .getByText("geminiSharedSettings.files.geminiSettings")
+          .closest("li")!,
+      );
+      expect(
+        settingsFile.getByText("geminiSharedSettings.files.unchanged"),
+      ).toBeVisible();
+      for (const change of changes) {
+        expect(
+          within(screen.getByText(change.field).closest("li")!).getByText(
+            `geminiSharedSettings.files.${change.role}`,
+          ),
+        ).toBeVisible();
+      }
+      expect(geminiShared.preview).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        expect.any(String),
+      );
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.save).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        request,
+      );
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(shared.get).not.toHaveBeenCalled();
+      expect(shared.save).not.toHaveBeenCalled();
+      expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+      expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+    });
+    it("compares both Gemini text values and allows leaving after reverting to identical contents", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      for (const field of ["env", "settings"] as const) {
+        fireEvent.change(editors[field], { target: { value: initial[field] } });
+      }
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      ).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      expect(
+        screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("dialog", { name: "geminiSharedSettings.title" }),
+      ).not.toBeInTheDocument();
+    });
+    it.each(["env", "settings"] as const)(
+      "invalidates a Gemini preview after editing %s and keeps both drafts on leave cancellation",
+      async (field) => {
+        renderSettingsPage();
+        const editors = await previewGemini();
+        fireEvent.change(editors[field], {
+          target: { value: edited[field] + "\n" },
+        });
+        expect(
+          screen.queryByText("codexSharedSettings.versionCheck"),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+        await screen.findByText("applications.leaveDraftTitle");
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: "loongport.tier.editConfirmButton",
+          }),
+        );
+        expect(editors.env).toHaveValue(
+          edited.env + (field === "env" ? "\n" : ""),
+        );
+        expect(editors.settings).toHaveValue(
+          edited.settings + (field === "settings" ? "\n" : ""),
+        );
+        expect(geminiShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("imports selected Gemini env paths explicitly and adopts the complete fresh backend draft", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      expect(geminiShared.getImport).not.toHaveBeenCalled();
+      await selectGeminiImport();
+      await waitFor(() => expect(editors.env).toHaveValue(imported.env));
+      expect(editors.settings).toHaveValue(imported.settings);
+      expect(geminiShared.previewImport).toHaveBeenCalledExactlyOnceWith(
+        [["GEMINI_CLI_THEME"]],
+        expect.any(String),
+      );
+      expect(geminiShared.preview).not.toHaveBeenCalled();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.save).toHaveBeenCalledExactlyOnceWith(
+        imported,
+        request,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      expect(
+        screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).not.toBeInTheDocument();
+    });
+    it("retains both Gemini drafts and selected import until replacement is confirmed", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      await selectGeminiImport();
+      await screen.findByText("applications.leaveDraftTitle");
+      expect(geminiShared.previewImport).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(editors.env).toHaveValue(edited.env);
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(
+        screen.getByRole("checkbox", { name: "GEMINI_CLI_THEME" }),
+      ).toBeChecked();
+      expect(
+        screen.getByText("geminiSharedSettings.importDescription"),
+      ).toBeVisible();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() => expect(editors.env).toHaveValue(imported.env));
+      expect(editors.settings).toHaveValue(imported.settings);
+      expect(geminiShared.previewImport).toHaveBeenCalledOnce();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+    });
+    it("cancels Gemini legacy selection without mutating either draft", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: "GEMINI_CLI_THEME",
+      });
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.cancel",
+        }),
+      );
+      expect(editors.env).toHaveValue(edited.env);
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(geminiShared.previewImport).not.toHaveBeenCalled();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+    });
+    it("locks both Gemini editors while saving and queries the exact unknown receipt without another write", async () => {
+      let rejectSave!: (reason: Error) => void;
+      geminiShared.save.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectSave = reject;
+          }),
+      );
+      geminiShared.result.mockRejectedValue(new Error("secret-result-source"));
+      renderSettingsPage();
+      const editors = await previewGemini();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      expect(geminiShared.save).toHaveBeenCalledOnce();
+      rejectSave(new Error("secret-save-source"));
+      await screen.findByText("codexSharedSettings.result.unknown");
+      expect(geminiShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      for (const action of ["import.open", "preview", "save", "reload"]) {
+        expect(
+          screen.getByRole("button", { name: `codexSharedSettings.${action}` }),
+        ).toBeDisabled();
+      }
+      geminiShared.result.mockResolvedValue({
+        app: "gemini",
+        request,
+        status: "completed",
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.result).toHaveBeenLastCalledWith(request);
+      expect(geminiShared.save).toHaveBeenCalledOnce();
+      for (const editor of Object.values(editors))
+        expect(editor).not.toHaveAttribute("readonly");
+      expect(document.body).not.toHaveTextContent("secret-save-source");
+      expect(document.body).not.toHaveTextContent("secret-result-source");
+      expect(shared.result).not.toHaveBeenCalled();
+    });
+    it.each(["invalidFormat", "sourceChanged", "secret-parser-source"])(
+      "shows a safe Gemini %s failure without dropping either draft",
+      async (code) => {
+        geminiShared.preview.mockResolvedValue({
+          app: "gemini",
+          status: "blocked",
+          request,
+          changes: [],
+          files: [],
+          code,
+        });
+        renderSettingsPage();
+        const editors = await openGemini();
+        changeEditors(editors);
+        fireEvent.click(
+          screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+        );
+        await screen.findByText(
+          code === "invalidFormat"
+            ? "geminiSharedSettings.invalidFormat"
+            : `codexSharedSettings.error.${code === "sourceChanged" ? code : "generic"}`,
+        );
+        expect(editors.env).toHaveValue(edited.env);
+        expect(editors.settings).toHaveValue(edited.settings);
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        expect(document.body).not.toHaveTextContent("secret-parser-source");
+        expect(geminiShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("requires a fresh Gemini read after resolving an original save from a previous session", async () => {
+      geminiShared.get.mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        config: initial,
+        originalSave: {
+          app: "gemini",
+          request,
+          status: "verificationRequired",
+        },
+      });
+      geminiShared.result.mockResolvedValue({
+        app: "gemini",
+        request,
+        status: "completed",
+      });
+      renderSettingsPage();
+      const editors = await openGemini();
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      expect(geminiShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.reload" }),
+      );
+      await waitFor(() => expect(geminiShared.get).toHaveBeenCalledTimes(2));
     });
   });
 

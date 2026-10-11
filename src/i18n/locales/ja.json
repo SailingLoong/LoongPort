@@ -4717,5 +4717,22 @@
     "manageMcp": "拡張リソースで Claude Code MCP を管理",
     "editor": "共有内容（JSON）",
     "invalidFormat": "JSON が無効です。内容を修正して再度プレビューしてください。"
+  },
+  "geminiSharedSettings": {
+    "title": "Gemini CLI の共有設定",
+    "description": "現在の設定を切り替えずに、.env と settings.json の共有フィールドを編集します。",
+    "manageMcp": "拡張リソースで Gemini CLI MCP を管理",
+    "envEditor": "共有環境変数（.env）",
+    "settingsEditor": "共有設定（settings.json）",
+    "preservedEnv": "変数展開や未知の構文を含む環境変数の値は表示せず、元のファイルにそのまま保持します。",
+    "importDescription": "選択した .env の未設定の一般フィールドのみを取り込みます。バックエンドは両方の現行ファイルを再読込し、旧スニペットから settings.json を取り込みません。保存前に両方の下書きを確認してください。",
+    "invalidFormat": ".env または JSON の形式が無効です。内容を修正して再度プレビューしてください。",
+    "files": {
+      "title": "ファイルの変更プレビュー",
+      "geminiEnv": ".env",
+      "geminiSettings": "settings.json",
+      "write": "書き込み予定",
+      "unchanged": "変更なし"
+    }
   }
 }

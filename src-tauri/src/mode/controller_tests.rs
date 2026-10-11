@@ -6486,3 +6486,318 @@ fn claude_legacy_shared_import_seeds_selected_missing_json_fields() {
     assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
     assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
 }
+
+#[test]
+#[serial_test::serial]
+fn gemini_shared_settings_saves_two_native_files_with_one_original_receipt() {
+    use crate::services::config::{ConfigService as C, GeminiSharedDraft};
+    let fx = Fixture::for_app(AppType::Gemini);
+    let settings = crate::gemini_config::get_gemini_settings_path();
+    let env="# synthetic-private comment\r\nGEMINI_API_KEY=synthetic-private\r\nGOOGLE_GEMINI_BASE_URL=https://synthetic.invalid\r\nGEMINI_MODEL=synthetic-model\r\nAUTHORIZATION=synthetic-private\r\nUI_THEME=old\r\nUNCHANGED='hello' # synthetic-hidden-comment\r\nEXPANDED=$SYNTHETIC_SECRET\r\nDUPLICATE=$SYNTHETIC_SECRET\r\nDUPLICATE=last\r\n";
+    let cfg = json!({"security":{"auth":{"selectedType":"gemini-api-key","credential":"synthetic-private"},"workspace":{"trusted":true}},"model":{"name":"synthetic-model","compressionThreshold":0.5},"mcpServers":{"example":{"command":"synthetic-private"}},"mcp":{"allowed":["example"]},"ui":{"theme":"old"},"historyLimit":9007199254740993u64});
+    std::fs::write(&fx.path, env).unwrap();
+    std::fs::write(&settings, cfg.to_string()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let db = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let mode = state::mode_state(
+        &store,
+        &fx.state.db.secret_session().read().unwrap(),
+        "gemini",
+    )
+    .unwrap();
+    let read = C::read_gemini_shared_settings(&fx.state).unwrap();
+    assert_eq!(
+        read["status"], "ready",
+        "Gemini shared read exposes two native texts"
+    );
+    assert!(!read.to_string().contains("synthetic"));
+    let mut draft: GeminiSharedDraft = serde_json::from_value(read["config"].clone()).unwrap();
+    assert!(!draft.env.contains("EXPANDED"));
+    assert!(!draft.env.contains("DUPLICATE"));
+    assert!(draft.settings.contains("9007199254740993"));
+    draft.env = draft.env.replace("old", "new");
+    let mut ordinary: serde_json::Value = serde_json::from_str(&draft.settings).unwrap();
+    ordinary["ui"]["theme"] = json!("new");
+    draft.settings = ordinary.to_string();
+    let preview = C::preview_gemini_shared_settings(
+        &fx.state,
+        &draft,
+        "51515151-5151-4151-8151-515151515151",
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(
+        preview["files"],
+        json!([{"role":"geminiEnv","change":"write"},{"role":"geminiSettings","change":"write"}])
+    );
+    assert_eq!(
+        preview["changes"],
+        json!([{"role":"geminiEnv","field":"UI_THEME","before":"\"old\"","after":"\"new\""},{"role":"geminiSettings","field":"ui.theme","before":"\"old\"","after":"\"new\""}])
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), env.as_bytes());
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), cfg.to_string());
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_gemini_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fx.path).unwrap(),
+        env.replace("UI_THEME=old", "UI_THEME=\"new\"")
+    );
+    let mut expected = cfg;
+    expected["ui"]["theme"] = json!("new");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&settings).unwrap()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db
+    );
+    assert_eq!(
+        state::mode_state(
+            &store,
+            &fx.state.db.secret_session().read().unwrap(),
+            "gemini"
+        )
+        .unwrap(),
+        mode
+    );
+    let env = std::fs::read(&fx.path).unwrap();
+    let cfg = std::fs::read(&settings).unwrap();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_gemini_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        C::save_gemini_shared_settings(&fx.state, &draft, request).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), env);
+    assert_eq!(std::fs::read(&settings).unwrap(), cfg);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+}
+
+#[test]
+#[serial_test::serial]
+fn gemini_shared_settings_rejects_either_file_drift_and_unsafe_values_before_writes() {
+    use crate::services::config::{ConfigService as C, GeminiSharedDraft};
+    let fx = Fixture::for_app(AppType::Gemini);
+    let settings = crate::gemini_config::get_gemini_settings_path();
+    let env = "GEMINI_API_KEY=synthetic-private\nPLAIN=old\nUNKNOWN=$SYNTHETIC\n";
+    let cfg = r#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":{"name":"synthetic-model"},"ui":{"theme":"old"},"hidden":{"api_key":"synthetic-private","ordinary":true}}"#;
+    std::fs::write(&fx.path, env).unwrap();
+    std::fs::write(&settings, cfg).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let read = C::read_gemini_shared_settings(&fx.state).unwrap();
+    assert_eq!(read["status"], "ready");
+    let base: GeminiSharedDraft = serde_json::from_value(read["config"].clone()).unwrap();
+    for value in [
+        "PLAIN=ok\nGEMINI_API_KEY=synthetic-new\n",
+        "AUTHORIZATION=synthetic-private\n",
+        "PLAIN=\"unterminated\nGEMINI_API_KEY=synthetic-new\n",
+        "PLAIN=\"line1\nline2\"\n",
+        "PLAIN=$SYNTHETIC\n",
+        "PLAIN=foo # synthetic-secret\n",
+        "UNKNOWN=overwrite\n",
+    ] {
+        let mut draft = base.clone();
+        draft.env = value.into();
+        let p = C::preview_gemini_shared_settings(
+            &fx.state,
+            &draft,
+            "52525252-5252-4252-8252-525252525252",
+        )
+        .unwrap();
+        assert_eq!(p["status"], "blocked");
+        assert!(!p.to_string().contains("synthetic"));
+        assert_eq!(std::fs::read(&fx.path).unwrap(), env.as_bytes());
+        assert_eq!(std::fs::read(&settings).unwrap(), cfg.as_bytes());
+        assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    }
+    for value in [
+        json!({"security":"replace"}),
+        json!({"model":{"name":"new"}}),
+        json!({"mcpServers":{}}),
+        json!({"hidden":[]}),
+        json!({"items":[{"token":"synthetic-private"}]}),
+    ] {
+        let mut draft = base.clone();
+        draft.settings = value.to_string();
+        let p = C::preview_gemini_shared_settings(
+            &fx.state,
+            &draft,
+            "52525252-5252-4252-8252-525252525252",
+        )
+        .unwrap();
+        assert_eq!(p["status"], "blocked");
+        assert_eq!(p["code"], "readOnlyFields");
+        assert!(!p.to_string().contains("synthetic"));
+    }
+    let mut draft = base;
+    draft.env = "PLAIN=new\n".into();
+    draft.settings = r#"{"ui":{"theme":"new"}}"#.into();
+    for corrupt in [false, true] {
+        for file in [&fx.path, &settings] {
+            let preview = C::preview_gemini_shared_settings(
+                &fx.state,
+                &draft,
+                "52525252-5252-4252-8252-525252525253",
+            )
+            .unwrap();
+            assert_eq!(preview["status"], "ready");
+            let request = serde_json::from_value(preview["request"].clone()).unwrap();
+            let outside = if corrupt {
+                "\"unterminated".to_owned()
+            } else if file == &fx.path {
+                format!("{env}EXTERNAL=kept\n")
+            } else {
+                r#"{"ui":{"theme":"external"}}"#.into()
+            };
+            std::fs::write(file, &outside).unwrap();
+            let before_env = std::fs::read(&fx.path).unwrap();
+            let before_cfg = std::fs::read(&settings).unwrap();
+            let result = C::save_gemini_shared_settings(&fx.state, &draft, request).unwrap();
+            assert!(matches!(
+                result["status"].as_str(),
+                Some("stale" | "blocked")
+            ));
+            assert_eq!(std::fs::read(&fx.path).unwrap(), before_env);
+            assert_eq!(std::fs::read(&settings).unwrap(), before_cfg);
+            assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+            std::fs::write(&fx.path, env).unwrap();
+            std::fs::write(&settings, cfg).unwrap();
+        }
+    }
+    let preview = C::preview_gemini_shared_settings(
+        &fx.state,
+        &draft,
+        "52525252-5252-4252-8252-525252525254",
+    )
+    .unwrap();
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    {
+        let _fault = Fault::at("published:0");
+        assert_eq!(
+            C::save_gemini_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+            "verificationRequired"
+        );
+    }
+    let before_env = std::fs::read(&fx.path).unwrap();
+    let before_cfg = std::fs::read(&settings).unwrap();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_gemini_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "verificationRequired"
+    );
+    assert_eq!(
+        C::save_gemini_shared_settings(&fx.state, &draft, request).unwrap()["status"],
+        "verificationRequired"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), before_env);
+    assert_eq!(std::fs::read(&settings).unwrap(), before_cfg);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+}
+
+#[test]
+#[serial_test::serial]
+fn gemini_legacy_shared_import_only_seeds_env_and_preserves_json_settings() {
+    use crate::services::config::{ConfigService as C, GeminiSharedDraft};
+    let fx = Fixture::for_app(AppType::Gemini);
+    let settings = crate::gemini_config::get_gemini_settings_path();
+    let env = "GEMINI_API_KEY=synthetic-private\nPRESENT=live\nUNKNOWN=$SYNTHETIC\n";
+    let cfg = r#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"ui":{"theme":"live"},"model":{"name":"synthetic-model"}}"#;
+    std::fs::write(&fx.path, env).unwrap();
+    std::fs::write(&settings, cfg).unwrap();
+    let snippet = json!({"PRESENT":"old","MISSING":"yes","OTHER":"later","UNKNOWN":"replacement","GEMINI_API_KEY":"synthetic-secret","AUTHORIZATION":"synthetic-private","GOOGLE_GEMINI_BASE_URL":"https://synthetic.invalid","GEMINI_MODEL":"synthetic-model","ui":{"theme":"not-settings"},"UNSAFE":"line\nGEMINI_API_KEY=injected"});
+    fx.state
+        .db
+        .set_config_snippet("gemini", Some(snippet.to_string()))
+        .unwrap();
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("a", "gemini")
+        .unwrap()
+        .unwrap();
+    provider
+        .meta
+        .get_or_insert_with(Default::default)
+        .common_config_enabled = Some(false);
+    fx.state.db.save_provider("gemini", &provider).unwrap();
+    assert_eq!(
+        C::read_gemini_shared_settings_import(&fx.state).unwrap()["code"],
+        "legacyDisabled"
+    );
+    provider.meta.as_mut().unwrap().common_config_enabled = Some(true);
+    fx.state.db.save_provider("gemini", &provider).unwrap();
+    let db = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let candidates = C::read_gemini_shared_settings_import(&fx.state).unwrap();
+    assert_eq!(candidates["status"], "ready");
+    assert_eq!(
+        candidates["fields"],
+        json!([{"path":["MISSING"],"field":"MISSING","value":"\"yes\""},{"path":["OTHER"],"field":"OTHER","value":"\"later\""}])
+    );
+    assert!(!candidates.to_string().contains("synthetic"));
+    let fields = vec![vec!["MISSING".into()]];
+    let p = C::preview_gemini_shared_settings_import(
+        &fx.state,
+        &fields,
+        "53535353-5353-4353-8353-535353535353",
+    )
+    .unwrap();
+    assert_eq!(p["status"], "ready");
+    assert_eq!(
+        p["files"],
+        json!([{"role":"geminiEnv","change":"write"},{"role":"geminiSettings","change":"unchanged"}])
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let draft: GeminiSharedDraft = serde_json::from_value(p["config"].clone()).unwrap();
+    assert!(!draft.settings.contains("not-settings"));
+    let request: state::SaveRequest = serde_json::from_value(p["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_gemini_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fx.path).unwrap(),
+        format!("{env}MISSING=\"yes\"\n")
+    );
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), cfg);
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db
+    );
+    assert_eq!(
+        C::query_gemini_shared_settings_save(&fx.state, request).unwrap()["status"],
+        "completed"
+    );
+    std::fs::write(&fx.path, env).unwrap();
+    let again = C::preview_gemini_shared_settings_import(
+        &fx.state,
+        &fields,
+        "53535353-5353-4353-8353-535353535354",
+    )
+    .unwrap();
+    assert_eq!(again["changes"].as_array().unwrap().len(), 1);
+    std::fs::write(&fx.path, format!("{env}MISSING=external\n")).unwrap();
+    let refreshed = C::preview_gemini_shared_settings_import(
+        &fx.state,
+        &fields,
+        "53535353-5353-4353-8353-535353535355",
+    )
+    .unwrap();
+    assert_eq!(refreshed["changes"], json!([]));
+    assert!(refreshed["config"]["env"]
+        .as_str()
+        .unwrap()
+        .contains("external"));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), cfg);
+}

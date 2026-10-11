@@ -4717,5 +4717,22 @@
     "manageMcp": "前往扩展资源管理 Claude Code MCP",
     "editor": "共享内容（JSON）",
     "invalidFormat": "JSON 格式无效，请修改内容后重新预览。"
+  },
+  "geminiSharedSettings": {
+    "title": "Gemini CLI 共享设置",
+    "description": "编辑 .env 和 settings.json 的共享字段，不切换当前配置。",
+    "manageMcp": "前往扩展资源管理 Gemini CLI MCP",
+    "envEditor": "共享环境变量（.env）",
+    "settingsEditor": "共享设置（settings.json）",
+    "preservedEnv": "含变量展开或未知语法的环境变量值不显示，原文件中的内容保留不变。",
+    "importDescription": "仅导入所选的 .env 普通缺失字段。后端会重新读取两份实时文件；不从旧片段导入 settings.json。请核对两区草稿后再保存。",
+    "invalidFormat": ".env 或 JSON 格式无效，请修改内容后重新预览。",
+    "files": {
+      "title": "文件变更预览",
+      "geminiEnv": ".env",
+      "geminiSettings": "settings.json",
+      "write": "将写入",
+      "unchanged": "不变"
+    }
   }
 }

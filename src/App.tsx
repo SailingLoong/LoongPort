@@ -1164,6 +1164,7 @@ function App() {
               ref={settingsRef}
               onManageCodexMcp={() => setCurrentView("mcp", "codex")}
               onManageClaudeMcp={() => setCurrentView("mcp", "claude")}
+              onManageGeminiMcp={() => setCurrentView("mcp", "gemini")}
               open={true}
               onOpenChange={goBack}
               onImportSuccess={handleImportSuccess}

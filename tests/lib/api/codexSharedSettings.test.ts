@@ -97,3 +97,46 @@ describe("Claude shared settings wire contract", () => {
     );
   });
 });
+
+describe("Gemini shared settings wire contract", () => {
+  it("echoes two original-format texts and the exact Gemini receipt across all six commands", async () => {
+    const request = {
+      id: "gemini-1",
+      scope: "geminiSharedSettings" as const,
+      draftDigest: "digest",
+      revision: "revision",
+    };
+    const config = {
+      env: '# shared\nGEMINI_CLI_THEME="dark"\n',
+      settings: '{ "ui": { "theme": "dark" }, "large": 9007199254740993 }\n',
+    };
+    const api = configApi.getSharedSettingsApi("gemini");
+    await api.get();
+    expect(invoke).toHaveBeenLastCalledWith("get_gemini_shared_settings");
+    await api.preview(config, request.id);
+    expect(invoke).toHaveBeenLastCalledWith("preview_gemini_shared_settings", {
+      config,
+      requestId: request.id,
+    });
+    await api.save(config, request);
+    expect(invoke).toHaveBeenLastCalledWith("save_gemini_shared_settings", {
+      config,
+      request,
+    });
+    await api.result(request);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "get_gemini_shared_settings_save_result",
+      { request },
+    );
+    await api.getImport();
+    expect(invoke).toHaveBeenLastCalledWith(
+      "get_gemini_shared_settings_import",
+    );
+    const fields = [["GEMINI_CLI_THEME"]];
+    await api.previewImport(fields, request.id);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "preview_gemini_shared_settings_import",
+      { fields, requestId: request.id },
+    );
+  });
+});

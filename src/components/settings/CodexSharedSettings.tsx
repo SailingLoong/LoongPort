@@ -22,6 +22,7 @@ import {
 import {
   getSharedSettingsApi,
   type SharedSettingsApp,
+  type SharedSettingsConfig,
   type SharedSettingsPreview,
   type SharedSettingsImport,
   type SharedSettingsRequest,
@@ -74,8 +75,10 @@ export function CodexSharedSettings({
   const { t } = useTranslation();
   const api = getSharedSettingsApi(app);
   const appText = `${app}SharedSettings`;
-  const [draft, setDraft] = useState("");
-  const [baseline, setBaseline] = useState("");
+  const [draft, setDraft] = useState<SharedSettingsConfig>(
+    app === "gemini" ? { env: "", settings: "" } : "",
+  );
+  const [baseline, setBaseline] = useState<SharedSettingsConfig>(draft);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -86,12 +89,16 @@ export function CodexSharedSettings({
   const [importOptions, setImportOptions] =
     useState<SharedSettingsImport | null>(null);
   const [selectedFields, setSelectedFields] = useState<number[]>([]);
-  const submittedDraft = useRef<string | null>(null);
+  const submittedDraft = useRef<SharedSettingsConfig | null>(null);
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark"),
   );
   const unresolved = !!result && unresolvedStatuses.includes(result.status);
-  dirtyRef.current = draft !== baseline;
+  const dirty =
+    typeof draft === "string" || typeof baseline === "string"
+      ? draft !== baseline
+      : draft.env !== baseline.env || draft.settings !== baseline.settings;
+  dirtyRef.current = dirty;
 
   function setOperation(value: boolean) {
     busyRef.current = value;
@@ -99,6 +106,13 @@ export function CodexSharedSettings({
   }
   function showError(code?: string) {
     setError(errorCodes.includes(code ?? "") ? code! : "generic");
+  }
+  function editDraft(value: SharedSettingsConfig) {
+    if (busyRef.current || !ready || unresolved) return;
+    setDraft(value);
+    setPreview(null);
+    setResult(null);
+    setError(null);
   }
   function discard() {
     dirtyRef.current = false;
@@ -270,6 +284,9 @@ export function CodexSharedSettings({
         <SheetBody className="space-y-4">
           <Notice title={t("codexSharedSettings.readOnlyFields")}>
             {t("codexSharedSettings.scope")}
+            {app === "gemini" && (
+              <p className="mt-2">{t("geminiSharedSettings.preservedEnv")}</p>
+            )}
           </Notice>
           {onManageMcp && (
             <Button
@@ -288,7 +305,13 @@ export function CodexSharedSettings({
           )}
           {importOptions ? (
             <Notice title={t("codexSharedSettings.import.title")}>
-              <p>{t("codexSharedSettings.import.description")}</p>
+              <p>
+                {t(
+                  app === "gemini"
+                    ? "geminiSharedSettings.importDescription"
+                    : "codexSharedSettings.import.description",
+                )}
+              </p>
               {importOptions.fields.length === 0 ? (
                 <p className="mt-2">{t("codexSharedSettings.import.empty")}</p>
               ) : (
@@ -355,32 +378,48 @@ export function CodexSharedSettings({
               {t("codexSharedSettings.import.open")}
             </Button>
           )}
-          <JsonEditor
-            ariaLabel={t(`${appText}.editor`)}
-            value={draft}
-            onChange={(value) => {
-              if (busyRef.current || !ready || unresolved) return;
-              setDraft(value);
-              setPreview(null);
-              setResult(null);
-              setError(null);
-            }}
-            language={app === "claude" ? "json" : "javascript"}
-            showFormat={false}
-            showValidation={false}
-            redactErrors
-            darkMode={darkMode}
-            rows={16}
-            readOnly={!ready || busy || unresolved}
-          />
+          {typeof draft === "string" ? (
+            <JsonEditor
+              ariaLabel={t(`${appText}.editor`)}
+              value={draft}
+              onChange={editDraft}
+              language={app === "claude" ? "json" : "javascript"}
+              showFormat={false}
+              showValidation={false}
+              redactErrors
+              darkMode={darkMode}
+              rows={16}
+              readOnly={!ready || busy || unresolved}
+            />
+          ) : (
+            (["env", "settings"] as const).map((field) => (
+              <div key={field} className="space-y-2">
+                <p className="text-sm font-medium">
+                  {t(`geminiSharedSettings.${field}Editor`)}
+                </p>
+                <JsonEditor
+                  ariaLabel={t(`geminiSharedSettings.${field}Editor`)}
+                  value={draft[field]}
+                  onChange={(value) => editDraft({ ...draft, [field]: value })}
+                  language={field === "env" ? "javascript" : "json"}
+                  showFormat={false}
+                  showValidation={false}
+                  redactErrors
+                  darkMode={darkMode}
+                  rows={8}
+                  readOnly={!ready || busy || unresolved}
+                />
+              </div>
+            ))
+          )}
           <NoticeSlot>
             {busy && <Notice title={t("common.loading")} />}
             {error && (
               <Notice
                 tone="warning"
                 title={t(
-                  app === "claude" && error === "invalidFormat"
-                    ? "claudeSharedSettings.invalidFormat"
+                  app !== "codex" && error === "invalidFormat"
+                    ? `${appText}.invalidFormat`
                     : `codexSharedSettings.error.${error}`,
                 )}
               />
@@ -401,10 +440,34 @@ export function CodexSharedSettings({
                   count: preview.changes.length,
                 })}
               >
+                {app === "gemini" && (
+                  <ul
+                    className="mb-3 space-y-1"
+                    aria-label={t("geminiSharedSettings.files.title")}
+                  >
+                    {preview.files.map((file) => (
+                      <li key={file.role}>
+                        <span className="font-medium">
+                          {t(`geminiSharedSettings.files.${file.role}`)}
+                        </span>
+                        <span className="ms-2">
+                          {t(`geminiSharedSettings.files.${file.change}`)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <ul className="space-y-3">
                   {preview.changes.map((change) => (
-                    <li key={change.field}>
+                    <li
+                      key={`${"role" in change ? change.role : ""}:${change.field}`}
+                    >
                       <p>
+                        {"role" in change && (
+                          <span className="me-2 font-medium">
+                            {t(`geminiSharedSettings.files.${change.role}`)}
+                          </span>
+                        )}
                         <span className="font-medium">{change.field}</span>
                         <span className="ms-2">
                           {t(
@@ -465,7 +528,7 @@ export function CodexSharedSettings({
           </Button>
           <Button
             variant="outline"
-            disabled={!ready || busy || unresolved || draft === baseline}
+            disabled={!ready || busy || unresolved || !dirty}
             onClick={() => void previewChanges()}
           >
             {t("codexSharedSettings.preview")}

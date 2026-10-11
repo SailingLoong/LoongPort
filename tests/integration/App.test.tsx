@@ -378,7 +378,7 @@ describe("App integration with MSW", () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
 
-  async function openSharedDraft(app: "codex" | "claude" = "codex") {
+  async function openSharedDraft(app: "codex" | "claude" | "gemini" = "codex") {
     workspaceHarness.real = true;
     localStorage.setItem(
       LAST_APP_STORAGE_KEY,
@@ -394,9 +394,14 @@ describe("App integration with MSW", () => {
           app,
           status: "ready",
           config:
-            app === "codex"
-              ? 'approval_policy = "on-request"'
-              : '{"permissions":{"defaultMode":"default"}}',
+            app === "gemini"
+              ? {
+                  env: 'GEMINI_CLI_THEME="default"',
+                  settings: '{"ui":{"theme":"default"}}',
+                }
+              : app === "codex"
+                ? 'approval_policy = "on-request"'
+                : '{"permissions":{"defaultMode":"default"}}',
           originalSave: null,
         }),
       ),
@@ -409,21 +414,28 @@ describe("App integration with MSW", () => {
       await screen.findByRole("button", { name: `${app}SharedSettings.title` }),
     );
     const editor = await screen.findByRole("textbox", {
-      name: `${app}SharedSettings.editor`,
+      name:
+        app === "gemini"
+          ? "geminiSharedSettings.settingsEditor"
+          : `${app}SharedSettings.editor`,
     });
     await waitFor(() =>
       expect(editor).toHaveValue(
-        app === "codex"
-          ? 'approval_policy = "on-request"'
-          : '{"permissions":{"defaultMode":"default"}}',
+        app === "gemini"
+          ? '{"ui":{"theme":"default"}}'
+          : app === "codex"
+            ? 'approval_policy = "on-request"'
+            : '{"permissions":{"defaultMode":"default"}}',
       ),
     );
     fireEvent.change(editor, {
       target: {
         value:
-          app === "codex"
-            ? 'approval_policy = "never"'
-            : '{"permissions":{"defaultMode":"plan"}}',
+          app === "gemini"
+            ? '{"ui":{"theme":"dark"}}'
+            : app === "codex"
+              ? 'approval_policy = "never"'
+              : '{"permissions":{"defaultMode":"plan"}}',
       },
     });
     return { resources, editor };
@@ -452,7 +464,7 @@ describe("App integration with MSW", () => {
     );
   });
 
-  it.each(["codex", "claude"] as const)(
+  it.each(["codex", "claude", "gemini"] as const)(
     "opens existing MCP resources for %s after shared draft confirmation",
     async (app) => {
       await openSharedDraft(app);

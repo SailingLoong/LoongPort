@@ -396,6 +396,7 @@ pub enum SaveScope {
     Provider,
     CodexSharedSettings,
     ClaudeSharedSettings,
+    GeminiSharedSettings,
 }
 impl SaveScope {
     fn is_provider(&self) -> bool {
@@ -433,9 +434,9 @@ impl SaveRequest {
                     .provider_id
                     .as_ref()
                     .is_none_or(|id| id.trim().is_empty()),
-                SaveScope::CodexSharedSettings | SaveScope::ClaudeSharedSettings => {
-                    self.provider_id.is_some()
-                }
+                SaveScope::CodexSharedSettings
+                | SaveScope::ClaudeSharedSettings
+                | SaveScope::GeminiSharedSettings => self.provider_id.is_some(),
             }
             || !digest(&self.draft_digest)
             || !digest(&self.revision)

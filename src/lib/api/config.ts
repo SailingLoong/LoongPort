@@ -99,7 +99,27 @@ export async function extractCommonConfigSnippet(
   return invoke<string>("extract_common_config_snippet", args);
 }
 
-export type SharedSettingsApp = "codex" | "claude";
+export type SharedSettingsApp = "codex" | "claude" | "gemini";
+
+export interface GeminiSharedSettingsConfig {
+  env: string;
+  settings: string;
+}
+export type SharedSettingsConfig<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> = App extends "gemini" ? GeminiSharedSettingsConfig : string;
+export type SharedSettingsFileRole<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> = App extends "gemini"
+  ? "geminiEnv" | "geminiSettings"
+  : App extends "codex"
+    ? "codexConfig"
+    : "claudeSettings";
+type SharedSettingsChange<App extends SharedSettingsApp> = {
+  field: string;
+  before?: string;
+  after?: string;
+} & (App extends "gemini" ? { role: SharedSettingsFileRole<App> } : {});
 
 export interface SharedSettingsRequest<
   App extends SharedSettingsApp = SharedSettingsApp,
@@ -134,7 +154,7 @@ export interface SharedSettingsSnapshot<
 > {
   app: App;
   status: "ready" | "blocked";
-  config: string;
+  config: SharedSettingsConfig<App>;
   originalSave: SharedSettingsResult<App> | null;
   code?: string;
 }
@@ -145,9 +165,9 @@ export interface SharedSettingsPreview<
   app: App;
   request: SharedSettingsRequest<App>;
   status: "ready" | "blocked";
-  changes: { field: string; before?: string; after?: string }[];
+  changes: SharedSettingsChange<App>[];
   files: {
-    role: App extends "codex" ? "codexConfig" : "claudeSettings";
+    role: SharedSettingsFileRole<App>;
     change: "write" | "unchanged";
   }[];
   code?: string;
@@ -165,20 +185,23 @@ export interface SharedSettingsImport<
 export interface SharedSettingsImportPreview<
   App extends SharedSettingsApp = SharedSettingsApp,
 > extends SharedSettingsPreview<App> {
-  config: string;
+  config: SharedSettingsConfig<App>;
 }
 
-/** Both editors echo backend text and receipts; neither parses business values. */
+/** All editors echo backend text and receipts without parsing business values. */
 export function getSharedSettingsApi<App extends SharedSettingsApp>(app: App) {
   return {
     get: () =>
       invoke<SharedSettingsSnapshot<App>>(`get_${app}_shared_settings`),
-    preview: (config: string, requestId: string) =>
+    preview: (config: SharedSettingsConfig<App>, requestId: string) =>
       invoke<SharedSettingsPreview<App>>(`preview_${app}_shared_settings`, {
         config,
         requestId,
       }),
-    save: (config: string, request: SharedSettingsRequest<App>) =>
+    save: (
+      config: SharedSettingsConfig<App>,
+      request: SharedSettingsRequest<App>,
+    ) =>
       invoke<SharedSettingsResult<App>>(`save_${app}_shared_settings`, {
         config,
         request,

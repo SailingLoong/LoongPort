@@ -1032,12 +1032,15 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
                     return Err(invalid_pending());
                 }
             }
-            state::SaveScope::CodexSharedSettings | state::SaveScope::ClaudeSharedSettings => {
+            state::SaveScope::CodexSharedSettings
+            | state::SaveScope::ClaudeSharedSettings
+            | state::SaveScope::GeminiSharedSettings => {
                 let mut effects = target.clone();
                 effects.save_request = None;
                 let expected_app = match request.scope {
                     state::SaveScope::CodexSharedSettings => "codex",
                     state::SaveScope::ClaudeSharedSettings => "claude",
+                    state::SaveScope::GeminiSharedSettings => "gemini",
                     state::SaveScope::Provider => unreachable!(),
                 };
                 if app != expected_app || !effects.is_empty() {

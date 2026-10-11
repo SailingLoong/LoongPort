@@ -9,6 +9,9 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
+mod gemini;
+pub use gemini::GeminiSharedDraft;
+
 const MAX_BACKUPS: usize = 10;
 
 /// 配置导入导出相关业务逻辑
@@ -587,43 +590,65 @@ fn shared_item_value(item: &toml_edit::Item) -> Result<toml::Value, AppError> {
         .map(|value| value["value"].clone())
         .map_err(|_| shared_problem("invalidFormat"))
 }
-// The two existing shared editors reuse the transaction and receipt, while
+// Shared editors reuse the transaction and receipt, while
 // each native format retains its own field projection and patch implementation.
 #[derive(Clone, Copy)]
 enum SharedApp {
     Codex,
     Claude,
+    Gemini,
 }
 impl SharedApp {
     fn kind(self) -> AppType {
         match self {
             Self::Codex => AppType::Codex,
             Self::Claude => AppType::Claude,
+            Self::Gemini => AppType::Gemini,
         }
     }
     fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Gemini => "gemini",
         }
     }
     fn scope(self) -> crate::mode::state::SaveScope {
         match self {
             Self::Codex => crate::mode::state::SaveScope::CodexSharedSettings,
             Self::Claude => crate::mode::state::SaveScope::ClaudeSharedSettings,
+            Self::Gemini => crate::mode::state::SaveScope::GeminiSharedSettings,
         }
     }
-    fn file(self) -> crate::live::engine::LiveFile {
-        crate::live::engine::LiveFile::private(match self {
-            Self::Codex => crate::codex_config::get_codex_config_path(),
-            Self::Claude => crate::config::get_claude_settings_path(),
-        })
-    }
-    fn role(self) -> &'static str {
-        match self {
-            Self::Codex => "codexConfig",
-            Self::Claude => "claudeSettings",
-        }
+    fn sources(self) -> Result<Vec<SharedSource>, AppError> {
+        use crate::live::engine::{read_current, LiveFile};
+        let files = match self {
+            Self::Codex => vec![(
+                "codexConfig",
+                LiveFile::private(crate::codex_config::get_codex_config_path()),
+            )],
+            Self::Claude => vec![(
+                "claudeSettings",
+                LiveFile::private(crate::config::get_claude_settings_path()),
+            )],
+            Self::Gemini => vec![
+                (
+                    "geminiEnv",
+                    LiveFile::private(crate::gemini_config::get_gemini_env_path()),
+                ),
+                (
+                    "geminiSettings",
+                    LiveFile::shared(crate::gemini_config::get_gemini_settings_path()),
+                ),
+            ],
+        };
+        files
+            .into_iter()
+            .map(|(role, file)| {
+                let pre = read_current(&file.path)?;
+                Ok(SharedSource { role, file, pre })
+            })
+            .collect()
     }
     fn config_text(self, bytes: Option<&[u8]>) -> Result<String, AppError> {
         match self {
@@ -632,13 +657,67 @@ impl SharedApp {
                     .map_err(|_| shared_problem("invalidFormat"))?,
             )?),
             Self::Claude => {
-                let mut value = claude_shared_parse(&self.file().path, bytes)?;
-                claude_shared_projection(&mut value, &[]);
+                let mut value =
+                    claude_shared_parse(&crate::config::get_claude_settings_path(), bytes)?;
+                claude_shared_projection(&mut value, &[], claude_shared_field_allowed);
                 serde_json::to_string_pretty(&value).map_err(|_| shared_problem("invalidFormat"))
+            }
+            Self::Gemini => Err(shared_problem("invalidFormat")),
+        }
+    }
+}
+struct SharedSource {
+    role: &'static str,
+    file: crate::live::engine::LiveFile,
+    pre: Option<Vec<u8>>,
+}
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum SharedDraft {
+    Text(String),
+    Gemini(GeminiSharedDraft),
+}
+impl SharedDraft {
+    fn encoded(&self) -> Result<String, AppError> {
+        match self {
+            Self::Text(text) => Ok(text.clone()),
+            Self::Gemini(draft) => {
+                serde_json::to_string(draft).map_err(|_| shared_problem("invalidFormat"))
             }
         }
     }
 }
+struct SharedPlan {
+    request: crate::mode::state::SaveRequest,
+    files: Vec<(
+        &'static str,
+        crate::live::engine::LiveFile,
+        crate::live::patch::Guarded,
+    )>,
+    changes: Vec<Value>,
+}
+impl SharedPlan {
+    fn preview(&self, app: SharedApp) -> Value {
+        let files: Vec<_> = self.files.iter().map(|(role,_,patch)| {
+            let post = match &patch.then {
+                crate::live::patch::WholeFile::Write(bytes) => Some(bytes.as_slice()),
+                crate::live::patch::WholeFile::Delete => None,
+            };
+            serde_json::json!({"role":role,"change":if crate::live::engine::digest(post)==patch.expected_pre {"unchanged"}else{"write"}})
+        }).collect();
+        serde_json::json!({"app":app.name(),"request":self.request,"status":"ready","changes":self.changes,"files":files})
+    }
+}
+fn shared_draft(app: SharedApp, sources: &[SharedSource]) -> Result<SharedDraft, AppError> {
+    if matches!(app, SharedApp::Gemini) {
+        Ok(SharedDraft::Gemini(gemini::read(sources)?))
+    } else {
+        Ok(SharedDraft::Text(
+            app.config_text(sources[0].pre.as_deref())?,
+        ))
+    }
+}
+
 fn shared_result(
     app: SharedApp,
     request: &crate::mode::state::SaveRequest,
@@ -714,23 +793,33 @@ fn shared_query(
 fn shared_plan(
     app: SharedApp,
     state: &crate::store::AppState,
-    config: &str,
+    config: &SharedDraft,
     id: &str,
-) -> Result<
-    (
-        crate::mode::state::SaveRequest,
-        crate::live::engine::LiveFile,
-        crate::live::patch::Guarded,
-        Vec<Value>,
-    ),
-    AppError,
-> {
-    use crate::live::engine;
+) -> Result<SharedPlan, AppError> {
     let _admission =
         crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
-    let file = app.file();
-    let pre = engine::read_current(&file.path)?;
-    plan_shared_source(app, config, id, file, pre)
+    shared_plan_sources(app, config, id, app.sources()?)
+}
+fn shared_plan_sources(
+    app: SharedApp,
+    config: &SharedDraft,
+    id: &str,
+    mut sources: Vec<SharedSource>,
+) -> Result<SharedPlan, AppError> {
+    match (app, config) {
+        (SharedApp::Gemini, SharedDraft::Gemini(draft)) => gemini::plan(draft, id, sources),
+        (SharedApp::Codex | SharedApp::Claude, SharedDraft::Text(text)) => {
+            let source = sources.remove(0);
+            let (request, file, patch, changes) =
+                plan_shared_source(app, text, id, source.file, source.pre)?;
+            Ok(SharedPlan {
+                request,
+                files: vec![(source.role, file, patch)],
+                changes,
+            })
+        }
+        _ => Err(shared_problem("invalidFormat")),
+    }
 }
 
 // Both editors plan from one observed file version; importing must not seed
@@ -918,41 +1007,52 @@ fn claude_shared_key_allowed(path: &[String]) -> bool {
         _ => true,
     }
 }
-fn claude_shared_value_allowed(value: &Value, path: &[String]) -> bool {
-    if !claude_shared_key_allowed(path) || (path == ["env"] && !value.is_object()) {
+fn claude_shared_field_allowed(path: &[String], value: &Value) -> bool {
+    claude_shared_key_allowed(path) && (path != ["env"] || value.is_object())
+}
+fn claude_shared_value_allowed(
+    value: &Value,
+    path: &[String],
+    allowed: fn(&[String], &Value) -> bool,
+) -> bool {
+    if !allowed(path, value) {
         return false;
     }
     match value {
         Value::Object(map) => map.iter().all(|(key, value)| {
             let mut child = path.to_vec();
             child.push(key.clone());
-            claude_shared_value_allowed(value, &child)
+            claude_shared_value_allowed(value, &child, allowed)
         }),
         Value::Array(array) => array
             .iter()
-            .all(|value| claude_shared_value_allowed(value, path)),
+            .all(|value| claude_shared_value_allowed(value, path, allowed)),
         _ => true,
     }
 }
-fn claude_shared_projection(value: &mut Value, path: &[String]) {
+fn claude_shared_projection(
+    value: &mut Value,
+    path: &[String],
+    allowed: fn(&[String], &Value) -> bool,
+) {
     if let Some(map) = value.as_object_mut() {
         for key in map.keys().cloned().collect::<Vec<_>>() {
             let mut child = path.to_vec();
             child.push(key.clone());
             let item = map.get_mut(&key).unwrap();
-            if !claude_shared_key_allowed(&child) || (child == ["env"] && !item.is_object()) {
+            if !allowed(&child, item) {
                 map.shift_remove(&key);
                 continue;
             }
             if item.is_object() {
                 let was_empty = item.as_object().unwrap().is_empty();
-                claude_shared_projection(item, &child);
+                claude_shared_projection(item, &child, allowed);
                 // An object emptied by redaction is not an editable empty object:
                 // removing it from a draft must not remove its protected children.
                 if !was_empty && item.as_object().unwrap().is_empty() {
                     map.shift_remove(&key);
                 }
-            } else if !claude_shared_value_allowed(item, &child) {
+            } else if !claude_shared_value_allowed(item, &child, allowed) {
                 map.shift_remove(&key);
             }
         }
@@ -962,8 +1062,9 @@ fn claude_shared_fields(
     value: &Value,
     path: &[String],
     fields: &mut std::collections::BTreeMap<Vec<String>, Value>,
+    allowed: fn(&[String], &Value) -> bool,
 ) -> Result<(), AppError> {
-    if !claude_shared_value_allowed(value, path) {
+    if !claude_shared_value_allowed(value, path, allowed) {
         return Err(shared_problem("readOnlyFields"));
     }
     if let Some(map) = value
@@ -973,7 +1074,7 @@ fn claude_shared_fields(
         for (key, value) in map {
             let mut child = path.to_vec();
             child.push(key.clone());
-            claude_shared_fields(value, &child, fields)?;
+            claude_shared_fields(value, &child, fields, allowed)?;
         }
     } else {
         fields.insert(path.to_vec(), value.clone());
@@ -991,10 +1092,13 @@ fn claude_import_fields(
     let Some(text) = shared_import_snippet(SharedApp::Claude, state)? else {
         return Ok(Default::default());
     };
-    let mut value = claude_shared_parse(&SharedApp::Claude.file().path, Some(text.as_bytes()))?;
-    claude_shared_projection(&mut value, &[]);
+    let mut value = claude_shared_parse(
+        &crate::config::get_claude_settings_path(),
+        Some(text.as_bytes()),
+    )?;
+    claude_shared_projection(&mut value, &[], claude_shared_field_allowed);
     let mut fields = Default::default();
-    claude_shared_fields(&value, &[], &mut fields)?;
+    claude_shared_fields(&value, &[], &mut fields, claude_shared_field_allowed)?;
     Ok(fields)
 }
 fn claude_path_missing(value: &Value, path: &[String]) -> bool {
@@ -1028,6 +1132,27 @@ fn plan_shared_source(
     if matches!(app, SharedApp::Codex) {
         return shared_plan_from_source(config, id, file, pre);
     }
+    use crate::live::engine;
+    let mut request = shared_request(app, config, id)?;
+    let (patch, changes) = shared_json_patch(
+        &file,
+        pre.as_deref(),
+        config,
+        claude_shared_field_allowed,
+        false,
+    )?;
+    let source = serde_json::to_vec(&(app.scope(), &file.path, engine::digest(pre.as_deref())))
+        .map_err(|_| shared_problem("invalidFormat"))?;
+    request.revision = engine::sha256_hex(&source);
+    Ok((request, file, patch, changes))
+}
+fn shared_json_patch(
+    file: &crate::live::engine::LiveFile,
+    pre: Option<&[u8]>,
+    config: &str,
+    allowed: fn(&[String], &Value) -> bool,
+    preserve_unchanged: bool,
+) -> Result<(crate::live::patch::Guarded, Vec<Value>), AppError> {
     use crate::live::{
         engine,
         patch::{
@@ -1035,21 +1160,20 @@ fn plan_shared_source(
             Guarded, KeyPath, LivePatch, WholeFile,
         },
     };
-    let mut request = shared_request(app, config, id)?;
-    let full = claude_shared_parse(&file.path, pre.as_deref())?;
+    let full = claude_shared_parse(&file.path, pre)?;
     let mut before = full.clone();
-    claude_shared_projection(&mut before, &[]);
+    claude_shared_projection(&mut before, &[], allowed);
     let after = claude_shared_parse(&file.path, Some(config.as_bytes()))?;
     let mut old = std::collections::BTreeMap::new();
     let mut new = std::collections::BTreeMap::new();
-    claude_shared_fields(&before, &[], &mut old)?;
-    claude_shared_fields(&after, &[], &mut new)?;
+    claude_shared_fields(&before, &[], &mut old, allowed)?;
+    claude_shared_fields(&after, &[], &mut new, allowed)?;
     let mut patch = JsonPatch::default();
     let mut changes = std::collections::BTreeMap::new();
     for (path, value) in &new {
         if old.get(path) != Some(value) {
             if value_at(&full, &KeyPath(path.clone()))
-                .is_some_and(|value| !claude_shared_value_allowed(value, path))
+                .is_some_and(|value| !claude_shared_value_allowed(value, path, allowed))
             {
                 return Err(shared_problem("readOnlyFields"));
             }
@@ -1068,18 +1192,19 @@ fn plan_shared_source(
             serde_json::json!({"field":path.join("."),"before":value.to_string()}),
         );
     }
-    let bytes = patch
-        .apply(&file.path, pre.as_deref())
-        .map_err(|_| shared_problem("invalidFormat"))?;
-    let source = serde_json::to_vec(&(app.scope(), &file.path, engine::digest(pre.as_deref())))
-        .map_err(|_| shared_problem("invalidFormat"))?;
-    request.revision = engine::sha256_hex(&source);
+    let then = if preserve_unchanged && changes.is_empty() {
+        pre.map_or(WholeFile::Delete, |bytes| WholeFile::Write(bytes.to_vec()))
+    } else {
+        WholeFile::Write(
+            patch
+                .apply(&file.path, pre)
+                .map_err(|_| shared_problem("invalidFormat"))?,
+        )
+    };
     Ok((
-        request,
-        file,
         Guarded {
-            expected_pre: engine::digest(pre.as_deref()),
-            then: WholeFile::Write(bytes),
+            expected_pre: engine::digest(pre),
+            then,
         },
         changes.into_values().collect(),
     ))
@@ -1095,7 +1220,8 @@ impl ConfigService {
         let read = || -> Result<Vec<Value>, AppError> {
             let _admission =
                 crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
-            let bytes = crate::live::engine::read_current(&app.file().path)?;
+            let sources = app.sources()?;
+            let bytes = &sources[0].pre;
             match app {
                 SharedApp::Codex => {
                     let doc = shared_parse(
@@ -1106,10 +1232,11 @@ impl ConfigService {
                       .map(|(path,value)|Ok(serde_json::json!({"field":path.join("."),"path":path,"value":shared_item_value(&value)?.to_string()}))).collect()
                 }
                 SharedApp::Claude => {
-                    let doc = claude_shared_parse(&app.file().path, bytes.as_deref())?;
+                    let doc = claude_shared_parse(&sources[0].file.path, bytes.as_deref())?;
                     Ok(claude_import_fields(state)?.into_iter().filter(|(path,_)|claude_path_missing(&doc,path))
                       .map(|(path,value)|serde_json::json!({"field":path.join("."),"path":path,"value":value.to_string()})).collect())
                 }
+                SharedApp::Gemini => gemini::import_fields(state, &sources),
             }
         };
         Ok(match read() {
@@ -1125,18 +1252,25 @@ impl ConfigService {
         fields: &[Vec<String>],
         id: &str,
     ) -> Result<Value, AppError> {
-        use crate::live::{
-            engine,
-            patch::{toml::TomlPatch, KeyPath, LivePatch},
-        };
+        use crate::live::patch::{toml::TomlPatch, KeyPath, LivePatch};
         let request = shared_request(app, "", id)?;
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
         let plan = || -> Result<Value, AppError> {
             let _admission =
                 crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
-            let file = app.file();
-            let pre = engine::read_current(&file.path)?;
+            let mut sources = app.sources()?;
+            if matches!(app, SharedApp::Gemini) {
+                let draft = gemini::seed(state, &sources, fields)?;
+                let plan = gemini::plan(&draft, id, sources)?;
+                let mut value = plan.preview(app);
+                value["config"] =
+                    serde_json::to_value(draft).map_err(|_| shared_problem("invalidFormat"))?;
+                return Ok(value);
+            }
+            let source = sources.remove(0);
+            let file = source.file;
+            let pre = source.pre;
             let config = match app {
                 SharedApp::Codex => {
                     let full = shared_parse(
@@ -1175,14 +1309,17 @@ impl ConfigService {
                         .map_err(|_| shared_problem("invalidFormat"))?;
                     app.config_text(Some(&bytes))?
                 }
+                SharedApp::Gemini => unreachable!(),
             };
-            let (request, _, patch, changes) = plan_shared_source(app, &config, id, file, pre)?;
-            let crate::live::patch::WholeFile::Write(bytes) = patch.then else {
-                unreachable!()
-            };
-            Ok(
-                serde_json::json!({"app":app.name(),"request":request,"status":"ready","config":config,"changes":changes,"files":[{"role":app.role(),"change":if engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]}),
-            )
+            let (request, file, patch, changes) = plan_shared_source(app, &config, id, file, pre)?;
+            let mut value = SharedPlan {
+                request,
+                files: vec![(source.role, file, patch)],
+                changes,
+            }
+            .preview(app);
+            value["config"] = serde_json::json!(config);
+            Ok(value)
         };
         Ok(match plan() {
             Ok(value) => value,
@@ -1201,11 +1338,10 @@ impl ConfigService {
             .ok()
             .flatten()
             .map(|(request, status)| shared_result(app, &request, status, None));
-        let read = || -> Result<String, AppError> {
+        let read = || -> Result<SharedDraft, AppError> {
             let _admission =
                 crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
-            let bytes = crate::live::engine::read_current(&app.file().path)?;
-            app.config_text(bytes.as_deref())
+            shared_draft(app, &app.sources()?)
         };
         Ok(match read() {
             Ok(config) => {
@@ -1219,19 +1355,14 @@ impl ConfigService {
     fn preview_shared_settings(
         app: SharedApp,
         state: &crate::store::AppState,
-        config: &str,
+        config: &SharedDraft,
         id: &str,
     ) -> Result<Value, AppError> {
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
-        let request = shared_request(app, config, id)?;
+        let request = shared_request(app, &config.encoded()?, id)?;
         Ok(match shared_plan(app, state, config, id) {
-            Ok((request, _, patch, changes)) => {
-                let crate::live::patch::WholeFile::Write(bytes) = patch.then else {
-                    unreachable!()
-                };
-                serde_json::json!({"app":app.name(),"request":request,"status":"ready","changes":changes,"files":[{"role":app.role(),"change":if crate::live::engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]})
-            }
+            Ok(plan) => plan.preview(app),
             Err(error) => {
                 serde_json::json!({"app":app.name(),"request":request,"status":"blocked","changes":[],"files":[],"code":shared_code(&error)})
             }
@@ -1240,7 +1371,7 @@ impl ConfigService {
     fn save_shared_settings(
         app: SharedApp,
         state: &crate::store::AppState,
-        config: &str,
+        config: &SharedDraft,
         request: crate::mode::state::SaveRequest,
     ) -> Result<Value, AppError> {
         use crate::mode::{
@@ -1249,7 +1380,7 @@ impl ConfigService {
         };
         request.validate()?;
         if request.scope != app.scope()
-            || request.draft_digest != crate::live::engine::sha256_hex(config.as_bytes())
+            || request.draft_digest != crate::live::engine::sha256_hex(config.encoded()?.as_bytes())
         {
             return Ok(shared_result(app, &request, "conflict", None));
         }
@@ -1269,7 +1400,7 @@ impl ConfigService {
         if !matches!(previous["status"].as_str(), Some("notRecorded" | "unknown")) {
             return Ok(previous);
         }
-        let (planned, file, patch, _) = match shared_plan(app, state, config, &request.id) {
+        let plan = match shared_plan(app, state, config, &request.id) {
             Ok(plan) => plan,
             Err(error) => {
                 return Ok(shared_result(
@@ -1280,17 +1411,21 @@ impl ConfigService {
                 ))
             }
         };
-        if planned.revision != request.revision {
+        if plan.request.revision != request.revision {
             return Ok(shared_result(app, &request, "stale", Some("sourceChanged")));
         }
         let saved = (|| {
             let write = AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
             write.run(
                 op::APPLY,
-                &[FileChange {
-                    file,
-                    patch: &patch,
-                }],
+                &plan
+                    .files
+                    .iter()
+                    .map(|(_, file, patch)| FileChange {
+                        file: file.clone(),
+                        patch,
+                    })
+                    .collect::<Vec<_>>(),
                 PendingTarget {
                     save_request: Some(request.clone()),
                     ..Default::default()
@@ -1331,14 +1466,24 @@ impl ConfigService {
         config: &str,
         id: &str,
     ) -> Result<Value, AppError> {
-        Self::preview_shared_settings(SharedApp::Codex, state, config, id)
+        Self::preview_shared_settings(
+            SharedApp::Codex,
+            state,
+            &SharedDraft::Text(config.into()),
+            id,
+        )
     }
     pub(crate) fn save_codex_shared_settings(
         state: &crate::store::AppState,
         config: &str,
         request: crate::mode::state::SaveRequest,
     ) -> Result<Value, AppError> {
-        Self::save_shared_settings(SharedApp::Codex, state, config, request)
+        Self::save_shared_settings(
+            SharedApp::Codex,
+            state,
+            &SharedDraft::Text(config.into()),
+            request,
+        )
     }
     pub(crate) fn query_codex_shared_settings_save(
         state: &crate::store::AppState,
@@ -1368,14 +1513,24 @@ impl ConfigService {
         config: &str,
         id: &str,
     ) -> Result<Value, AppError> {
-        Self::preview_shared_settings(SharedApp::Claude, state, config, id)
+        Self::preview_shared_settings(
+            SharedApp::Claude,
+            state,
+            &SharedDraft::Text(config.into()),
+            id,
+        )
     }
     pub(crate) fn save_claude_shared_settings(
         state: &crate::store::AppState,
         config: &str,
         request: crate::mode::state::SaveRequest,
     ) -> Result<Value, AppError> {
-        Self::save_shared_settings(SharedApp::Claude, state, config, request)
+        Self::save_shared_settings(
+            SharedApp::Claude,
+            state,
+            &SharedDraft::Text(config.into()),
+            request,
+        )
     }
     pub(crate) fn query_claude_shared_settings_save(
         state: &crate::store::AppState,
@@ -1394,6 +1549,53 @@ impl ConfigService {
         id: &str,
     ) -> Result<Value, AppError> {
         Self::preview_shared_settings_import(SharedApp::Claude, state, fields, id)
+    }
+    pub(crate) fn read_gemini_shared_settings(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings(SharedApp::Gemini, state)
+    }
+    pub(crate) fn preview_gemini_shared_settings(
+        state: &crate::store::AppState,
+        config: &GeminiSharedDraft,
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings(
+            SharedApp::Gemini,
+            state,
+            &SharedDraft::Gemini(config.clone()),
+            id,
+        )
+    }
+    pub(crate) fn save_gemini_shared_settings(
+        state: &crate::store::AppState,
+        config: &GeminiSharedDraft,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        Self::save_shared_settings(
+            SharedApp::Gemini,
+            state,
+            &SharedDraft::Gemini(config.clone()),
+            request,
+        )
+    }
+    pub(crate) fn query_gemini_shared_settings_save(
+        state: &crate::store::AppState,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        Self::query_shared_settings_save(SharedApp::Gemini, state, request)
+    }
+    pub(crate) fn read_gemini_shared_settings_import(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings_import(SharedApp::Gemini, state)
+    }
+    pub(crate) fn preview_gemini_shared_settings_import(
+        state: &crate::store::AppState,
+        fields: &[Vec<String>],
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings_import(SharedApp::Gemini, state, fields, id)
     }
 }
 

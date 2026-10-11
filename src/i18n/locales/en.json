@@ -4717,5 +4717,22 @@
     "manageMcp": "Manage Claude Code MCP in extension resources",
     "editor": "Shared content (JSON)",
     "invalidFormat": "Invalid JSON. Edit the content and preview again."
+  },
+  "geminiSharedSettings": {
+    "title": "Gemini CLI shared settings",
+    "description": "Edit shared .env and settings.json fields without switching the current configuration.",
+    "manageMcp": "Manage Gemini CLI MCP in extension resources",
+    "envEditor": "Shared environment (.env)",
+    "settingsEditor": "Shared settings (settings.json)",
+    "preservedEnv": "Environment values with expansions or unknown syntax are hidden and preserved in the original file.",
+    "importDescription": "Import only selected missing ordinary .env fields. The backend reads both live files again; settings.json is not imported from the legacy snippet. Review both drafts before saving.",
+    "invalidFormat": "Invalid .env or JSON content. Edit the content and preview again.",
+    "files": {
+      "title": "File change preview",
+      "geminiEnv": ".env",
+      "geminiSettings": "settings.json",
+      "write": "Will write",
+      "unchanged": "Unchanged"
+    }
   }
 }

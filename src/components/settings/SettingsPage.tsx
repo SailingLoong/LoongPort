@@ -70,6 +70,7 @@ interface SettingsDialogProps {
   ref?: Ref<CodexSharedSettingsHandle>;
   onManageCodexMcp?: () => void;
   onManageClaudeMcp?: () => void;
+  onManageGeminiMcp?: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImportSuccess?: () => void | Promise<void>;
@@ -81,6 +82,7 @@ export function SettingsPage({
   ref,
   onManageCodexMcp,
   onManageClaudeMcp,
+  onManageGeminiMcp,
   open,
   onOpenChange,
   onImportSuccess,
@@ -121,7 +123,7 @@ export function SettingsPage({
   } = useImportExport({ onImportSuccess });
 
   const [sharedSettingsApp, setSharedSettingsApp] = useState<
-    "codex" | "claude" | null
+    "codex" | "claude" | "gemini" | null
   >(null);
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
@@ -275,7 +277,7 @@ export function SettingsPage({
                     />
                     {/* skill 存储位置 / 同步方式两块已挪去 skills 管理页就近
                         （改它们的场景是「在管 skills 的时候」）。 */}
-                    {(["codex", "claude"] as const).map((app) => (
+                    {(["codex", "claude", "gemini"] as const).map((app) => (
                       <div key={app} className="space-y-2">
                         <Button
                           variant="outline"
@@ -576,9 +578,11 @@ export function SettingsPage({
           ref={ref}
           onClose={() => setSharedSettingsApp(null)}
           onManageMcp={
-            sharedSettingsApp === "claude"
-              ? onManageClaudeMcp
-              : onManageCodexMcp
+            sharedSettingsApp === "gemini"
+              ? onManageGeminiMcp
+              : sharedSettingsApp === "claude"
+                ? onManageClaudeMcp
+                : onManageCodexMcp
           }
         />
       )}
