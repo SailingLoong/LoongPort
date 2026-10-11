@@ -3998,6 +3998,9 @@
     }
   },
   "applications": {
+    "originalRequestUnresolved": "原应用请求的结果尚未确认。检查结果不会再次应用更改。",
+    "recheckOriginalRequest": "检查原请求结果",
+    "startNewRequest": "重新复核新应用",
     "routingModeDirect": "直连",
     "routingModeProxy": "代理 · 已接管",
     "routingModeDetached": "代理 · 未接管",

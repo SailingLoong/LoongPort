@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   order: vi.fn(),
   apply: vi.fn(),
+  prepare: vi.fn(),
+  query: vi.fn(),
   failover: vi.fn(),
   status: vi.fn(),
   takeover: vi.fn(),
@@ -20,6 +22,8 @@ vi.mock("@/lib/api/applicationRouting", () => ({
     get: mocks.get,
     setOrder: mocks.order,
     apply: mocks.apply,
+    prepareRequest: mocks.prepare,
+    queryRequest: mocks.query,
     setFailover: mocks.failover,
   },
 }));
@@ -51,6 +55,16 @@ beforeEach(() => {
   mocks.setTakeover.mockResolvedValue(undefined);
   mocks.failover.mockResolvedValue(undefined);
   mocks.order.mockResolvedValue(undefined);
+  mocks.prepare.mockImplementation(async (_app, _change, id) => ({
+    id,
+    scope: "applicationRouting",
+    draftDigest: "a".repeat(64),
+    revision: "b".repeat(64),
+  }));
+  mocks.query.mockImplementation(async (_app, request) => ({
+    request,
+    status: "unknown",
+  }));
 });
 describe("application routing controls", () => {
   it("reads the page without starting or reconfiguring routing", async () => {
@@ -147,7 +161,12 @@ describe("application routing controls", () => {
     await act(async () => {
       await result.current.apply(change, false);
     });
-    expect(mocks.apply).toHaveBeenLastCalledWith("codex", change, false);
+    expect(mocks.apply).toHaveBeenLastCalledWith(
+      "codex",
+      change,
+      false,
+      expect.objectContaining({ scope: "applicationRouting" }),
+    );
     for (const owner of [
       "applicationRouting",
       "applicationOverview",
@@ -217,4 +236,58 @@ describe("application routing controls", () => {
     expect(mocks.failover).not.toHaveBeenCalled();
     expect(result.current.data).toEqual(last);
   });
+});
+
+it("prepares a catalog decision before showing its confirmation and reuses the original request", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "synthetic-external",
+    afterPointer: "synthetic-external",
+  };
+  mocks.apply
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Synthetic",
+      catalog,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "switched",
+      providerName: "Synthetic",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
+  const { result } = renderHook(() => useApplicationRouting("codex"), {
+    wrapper,
+  });
+  await waitFor(() => expect(result.current.data).toBeDefined());
+  const change = { selection: { providerId: "b", model: "model-b" } };
+  await act(async () => {
+    await result.current.prepareRequest(change);
+  });
+  await act(async () => {
+    await result.current.apply(change);
+  });
+  expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  expect(mocks.prepare.mock.calls[1][2]).toEqual(
+    mocks.prepare.mock.calls[0][2],
+  );
+  await act(async () => {
+    await result.current.apply(
+      {
+        ...change,
+        catalogDecision: { choice: "keep", revision: "catalog-v1" },
+        catalogPreviewOnly: false,
+      },
+      false,
+    );
+  });
+  expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  expect(mocks.apply.mock.calls[1][3].id).toEqual(
+    mocks.apply.mock.calls[0][3].id,
+  );
 });

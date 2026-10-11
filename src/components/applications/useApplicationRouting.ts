@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -6,6 +7,8 @@ import {
   type ApplicationRoutingChange,
   type ApplicationRouting,
   type ApplicationModeState,
+  type ApplicationRoutingRequest,
+  type ApplicationRoutingRequestResult,
 } from "@/lib/api/applicationRouting";
 import { failoverApi } from "@/lib/api/failover";
 import { proxyKeys } from "@/lib/query/proxy";
@@ -19,6 +22,18 @@ import {
 } from "@/lib/api/events";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { extractErrorMessage } from "@/utils/errorUtils";
+
+function routingChangeImage(change: ApplicationRoutingChange) {
+  return JSON.stringify([
+    change.order?.profileName,
+    change.order?.providerIds,
+    change.selection?.providerId,
+    change.selection?.model,
+    change.catalogDecision?.choice,
+    change.catalogDecision?.revision,
+    change.catalogPreviewOnly === true,
+  ]);
+}
 
 function errorModeState(error: unknown): ApplicationModeState | undefined {
   if (!error || typeof error !== "object" || !("modeState" in error)) return;
@@ -41,6 +56,83 @@ export function useApplicationRouting(appId: AppId) {
   const client = useQueryClient();
   const { t } = useTranslation();
   const key = ["applicationRouting", appId];
+  const [originalResult, setOriginalResult] =
+    useState<ApplicationRoutingRequestResult | null>(null);
+  const original = useRef<{
+    change: string;
+    request: ApplicationRoutingRequest;
+  } | null>(null);
+  const [checkingRequest, setCheckingRequest] = useState(false);
+  const queryOriginal = async (request: ApplicationRoutingRequest) => {
+    try {
+      const result = await applicationRoutingApi.queryRequest(appId, request);
+      if (
+        result.request.id !== request.id ||
+        result.request.scope !== request.scope ||
+        result.request.draftDigest !== request.draftDigest ||
+        result.request.revision !== request.revision
+      )
+        throw new Error("mode.invalid_save_request");
+      setOriginalResult(result);
+      return result;
+    } catch {
+      const result: ApplicationRoutingRequestResult = {
+        request,
+        status: "unknown",
+      };
+      setOriginalResult(result);
+      return result;
+    }
+  };
+  const prepareRequest = async (change: ApplicationRoutingChange) => {
+    requireWritable();
+    if (originalResult && originalResult.status !== "completed")
+      throw new Error("mode.verification_required");
+    setCheckingRequest(true);
+    try {
+      const request = await applicationRoutingApi.prepareRequest(
+        appId,
+        change,
+        crypto.randomUUID(),
+      );
+      original.current = { change: routingChangeImage(change), request };
+      await Promise.all([
+        refresh(),
+        client.invalidateQueries({ queryKey: ["applicationOverview", appId] }),
+        client.invalidateQueries({ queryKey: ["orderProfiles", appId] }),
+      ]);
+    } finally {
+      setCheckingRequest(false);
+    }
+  };
+  const prepareCatalogConfirmation = async (
+    change: ApplicationRoutingChange,
+    result: import("@/lib/api/relay").SwitchTierCommandResult,
+  ) => {
+    if (
+      result.status !== "confirmationRequired" ||
+      !result.catalog ||
+      !original.current
+    )
+      return;
+    const current = original.current;
+    const reviewed = {
+      ...change,
+      catalogPreviewOnly: false,
+      catalogDecision: {
+        choice: result.catalog.choice,
+        revision: result.catalog.revision,
+      },
+    };
+    const request = await applicationRoutingApi.prepareRequest(
+      appId,
+      reviewed,
+      current.request.id,
+    );
+    if (request.revision !== current.request.revision)
+      throw new Error("mode.verification_required");
+    original.current = { change: routingChangeImage(reviewed), request };
+  };
   const refresh = () => client.invalidateQueries({ queryKey: key });
   useTauriEvent(PROVIDER_SWITCHED, refresh);
   useTauriEvent(PROVIDER_MODELS_UPDATED, refresh);
@@ -70,7 +162,7 @@ export function useApplicationRouting(appId: AppId) {
       description: extractErrorMessage(error),
     });
   const apply = useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       change,
       quitChatgpt,
     }: {
@@ -78,7 +170,76 @@ export function useApplicationRouting(appId: AppId) {
       quitChatgpt?: boolean;
     }) => {
       requireWritable();
-      return applicationRoutingApi.apply(appId, change, quitChatgpt);
+      if (change.catalogPreviewOnly) {
+        const result = await applicationRoutingApi.apply(
+          appId,
+          change,
+          quitChatgpt,
+        );
+        await prepareCatalogConfirmation(change, result);
+        return result;
+      }
+      if (originalResult && originalResult.status !== "completed")
+        throw new Error("mode.verification_required");
+      const image = routingChangeImage(change);
+      if (original.current && original.current.change !== image)
+        throw new Error("mode.verification_required");
+      if (!original.current) {
+        const request = await applicationRoutingApi.prepareRequest(
+          appId,
+          change,
+          crypto.randomUUID(),
+        );
+        original.current = { change: image, request };
+      }
+      const request = original.current.request;
+      try {
+        const result = await applicationRoutingApi.apply(
+          appId,
+          change,
+          quitChatgpt,
+          request,
+        );
+        if (result.status === "requestResolved") {
+          if (
+            result.result.request.id !== request.id ||
+            result.result.request.scope !== request.scope ||
+            result.result.request.draftDigest !== request.draftDigest ||
+            result.result.request.revision !== request.revision
+          )
+            throw new Error("mode.invalid_save_request");
+          setOriginalResult(result.result);
+          if (result.result.status !== "completed")
+            throw new Error("mode.verification_required");
+          original.current = null;
+          return {
+            status: "switched" as const,
+            providerName: "",
+            warnings: [],
+            chatgptWasRunning: false,
+            chatgptRelaunched: false,
+          };
+        }
+        await prepareCatalogConfirmation(change, result);
+        if (result.status !== "confirmationRequired") {
+          setOriginalResult({ request, status: "completed" });
+          original.current = null;
+        }
+        return result;
+      } catch (error) {
+        const result = await queryOriginal(request);
+        if (result.status === "completed") {
+          original.current = null;
+          return {
+            status: "switched" as const,
+            providerName: "",
+            warnings: [],
+            chatgptWasRunning: false,
+            chatgptRelaunched: false,
+          };
+        }
+        throw error;
+      }
     },
     onSettled: async (result) => {
       if (result?.status === "confirmationRequired") return;
@@ -155,8 +316,33 @@ export function useApplicationRouting(appId: AppId) {
   return {
     ...query,
     modeState,
-    writeBlocked,
+    writeBlocked:
+      writeBlocked ||
+      Boolean(originalResult && originalResult.status !== "completed"),
+    originalResult,
+    prepareRequest,
+    recheckRequest: async () => {
+      if (!originalResult || checkingRequest) return;
+      setCheckingRequest(true);
+      try {
+        await queryOriginal(originalResult.request);
+        await Promise.all([
+          refresh(),
+          client.invalidateQueries({
+            queryKey: ["applicationOverview", appId],
+          }),
+          client.invalidateQueries({ queryKey: ["orderProfiles", appId] }),
+        ]);
+      } finally {
+        setCheckingRequest(false);
+      }
+    },
+    startNewRequest: () => {
+      original.current = null;
+      setOriginalResult(null);
+    },
     busy:
+      checkingRequest ||
       apply.isPending ||
       order.isPending ||
       failover.isPending ||

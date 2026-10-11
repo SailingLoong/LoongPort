@@ -218,3 +218,36 @@ it("drops catalog approval on sourceChanged and preserves local order for a fres
   expect(apply).toHaveBeenCalledTimes(2);
   expect(toastMocks.success).not.toHaveBeenCalled();
 });
+
+it("keeps a newer draft when the submitted intent completes", async () => {
+  let finish!: (value: SwitchTierCommandResult) => void;
+  const apply = vi.fn(
+    () =>
+      new Promise<SwitchTierCommandResult>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  act(() => result.current.load("Travel", ["b"]));
+  let submitted!: Promise<void>;
+  act(() => {
+    submitted = result.current.submit(changed);
+  });
+  act(() => {
+    result.current.load("New draft", ["a"]);
+    result.current.setModelFilter("model-d");
+  });
+  await act(async () => {
+    finish({
+      status: "switched",
+      providerName: "Synthetic",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
+    await submitted;
+  });
+  act(() => result.current.discardSubmitted());
+  expect(result.current.stagedIds).toEqual(["a"]);
+  expect(result.current.modelFilter).toEqual("model-d");
+});

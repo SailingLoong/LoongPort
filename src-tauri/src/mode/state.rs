@@ -398,6 +398,7 @@ pub enum SaveScope {
     ClaudeSharedSettings,
     GeminiSharedSettings,
     CodexCatalogRestore,
+    ApplicationRouting,
 }
 impl SaveScope {
     fn is_provider(&self) -> bool {
@@ -438,7 +439,8 @@ impl SaveRequest {
                 SaveScope::CodexSharedSettings
                 | SaveScope::ClaudeSharedSettings
                 | SaveScope::GeminiSharedSettings
-                | SaveScope::CodexCatalogRestore => self.provider_id.is_some(),
+                | SaveScope::CodexCatalogRestore
+                | SaveScope::ApplicationRouting => self.provider_id.is_some(),
             }
             || !digest(&self.draft_digest)
             || !digest(&self.revision)

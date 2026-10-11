@@ -3998,6 +3998,9 @@
     }
   },
   "applications": {
+    "originalRequestUnresolved": "元の適用リクエストの結果は未確認です。結果を確認しても変更は再適用されません。",
+    "recheckOriginalRequest": "元の結果を確認",
+    "startNewRequest": "新しい適用を確認",
     "routingModeDirect": "直接接続",
     "routingModeProxy": "プロキシ・接続中",
     "routingModeDetached": "プロキシ・未接続",

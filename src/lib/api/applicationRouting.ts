@@ -64,13 +64,69 @@ export interface ApplicationRoutingChange {
   selection?: { providerId: string; model?: string };
 }
 
+export interface ApplicationRoutingRequest {
+  id: string;
+  scope: "applicationRouting";
+  draftDigest: string;
+  revision: string;
+}
+export interface ApplicationRoutingRequestResult {
+  request: ApplicationRoutingRequest;
+  status:
+    | "completed"
+    | "pending"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "notRecorded"
+    | "unknown"
+    | "conflict";
+}
+export type ApplicationRoutingCommandResult =
+  | SwitchTierCommandResult
+  | { status: "requestResolved"; result: ApplicationRoutingRequestResult };
+
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt?: boolean,
+): Promise<SwitchTierCommandResult>;
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt: boolean | undefined,
+  request: ApplicationRoutingRequest,
+): Promise<ApplicationRoutingCommandResult>;
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt?: boolean,
+  request?: ApplicationRoutingRequest,
+): Promise<ApplicationRoutingCommandResult> {
+  return invoke("apply_application_routing", {
+    appType,
+    change,
+    quitChatgpt,
+    ...(request ? { request } : {}),
+  });
+}
 export const applicationRoutingApi = {
-  apply: (
+  apply: applyRouting,
+  prepareRequest: (
     appType: string,
     change: ApplicationRoutingChange,
-    quitChatgpt?: boolean,
-  ): Promise<SwitchTierCommandResult> =>
-    invoke("apply_application_routing", { appType, change, quitChatgpt }),
+    requestId: string,
+  ): Promise<ApplicationRoutingRequest> =>
+    invoke("prepare_application_routing_request", {
+      appType,
+      change,
+      requestId,
+    }),
+  queryRequest: (
+    appType: string,
+    request: ApplicationRoutingRequest,
+  ): Promise<ApplicationRoutingRequestResult> =>
+    invoke("get_application_routing_request_result", { appType, request }),
   get: (appType: string): Promise<ApplicationRouting> =>
     invoke("get_application_routing", { appType }),
   setOrder: (appType: string, orderedIds: string[]): Promise<void> =>

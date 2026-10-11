@@ -2129,6 +2129,8 @@ pub fn run() {
             commands::import_order_profiles,
             commands::set_application_failover,
             commands::apply_application_routing,
+            commands::prepare_application_routing_request,
+            commands::get_application_routing_request_result,
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,
             commands::set_auto_mode_strategy,

@@ -65,8 +65,20 @@ pub async fn apply_application_routing(
     app_type: String,
     change: crate::services::application_selection::ApplicationRoutingChange,
     quit_chatgpt: Option<bool>,
-) -> Result<crate::services::application_selection::SwitchTierCommandResult, String> {
+    request: Option<crate::mode::state::SaveRequest>,
+) -> Result<serde_json::Value, String> {
     let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    if let Some(request) = request {
+        return crate::services::application_selection::apply_requested_application_routing(
+            &app_handle,
+            app,
+            change,
+            quit_chatgpt,
+            request,
+        )
+        .await
+        .map_err(|error| error.to_string());
+    }
     crate::services::application_selection::apply_application_routing(
         &app_handle,
         app,
@@ -74,7 +86,39 @@ pub async fn apply_application_routing(
         quit_chatgpt,
     )
     .await
+    .and_then(|result| {
+        serde_json::to_value(result)
+            .map_err(|error| crate::error::AppError::Message(error.to_string()))
+    })
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn prepare_application_routing_request(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    change: crate::services::application_selection::ApplicationRoutingChange,
+    request_id: String,
+) -> Result<crate::mode::state::SaveRequest, String> {
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::prepare_routing_request(
+        &state,
+        &app,
+        &change,
+        &request_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_application_routing_request_result(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    request: crate::mode::state::SaveRequest,
+) -> Result<crate::services::application_selection::RoutingRequestResult, String> {
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::query_routing_request(&state, &app, request)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import type { ApplicationRoutingChange } from "@/lib/api/applicationRouting";
@@ -32,6 +38,14 @@ export function useApplicationRoutingDraft(
     catalog?: CatalogPreview;
     quitRequired?: boolean;
   } | null>(null);
+  const intent = useRef(0);
+  const submittedIntent = useRef<number | null>(null);
+  const edit =
+    <T>(setter: Dispatch<SetStateAction<T>>) =>
+    (value: SetStateAction<T>) => {
+      intent.current += 1;
+      setter(value);
+    };
   const pending = useRef(false);
   const lifecycle = useRef(0);
   useEffect(
@@ -42,6 +56,7 @@ export function useApplicationRoutingDraft(
   );
 
   const discard = () => {
+    intent.current += 1;
     setStagedIds(null);
     setProfileName(null);
     setShowAll(false);
@@ -49,6 +64,10 @@ export function useApplicationRoutingDraft(
     setAccountFilter(null);
     setModelFilter(null);
     setSearch("");
+  };
+  const discardSubmitted = () => {
+    if (submittedIntent.current === intent.current) discard();
+    submittedIntent.current = null;
   };
   const submit = async (
     change: ApplicationRoutingChange,
@@ -62,6 +81,7 @@ export function useApplicationRoutingDraft(
       return;
     }
     const generation = lifecycle.current;
+    submittedIntent.current = intent.current;
     pending.current = true;
     setSubmitting(true);
     try {
@@ -88,7 +108,7 @@ export function useApplicationRoutingDraft(
       }
       setConfirmation(null);
       if (change.catalogPreviewOnly) return;
-      if (change.order) discard();
+      if (change.order) discardSubmitted();
       toast.success(t("applications.changesApplied"));
       result.warnings.forEach((warning) => toast.warning(warning));
       if (result.chatgptWasRunning && !result.chatgptRelaunched) {
@@ -106,23 +126,24 @@ export function useApplicationRoutingDraft(
   };
   return {
     search,
-    setSearch,
+    setSearch: edit(setSearch),
     sort,
-    setSort,
+    setSort: edit(setSort),
     accountFilter,
-    setAccountFilter,
+    setAccountFilter: edit(setAccountFilter),
     modelFilter,
-    setModelFilter,
+    setModelFilter: edit(setModelFilter),
     stagedIds,
-    setStagedIds,
+    setStagedIds: edit(setStagedIds),
     profileName,
-    setProfileName,
+    setProfileName: edit(setProfileName),
     showAll,
-    setShowAll,
+    setShowAll: edit(setShowAll),
     submitting,
     confirmation,
     submit,
     discard,
+    discardSubmitted,
     cancel: () => {
       lifecycle.current += 1;
       setConfirmation(null);
@@ -165,6 +186,7 @@ export function useApplicationRoutingDraft(
       );
     },
     saveAs: (name: string, ids: string[]) => {
+      intent.current += 1;
       setProfileName(name);
       setStagedIds(ids);
       setSort(null);

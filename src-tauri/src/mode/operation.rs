@@ -1047,11 +1047,30 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
                     state::SaveScope::CodexSharedSettings => "codex",
                     state::SaveScope::ClaudeSharedSettings => "claude",
                     state::SaveScope::GeminiSharedSettings => "gemini",
-                    state::SaveScope::Provider | state::SaveScope::CodexCatalogRestore => {
+                    state::SaveScope::Provider
+                    | state::SaveScope::CodexCatalogRestore
+                    | state::SaveScope::ApplicationRouting => {
                         unreachable!()
                     }
                 };
                 if app != expected_app || !effects.is_empty() {
+                    return Err(invalid_pending());
+                }
+            }
+            state::SaveScope::ApplicationRouting => {
+                if !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
+                    || (target.routing_order.is_none()
+                        && target.model_preference.is_none()
+                        && target.pointer.is_none()
+                        && target
+                            .state
+                            .as_ref()
+                            .and_then(|mode| mode.proxy_route.as_ref())
+                            .is_none())
+                    || (target.saved_row.is_some() && target.model_preference.is_none())
+                    || target.stack.is_some()
+                    || !target.extra.is_empty()
+                {
                     return Err(invalid_pending());
                 }
             }
@@ -1425,7 +1444,11 @@ fn verify_committed_target(
             .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
             .ok_or_else(verification_required)?;
         if Database::provider_update_digest(&actual)? != Database::provider_update_digest(&planned)?
-            || (target.save_request.is_some() && !db.get_user_edited(app.as_str(), &planned.id)?)
+            || (target
+                .save_request
+                .as_ref()
+                .is_some_and(|request| request.scope == state::SaveScope::Provider)
+                && !db.get_user_edited(app.as_str(), &planned.id)?)
         {
             return Err(verification_required());
         }
@@ -1525,7 +1548,10 @@ fn commit_target_with_pointer(
             app.as_str(),
             &provider,
             Some(&row.before),
-            target.save_request.is_some(),
+            target
+                .save_request
+                .as_ref()
+                .is_some_and(|request| request.scope == state::SaveScope::Provider),
             session,
             vault,
         )?;
@@ -1534,7 +1560,11 @@ fn commit_target_with_pointer(
             .ok_or_else(invalid_pending)?;
         if Database::provider_update_digest(&current)?
             != Database::provider_update_digest(&provider)?
-            || (target.save_request.is_some() && !db.get_user_edited(app.as_str(), &provider.id)?)
+            || (target
+                .save_request
+                .as_ref()
+                .is_some_and(|request| request.scope == state::SaveScope::Provider)
+                && !db.get_user_edited(app.as_str(), &provider.id)?)
         {
             return Err(verification_required());
         }

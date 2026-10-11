@@ -7770,3 +7770,437 @@ fn gemini_legacy_shared_import_only_seeds_env_and_preserves_json_settings() {
         .contains("external"));
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), cfg);
 }
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn u01_original_routing_receipt_precedes_outer_effects_and_current_facts() {
+    use crate::relay::chatgpt_app::{self, QuitOutcome};
+    use crate::services::application_selection as selection;
+    use std::cell::Cell;
+    let fx = Fixture::for_app(AppType::Codex);
+    let change = selection::ApplicationRoutingChange {
+        order: None,
+        selection: Some(selection::TierSelection {
+            provider_id: "b".into(),
+            model: Some("model-b".into()),
+        }),
+        catalog_decision: None,
+        catalog_preview_only: false,
+    };
+    let request = selection::prepare_routing_request(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        "77777777-7777-4777-8777-777777777777",
+    )
+    .unwrap();
+    let quits = Cell::new(0);
+    let relaunches = Cell::new(0);
+    let actions = Cell::new(0);
+    {
+        let _lock =
+            futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+        let (result, event) = selection::apply_requested_routing_locked(
+            &fx.state,
+            &AppType::Codex,
+            &change,
+            Some(true),
+            &request,
+            true,
+            |action| {
+                chatgpt_app::around_with(
+                    false,
+                    || {
+                        quits.set(quits.get() + 1);
+                        QuitOutcome::Quit
+                    },
+                    || {
+                        relaunches.set(relaunches.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        actions.set(actions.get() + 1);
+                        action()
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result["status"], "switched");
+        assert_eq!(event.as_deref(), Some("b"));
+    }
+    assert!(
+        !fx.state.db.get_user_edited("codex", "b").unwrap(),
+        "routing is not an explicit Provider edit"
+    );
+    ProviderService::switch(&fx.state, AppType::Codex, "a").unwrap();
+    assert_eq!(
+        selection::query_routing_request(&fx.state, &AppType::Codex, request.clone())
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let before = crate::mode::controller::files(&AppType::Codex)
+        .unwrap()
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    {
+        let _lock =
+            futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+        let (result, event) = selection::apply_requested_routing_locked(
+            &fx.state,
+            &AppType::Codex,
+            &change,
+            Some(true),
+            &request,
+            true,
+            |_| panic!("duplicate must never quit or invoke action"),
+        )
+        .unwrap();
+        assert_eq!(result["result"]["status"], "completed");
+        assert!(
+            event.is_none(),
+            "duplicate emits no new successful selection"
+        );
+    }
+    assert_eq!((quits.get(), relaunches.get(), actions.get()), (1, 1, 1));
+    assert_eq!(
+        crate::mode::controller::files(&AppType::Codex)
+            .unwrap()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    fx.state.db.set_user_edited("codex", "b", true).unwrap();
+    let newer = selection::prepare_routing_request(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        "88888888-8888-4888-8888-888888888888",
+    )
+    .unwrap();
+    {
+        let _lock =
+            futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+        selection::apply_requested_routing_locked(
+            &fx.state,
+            &AppType::Codex,
+            &change,
+            Some(false),
+            &newer,
+            false,
+            |_| panic!("no quit requested"),
+        )
+        .unwrap();
+    }
+    assert!(
+        fx.state.db.get_user_edited("codex", "b").unwrap(),
+        "routing preserves an existing Provider edit mark"
+    );
+    assert_eq!(
+        selection::query_routing_request(&fx.state, &AppType::Codex, request.clone())
+            .unwrap()
+            .status,
+        "unknown"
+    );
+    let _lock = futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+    let (result, event) = selection::apply_requested_routing_locked(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        Some(true),
+        &request,
+        true,
+        |_| panic!("unknown old request cannot repeat effects"),
+    )
+    .unwrap();
+    assert_eq!(result["result"]["status"], "unknown");
+    assert!(event.is_none());
+}
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn u01_routing_rechecks_reviewed_native_version_after_synthetic_quit() {
+    use crate::relay::chatgpt_app::{self, QuitOutcome};
+    use crate::services::application_selection as selection;
+    let fx = Fixture::for_app(AppType::Codex);
+    let change = selection::ApplicationRoutingChange {
+        order: None,
+        selection: Some(selection::TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        }),
+        catalog_decision: None,
+        catalog_preview_only: false,
+    };
+    let request = selection::prepare_routing_request(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        "99999999-9999-4999-8999-999999999999",
+    )
+    .unwrap();
+    let _lock = futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+    let result = selection::apply_requested_routing_locked(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        Some(true),
+        &request,
+        true,
+        |action| {
+            chatgpt_app::around_with(
+                false,
+                || {
+                    let text = std::fs::read_to_string(&fx.path).unwrap();
+                    std::fs::write(
+                        &fx.path,
+                        format!("# synthetic quit saved native edits\n{text}"),
+                    )
+                    .unwrap();
+                    QuitOutcome::Quit
+                },
+                || Ok(()),
+                action,
+            )
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        fx.state
+            .db
+            .get_current_provider("codex")
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
+    assert!(std::fs::read_to_string(&fx.path)
+        .unwrap()
+        .starts_with("# synthetic quit"));
+    assert!(state::pending(
+        &DeviceStore::for_device(),
+        &fx.state.db.secret_session().read().unwrap(),
+        "codex"
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn u01_concurrent_same_routing_request_runs_outer_effects_once() {
+    use crate::relay::chatgpt_app::{self, QuitOutcome};
+    use crate::services::application_selection as selection;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Barrier,
+    };
+    let fx = Fixture::for_app(AppType::Codex);
+    let change = selection::ApplicationRoutingChange {
+        order: None,
+        selection: Some(selection::TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        }),
+        catalog_decision: None,
+        catalog_preview_only: false,
+    };
+    let request = selection::prepare_routing_request(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    .unwrap();
+    let counts = Arc::new([
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ]);
+    let barrier = Arc::new(Barrier::new(2));
+    let threads = (0..2)
+        .map(|_| {
+            let state = fx.state.clone();
+            let change = change.clone();
+            let request = request.clone();
+            let counts = counts.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _lock =
+                    futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+                selection::apply_requested_routing_locked(
+                    &state,
+                    &AppType::Codex,
+                    &change,
+                    Some(true),
+                    &request,
+                    true,
+                    |action| {
+                        chatgpt_app::around_with(
+                            false,
+                            || {
+                                counts[0].fetch_add(1, Ordering::SeqCst);
+                                QuitOutcome::Quit
+                            },
+                            || {
+                                counts[1].fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            },
+                            || {
+                                counts[2].fetch_add(1, Ordering::SeqCst);
+                                action()
+                            },
+                        )
+                    },
+                )
+                .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|(_, event)| event.is_some()).count(),
+        1
+    );
+    assert_eq!(
+        counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect::<Vec<_>>(),
+        vec![1, 1, 1]
+    );
+}
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn u01_reviewed_direct_pointer_change_with_identical_native_bytes_rejects_old_request() {
+    use crate::services::application_selection as selection;
+    use std::cell::Cell;
+    let fx = Fixture::for_app(AppType::Codex);
+    let a = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    let mut b = fx
+        .state
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    b.settings_config = a.settings_config.clone();
+    fx.state.db.save_provider("codex", &b).unwrap();
+    ProviderService::switch(&fx.state, AppType::Codex, "a").unwrap();
+    let change = selection::ApplicationRoutingChange {
+        order: None,
+        selection: Some(selection::TierSelection {
+            provider_id: "a".into(),
+            model: None,
+        }),
+        catalog_decision: None,
+        catalog_preview_only: false,
+    };
+    let request = selection::prepare_routing_request(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+    .unwrap();
+    let files = crate::mode::controller::files(&AppType::Codex).unwrap();
+    let native_before = files
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    let journal_before = state::load_app(
+        &DeviceStore::for_device(),
+        &fx.state.db.secret_session().read().unwrap(),
+        "codex",
+    )
+    .unwrap()
+    .apps
+    .remove("codex");
+    ProviderService::switch(&fx.state, AppType::Codex, "b").unwrap();
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>(),
+        native_before,
+        "same configuration bytes must not reveal the changed current ID"
+    );
+    assert_eq!(
+        state::load_app(
+            &DeviceStore::for_device(),
+            &fx.state.db.secret_session().read().unwrap(),
+            "codex"
+        )
+        .unwrap()
+        .apps
+        .remove("codex"),
+        journal_before,
+        "journal facts are unchanged while the original current pointer changes"
+    );
+    assert_eq!(
+        fx.state
+            .db
+            .get_current_provider("codex")
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    let around_calls = Cell::new(0);
+    let _lock = futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+    let result = selection::apply_requested_routing_locked(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        Some(true),
+        &request,
+        true,
+        |action| {
+            around_calls.set(around_calls.get() + 1);
+            Ok((
+                action()?,
+                crate::relay::chatgpt_app::AroundOutcome::default(),
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        result.0["status"], "requestResolved",
+        "changed original direct pointer must reject the stale reviewed request"
+    );
+    assert!(result.1.is_none());
+    assert_eq!(
+        around_calls.get(),
+        0,
+        "stale request must never enter quit/relaunch effects"
+    );
+    assert_eq!(
+        fx.state
+            .db
+            .get_current_provider("codex")
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>(),
+        native_before
+    );
+}

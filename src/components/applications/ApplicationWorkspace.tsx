@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import {
   useEffect,
   useImperativeHandle,
@@ -259,6 +260,22 @@ export function ApplicationWorkspace({
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
   const draft = useApplicationRoutingDraft(routing.apply);
+  const consumedRequest = useRef<string | null>(null);
+  useEffect(() => {
+    const result = routing.originalResult;
+    if (
+      result?.status === "completed" &&
+      !routing.busy &&
+      consumedRequest.current !== result.request.id
+    ) {
+      consumedRequest.current = result.request.id;
+      draft.discardSubmitted();
+    }
+  }, [
+    routing.originalResult?.request.id,
+    routing.originalResult?.status,
+    routing.busy,
+  ]);
   const {
     search,
     setSearch,
@@ -453,7 +470,7 @@ export function ApplicationWorkspace({
     pendingReview.current = null;
     setReview(null);
   };
-  const applyOrder = () => {
+  const applyOrder = async () => {
     if (
       !hasPendingChanges ||
       targetIds.length === 0 ||
@@ -490,7 +507,19 @@ export function ApplicationWorkspace({
       },
     };
     pendingReview.current = next;
-    setReview(next);
+    try {
+      await routing.prepareRequest?.(next.change);
+      if (pendingReview.current !== next) return;
+      if (!next.isCurrent()) {
+        cancelReview();
+        toast.warning(t("applications.reviewChanged"));
+        return;
+      }
+      setReview(next);
+    } catch {
+      cancelReview();
+      toast.error(t("applications.updateFailed"));
+    }
   };
   const discardOrder = draft.discard;
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
@@ -1015,6 +1044,29 @@ export function ApplicationWorkspace({
           {typeof children === "function" ? children(mutationBusy) : children}
         </CollapsibleContent>
       </Collapsible>
+      {routing.originalResult &&
+        routing.originalResult.status !== "completed" && (
+          <div
+            role="alert"
+            className="space-y-2 rounded-lg border border-amber-500/30 p-3 text-sm"
+          >
+            <p>{t("applications.originalRequestUnresolved")}</p>
+            <Button
+              variant="outline"
+              disabled={routing.busy}
+              onClick={() => void routing.recheckRequest()}
+            >
+              {t("applications.recheckOriginalRequest")}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={routing.busy}
+              onClick={routing.startNewRequest}
+            >
+              {t("applications.startNewRequest")}
+            </Button>
+          </div>
+        )}
       <ApplicationChangeConfirmDialog
         review={review}
         stale={Boolean(review && !review.isCurrent())}
