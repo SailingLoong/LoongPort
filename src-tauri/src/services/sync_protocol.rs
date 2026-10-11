@@ -1348,6 +1348,7 @@ mod publication_tests {
             home.path().join("vault"),
             context.clone(),
         );
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
         crate::database::vault::stamp(&db.conn.lock().unwrap(), &context).unwrap();
         db.set_setting("common_config_claude", "local-credential-canary")
             .unwrap();

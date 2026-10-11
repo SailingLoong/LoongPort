@@ -4793,9 +4793,14 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn codex_native_handoff_preserves_external_identity_and_catalog() {
-        let _home = TempHome::new();
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        // This tests the original backup/recover_from_crash handoff.
+        let db = Arc::new(crate::secrets::testing::initialize_source17_database().unwrap());
+        assert_eq!(
+            crate::Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
+            crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        );
         use_ephemeral_proxy_port(&db).await;
         let service = ProxyService::new(
             db.clone(),

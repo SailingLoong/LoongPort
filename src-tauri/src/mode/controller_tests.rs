@@ -30,7 +30,11 @@ impl Fixture {
     fn for_app_with_schema(app: AppType, modern: bool) -> Self {
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(initialize_database().unwrap());
+        let db = Arc::new(if modern {
+            initialize_database().unwrap()
+        } else {
+            crate::secrets::testing::initialize_source17_database().unwrap()
+        });
         let mut settings = crate::settings::get_settings();
         settings.claude_config_dir =
             Some(home.path().join(".claude").to_string_lossy().into_owned());
@@ -64,6 +68,12 @@ impl Fixture {
         db.set_current_provider(app.as_str(), "a").unwrap();
         crate::settings::set_current_provider(&app, Some("a")).unwrap();
         let state = AppState::new(db).unwrap();
+        if !modern {
+            assert_eq!(
+                crate::Database::get_user_version(&state.db.conn.lock().unwrap()).unwrap(),
+                crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+            );
+        }
         let path = match app {
             AppType::Claude => crate::config::get_claude_settings_path(),
             AppType::Codex => crate::codex_config::get_codex_config_path(),
@@ -3949,6 +3959,17 @@ fn routing_read_model_exposes_owner_facts_without_recovery_or_secrets() {
     assert!(super::current::read_view(&legacy.state.proxy_service, &AppType::Claude).is_none());
     drop(legacy);
     let fixture = Fixture::claude();
+    fixture.runtime.block_on(async {
+        let mut global = fixture.state.db.get_global_proxy_config().await.unwrap();
+        global.listen_address = "127.0.0.1".into();
+        global.listen_port = 0;
+        fixture
+            .state
+            .db
+            .update_global_proxy_config(global)
+            .await
+            .unwrap();
+    });
     let direct = super::current::read_view(&fixture.state.proxy_service, &AppType::Claude).unwrap();
     assert_eq!(direct.status, "ready");
     assert_eq!(direct.mode, Some(Mode::Direct));
@@ -4773,7 +4794,7 @@ pub(crate) fn verify_constructor_admission() -> Result<(), AppError> {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn service_constructor_only_migrates_admitted_legacy_schema() {
-    for version in [17, 18, 20, 21] {
+    for version in [17, 18, 19, 20, 21] {
         let fixture = Fixture::for_app_with_schema(AppType::Claude, version == 20);
         fixture
             .state

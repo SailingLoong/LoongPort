@@ -1725,8 +1725,12 @@ mod tests {
                 br#"{"token":"checkpoint-canary"}"#
             );
             assert!(!fixture.root.join(INTENT).exists());
-            assert!(
-                matches!(vault::preflight(&fixture.root.join(crate::config::DB_FILE_NAME)), Err(AppError::Config(code)) if code == "secret.database_version_too_new")
+            let before = crate::secrets::upgrade::review_tests::snapshot(fixture._temporary.path());
+            vault::preflight(&fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            assert_eq!(
+                crate::secrets::upgrade::review_tests::snapshot(fixture._temporary.path()),
+                before,
+                "supported schema20 preflight must remain read-only"
             );
         }
     }

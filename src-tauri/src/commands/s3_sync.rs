@@ -267,6 +267,7 @@ mod tests {
     #[serial]
     async fn download_suppression_starts_after_s3_lock_acquisition() {
         let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let _db = crate::secrets::testing::initialize_database().unwrap();
         assert!(!crate::services::s3_auto_sync::is_auto_sync_suppressed());
         let guard = s3_sync_mutex().lock().await;
         let download_entered = AtomicBool::new(false);

@@ -437,7 +437,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn published_migration_stage_is_resumed_and_authenticated_before_replacement() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = dir.path().join("fixture.db");
         let stage = dir.path().join(".vault-migration.db");
@@ -490,7 +492,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn legacy_upgrade_removes_plaintext_from_database_and_reopens() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = dir.path().join("fixture.db");
         let conn = Connection::open(&path).unwrap();

@@ -22,7 +22,11 @@ impl Fixture {
     fn with_schema(modern: bool) -> Self {
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        let db = Arc::new(if modern {
+            crate::secrets::testing::initialize_database().unwrap()
+        } else {
+            crate::secrets::testing::initialize_source17_database().unwrap()
+        });
         if modern {
             let conn = db.conn.lock().unwrap();
             crate::database::Database::apply_upstream4_migrations_on_conn(&conn).unwrap();
@@ -42,6 +46,12 @@ impl Fixture {
         db.set_current_provider("codex", "a").unwrap();
         crate::settings::set_current_provider(&AppType::Codex, Some("a")).unwrap();
         let state = AppState::new(db).unwrap();
+        if !modern {
+            assert_eq!(
+                crate::Database::get_user_version(&state.db.conn.lock().unwrap()).unwrap(),
+                crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+            );
+        }
         let config = crate::codex_config::get_codex_config_path();
         let auth = crate::codex_config::get_codex_auth_path();
         assert!(config.starts_with(home.path()));

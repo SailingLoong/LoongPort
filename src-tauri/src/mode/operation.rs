@@ -1278,7 +1278,7 @@ pub(crate) fn uses_upstream4_version(version: i32, supported: i32) -> Result<boo
     if version == crate::database::UPSTREAM4_SCHEMA_VERSION {
         return Ok(true);
     }
-    if version <= supported && version < crate::database::UPSTREAM4_SCHEMA_VERSION {
+    if version <= supported && version <= crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION {
         return Ok(false);
     }
     Err(AppError::Config("upgrade.future_version".into()))

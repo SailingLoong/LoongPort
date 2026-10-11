@@ -27,7 +27,11 @@ impl Fixture {
     fn with_schema(app: AppType, modern: bool) -> Self {
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        let db = Arc::new(if modern {
+            crate::secrets::testing::initialize_database().unwrap()
+        } else {
+            crate::secrets::testing::initialize_source17_database().unwrap()
+        });
         if modern {
             crate::database::Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap())
                 .unwrap();
@@ -53,6 +57,12 @@ impl Fixture {
         db.set_current_provider(app.as_str(), "a").unwrap();
         crate::settings::set_current_provider(&app, Some("a")).unwrap();
         let state = AppState::new(db).unwrap();
+        if !modern {
+            assert_eq!(
+                crate::Database::get_user_version(&state.db.conn.lock().unwrap()).unwrap(),
+                crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+            );
+        }
         let (file, bytes) = match app {
             AppType::Claude => (crate::config::get_claude_settings_path(), serde_json::to_vec_pretty(&json!({"env":{"ANTHROPIC_AUTH_TOKEN":"key-a","ANTHROPIC_BASE_URL":"https://a.example.invalid","ANTHROPIC_MODEL":"model-a","CLAUDE_CODE_DISABLE_ARTIFACT":"1","USER_ENV":"keep"},"userOnly":{"keep":true},"mcpServers":{"local":{"command":"synthetic"}},"hooks":{"Stop":[]}})).unwrap()),
             AppType::GrokBuild => (crate::grok_config::get_grok_config_path(), format!("# hand-written\n[ui]\ntheme = \"dark\"\n\n{}\n[model.mine]\nmodel = \"user-model\"\n\n[mcp_servers.local]\ncommand = \"synthetic\"\n", grok_row("a")).into_bytes()),

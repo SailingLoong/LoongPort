@@ -3022,6 +3022,7 @@ mod tests {
                      file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset, last_tail_fingerprint
                  ) VALUES ('/local/sessions/manual-backup.jsonl', 11, 22, 33, 444, 'synthetic-tail');",
             )?;
+            crate::database::loongport_schema::apply(&conn)?;
         }
 
         seal_fixture_rows(&source)?;

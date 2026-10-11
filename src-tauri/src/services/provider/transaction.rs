@@ -171,9 +171,20 @@ mod tests {
         }
 
         fn state(&self) -> Arc<AppState> {
-            let db = Arc::new(
-                crate::secrets::testing::initialize_database().expect("initialize isolated vault"),
-            );
+            self.state_with_schema(true)
+        }
+
+        fn legacy_state(&self) -> Arc<AppState> {
+            self.state_with_schema(false)
+        }
+
+        fn state_with_schema(&self, modern: bool) -> Arc<AppState> {
+            let db = Arc::new(if modern {
+                crate::secrets::testing::initialize_database().expect("initialize isolated vault")
+            } else {
+                crate::secrets::testing::initialize_source17_database()
+                    .expect("initialize isolated legacy vault")
+            });
             crate::settings::mutate_settings(|settings| {
                 settings.claude_config_dir = Some(
                     self.dir
@@ -189,6 +200,12 @@ mod tests {
                 .unwrap()
                 .starts_with(self.dir.path()));
             let state = Arc::new(AppState::new(db).expect("create application state"));
+            if !modern {
+                assert_eq!(
+                    crate::Database::get_user_version(&state.db.conn.lock().unwrap()).unwrap(),
+                    crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+                );
+            }
             for (id, model) in [("a", "model-a"), ("b", "model-b")] {
                 let provider = Provider::with_id(
                     id.into(),
@@ -276,6 +293,16 @@ mod tests {
     fn noncurrent_edit_does_not_read_or_restore_unrelated_live_files() {
         let home = TempHome::new();
         let state = home.state();
+        crate::mode::state::update_app(
+            &crate::live::engine::DeviceStore::for_device(),
+            &state.db.secret_session().read().unwrap(),
+            "claude",
+            |entry| {
+                entry.mode = Some(crate::mode::state::Mode::Direct);
+                Ok(())
+            },
+        )
+        .unwrap();
         let live_path = crate::config::get_claude_settings_path();
         // A directory at the file path causes a real read error on every supported OS.
         std::fs::create_dir_all(&live_path).unwrap();
@@ -361,7 +388,7 @@ mod tests {
     #[serial_test::serial]
     async fn failed_first_selection_clears_the_active_target_mirror() {
         let home = TempHome::new();
-        let state = home.state();
+        let state = home.legacy_state();
         {
             let conn = state.db.conn.lock().unwrap();
             conn.execute(

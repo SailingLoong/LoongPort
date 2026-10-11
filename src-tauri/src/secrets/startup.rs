@@ -2027,6 +2027,62 @@ mod upgrade_handoff_tests {
 
     #[test]
     #[serial_test::serial]
+    fn u03_missing_checkpoint_refuses_retained_handoff_and_restarts_through_supported_schema_owner()
+    {
+        let f = Fixture::new();
+        let root = f.coordinator.root.clone();
+        let original_session = f.session();
+        let native_before = std::fs::read(&f.native).unwrap();
+        std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap();
+        let before = snapshot(f.home.path());
+        let retained_prepare_calls = Cell::new(0);
+        assert!(f
+            .coordinator
+            .run_upgrade_attempt(&f.token, |_| {
+                retained_prepare_calls.set(retained_prepare_calls.get() + 1);
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(retained_prepare_calls.get(), 0);
+        assert_eq!(snapshot(f.home.path()), before);
+
+        // A new startup does not retain an upgrade review's missing authority.
+        // Exact supported schema20 remains an ordinary authenticated database.
+        let inspected = crate::secrets::upgrade::inspect(&root, &f.device).unwrap();
+        assert!(!inspected.is_database_resume_candidate());
+        inspected.ensure_runtime_admitted().unwrap();
+        database::vault::preflight(&root.join(crate::config::DB_FILE_NAME)).unwrap();
+        let restarted = StartupCoordinator::new(root.clone(), inspected);
+        let ordinary_prepare_calls = Cell::new(0);
+        restarted
+            .initialize_with(None, &f.store, |session| {
+                ordinary_prepare_calls.set(ordinary_prepare_calls.get() + 1);
+                let vault = session.read().unwrap();
+                assert_eq!(
+                    vault.metadata().vault_id,
+                    original_session.read().unwrap().metadata().vault_id
+                );
+                assert!(checkpoint::verified_database_id(&root, &f.device, &vault)
+                    .unwrap()
+                    .is_none());
+                let conn =
+                    rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
+                assert_eq!(
+                    Database::get_user_version(&conn).unwrap(),
+                    database::SCHEMA_VERSION
+                );
+                database::vault::check_identity(&conn, &vault).unwrap();
+                crate::secrets::inventory::validate_database(&conn, &vault).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(ordinary_prepare_calls.get(), 1);
+        assert_eq!(snapshot(f.home.path()), before);
+        assert_eq!(std::fs::read(&f.native).unwrap(), native_before);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn u03_restart_keeps_busy_failed_and_changed_handoffs_controlled() {
         let f = Fixture::new();
         let root = f.coordinator.root.clone();

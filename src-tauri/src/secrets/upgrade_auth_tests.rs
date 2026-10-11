@@ -3986,10 +3986,13 @@ fn u03_runtime_database_constructor_reuses_verified_checkpoint_and_original_sess
         .unwrap()
         .checkpoint_id
         .unwrap();
-    upgrade
+    let published = upgrade
         .publish_checkpoint(&mut inspected, &token, &id, &f.store)
         .unwrap();
-    let session = upgrade.session_for_test();
+    let token = published.review_token.unwrap();
+    let original_session = upgrade.session_for_test();
+    let session = upgrade.runtime_session(&inspected, &token).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&session, &original_session));
     let checkpoint_bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
     let db = Database::init_with_secrets(session.clone()).unwrap_or_else(|error| {
         panic!("original runtime database owner must reopen its authenticated target20: {error}")
@@ -4015,10 +4018,10 @@ fn u03_runtime_database_constructor_reuses_verified_checkpoint_and_original_sess
         Some(id.as_str())
     );
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
-    assert!(
-        database::vault::preflight(&f.root.join(crate::config::DB_FILE_NAME)).is_err(),
-        "ordinary locked preflight must retain its older-version refusal"
-    );
+    let before = snapshot(f.home.path());
+    database::vault::preflight(&f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
 }
 
 #[test]
@@ -4028,6 +4031,7 @@ fn u03_runtime_database_constructor_refuses_unverified_target_without_mutation()
         "missing_checkpoint",
         "corrupt_checkpoint",
         "future_schema",
+        "corrupt_database",
         "generation_pending",
     ] {
         let f = Fixture::new();
@@ -4041,9 +4045,17 @@ fn u03_runtime_database_constructor_refuses_unverified_target_without_mutation()
             .unwrap()
             .checkpoint_id
             .unwrap();
-        upgrade
+        let published = upgrade
             .publish_checkpoint(&mut inspected, &token, &id, &f.store)
             .unwrap();
+        let token = published.review_token.unwrap();
+        let admitted_before = snapshot(f.home.path());
+        let admitted_session = upgrade.runtime_session(&inspected, &token).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &admitted_session,
+            &upgrade.session_for_test()
+        ));
+        assert_eq!(snapshot(f.home.path()), admitted_before);
         match case {
             "missing_checkpoint" => {
                 std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap()
@@ -4057,6 +4069,11 @@ fn u03_runtime_database_constructor_refuses_unverified_target_without_mutation()
                 .unwrap()
                 .pragma_update(None, "user_version", 21)
                 .unwrap(),
+            "corrupt_database" => std::fs::write(
+                f.root.join(crate::config::DB_FILE_NAME),
+                b"synthetic-invalid-database",
+            )
+            .unwrap(),
             "generation_pending" => std::fs::write(
                 f.root.join(crate::secrets::transition::INTENT),
                 b"synthetic-pending-generation",
@@ -4065,10 +4082,18 @@ fn u03_runtime_database_constructor_refuses_unverified_target_without_mutation()
             _ => unreachable!(),
         }
         let before = snapshot(f.home.path());
+        let prepare_calls = std::cell::Cell::new(0);
         assert!(
-            Database::init_with_secrets(upgrade.session_for_test()).is_err(),
+            upgrade
+                .runtime_session(&inspected, &token)
+                .and_then(|session| {
+                    prepare_calls.set(prepare_calls.get() + 1);
+                    Database::init_with_secrets(session)
+                })
+                .is_err(),
             "{case}"
         );
+        assert_eq!(prepare_calls.get(), 0, "{case}: prepare must not run");
         assert_eq!(snapshot(f.home.path()), before, "{case}");
     }
 }

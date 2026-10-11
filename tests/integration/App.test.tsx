@@ -13,7 +13,11 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 // 在收集阶段完成模块加载：若把 import 留在用例体内，超时后它仍可能续跑并越过 cleanup 再挂载 App。
 import App from "@/App";
-import type { ApplicationRouting } from "@/lib/api/applicationRouting";
+import type {
+  ApplicationRouting,
+  ApplicationRoutingChange,
+  ApplicationRoutingRequest,
+} from "@/lib/api/applicationRouting";
 import {
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
@@ -321,7 +325,39 @@ async function selectApplication(name: string) {
 async function renderRoutingDraft(client = new QueryClient()) {
   workspaceHarness.real = true;
   const apply = vi.fn();
+  const requests = new Map<string, ApplicationRoutingRequest>();
   server.use(
+    http.post(
+      "http://tauri.local/prepare_application_routing_request",
+      async ({ request }) => {
+        const { appType, change, requestId } = (await request.json()) as {
+          appType: string;
+          change: ApplicationRoutingChange;
+          requestId: string;
+        };
+        expect(appType).toBe("claude");
+        expect(change.order?.providerIds.length).toBeGreaterThan(0);
+        const prepared: ApplicationRoutingRequest = {
+          id: requestId,
+          scope: "applicationRouting",
+          draftDigest: "d".repeat(64),
+          revision: "e".repeat(64),
+        };
+        requests.set(requestId, prepared);
+        return HttpResponse.json(prepared);
+      },
+    ),
+    http.post(
+      "http://tauri.local/get_application_routing_request_result",
+      async ({ request }) => {
+        const { request: original } = (await request.json()) as {
+          request: ApplicationRoutingRequest;
+        };
+        expect(original).toEqual(requests.get(original.id));
+        // This flow rejects apply before any commit; a read cannot invent success.
+        return HttpResponse.json({ request: original, status: "notRecorded" });
+      },
+    ),
     http.post(
       "http://tauri.local/get_application_routing",
       async ({ request }) => {

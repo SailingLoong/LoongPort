@@ -54,6 +54,37 @@ pub(crate) fn initialize_database() -> Result<Database, AppError> {
     Database::init_with_secrets(session)
 }
 
+/// Build the actual source17 schema for legacy-path fixtures, without downgrading
+/// a modern database or changing the default modern initializer.
+pub(crate) fn initialize_source17_database() -> Result<Database, AppError> {
+    let test_home = std::env::var_os("CC_SWITCH_TEST_HOME")
+        .expect("legacy disk tests must select an isolated home");
+    let app_root = crate::config::get_app_config_dir();
+    assert!(
+        app_root.starts_with(std::path::Path::new(&test_home)),
+        "legacy test app root escaped the isolated test home"
+    );
+    let key_store = MemoryKeyStore::default();
+    let session = SecretSession::open(&app_root, &key_store, None)?;
+    let conn = rusqlite::Connection::open(app_root.join(crate::config::DB_FILE_NAME))?;
+    Database::create_tables_on_conn(&conn)?;
+    Database::apply_upgrade_source_migrations_on_conn(&conn)?;
+    crate::database::loongport_schema::apply(&conn)?;
+    {
+        let vault = session.read()?;
+        crate::database::vault::stamp(&conn, &vault)?;
+    }
+    session.complete_migration()?;
+    crate::settings::unlock_settings_for_test(session.clone())?;
+    let db = Database::from_connection(conn, session);
+    assert_eq!(
+        Database::get_user_version(&db.conn.lock().unwrap())?,
+        crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+    );
+    assert!(!crate::mode::operation::uses_upstream4_schema(&db)?);
+    Ok(db)
+}
+
 /// Allocate an isolated storage fixture using the physical temporary directory.
 /// Storage tests must not inherit system path aliases from the temporary base.
 pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
