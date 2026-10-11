@@ -28,6 +28,21 @@ import {
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
 
+vi.mock("@/components/settings/ThemeSettings", () => ({
+  ThemeSettings: () => null,
+}));
+
+vi.mock("@/components/JsonEditor", () => ({
+  default: ({ value, onChange, readOnly, ariaLabel }: any) => (
+    <textarea
+      aria-label={ariaLabel}
+      value={value}
+      readOnly={readOnly}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+}));
+
 const workspaceHarness = vi.hoisted(() => ({ real: false }));
 const editResultMock = vi.hoisted(() => vi.fn());
 const toastSuccessMock = vi.fn();
@@ -361,6 +376,83 @@ describe("App integration with MSW", () => {
     // Start each independent flow from the persisted application view.
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  });
+
+  async function openSharedDraft() {
+    workspaceHarness.real = true;
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "settings");
+    server.use(
+      http.post("http://tauri.local/get_mcp_servers", () =>
+        HttpResponse.json({}),
+      ),
+      http.post("http://tauri.local/get_codex_shared_settings", () =>
+        HttpResponse.json({
+          app: "codex",
+          status: "ready",
+          config: 'approval_policy = "on-request"',
+          originalSave: null,
+        }),
+      ),
+    );
+    renderApp();
+    const resources = await screen.findByRole("button", {
+      name: "client.resources",
+    });
+    await userEvent.click(
+      await screen.findByRole("button", { name: "codexSharedSettings.title" }),
+    );
+    const editor = await screen.findByRole("textbox", {
+      name: "codexSharedSettings.editor",
+    });
+    await waitFor(() =>
+      expect(editor).toHaveValue('approval_policy = "on-request"'),
+    );
+    fireEvent.change(editor, {
+      target: { value: 'approval_policy = "never"' },
+    });
+    return { resources, editor };
+  }
+
+  it("keeps a shared settings draft through the existing application navigation guard", async () => {
+    const { resources, editor } = await openSharedDraft();
+    // Exercise the existing navigation handler even while the Sheet traps pointer focus.
+    fireEvent.click(resources);
+    const dialog = await screen.findByRole("dialog", {
+      name: "applications.leaveDraftTitle",
+    });
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("settings");
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "loongport.tier.editConfirmButton",
+      }),
+    );
+    expect(editor).toHaveValue('approval_policy = "never"');
+    fireEvent.click(resources);
+    fireEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("resources"),
+    );
+  });
+
+  it("opens existing MCP resources for Codex after shared draft confirmation", async () => {
+    await openSharedDraft();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.manageMcp" }),
+    );
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+    fireEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await screen.findByRole("textbox", {
+      name: "mcp.unifiedPanel.searchAriaLabel",
+    });
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex");
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("mcp");
+    expect(
+      screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+    ).not.toBeInTheDocument();
   });
 
   it("asks before leaving a real routing draft through the sidebar", async () => {

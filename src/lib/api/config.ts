@@ -98,3 +98,65 @@ export async function extractCommonConfigSnippet(
 
   return invoke<string>("extract_common_config_snippet", args);
 }
+
+export interface CodexSharedSettingsRequest {
+  id: string;
+  scope: "codexSharedSettings";
+  draftDigest: string;
+  revision: string;
+}
+
+export interface CodexSharedSettingsResult {
+  app: "codex";
+  request: CodexSharedSettingsRequest;
+  status:
+    | "completed"
+    | "pending"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "notRecorded"
+    | "unknown"
+    | "conflict"
+    | "stale"
+    | "blocked";
+  code?: string;
+}
+
+export interface CodexSharedSettingsSnapshot {
+  app: "codex";
+  status: "ready" | "blocked";
+  config: string;
+  originalSave: CodexSharedSettingsResult | null;
+  code?: string;
+}
+
+export interface CodexSharedSettingsPreview {
+  app: "codex";
+  request: CodexSharedSettingsRequest;
+  status: "ready" | "blocked";
+  changes: { field: string; before?: string; after?: string }[];
+  files: { role: "codexConfig"; change: "write" | "unchanged" }[];
+  code?: string;
+}
+
+export function getCodexSharedSettings(): Promise<CodexSharedSettingsSnapshot> {
+  return invoke("get_codex_shared_settings");
+}
+export function previewCodexSharedSettings(
+  config: string,
+  requestId: string,
+): Promise<CodexSharedSettingsPreview> {
+  return invoke("preview_codex_shared_settings", { config, requestId });
+}
+export function saveCodexSharedSettings(
+  config: string,
+  request: CodexSharedSettingsRequest,
+): Promise<CodexSharedSettingsResult> {
+  return invoke("save_codex_shared_settings", { config, request });
+}
+export function getCodexSharedSettingsSaveResult(
+  request: CodexSharedSettingsRequest,
+): Promise<CodexSharedSettingsResult> {
+  return invoke("get_codex_shared_settings_save_result", { request });
+}

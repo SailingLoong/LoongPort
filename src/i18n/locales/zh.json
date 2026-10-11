@@ -4659,5 +4659,47 @@
     },
     "modeChoiceRequired": "此应用已有模式缺失或冲突，需要选择模式。",
     "providerChoiceRequired": "此应用提供商缺失或冲突，需要选择提供商。"
+  },
+  "codexSharedSettings": {
+    "title": "Codex 共享设置",
+    "description": "只修改共享字段，不切换当前配置。",
+    "readOnlyFields": "连接地址、密钥、模型与路由字段只读。",
+    "scope": "这里编辑 Hooks、工具偏好及其他全局字段；不显示档位的敏感字段。",
+    "manageMcp": "到扩展资源管理 Codex MCP",
+    "editor": "共享内容（TOML）",
+    "saveScope": "保存仅写本页差异，不顺带保存档位或其他设置表单。",
+    "preview": "预览变更",
+    "previewTitle": "变更预览：{{count}} 个共享字段",
+    "versionCheck": "保存时将重新读取并校验文件版本；外部变更会使本次预览失效。",
+    "currentUnchanged": "当前配置保持不变；预览不是写入成功。",
+    "save": "保存共享设置",
+    "reload": "重新读取",
+    "checkResult": "查询原保存结果",
+    "error": {
+      "generic": "无法完成操作。请重试读取或查询原保存结果。",
+      "readOnlyFields": "内容包含只读字段，请移除连接、认证、模型、路由或 MCP 设置后重新预览。",
+      "invalidFormat": "TOML 格式无效，请修改后重新预览。",
+      "sourceChanged": "源文件已变化，请重新读取或重新预览。",
+      "ownerUnavailable": "当前配置不可用，暂时无法保存共享设置。",
+      "vaultLocked": "凭据库已锁定，请解锁后重新读取。",
+      "pendingOperation": "已有操作待确认，请先查询原保存结果。"
+    },
+    "result": {
+      "completed": "共享设置已核验并保存。",
+      "pending": "保存仍在进行，请查询原保存结果。",
+      "verificationRequired": "保存结果待核验，请查询原请求。",
+      "discarded": "本次保存已放弃，未确认写入成功。",
+      "abandoned": "本次保存已终止，未确认写入成功。",
+      "notRecorded": "未找到原保存记录，请重新读取后再预览。",
+      "unknown": "尚无法确定保存结果，请查询原请求，勿重复保存。",
+      "conflict": "保存发生冲突，请重新读取并预览。",
+      "stale": "文件版本已变化，请重新读取并预览。",
+      "blocked": "共享设置保存已阻止，请检查提示后重新读取。"
+    },
+    "before": "变更前",
+    "after": "变更后",
+    "added": "新增",
+    "removed": "删除",
+    "modified": "修改"
   }
 }

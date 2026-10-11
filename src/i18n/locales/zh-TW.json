@@ -4660,5 +4660,47 @@
     },
     "modeChoiceRequired": "此應用既有模式缺失或衝突，需要選擇模式。",
     "providerChoiceRequired": "此應用供應商缺失或衝突，需要選擇供應商。"
+  },
+  "codexSharedSettings": {
+    "title": "Codex 共用設定",
+    "description": "只修改共用欄位，不切換目前設定。",
+    "readOnlyFields": "連線位址、金鑰、模型與路由欄位唯讀。",
+    "scope": "在此編輯 Hooks、工具偏好及其他全域欄位；不顯示檔位的敏感欄位。",
+    "manageMcp": "到擴充資源管理 Codex MCP",
+    "editor": "共用內容（TOML）",
+    "saveScope": "儲存僅寫入本頁差異，不連帶儲存檔位或其他設定表單。",
+    "preview": "預覽變更",
+    "previewTitle": "變更預覽：{{count}} 個共用欄位",
+    "versionCheck": "儲存時將重新讀取並驗證檔案版本；外部變更會使本次預覽失效。",
+    "currentUnchanged": "目前設定保持不變；預覽不代表已成功寫入。",
+    "save": "儲存共用設定",
+    "reload": "重新讀取",
+    "checkResult": "查詢原儲存結果",
+    "error": {
+      "generic": "無法完成操作。請重新讀取或查詢原儲存結果。",
+      "readOnlyFields": "內容包含唯讀欄位，請移除連線、認證、模型、路由或 MCP 設定後重新預覽。",
+      "invalidFormat": "TOML 格式無效，請修改後重新預覽。",
+      "sourceChanged": "來源檔案已變更，請重新讀取或重新預覽。",
+      "ownerUnavailable": "目前設定無法使用，暫時無法儲存共用設定。",
+      "vaultLocked": "憑據庫已鎖定，請解鎖後重新讀取。",
+      "pendingOperation": "已有操作待確認，請先查詢原儲存結果。"
+    },
+    "result": {
+      "completed": "共用設定已驗證並儲存。",
+      "pending": "儲存仍在進行，請查詢原儲存結果。",
+      "verificationRequired": "儲存結果待驗證，請查詢原請求。",
+      "discarded": "本次儲存已捨棄，尚未確認寫入成功。",
+      "abandoned": "本次儲存已終止，尚未確認寫入成功。",
+      "notRecorded": "找不到原儲存記錄，請重新讀取後再預覽。",
+      "unknown": "尚無法確定儲存結果，請查詢原請求，勿重複儲存。",
+      "conflict": "儲存發生衝突，請重新讀取並預覽。",
+      "stale": "檔案版本已變更，請重新讀取並預覽。",
+      "blocked": "共用設定儲存已遭阻止，請查看提示後重新讀取。"
+    },
+    "before": "變更前",
+    "after": "變更後",
+    "added": "新增",
+    "removed": "刪除",
+    "modified": "修改"
   }
 }

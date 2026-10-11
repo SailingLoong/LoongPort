@@ -360,3 +360,45 @@ pub async fn extract_common_config_snippet(
     crate::services::provider::ProviderService::extract_common_config_snippet(&state, app)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn get_codex_shared_settings(
+    state: tauri::State<'_, crate::store::AppState>,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::read_codex_shared_settings(state.inner())
+        .map_err(|_| "shared_settings.ownerUnavailable".into())
+}
+#[tauri::command]
+pub fn preview_codex_shared_settings(
+    state: tauri::State<'_, crate::store::AppState>,
+    config: String,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::preview_codex_shared_settings(
+        state.inner(),
+        &config,
+        &request_id,
+    )
+    .map_err(|_| "shared_settings.invalidRequest".into())
+}
+#[tauri::command]
+pub fn save_codex_shared_settings(
+    state: tauri::State<'_, crate::store::AppState>,
+    config: String,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::save_codex_shared_settings(
+        state.inner(),
+        &config,
+        request,
+    )
+    .map_err(|_| "shared_settings.invalidRequest".into())
+}
+#[tauri::command]
+pub fn get_codex_shared_settings_save_result(
+    state: tauri::State<'_, crate::store::AppState>,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::query_codex_shared_settings_save(state.inner(), request)
+        .map_err(|_| "shared_settings.invalidRequest".into())
+}

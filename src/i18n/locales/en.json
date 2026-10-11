@@ -4659,5 +4659,47 @@
     },
     "modeChoiceRequired": "This app requires a mode choice because the saved value is missing or conflicting.",
     "providerChoiceRequired": "This app requires a provider choice because the saved value is missing or conflicting."
+  },
+  "codexSharedSettings": {
+    "title": "Codex shared settings",
+    "description": "Edit shared fields without switching the current configuration.",
+    "readOnlyFields": "Connection, credential, model, and routing fields are read-only.",
+    "scope": "Edit hooks, tool preferences, and other global fields. Sensitive provider fields are not displayed.",
+    "manageMcp": "Manage Codex MCP in extension resources",
+    "editor": "Shared content (TOML)",
+    "saveScope": "Save only this page’s changes, without saving provider or other settings forms.",
+    "preview": "Preview changes",
+    "previewTitle": "Change preview: {{count}} shared fields",
+    "versionCheck": "The file version is read and checked again on save. External changes invalidate this preview.",
+    "currentUnchanged": "The current configuration stays selected. A preview does not mean the file was saved.",
+    "save": "Save shared settings",
+    "reload": "Read again",
+    "checkResult": "Check original save result",
+    "error": {
+      "generic": "The operation could not be completed. Read again or check the original save result.",
+      "readOnlyFields": "Remove read-only connection, authentication, model, routing, or MCP fields before previewing again.",
+      "invalidFormat": "Invalid TOML. Edit the content and preview again.",
+      "sourceChanged": "The source file changed. Read or preview again.",
+      "ownerUnavailable": "The current configuration is unavailable. Shared settings cannot be saved yet.",
+      "vaultLocked": "The credential vault is locked. Unlock it and read again.",
+      "pendingOperation": "An operation awaits verification. Check the original save result first."
+    },
+    "result": {
+      "completed": "Shared settings saved and verified.",
+      "pending": "The save is still in progress. Check the original result.",
+      "verificationRequired": "The save needs verification. Check the original request.",
+      "discarded": "This save was discarded. A successful write has not been confirmed.",
+      "abandoned": "This save was abandoned. A successful write has not been confirmed.",
+      "notRecorded": "No original save record was found. Read again before previewing.",
+      "unknown": "The save result is unknown. Check the original request instead of saving again.",
+      "conflict": "The save conflicted. Read and preview again.",
+      "stale": "The file version changed. Read and preview again.",
+      "blocked": "The save was blocked. Check the notice and read again."
+    },
+    "before": "Before",
+    "after": "After",
+    "added": "Added",
+    "removed": "Removed",
+    "modified": "Modified"
   }
 }

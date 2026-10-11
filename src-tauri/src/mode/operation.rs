@@ -68,39 +68,92 @@ pub(crate) struct SavedRequestView {
     pub(crate) status: &'static str,
 }
 
+fn pending_save_view(
+    app: &str,
+    entry: &state::AppLiveState,
+) -> Result<Option<SavedRequestView>, AppError> {
+    state::validate_app_evidence_for_update(app, entry)?;
+    let Some(pending) = &entry.pending else {
+        return Ok(None);
+    };
+    let Some(request) = &pending.target.save_request else {
+        return Ok(None);
+    };
+    validate_operation(app, &pending.op, &pending.target)?;
+    Ok(Some(SavedRequestView {
+        request: request.clone(),
+        status: if pending.published {
+            "verificationRequired"
+        } else {
+            "pending"
+        },
+    }))
+}
+fn saved_outcome_status(outcome: state::SaveOutcome) -> &'static str {
+    match outcome {
+        state::SaveOutcome::Completed => "completed",
+        state::SaveOutcome::Discarded => "discarded",
+        state::SaveOutcome::Abandoned => "abandoned",
+    }
+}
+
 pub(crate) fn original_save_view(
     app: &str,
     entry: &state::AppLiveState,
     provider_id: &str,
 ) -> Result<Option<SavedRequestView>, AppError> {
-    state::validate_app_evidence_for_update(app, entry)?;
-    if let Some(pending) = &entry.pending {
-        if let Some(request) = &pending.target.save_request {
-            validate_operation(app, &pending.op, &pending.target)?;
-            if request.provider_id == provider_id {
-                return Ok(Some(SavedRequestView {
-                    request: request.clone(),
-                    status: if pending.published {
-                        "verificationRequired"
-                    } else {
-                        "pending"
-                    },
-                }));
-            }
-        }
+    saved_request_view(app, entry, state::SaveScope::Provider, Some(provider_id))
+}
+
+/// The provider editor and Codex shared page select their own original receipt.
+pub(crate) fn saved_request_view(
+    app: &str,
+    entry: &state::AppLiveState,
+    scope: state::SaveScope,
+    provider_id: Option<&str>,
+) -> Result<Option<SavedRequestView>, AppError> {
+    let matches = |request: &state::SaveRequest| {
+        request.scope == scope && request.provider_id.as_deref() == provider_id
+    };
+    if let Some(view) = pending_save_view(app, entry)?.filter(|v| matches(&v.request)) {
+        return Ok(Some(view));
     }
     Ok(entry
         .last_save
         .as_ref()
-        .filter(|receipt| receipt.request.provider_id == provider_id)
-        .map(|receipt| SavedRequestView {
-            request: receipt.request.clone(),
-            status: match receipt.outcome {
-                state::SaveOutcome::Completed => "completed",
-                state::SaveOutcome::Discarded => "discarded",
-                state::SaveOutcome::Abandoned => "abandoned",
-            },
+        .filter(|r| matches(&r.request))
+        .map(|r| SavedRequestView {
+            request: r.request.clone(),
+            status: saved_outcome_status(r.outcome),
         }))
+}
+
+/// Query by request identity before looking at target scope. The one last receipt
+/// may belong to the other editor; that means unknown, never not-recorded.
+pub(crate) fn saved_request_status(
+    app: &str,
+    entry: &state::AppLiveState,
+    request: &state::SaveRequest,
+) -> Result<&'static str, AppError> {
+    request.validate()?;
+    if let Some(view) = pending_save_view(app, entry)?.filter(|v| v.request.id == request.id) {
+        return Ok(if view.request == *request {
+            view.status
+        } else {
+            "conflict"
+        });
+    }
+    Ok(match &entry.last_save {
+        Some(receipt) if receipt.request.id == request.id => {
+            if receipt.request == *request {
+                saved_outcome_status(receipt.outcome)
+            } else {
+                "conflict"
+            }
+        }
+        Some(_) => "unknown",
+        None => "notRecorded",
+    })
 }
 
 /// 执行一次操作。调用方持有这个应用的写锁。
@@ -967,14 +1020,28 @@ fn valid_digest(value: &Option<String>) -> bool {
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
     if let Some(request) = &target.save_request {
         request.validate()?;
-        let row = target.saved_row.as_ref().ok_or_else(invalid_pending)?;
-        if op != state::op::APPLY
-            || !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
-            || request.provider_id != saved_provider(row)?.id
-        {
+        if op != state::op::APPLY {
             return Err(invalid_pending());
         }
+        match request.scope {
+            state::SaveScope::Provider => {
+                let row = target.saved_row.as_ref().ok_or_else(invalid_pending)?;
+                if !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
+                    || request.provider_id.as_deref() != Some(saved_provider(row)?.id.as_str())
+                {
+                    return Err(invalid_pending());
+                }
+            }
+            state::SaveScope::CodexSharedSettings => {
+                let mut effects = target.clone();
+                effects.save_request = None;
+                if app != "codex" || !effects.is_empty() {
+                    return Err(invalid_pending());
+                }
+            }
+        }
     }
+
     if target.model_preference.is_some() || target.routing_order.is_some() {
         if op != state::op::APPLY || !matches!(app, "claude" | "codex" | "gemini" | "grokbuild") {
             return Err(invalid_pending());

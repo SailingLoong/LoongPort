@@ -1398,7 +1398,8 @@ fn bound_editor_target() -> PendingTarget {
     PendingTarget {
         save_request: Some(state::SaveRequest {
             id: "22222222-2222-4222-8222-222222222222".into(),
-            provider_id: row.id.clone(),
+            scope: state::SaveScope::Provider,
+            provider_id: Some(row.id.clone()),
             draft_digest: digest.clone(),
             revision: "c".repeat(64),
         }),
@@ -1954,4 +1955,126 @@ fn editor_source_last_recovery_cleanup_retains_drifted_pending() {
     let live = state::load_app(&fx.store, &vault, &fx.app).unwrap();
     assert!(live.apps[&fx.app].pending.is_some());
     assert!(live.apps[&fx.app].last_save.is_none());
+}
+
+#[test]
+fn codex_shared_settings_uses_original_receipt_without_a_provider_row() {
+    let mut fx = Fixture::new();
+    fx.app = "codex".into();
+    let wire = json!({
+        "id": "55555555-5555-4555-8555-555555555555",
+        "scope": "codexSharedSettings",
+        "draftDigest": "a".repeat(64),
+        "revision": "b".repeat(64)
+    });
+    let decoded = serde_json::from_value::<state::SaveRequest>(wire.clone());
+    assert!(
+        decoded.is_ok(),
+        "an explicit shared-settings request must not invent a provider row"
+    );
+    let request = decoded.unwrap();
+    request.validate().unwrap();
+    assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+    let target = PendingTarget {
+        save_request: Some(request.clone()),
+        ..Default::default()
+    };
+    let original = fs::read(&fx.a).unwrap();
+    let patch = crate::live::patch::Guarded {
+        expected_pre: digest(Some(&original)),
+        then: crate::live::patch::WholeFile::Write(b"{\"user\":2,\"key\":\"old\"}".to_vec()),
+    };
+    let vault = fx.key.read().unwrap();
+    let guard = lock_app(&fx.app);
+    let commits = RefCell::new(0);
+    let commit = |target: &PendingTarget| {
+        assert!(target.saved_row.is_none());
+        assert!(target.pointer.is_none());
+        assert!(target.state.is_none());
+        assert!(target.routing_order.is_none());
+        assert!(target.model_preference.is_none());
+        assert!(target.written.is_none());
+        *commits.borrow_mut() += 1;
+        Ok(())
+    };
+    let changes = [FileChange {
+        file: LiveFile::shared(&fx.a),
+        patch: &patch,
+    }];
+    run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &changes,
+        target.clone(),
+        &commit,
+    )
+    .unwrap();
+    let live = state::load_app(&fx.store, &vault, &fx.app).unwrap();
+    let receipt = live.apps[&fx.app].last_save.as_ref().unwrap();
+    assert_eq!(receipt.request, request);
+    assert_eq!(receipt.outcome, state::SaveOutcome::Completed);
+    assert!(live.apps[&fx.app].pending.is_none());
+    let journal = fs::read(fx.store.state_path()).unwrap();
+    let content = fs::read(&fx.a).unwrap();
+    run(
+        &fx.store,
+        &vault,
+        &guard,
+        state::op::APPLY,
+        &changes,
+        target,
+        &commit,
+    )
+    .unwrap();
+    assert_eq!(
+        *commits.borrow(),
+        1,
+        "lost response must return the original receipt, not write again"
+    );
+    assert_eq!(fs::read(fx.store.state_path()).unwrap(), journal);
+    assert_eq!(fs::read(&fx.a).unwrap(), content);
+    assert_eq!(fx.read(&fx.b), json!({"key":"old"}));
+}
+
+#[test]
+fn shared_scope_is_explicit_and_cannot_carry_provider_or_mode_effects() {
+    let base = json!({"id":"66666666-6666-4666-8666-666666666666","draftDigest":"a".repeat(64),"revision":"b".repeat(64)});
+    let missing_id = serde_json::from_value::<state::SaveRequest>(base.clone());
+    assert!(
+        missing_id.is_err() || missing_id.unwrap().validate().is_err(),
+        "old provider requests still require an ID"
+    );
+    let mut shared = base;
+    shared["scope"] = json!("codexSharedSettings");
+    let request: state::SaveRequest = serde_json::from_value(shared.clone()).unwrap();
+    request.validate().unwrap();
+    shared["providerId"] = json!("synthetic-provider");
+    assert!(serde_json::from_value::<state::SaveRequest>(shared)
+        .unwrap()
+        .validate()
+        .is_err());
+    let target = PendingTarget {
+        save_request: Some(request),
+        ..Default::default()
+    };
+    validate_operation("codex", state::op::APPLY, &target).unwrap();
+    assert!(validate_operation("claude", state::op::APPLY, &target).is_err());
+    assert!(validate_operation("codex", state::op::SWITCH, &target).is_err());
+    let mut with_row = bound_editor_target();
+    with_row.save_request = target.save_request.clone();
+    assert!(validate_operation("codex", state::op::APPLY, &with_row).is_err());
+    let mut changed = target.clone();
+    changed.pointer = Some("synthetic-provider".into());
+    assert!(validate_operation("codex", state::op::APPLY, &changed).is_err());
+    let mut changed = target.clone();
+    changed.state = Some(state::ModeState::default());
+    assert!(validate_operation("codex", state::op::APPLY, &changed).is_err());
+    let mut changed = target.clone();
+    changed.written = Some(state::Written::default());
+    assert!(validate_operation("codex", state::op::APPLY, &changed).is_err());
+    let mut changed = target;
+    changed.model_preference = Some(state::ModelPreferenceAction::Clear {});
+    assert!(validate_operation("codex", state::op::APPLY, &changed).is_err());
 }

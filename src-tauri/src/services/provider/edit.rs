@@ -71,46 +71,20 @@ fn result(app: &AppType, request: &SaveRequest, status: &str, why: Option<&str>)
 }
 fn query_locked(state: &AppState, app: &AppType, request: &SaveRequest) -> Result<Value, AppError> {
     admitted(state, app)?;
+    if request.scope != state::SaveScope::Provider {
+        return Err(problem("readOnly"));
+    }
     let vault = state.db.secret_session().read()?;
     let live = state::load_app(&DeviceStore::for_device(), &vault, app.as_str())?;
     let Some(entry) = live.apps.get(app.as_str()) else {
         return Ok(result(app, request, "notRecorded", None));
     };
-    state::validate_app_evidence_for_update(app.as_str(), entry)?;
-    if let Some(pending) = &entry.pending {
-        if let Some(original) = &pending.target.save_request {
-            let view = operation::original_save_view(app.as_str(), entry, &original.provider_id)?
-                .ok_or_else(|| problem("ownerUnavailable"))?;
-            if original.id == request.id {
-                return Ok(result(
-                    app,
-                    request,
-                    if original != request {
-                        "conflict"
-                    } else {
-                        view.status
-                    },
-                    None,
-                ));
-            }
-        }
-    }
-    if let Some(receipt) = &entry.last_save {
-        if receipt.request.id == request.id {
-            let status = if receipt.request != *request {
-                "conflict"
-            } else {
-                match receipt.outcome {
-                    state::SaveOutcome::Completed => "completed",
-                    state::SaveOutcome::Discarded => "discarded",
-                    state::SaveOutcome::Abandoned => "abandoned",
-                }
-            };
-            return Ok(result(app, request, status, None));
-        }
-        return Ok(result(app, request, "unknown", None));
-    }
-    Ok(result(app, request, "notRecorded", None))
+    Ok(result(
+        app,
+        request,
+        operation::saved_request_status(app.as_str(), entry, request)?,
+        None,
+    ))
 }
 pub(crate) fn query(
     state: &AppState,
@@ -447,7 +421,8 @@ pub(crate) fn preview(
     let draft = draft_digest(app, &provider, original, delete_credential)?;
     let mut request = SaveRequest {
         id: id.into(),
-        provider_id: original.into(),
+        scope: state::SaveScope::Provider,
+        provider_id: Some(original.into()),
         draft_digest: draft.clone(),
         revision: draft,
     };
@@ -500,7 +475,8 @@ pub(crate) fn confirm(
     delete_credential: bool,
 ) -> Result<Value, AppError> {
     request.validate()?;
-    if request.provider_id != original
+    if request.scope != state::SaveScope::Provider
+        || request.provider_id.as_deref() != Some(original)
         || provider.id != original
         || draft_digest(app, &provider, original, delete_credential)? != request.draft_digest
     {

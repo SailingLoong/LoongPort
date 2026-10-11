@@ -4828,7 +4828,8 @@ fn editor_row_target(previous: &Provider, planned: &Provider) -> state::PendingT
     state::PendingTarget {
         save_request: Some(state::SaveRequest {
             id: "33333333-3333-4333-8333-333333333333".into(),
-            provider_id: planned.id.clone(),
+            scope: state::SaveScope::Provider,
+            provider_id: Some(planned.id.clone()),
             draft_digest: crate::database::Database::provider_update_digest(planned).unwrap(),
             revision: "e".repeat(64),
         }),
@@ -5649,4 +5650,288 @@ fn editor_query_reuses_original_unknown_publication_result_without_recovery() {
         assert!(std::fs::read(DeviceStore::for_device().state_path()).unwrap() == journal);
         assert!(read_current(&fx.path).unwrap() == native);
     }
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_shared_settings_saves_only_the_independent_page_and_queries_its_receipt() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::for_app(AppType::Codex);
+    let original = std::fs::read_to_string(&fx.path).unwrap();
+    let original = format!("{original}\n# keep this comment\n[tui]\nnotifications = false\nhistory_limit = 9007199254740993\nreminder_at = 2026-10-11T00:00:00Z\n[mcp_servers.synthetic]\ncommand = \"synthetic-tool\"\n");
+    std::fs::write(&fx.path, &original).unwrap();
+    let db_before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal_before = std::fs::read(store.state_path()).unwrap();
+    let mode_before = state::mode_state(
+        &store,
+        &fx.state.db.secret_session().read().unwrap(),
+        "codex",
+    )
+    .unwrap();
+    let other_files = crate::mode::controller::files(&AppType::Codex)
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.path != fx.path)
+        .map(|f| (f.path.clone(), read_current(&f.path).unwrap()))
+        .collect::<Vec<_>>();
+    let read = C::read_codex_shared_settings(&fx.state).unwrap();
+    assert_eq!(
+        read["status"], "ready",
+        "shared settings must have an independent live read"
+    );
+    let draft = read["config"]
+        .as_str()
+        .unwrap()
+        .replace("notifications = false", "notifications = true");
+    assert!(draft.contains("9007199254740993"));
+    assert!(draft.contains("2026-10-11T00:00:00Z"));
+    assert!(!draft.contains("synthetic-key"));
+    assert!(!draft.contains("model_providers"));
+    assert!(!draft.contains("mcp_servers"));
+    let preview =
+        C::preview_codex_shared_settings(&fx.state, &draft, "77777777-7777-4777-8777-777777777777")
+            .unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(
+        preview["changes"],
+        json!([{"field":"tui.notifications","before":"false","after":"true"}])
+    );
+    let mut add_remove = read["config"]
+        .as_str()
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    add_remove["tui"]
+        .as_table_like_mut()
+        .unwrap()
+        .remove("notifications");
+    add_remove["tui"]["new_preference"] = toml_edit::value("synthetic");
+    let changed = C::preview_codex_shared_settings(
+        &fx.state,
+        &add_remove.to_string(),
+        "77777777-7777-4777-8777-777777777779",
+    )
+    .unwrap();
+    assert_eq!(
+        changed["changes"],
+        json!([
+            {"field":"tui.new_preference","after":"\"synthetic\""},
+            {"field":"tui.notifications","before":"false"}
+        ])
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), original.as_bytes());
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal_before);
+    assert!(!preview.to_string().contains("synthetic-key"));
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    let saved = C::save_codex_shared_settings(&fx.state, &draft, request.clone()).unwrap();
+    assert_eq!(saved["status"], "completed");
+    assert_eq!(
+        std::fs::read_to_string(&fx.path).unwrap(),
+        original.replace("notifications = false", "notifications = true")
+    );
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db_before
+    );
+    assert_eq!(
+        state::mode_state(
+            &store,
+            &fx.state.db.secret_session().read().unwrap(),
+            "codex"
+        )
+        .unwrap(),
+        mode_before
+    );
+    for (path, bytes) in other_files {
+        assert!(read_current(&path).unwrap() == bytes);
+    }
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let native = read_current(&fx.path).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    assert!(read_current(&fx.path).unwrap() == native);
+    // The existing journal has one last receipt. A later provider save must
+    // make this old shared result unknown, never falsely not-recorded.
+    let mut edited = fx
+        .state
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    edited.name = "Synthetic later provider save".into();
+    let later = crate::services::provider::edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        edited.clone(),
+        "b",
+        "77777777-7777-4777-8777-777777777778",
+        false,
+    )
+    .unwrap();
+    let later_request = serde_json::from_value(later["request"].clone()).unwrap();
+    assert_eq!(
+        crate::services::provider::edit::confirm(
+            &fx.state,
+            &AppType::Codex,
+            edited,
+            "b",
+            later_request,
+            false
+        )
+        .unwrap()["status"],
+        "completed"
+    );
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, request).unwrap()["status"],
+        "unknown"
+    );
+    assert!(C::read_codex_shared_settings(&fx.state).unwrap()["originalSave"].is_null());
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    assert!(read_current(&fx.path).unwrap() == native);
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_shared_settings_rejects_protected_fields_and_stale_previews_without_writes() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::for_app(AppType::Codex);
+    let original = std::fs::read_to_string(&fx.path).unwrap();
+    let original = format!("hooks = [{{ api_key = \"synthetic-hidden-key\" }}]\n{original}\n[tui]\nnotifications = false\n[agents]\ndefault_subagent_model = \"synthetic-protected-model\"\nmax_threads = 4\n");
+    std::fs::write(&fx.path, &original).unwrap();
+    let id = "88888888-8888-4888-8888-888888888888";
+    for draft in [
+        "model = 'synthetic-model'\n",
+        "openai_base_url = 'https://synthetic.invalid'\n",
+        "experimental_bearer_token = 'synthetic-secret-canary'\n",
+        "cli_auth_credentials_store = 'keyring'\n",
+        "profile = 'synthetic'\n",
+        "[profiles.synthetic]\nmodel = 'other'\n",
+        "[model_providers.synthetic]\nbase_url = 'https://synthetic.invalid'\n",
+        "[mcp_servers.synthetic]\nenabled = true\n",
+        "[agents]\ndefault_subagent_model = 'other'\n",
+        "[tools]\napi_key = 'synthetic-secret-canary'\n",
+    ] {
+        let preview = C::preview_codex_shared_settings(&fx.state, draft, id).unwrap();
+        assert_eq!(preview["status"], "blocked");
+        assert_eq!(preview["code"], "readOnlyFields");
+        assert!(!preview.to_string().contains("synthetic-secret-canary"));
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+    }
+    for replacement in ["agents = 'replacement'\n", "agents = []\n", "hooks = []\n"] {
+        let preview = C::preview_codex_shared_settings(&fx.state, replacement, id).unwrap();
+        assert_eq!(
+            preview["status"], "blocked",
+            "a parent replacement must preserve hidden owner fields"
+        );
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+    }
+    let malformed =
+        C::preview_codex_shared_settings(&fx.state, "key = 'synthetic-secret-canary", id).unwrap();
+    assert_eq!(malformed["status"], "blocked");
+    assert_eq!(malformed["code"], "invalidFormat");
+    assert!(!malformed.to_string().contains("synthetic-secret-canary"));
+    let read = C::read_codex_shared_settings(&fx.state).unwrap();
+    let draft = read["config"]
+        .as_str()
+        .unwrap()
+        .replace("notifications = false", "notifications = true");
+    let changed_before_preview = original.replace("max_threads = 4", "max_threads = 5");
+    std::fs::write(&fx.path, &changed_before_preview).unwrap();
+    let fresh_diff = C::preview_codex_shared_settings(&fx.state, &draft, id).unwrap();
+    assert_eq!(
+        fresh_diff["changes"],
+        json!([
+            {"field":"agents.max_threads","before":"5","after":"4"},
+            {"field":"tui.notifications","before":"false","after":"true"}
+        ])
+    );
+    assert!(!fresh_diff.to_string().contains("synthetic-hidden-key"));
+    std::fs::write(&fx.path, &original).unwrap();
+    let preview = C::preview_codex_shared_settings(&fx.state, &draft, id).unwrap();
+    assert_eq!(preview["status"], "ready");
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    let external = format!("{original}\n# external change\n");
+    std::fs::write(&fx.path, &external).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, &draft, request).unwrap()["status"],
+        "stale"
+    );
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), external);
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    let fresh = C::preview_codex_shared_settings(&fx.state, &draft, id).unwrap();
+    let request = serde_json::from_value(fresh["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, &draft, request).unwrap()["status"],
+        "completed"
+    );
+    assert!(std::fs::read_to_string(&fx.path)
+        .unwrap()
+        .ends_with("# external change\n"));
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_shared_settings_queries_pending_without_recovery_or_duplicate_effects() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::for_app(AppType::Codex);
+    let original = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("{original}\n[tui]\nnotifications = false\n"),
+    )
+    .unwrap();
+    let read = C::read_codex_shared_settings(&fx.state).unwrap();
+    assert_eq!(read["status"], "ready");
+    let draft = read["config"]
+        .as_str()
+        .unwrap()
+        .replace("notifications = false", "notifications = true");
+    let preview =
+        C::preview_codex_shared_settings(&fx.state, &draft, "99999999-9999-4999-8999-999999999999")
+            .unwrap();
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert_eq!(
+            C::save_codex_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+            "pending"
+        );
+    }
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let native = std::fs::read(&fx.path).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, &draft, request.clone()).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(
+        C::read_codex_shared_settings(&fx.state).unwrap()["status"],
+        "blocked"
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), native);
+    crate::mode::controller::recover_locked(&fx.state.proxy_service, &AppType::Codex).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, request).unwrap()["status"],
+        "discarded"
+    );
 }

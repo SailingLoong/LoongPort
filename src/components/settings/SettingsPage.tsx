@@ -1,4 +1,5 @@
 import {
+  type Ref,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -58,7 +59,16 @@ import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
 
+import {
+  CodexSharedSettings,
+  type CodexSharedSettingsHandle,
+} from "@/components/settings/CodexSharedSettings";
+export type { CodexSharedSettingsHandle as SettingsPageHandle } from "@/components/settings/CodexSharedSettings";
+
 interface SettingsDialogProps {
+  beforeLeave: (proceed: () => void) => void;
+  ref?: Ref<CodexSharedSettingsHandle>;
+  onManageCodexMcp?: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImportSuccess?: () => void | Promise<void>;
@@ -66,6 +76,9 @@ interface SettingsDialogProps {
 }
 
 export function SettingsPage({
+  beforeLeave,
+  ref,
+  onManageCodexMcp,
   open,
   onOpenChange,
   onImportSuccess,
@@ -105,6 +118,7 @@ export function SettingsPage({
     resetStatus,
   } = useImportExport({ onImportSuccess });
 
+  const [sharedSettingsOpen, setSharedSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -257,6 +271,17 @@ export function SettingsPage({
                     />
                     {/* skill 存储位置 / 同步方式两块已挪去 skills 管理页就近
                         （改它们的场景是「在管 skills 的时候」）。 */}
+                    <div className="space-y-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => setSharedSettingsOpen(true)}
+                      >
+                        {t("codexSharedSettings.title")}
+                      </Button>
+                      <p className="text-sm text-muted-foreground">
+                        {t("codexSharedSettings.description")}
+                      </p>
+                    </div>
                     <CodexAuthSettings
                       settings={settings}
                       onChange={handleAutoSave}
@@ -535,6 +560,15 @@ export function SettingsPage({
             )}
           </div>
         </Tabs>
+      )}
+
+      {sharedSettingsOpen && (
+        <CodexSharedSettings
+          beforeLeave={beforeLeave}
+          ref={ref}
+          onClose={() => setSharedSettingsOpen(false)}
+          onManageMcp={onManageCodexMcp}
+        />
       )}
 
       <Dialog

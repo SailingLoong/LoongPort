@@ -388,13 +388,33 @@ pub struct PendingFile {
     pub extra: Map<String, Value>,
 }
 
+/// The two existing consumers of the same app-local save receipt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SaveScope {
+    #[default]
+    Provider,
+    CodexSharedSettings,
+}
+impl SaveScope {
+    fn is_provider(&self) -> bool {
+        *self == Self::Provider
+    }
+}
+
 /// Non-secret association for one explicit editor confirmation. Never a token cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SaveRequest {
     pub id: String,
-    #[serde(alias = "provider_id")]
-    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "SaveScope::is_provider")]
+    pub scope: SaveScope,
+    #[serde(
+        default,
+        alias = "provider_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_id: Option<String>,
     #[serde(alias = "draft_digest")]
     pub draft_digest: String,
     pub revision: String,
@@ -407,7 +427,13 @@ impl SaveRequest {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         if uuid::Uuid::parse_str(&self.id).is_err()
-            || self.provider_id.trim().is_empty()
+            || match self.scope {
+                SaveScope::Provider => self
+                    .provider_id
+                    .as_ref()
+                    .is_none_or(|id| id.trim().is_empty()),
+                SaveScope::CodexSharedSettings => self.provider_id.is_some(),
+            }
             || !digest(&self.draft_digest)
             || !digest(&self.revision)
         {

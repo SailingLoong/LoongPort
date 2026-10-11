@@ -89,7 +89,10 @@ import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { SettingsPage } from "@/components/settings/SettingsPage";
+import {
+  SettingsPage,
+  type SettingsPageHandle,
+} from "@/components/settings/SettingsPage";
 import { UsagePage } from "@/components/usage/UsagePage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
@@ -176,16 +179,20 @@ function App() {
   const queryClient = useQueryClient();
 
   const workspaceRef = useRef<ApplicationWorkspaceHandle>(null);
+  const settingsRef = useRef<SettingsPageHandle>(null);
   const pendingNavigation = useRef<(() => void) | null>(null);
   const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
   const beforeNavigate = useCallback(
     (proceed: () => void) => {
-      if (workspaceRef.current?.submitting) {
+      if (workspaceRef.current?.submitting || settingsRef.current?.submitting) {
         toast.info(t("common.saving"));
         return;
       }
       if (pendingNavigation.current) return;
-      if (!workspaceRef.current?.hasPendingChanges) {
+      if (
+        !workspaceRef.current?.hasPendingChanges &&
+        !settingsRef.current?.hasPendingChanges
+      ) {
         proceed();
         return;
       }
@@ -1153,6 +1160,9 @@ function App() {
         case "settings":
           return (
             <SettingsPage
+              beforeLeave={beforeNavigate}
+              ref={settingsRef}
+              onManageCodexMcp={() => setCurrentView("mcp", "codex")}
               open={true}
               onOpenChange={goBack}
               onImportSuccess={handleImportSuccess}
@@ -1758,11 +1768,15 @@ function App() {
           const proceed = pendingNavigation.current;
           cancelLeaveDraft();
           if (!proceed) return;
-          if (workspaceRef.current?.submitting) {
+          if (
+            workspaceRef.current?.submitting ||
+            settingsRef.current?.submitting
+          ) {
             toast.info(t("common.saving"));
             return;
           }
           workspaceRef.current?.discard();
+          settingsRef.current?.discard();
           proceed();
         }}
       />
