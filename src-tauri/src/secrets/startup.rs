@@ -45,6 +45,43 @@ impl StartupCoordinator {
 
     #[cfg(feature = "gui")]
     fn initialize(&self, app: &tauri::AppHandle, password: Option<&str>) -> Result<(), String> {
+        self.initialize_with(password, &SystemKeyStore, |session| {
+            crate::initialize_runtime(app, session).map_err(|error| error.to_string())
+        })?;
+        // Publish readiness only after the original coordinator has reached Ready.
+        crate::init_status::clear_init_error();
+        let _ = app.emit("runtime-ready", ());
+        Ok(())
+    }
+
+    fn initialize_with<P>(
+        &self,
+        password: Option<&str>,
+        store: &dyn super::key_store::KeyStore,
+        prepare: P,
+    ) -> Result<(), String>
+    where
+        P: FnOnce(std::sync::Arc<SecretSession>) -> Result<(), String>,
+    {
+        let resume = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?
+            .is_database_resume_candidate();
+        if resume {
+            let phase = *self
+                .phase
+                .lock()
+                .map_err(|_| "secret.startup_unavailable")?;
+            let view = match phase {
+                Phase::Locked => self.authenticate_upgrade(password, store)?,
+                Phase::UpgradeReview | Phase::Ready => self.upgrade_view()?,
+                Phase::Initializing => return Err("secret.initializing".into()),
+                Phase::Failed | Phase::Recovered => return Err("secret.restart_required".into()),
+            };
+            let token = view.review_token.ok_or("secret.locked")?;
+            return self.run_upgrade_attempt(&token, prepare);
+        }
         self.run_attempt(
             || {
                 let inspection = self
@@ -55,12 +92,8 @@ impl StartupCoordinator {
                     .verify_unchanged(&self.root)
                     .map_err(super::error::public_code)?;
                 if inspection.has_vault() {
-                    let vault = super::session::authenticate_existing(
-                        &self.root,
-                        &SystemKeyStore,
-                        password,
-                    )
-                    .map_err(super::error::public_code)?;
+                    let vault = super::session::authenticate_existing(&self.root, store, password)
+                        .map_err(super::error::public_code)?;
                     inspection
                         .validate_device_state(&vault)
                         .map_err(super::error::public_code)?;
@@ -74,16 +107,15 @@ impl StartupCoordinator {
                     return Err("secret.metadata_missing".into());
                 }
                 super::reset::recover(&self.root, password).map_err(super::error::public_code)?;
-                super::bootstrap_restore::recover(&self.root, &SystemKeyStore, password)
+                super::bootstrap_restore::recover(&self.root, store, password)
                     .map_err(super::error::public_code)?;
                 crate::settings::reload_settings().map_err(super::error::public_code)?;
                 crate::settings::bootstrap_settings().map_err(super::error::public_code)?;
                 crate::database::vault::preflight(&self.root.join(crate::config::DB_FILE_NAME))
                     .map_err(super::error::public_code)?;
-                SecretSession::open(&self.root, &SystemKeyStore, password)
-                    .map_err(super::error::public_code)
+                SecretSession::open(&self.root, store, password).map_err(super::error::public_code)
             },
-            |session| prepare_runtime(app, session),
+            prepare,
         )
     }
 
@@ -1384,11 +1416,14 @@ mod upgrade_handoff_tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_password(None)
+        }
+        fn with_password(password: Option<&str>) -> Self {
             let home = TestHome::new().unwrap();
             crate::settings::reload_settings().unwrap();
             let root = crate::config::get_app_config_dir();
             let store = MemoryKeyStore::default();
-            let session = SecretSession::open(&root, &store, None).unwrap();
+            let session = SecretSession::open(&root, &store, password).unwrap();
             let conn = rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
             Database::create_tables_on_conn(&conn).unwrap();
             Database::apply_schema_migrations_on_conn(&conn).unwrap();
@@ -1433,7 +1468,7 @@ mod upgrade_handoff_tests {
             let inspected = crate::secrets::upgrade::inspect(&root, &device).unwrap();
             let coordinator = StartupCoordinator::new(root, inspected);
             let token = coordinator
-                .authenticate_upgrade(None, &store)
+                .authenticate_upgrade(password, &store)
                 .unwrap()
                 .review_token
                 .unwrap();
@@ -1466,6 +1501,251 @@ mod upgrade_handoff_tests {
                 .runtime_session(&self.coordinator.inspection.lock().unwrap(), &self.token)
                 .unwrap()
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_restart_enters_controlled_runtime_after_original_authentication() {
+        let f = Fixture::new();
+        let root = f.coordinator.root.clone();
+        let restarted = StartupCoordinator::new(
+            root.clone(),
+            crate::secrets::upgrade::inspect(&root, &f.device).unwrap(),
+        );
+        let vault_before = std::fs::read(root.join("vault.json")).unwrap();
+        let checkpoint_before = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        let native_before = std::fs::read(&f.native).unwrap();
+        let calls = Cell::new(0);
+        let result = restarted.initialize_with(None, &f.store, |session| {
+            calls.set(calls.get() + 1);
+            assert!(matches!(
+                *restarted.phase.lock().unwrap(),
+                Phase::Initializing
+            ));
+            let legacy = session.migration_pending().map_err(|e| e.to_string())?;
+            crate::secrets::migration::prepare_files(&session, legacy)
+                .map_err(|e| e.to_string())?;
+            crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+            assert!(!session.legacy_json_pending().unwrap());
+            let db =
+                Arc::new(Database::init_with_secrets(session.clone()).map_err(|e| e.to_string())?);
+            let copilot = Arc::new(tokio::sync::RwLock::new(
+                crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())
+                    .map_err(|e| e.to_string())?,
+            ));
+            let xai = Arc::new(tokio::sync::RwLock::new(
+                crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())
+                    .map_err(|e| e.to_string())?,
+            ));
+            let state = crate::store::AppState::new(db).map_err(|e| e.to_string())?;
+            state
+                .proxy_service
+                .set_managed_auth(copilot, xai)
+                .map_err(|e| e.to_string())?;
+            session.complete_migration().map_err(|e| e.to_string())?;
+            assert!(checkpoint::ensure_no_pending_checkpoint(&f.device).is_err());
+            Ok(())
+        });
+        assert_eq!(
+            result,
+            Ok(()),
+            "verified restart should use the original controlled handoff"
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(*restarted.phase.lock().unwrap(), Phase::Ready));
+        restarted
+            .initialize_with(None, &f.store, |_| panic!("already prepared"))
+            .unwrap();
+        let view = restarted.upgrade_view().unwrap();
+        assert_eq!(view.status, "database_verified");
+        let token = view.review_token.unwrap();
+        assert!(
+            restarted
+                .review_upgrade_app(&token, &AppType::Claude)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(
+            !restarted
+                .review_upgrade_app(&token, &AppType::Codex)
+                .unwrap()
+                .can_complete_app
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        assert!(std::fs::read(root.join("vault.json")).unwrap() == vault_before);
+        assert!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap() == checkpoint_before
+        );
+        assert!(std::fs::read(&f.native).unwrap() == native_before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_restart_preserves_disabled_automatic_unlock_password_path() {
+        let password = "synthetic-restart-password";
+        let f = Fixture::with_password(Some(password));
+        let root = f.coordinator.root.clone();
+        let restarted = StartupCoordinator::new(
+            root.clone(),
+            crate::secrets::upgrade::inspect(&root, &f.device).unwrap(),
+        );
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            restarted.initialize_with(None, &f.store, |_| panic!("password required")),
+            Err("secret.locked".into())
+        );
+        assert!(restarted
+            .initialize_with(Some("synthetic-wrong"), &f.store, |_| panic!(
+                "wrong password"
+            ))
+            .is_err());
+        assert!(matches!(*restarted.phase.lock().unwrap(), Phase::Locked));
+        assert_eq!(snapshot(f.home.path()), before);
+        let calls = Cell::new(0);
+        restarted
+            .initialize_with(Some(password), &f.store, |session| {
+                calls.set(calls.get() + 1);
+                assert!(!session.migration_pending().unwrap());
+                assert!(checkpoint::verified_database_id(
+                    &root,
+                    &f.device,
+                    &session.read().unwrap()
+                )
+                .unwrap()
+                .is_some());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(snapshot(f.home.path()), before);
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_restart_refuses_unverified_checkpoint_database_and_generation() {
+        for case in [
+            "checkpoint",
+            "unpublished",
+            "generation",
+            "identity",
+            "schema",
+        ] {
+            let f = Fixture::new();
+            let root = f.coordinator.root.clone();
+            match case {
+                "checkpoint" => std::fs::write(
+                    f.device.root().join(checkpoint::FILE),
+                    b"synthetic-corrupt-proof",
+                )
+                .unwrap(),
+                "unpublished" => {
+                    let file = crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE)
+                        .unwrap();
+                    let session = f.session();
+                    let vault = session.read().unwrap();
+                    let bytes = f.device.read_device(&vault, &file).unwrap().unwrap();
+                    let mut proof: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    proof.as_object_mut().unwrap().remove("published_database");
+                    f.device
+                        .write_device(&vault, &file, &serde_json::to_vec(&proof).unwrap())
+                        .unwrap();
+                }
+                "generation" => std::fs::write(
+                    root.join(crate::secrets::transition::INTENT),
+                    b"synthetic-pending",
+                )
+                .unwrap(),
+                "identity" => {
+                    let conn =
+                        rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
+                    database::vault::stamp(
+                        &conn,
+                        &crate::secrets::VaultContext::generate().unwrap(),
+                    )
+                    .unwrap();
+                }
+                "schema" => {
+                    let conn =
+                        rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
+                    conn.pragma_update(
+                        None,
+                        "user_version",
+                        database::UPSTREAM4_SCHEMA_VERSION + 1,
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = snapshot(f.home.path());
+            let inspected = match crate::secrets::upgrade::inspect(&root, &f.device) {
+                Ok(inspected) => inspected,
+                Err(error) => {
+                    assert_eq!(case, "identity");
+                    assert_eq!(
+                        crate::secrets::error::public_code(error),
+                        "secret.identity_mismatch"
+                    );
+                    assert_eq!(snapshot(f.home.path()), before, "{case}");
+                    continue;
+                }
+            };
+            let restarted = StartupCoordinator::new(root, inspected);
+            assert!(
+                restarted
+                    .initialize_with(None, &f.store, |_| panic!(
+                        "unverified runtime must not start"
+                    ))
+                    .is_err(),
+                "{case}"
+            );
+            assert_eq!(snapshot(f.home.path()), before, "{case}");
+            assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_restart_keeps_busy_failed_and_changed_handoffs_controlled() {
+        let f = Fixture::new();
+        let root = f.coordinator.root.clone();
+        let restarted = StartupCoordinator::new(
+            root.clone(),
+            crate::secrets::upgrade::inspect(&root, &f.device).unwrap(),
+        );
+        let before = snapshot(f.home.path());
+        *restarted.phase.lock().unwrap() = Phase::Initializing;
+        assert_eq!(
+            restarted.initialize_with(None, &f.store, |_| panic!("busy")),
+            Err("secret.initializing".into())
+        );
+        *restarted.phase.lock().unwrap() = Phase::Locked;
+        assert_eq!(
+            restarted.initialize_with(None, &f.store, |_| Err("synthetic-runtime-failure".into())),
+            Err("synthetic-runtime-failure".into())
+        );
+        assert_eq!(
+            restarted.initialize_with(None, &f.store, |_| panic!("failed runtime")),
+            Err("secret.restart_required".into())
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        let restarted = StartupCoordinator::new(
+            root.clone(),
+            crate::secrets::upgrade::inspect(&root, &f.device).unwrap(),
+        );
+        restarted
+            .initialize_with(None, &f.store, |_| Ok(()))
+            .unwrap();
+        std::fs::write(
+            f.device.root().join(checkpoint::FILE),
+            b"synthetic-checkpoint-drift",
+        )
+        .unwrap();
+        let changed = snapshot(f.home.path());
+        assert!(restarted
+            .initialize_with(None, &f.store, |_| panic!("changed checkpoint"))
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), changed);
     }
 
     #[test]

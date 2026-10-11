@@ -72,10 +72,13 @@ describe("SecretUnlock", () => {
     expect(screen.queryByLabelText("secrets.password")).not.toBeInTheDocument();
   });
 
-  it("keeps the recovery view on failure and enters the app only after success", async () => {
+  it("keeps a password-locked restart on the existing unlock path and enters only after success", async () => {
     const onUnlocked = vi.fn();
     vi.mocked(invoke).mockRejectedValueOnce("secret.password_rejected");
-    render(<SecretUnlock onUnlocked={onUnlocked} />);
+    render(
+      <SecretUnlock initialError="secret.locked" onUnlocked={onUnlocked} />,
+    );
+    expect(invoke).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("secrets.password"), {
       target: { value: "test protection password" },
     });
@@ -92,6 +95,10 @@ describe("SecretUnlock", () => {
       password: "test protection password",
     });
     expect(screen.getByLabelText("secrets.password")).toHaveValue("");
+    expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
+      "unlock_secret_vault",
+      "unlock_secret_vault",
+    ]);
   });
 
   it("queries a lost recovery response without repeating the mutation", async () => {

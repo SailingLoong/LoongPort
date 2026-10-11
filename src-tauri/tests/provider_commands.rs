@@ -796,7 +796,14 @@ fn current_provider_editor_preserves_stored_mapping_when_live_omits_it() {
         .unwrap(),
     )
     .unwrap();
-    let edited = ProviderService::edit_settings(&state, AppType::Claude, &provider.id).unwrap();
+    let envelope = ProviderService::edit_settings(&state, AppType::Claude, &provider.id).unwrap();
+    // This original fixture has not opted into the upstream4 schema.
+    assert_eq!(envelope.get("modeState"), Some(&serde_json::Value::Null));
+    assert_eq!(envelope.get("originalSave"), Some(&serde_json::Value::Null));
+    let edited = envelope
+        .get("settingsConfig")
+        .filter(|settings| settings.is_object())
+        .expect("the editor settings belong to the backend-owned envelope");
     assert_eq!(edited.get("modelCatalog"), Some(&catalog));
     assert_eq!(edited.pointer("/env/USER_PREFERENCE"), Some(&json!("keep")));
 }

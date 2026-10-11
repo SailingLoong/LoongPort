@@ -1686,7 +1686,10 @@ impl CodexOAuthManager {
             refresh_token,
             authenticated_at: now,
             id_token,
-            token_updated_at_ms: now_ms,
+            // The persisted account and initial access cache are one received bundle.
+            token_updated_at_ms: initial_access_token
+                .as_ref()
+                .map_or(now_ms, |cached| cached.obtained_at_ms),
         };
 
         let account = GitHubAccount::from(&data);
@@ -2064,6 +2067,87 @@ mod tests {
         let manager = test_manager(temp.path().to_path_buf());
         assert!(!manager.is_authenticated().await);
         assert!(manager.list_accounts().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_commit_keeps_native_generation_when_access_cache_expires() {
+        let temp = crate::secrets::testing::tempdir().unwrap();
+        let manager = test_manager(temp.path().to_path_buf());
+        let account = "synthetic-generation-account";
+        // The token response predates admission to the account's commit lock.
+        let obtained = chrono::Utc::now().timestamp_millis() - 10_000;
+        manager
+            .add_account_internal(
+                account.into(),
+                "synthetic-refresh".into(),
+                None,
+                Some("synthetic-id".into()),
+                Some(CachedAccessToken {
+                    token: "synthetic-access".into(),
+                    obtained_at_ms: obtained,
+                    expires_at_ms: obtained + 3_600_000,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let stored_time = manager.accounts.read().await[account].token_updated_at_ms;
+        let bundle_time = manager.access_tokens.read().await[account].obtained_at_ms;
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(bundle_time)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let auth = crate::codex_config::codex_managed_oauth_auth_value(
+            account,
+            "synthetic-access",
+            Some("synthetic-id"),
+            "synthetic-refresh",
+            &timestamp,
+        );
+        let path = CredentialFile::Codex.path(&manager.secrets);
+        let inspect = || {
+            manager
+                .try_with_live_auth_guard(|guard| {
+                    let bytes = std::fs::read(&path).unwrap();
+                    let vault = manager.secrets.read()?;
+                    assert_eq!(guard.native_store_matches(&vault, Some(&bytes)), Some(true));
+                    Ok((
+                        guard.matches_prepared(account, &auth),
+                        guard.matches_live_generation(account, &auth),
+                    ))
+                })
+                .unwrap()
+        };
+        assert_eq!(inspect(), (true, true));
+        manager
+            .test_refresh_next(account, "unused-access", "unused-refresh")
+            .await;
+        let before = std::fs::read(&path).unwrap();
+        let expired = inspect();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(manager.test_refresh_is_queued());
+        // Exact controls keep persistence and memory in agreement. Only the
+        // relation between the native bundle and stored generation changes.
+        manager.test_set_bundle_time(account, bundle_time).await;
+        manager.save_to_disk().await.unwrap();
+        manager
+            .test_refresh_next(account, "unused-access", "unused-refresh")
+            .await;
+        assert_eq!(inspect(), (false, true));
+        manager
+            .test_set_token_updated_at_ms(account, bundle_time + 1)
+            .await;
+        manager.save_to_disk().await.unwrap();
+        assert_eq!(inspect(), (false, false));
+        assert_eq!(stored_time, bundle_time, "one login has one generation");
+        assert_eq!(
+            bundle_time, obtained,
+            "retain the actual token acquisition time"
+        );
+        assert!(!expired.0);
+        assert!(
+            expired.1,
+            "the same persisted login generation survives access-cache expiry"
+        );
     }
 
     #[tokio::test]
