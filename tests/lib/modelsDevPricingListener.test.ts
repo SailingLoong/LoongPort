@@ -30,7 +30,11 @@ vi.mock("@/lib/frontendLogger", () => ({
     mocks.reportFrontendError(...args),
 }));
 vi.mock("@/lib/query", () => ({
-  queryClient: { invalidateQueries: mocks.invalidateQueries },
+  // 该套件动态 import src/main，bootstrap 会经 queryClient 拉一次保存的语言
+  queryClient: {
+    invalidateQueries: mocks.invalidateQueries,
+    fetchQuery: async () => ({ language: null }),
+  },
 }));
 vi.mock("@/lib/query/usage", () => ({
   usageKeys: {
