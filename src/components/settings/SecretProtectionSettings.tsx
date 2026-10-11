@@ -1,3 +1,5 @@
+import { StartupUpgrade } from "@/components/StartupUpgrade";
+import { startupUpgradeApi } from "@/lib/api/startupUpgrade";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +28,11 @@ const protectionKey = ["secretProtection"] as const;
 export function SecretProtectionSettings() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const [reviewUpgrade, setReviewUpgrade] = useState(false);
+  const upgrade = useQuery({
+    queryKey: ["startupUpgrade"],
+    queryFn: startupUpgradeApi.query,
+  });
   const [password, setPassword] = useState("");
   const [rotate, setRotate] = useState(false);
   const [automatic, setAutomatic] = useState<boolean | null>(null);
@@ -171,6 +178,22 @@ export function SecretProtectionSettings() {
           {t("secrets.exportPlainAction")}
         </Button>
       </div>
+      {upgrade.data?.status === "database_verified" && (
+        <Button variant="outline" onClick={() => setReviewUpgrade(true)}>
+          {t("startupUpgrade.reviewApps")}
+        </Button>
+      )}
+      <Dialog open={reviewUpgrade} onOpenChange={setReviewUpgrade}>
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t("startupUpgrade.title")}</DialogTitle>
+            <DialogDescription>
+              {t("startupUpgrade.notComplete")}
+            </DialogDescription>
+          </DialogHeader>
+          {reviewUpgrade && <StartupUpgrade embedded />}
+        </DialogContent>
+      </Dialog>
       <Dialog open={confirmExport} onOpenChange={setConfirmExport}>
         <DialogContent className="max-w-md">
           <DialogHeader>

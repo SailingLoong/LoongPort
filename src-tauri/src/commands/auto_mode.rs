@@ -165,7 +165,10 @@ pub async fn set_easy_mode_mode(
     if mode != "manual" {
         return Err("Policy routing has been retired; set application priority instead".into());
     }
-    crate::proxy::application_routing::migrate(&state.db, &app_type).map_err(|e| e.to_string())
+    let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+    crate::services::application_selection::initialize_manual_routing(&state, &app)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Compatibility alias for application priority.
@@ -175,8 +178,20 @@ pub async fn set_easy_mode_manual_order(
     app_type: String,
     ordered_ids: Vec<String>,
 ) -> Result<(), String> {
-    crate::proxy::application_routing::set_order(&state.db, &app_type, &ordered_ids)
+    let app = app_type
+        .parse::<crate::app_config::AppType>()
+        .map_err(|e| e.to_string())?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::application_selection::apply_current_order_change(
+            &state,
+            &app,
+            &ordered_ids,
+        )
         .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 省心模式档位看板的一行（首页省心视图的展示事实，全部后端算好）。
@@ -269,7 +284,20 @@ pub async fn easy_mode_tier_board(
 
 /// 看板核心（真实 smoke 直接调它，不走 tauri State）。
 pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<TierBoard, String> {
-    crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?;
+    let _guard = state.proxy_service.lock_switch_for_app(app_type).await;
+    tier_board_locked(state, app_type).await
+}
+
+/// Caller holds the existing per-application lock.
+pub(crate) async fn tier_board_locked(
+    state: &AppState,
+    app_type: &str,
+) -> Result<TierBoard, String> {
+    let app = crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?;
+    let mode = crate::mode::current::read_view(&state.proxy_service, &app);
+    if mode.as_ref().is_some_and(|mode| !mode.can_write) {
+        return Err("mode.verification_required".into());
+    }
     let db = &state.db;
     let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
     let ranked = crate::proxy::application_routing::ordered_providers(db, app_type)
@@ -285,13 +313,20 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let recent_activity = db
         .get_provider_activity_buckets(app_type, chrono::Utc::now().timestamp() - 6 * 3600, 900, 24)
         .unwrap_or_default();
-    let routing_active = crate::proxy::application_routing::takeover_enabled(db, app_type)
-        .map_err(|e| e.to_string())?
-        && state.proxy_service.is_running().await;
+    let routing_active = match mode.as_ref() {
+        Some(mode) => {
+            mode.mode == Some(crate::mode::state::Mode::Proxy) && mode.attached == Some(true)
+        }
+        None => crate::proxy::application_routing::takeover_enabled(db, app_type)
+            .map_err(|e| e.to_string())?,
+    } && state.proxy_service.is_running().await;
     let model_pref = routing_active
         .then(|| crate::proxy::application_routing::effective_model(db, app_type))
         .flatten();
-    let current_id = crate::proxy::application_routing::current_provider_id(db, app_type);
+    let current_id = match mode {
+        Some(mode) => mode.current_provider_id,
+        None => crate::proxy::application_routing::current_provider_id(db, app_type),
+    };
 
     let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
     let breaker_states = state

@@ -11,10 +11,11 @@ pub(crate) mod owned_file;
 pub(crate) mod reset;
 pub(crate) mod rewrap;
 pub(crate) mod session;
-#[cfg(feature = "gui")]
+#[cfg(any(test, feature = "gui", feature = "test-hooks"))]
 pub(crate) mod startup;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) mod testing;
 pub(crate) mod transition;
+pub(crate) mod upgrade;
 pub(crate) use crypto::{VaultContext, VaultMetadata};
 pub(crate) use error::SecretError;

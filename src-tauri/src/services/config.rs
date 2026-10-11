@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 const MAX_BACKUPS: usize = 10;
 
@@ -14,6 +15,16 @@ const MAX_BACKUPS: usize = 10;
 pub struct ConfigService;
 
 impl ConfigService {
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_startup_upgrade_auth() -> Result<(), AppError> {
+        crate::secrets::upgrade::auth_tests::verify()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_startup_upgrade_review() -> Result<(), AppError> {
+        crate::secrets::upgrade::review_tests::verify()
+    }
+
     /// 为当前 config.json 创建备份，返回备份 ID（若文件不存在则返回空字符串）。
     pub fn create_backup(session: &SecretSession, config_path: &Path) -> Result<String, AppError> {
         let source = OwnedFile::at_path(session, config_path)?;
@@ -349,6 +360,113 @@ impl ConfigService {
             }
         }
 
+        Ok(())
+    }
+}
+
+// Original snippet command mutations. Validation stays at the command boundary;
+// both compatibility entry points share the same version admission below.
+impl ConfigService {
+    fn admit_legacy_snippet_write(
+        state: &crate::store::AppState,
+        app_type: &str,
+    ) -> Result<(), String> {
+        if matches!(app_type, "claude" | "codex" | "gemini")
+            && crate::mode::operation::uses_upstream4_schema(&state.db)
+                .map_err(|e| e.to_string())?
+        {
+            return Err("mode.legacy_common_config_frozen".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_common_config_snippet(
+        state: &crate::store::AppState,
+        app_type: &str,
+        snippet: String,
+    ) -> Result<(), String> {
+        Self::admit_legacy_snippet_write(state, app_type)?;
+        let is_cleared = snippet.trim().is_empty();
+        let old_snippet = state
+            .db
+            .get_config_snippet(app_type)
+            .map_err(|e| e.to_string())?;
+
+        let value = if is_cleared { None } else { Some(snippet) };
+
+        if matches!(app_type, "claude" | "codex" | "gemini") {
+            if let Some(legacy_snippet) = old_snippet
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
+                crate::services::provider::ProviderService::migrate_legacy_common_config_usage(
+                    state,
+                    app,
+                    legacy_snippet,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        state
+            .db
+            .set_config_snippet(app_type, value)
+            .map_err(|e| e.to_string())?;
+        state
+            .db
+            .set_config_snippet_cleared(app_type, is_cleared)
+            .map_err(|e| e.to_string())?;
+
+        if matches!(app_type, "claude" | "codex" | "gemini") {
+            let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
+            crate::services::provider::ProviderService::sync_current_provider_for_app(state, app)
+                .map_err(|e| e.to_string())?;
+        }
+
+        if app_type == "omo"
+            && state
+                .db
+                .get_current_omo_provider("opencode", "omo")
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            crate::services::OmoService::write_config_to_file(
+                state,
+                &crate::services::omo::STANDARD,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if app_type == "omo-slim"
+            && state
+                .db
+                .get_current_omo_provider("opencode", "omo-slim")
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            crate::services::OmoService::write_config_to_file(state, &crate::services::omo::SLIM)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_claude_common_config_snippet(
+        state: &crate::store::AppState,
+        snippet: String,
+    ) -> Result<(), String> {
+        Self::admit_legacy_snippet_write(state, "claude")?;
+        let is_cleared = snippet.trim().is_empty();
+
+        let value = if is_cleared { None } else { Some(snippet) };
+
+        state
+            .db
+            .set_config_snippet("claude", value)
+            .map_err(|e| e.to_string())?;
+        state
+            .db
+            .set_config_snippet_cleared("claude", is_cleared)
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 }

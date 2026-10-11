@@ -1,10 +1,12 @@
+import type { ProviderUpdateInput } from "@/lib/api/providers";
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   ArrowLeft,
@@ -68,13 +70,17 @@ import {
 import { PreservedView } from "@/components/ui/PreservedView";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
+import { PAGE_HEADER_HEIGHT } from "@/components/shell/layout";
 import { FeatureHub } from "@/components/shell/FeatureHub";
 import {
   CLIENT_VIEWS,
   useClientNavigation,
   type ClientView as View,
 } from "@/components/shell/navigation";
-import { ApplicationWorkspace } from "@/components/applications/ApplicationWorkspace";
+import {
+  ApplicationWorkspace,
+  type ApplicationWorkspaceHandle,
+} from "@/components/applications/ApplicationWorkspace";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 import { useAccountSessionStartup } from "@/components/relay/accounts/useAccountSessionStartup";
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
@@ -142,10 +148,9 @@ interface SyncStatusUpdatedPayload {
 }
 
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
-const HEADER_HEIGHT = 64; // px
 
 // 两个 localStorage key 的定义在 `@/config/constants` —— 别在这里重新写字面量。
-// 写入端在 `AppSwitcher.tsx`，那次分叉就是因为它们各写一份（见常量那边的文档）。
+// activeApp 的保存统一在下方 effect，切换请求尚待草稿确认时不提前写入。
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(LAST_APP_STORAGE_KEY) as AppId | null;
   if (saved && APP_IDS.includes(saved)) {
@@ -170,8 +175,47 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const navigation = useClientNavigation(getInitialView, getInitialApp);
+  const workspaceRef = useRef<ApplicationWorkspaceHandle>(null);
+  const pendingNavigation = useRef<(() => void) | null>(null);
+  const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
+  const beforeNavigate = useCallback(
+    (proceed: () => void) => {
+      if (workspaceRef.current?.submitting) {
+        toast.info(t("common.saving"));
+        return;
+      }
+      if (pendingNavigation.current) return;
+      if (!workspaceRef.current?.hasPendingChanges) {
+        proceed();
+        return;
+      }
+      // First destination wins until the user explicitly keeps or discards this draft.
+      pendingNavigation.current = proceed;
+      setLeaveDraftOpen(true);
+    },
+    [t],
+  );
+  const cancelLeaveDraft = () => {
+    pendingNavigation.current = null;
+    setLeaveDraftOpen(false);
+  };
+  const navigation = useClientNavigation(
+    getInitialView,
+    getInitialApp,
+    beforeNavigate,
+  );
   const activeApp = navigation.app;
+  // Observe the existing workspace query; do not mirror its facts in local state.
+  const routingAdmission = useQuery({
+    queryKey: ["applicationRouting", activeApp],
+    queryFn: () => applicationRoutingApi.get(activeApp),
+    enabled: false,
+  });
+  const providerWritesBlocked =
+    isProxyAppId(activeApp) &&
+    (!routingAdmission.data ||
+      Boolean(routingAdmission.error) ||
+      routingAdmission.data.modeState?.canWrite === false);
   const setActiveApp = navigation.setApp;
   const usesStore = usesProviderStore(activeApp);
   const sharedFeatureApp: AppId =
@@ -211,7 +255,7 @@ function App() {
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
-  const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
+  const contentTopOffset = dragBarHeight + PAGE_HEADER_HEIGHT;
   const visibleApps = useMemo<VisibleApps>(
     () => ({
       ...DEFAULT_VISIBLE_APPS,
@@ -322,7 +366,10 @@ function App() {
   // ChatGPT 桌面版与命令行 codex 共用同一个 `~/.codex`，它在跑的时候切任何 codex 供应商
   // 都会撞上「它启动时读的旧配置还在生效，而且它退出时会回写 config.toml」。
   // 判据与 LoongPort 档位切换完全一致（同一个页面两种行为不该不一样）。
-  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(switchProvider);
+  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(
+    switchProvider,
+    providerWritesBlocked,
+  );
 
   const handleEnablePiProvider = async (provider: Provider) => {
     try {
@@ -772,16 +819,25 @@ function App() {
   const handleEditProvider = async ({
     provider,
     originalId,
-  }: {
-    provider: Provider;
-    originalId?: string;
-  }) => {
-    await updateProvider(provider, originalId);
-    setEditingProvider(null);
+    edit,
+  }: ProviderUpdateInput) => {
+    if (providerWritesBlocked && !edit?.queryOnly) {
+      if (edit)
+        return {
+          app: activeApp,
+          request: edit.request,
+          status: "blocked" as const,
+          code: "pendingOperation" as const,
+        };
+      return;
+    }
+    return edit
+      ? updateProvider(provider, originalId, edit)
+      : updateProvider(provider, originalId);
   };
 
   const handleConfirmAction = async () => {
-    if (!confirmAction) return;
+    if (!confirmAction || providerWritesBlocked) return;
     const { provider, action } = confirmAction;
 
     if (action === "remove") {
@@ -1030,8 +1086,9 @@ function App() {
   };
 
   const renderContent = () => {
-    const providerList = (
+    const providerList = (mutationsDisabled = false) => (
       <ProviderList
+        mutationsDisabled={mutationsDisabled}
         showFailoverControls={false}
         providers={providers}
         appId={activeApp}
@@ -1206,10 +1263,11 @@ function App() {
                     ) : activeApp === "codex-image" ? (
                       <>
                         <ImageTabPage onOpenAddHub={handleOpenAddHub} />
-                        {providerList}
+                        {providerList()}
                       </>
                     ) : (
                       <ApplicationWorkspace
+                        ref={workspaceRef}
                         key={activeApp}
                         appId={activeApp}
                         providers={providers}
@@ -1223,7 +1281,7 @@ function App() {
                         }
                         onAdd={() => handleOpenAddHub()}
                       >
-                        {providerList}
+                        {(mutationsDisabled) => providerList(mutationsDisabled)}
                       </ApplicationWorkspace>
                     )}
                   </motion.div>
@@ -1252,6 +1310,7 @@ function App() {
 
   return (
     <div
+      data-client-shell
       className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
       style={{
         overflowX: "hidden",
@@ -1368,7 +1427,7 @@ function App() {
           {
             ...DRAG_REGION_STYLE,
             top: dragBarHeight,
-            height: HEADER_HEIGHT,
+            height: PAGE_HEADER_HEIGHT,
           } as any
         }
       >
@@ -1640,7 +1699,11 @@ function App() {
         </div>
       </header>
 
-      <main className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in focus:outline-none"
+      >
         {isOpenClawView && openclawHealthWarnings.length > 0 && (
           <OpenClawHealthBanner warnings={openclawHealthWarnings} />
         )}
@@ -1684,7 +1747,27 @@ function App() {
           renderContent()}
       </main>
 
+      <ConfirmDialog
+        isOpen={leaveDraftOpen}
+        title={t("applications.leaveDraftTitle")}
+        message={t("applications.leaveDraftDescription")}
+        cancelText={t("loongport.tier.editConfirmButton")}
+        confirmText={t("applications.discardAndLeave")}
+        onCancel={cancelLeaveDraft}
+        onConfirm={() => {
+          const proceed = pendingNavigation.current;
+          cancelLeaveDraft();
+          if (!proceed) return;
+          if (workspaceRef.current?.submitting) {
+            toast.info(t("common.saving"));
+            return;
+          }
+          workspaceRef.current?.discard();
+          proceed();
+        }}
+      />
       <EditProviderDialog
+        mutationsDisabled={providerWritesBlocked}
         open={Boolean(editingProvider)}
         provider={effectiveEditingProvider}
         onOpenChange={(open) => {
@@ -1699,13 +1782,14 @@ function App() {
 
       {effectiveUsageProvider && (
         <UsageScriptModal
+          mutationsDisabled={providerWritesBlocked}
           key={effectiveUsageProvider.id}
           provider={effectiveUsageProvider}
           appId={activeApp}
           isOpen={Boolean(usageProvider)}
           onClose={() => setUsageProvider(null)}
           onSave={(script) => {
-            if (usageProvider) {
+            if (usageProvider && !providerWritesBlocked) {
               void saveUsageScript(usageProvider, script);
             }
           }}
@@ -1713,6 +1797,7 @@ function App() {
       )}
 
       <ConfirmDialog
+        confirmDisabled={providerWritesBlocked}
         isOpen={Boolean(confirmAction)}
         title={
           confirmAction?.action === "remove"

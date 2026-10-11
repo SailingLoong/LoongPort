@@ -150,6 +150,7 @@ where
     Fut: Future<Output = Result<T, AppError>>,
 {
     let _guard = sync_mutex().lock().await;
+    ensure_upgrade_sync_admitted()?;
     operation.await
 }
 
@@ -268,6 +269,7 @@ impl RemoteLayout {
 pub(crate) fn build_local_snapshot(
     db: &crate::database::Database,
 ) -> Result<LocalSnapshot, AppError> {
+    ensure_upgrade_sync_admitted()?;
     // Keep the DB's skill rows and the filesystem SSOT at one logical point in
     // time. Skill writers take the matching write guard around both mutations.
     let _skill_state_guard = skill_state_read_guard();
@@ -502,6 +504,7 @@ pub(crate) fn apply_snapshot(
     db_sql: &[u8],
     skills_zip: &[u8],
 ) -> Result<(), AppError> {
+    ensure_upgrade_sync_admitted()?;
     apply_snapshot_with_store(
         db,
         manifest,
@@ -522,8 +525,7 @@ fn apply_snapshot_with_store(
     let next = db.secrets.read()?.clone();
     let sql =
         std::str::from_utf8(db_sql).map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
-    let staged =
-        crate::database::Database::validate_sync_snapshot(sql, manifest.vault_metadata()?, &next)?;
+    let staged = db.validate_sync_snapshot_for_current(sql, manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
         db,
         next,
@@ -544,6 +546,7 @@ pub(crate) fn restore_from_sync(
     password: &str,
     store: &dyn crate::secrets::key_store::KeyStore,
 ) -> Result<(), AppError> {
+    ensure_upgrade_sync_admitted()?;
     validate_manifest_compat(&snapshot.manifest, snapshot.layout)?;
     if snapshot.manifest.snapshot_id != expected_snapshot_id {
         return Err(publication_conflict());
@@ -566,11 +569,8 @@ pub(crate) fn restore_from_sync(
     .map_err(crate::secrets::inventory::secret_error)?;
     let sql = std::str::from_utf8(&snapshot.db_sql)
         .map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
-    let staged = crate::database::Database::validate_sync_snapshot(
-        sql,
-        snapshot.manifest.vault_metadata()?,
-        &next,
-    )?;
+    let staged =
+        db.validate_sync_snapshot_for_current(sql, snapshot.manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
         db,
         next,
@@ -1332,18 +1332,7 @@ mod publication_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn encrypted_sync_losing_cas_keeps_local_database_skills_and_receipt() {
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-                }
-            }
-        }
-        let home = tempfile::tempdir().unwrap();
-        let _restore = RestoreHome(std::env::var_os("CC_SWITCH_TEST_HOME"));
-        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         std::fs::create_dir_all(home.path().join(".cc-switch")).unwrap();
         let skills = crate::services::skill::SkillService::get_ssot_dir().unwrap();
         assert!(skills.starts_with(home.path()));
@@ -1520,7 +1509,8 @@ mod adoption_tests {
     }
     impl TestHome {
         fn new() -> Self {
-            let directory = tempfile::tempdir().unwrap();
+            let directory =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
             Self {
@@ -1603,6 +1593,107 @@ mod adoption_tests {
     #[test]
     #[serial_test::serial]
     fn explicit_restore_adopts_source_and_retains_local_credentials_and_automatic_unlock() {
+        restore_preserves_local_facts(17);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream4_actual20_sync_receiver_installs_with_original_transition() {
+        restore_preserves_local_facts(20);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream4_receiver_rejects_mixed_future_and_forged_images_before_mutation() {
+        let _sync = crate::rt::block_on(sync_mutex().lock());
+        for (local_version, source_version, source_loongport, forged) in [
+            (17, 20, 24, false),
+            (20, 17, 24, false),
+            (20, 21, 24, false),
+            (20, 20, 25, false),
+            (21, 20, 24, false),
+            (20, 20, 24, true),
+        ] {
+            let home = TestHome::new();
+            let store = MemoryKeyStore::default();
+            let source = database(
+                &home.directory.path().join("source"),
+                &store,
+                Some("source recovery password"),
+            );
+            if source_version >= 20 {
+                Database::apply_upstream4_migrations_on_conn(&source.conn.lock().unwrap()).unwrap();
+            }
+            {
+                let conn = source.conn.lock().unwrap();
+                conn.pragma_update(None, "user_version", source_version)
+                    .unwrap();
+                conn.execute(
+                    "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                    [source_loongport],
+                )
+                .unwrap();
+            }
+            let mut incoming = snapshot(&source);
+            if forged {
+                incoming.manifest.vault.as_mut().unwrap().revision += 1;
+                incoming.manifest.snapshot_id = compute_snapshot_id(
+                    &incoming.manifest.artifacts,
+                    incoming.manifest.vault_metadata().unwrap(),
+                );
+            }
+            let local = database(&home.root(), &store, None);
+            if local_version >= 20 {
+                Database::apply_upstream4_migrations_on_conn(&local.conn.lock().unwrap()).unwrap();
+            }
+            local
+                .conn
+                .lock()
+                .unwrap()
+                .pragma_update(None, "user_version", local_version)
+                .unwrap();
+            local.set_setting("local-sentinel", "unchanged").unwrap();
+            let session = local.secrets.clone();
+            let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
+            let metadata = std::fs::read(local.secrets.root().join("vault.json")).unwrap();
+            let native_path = crate::config::get_claude_settings_path();
+            assert!(native_path.starts_with(home.directory.path()));
+            std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+            let native = br#"{"synthetic-user-field":"rejected-image-retained"}"#;
+            std::fs::write(&native_path, native).unwrap();
+            assert!(
+                restore_from_sync(
+                    &local,
+                    &incoming,
+                    &incoming.manifest.snapshot_id,
+                    "source recovery password",
+                    &store,
+                )
+                .is_err(),
+                "receiver must reject {local_version}/{source_version}/{source_loongport}/{forged}"
+            );
+            assert!(std::sync::Arc::ptr_eq(&session, &local.secrets));
+            assert_eq!(
+                Database::content_digest(&local.conn.lock().unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(
+                std::fs::read(local.secrets.root().join("vault.json")).unwrap(),
+                metadata
+            );
+            assert_eq!(std::fs::read(&native_path).unwrap(), native);
+            assert_eq!(
+                local.get_setting("local-sentinel").unwrap().as_deref(),
+                Some("unchanged")
+            );
+            assert!(!local.secrets.root().join(".vault-transition").exists());
+            assert!(!local.secrets.root().join("skills").exists());
+            assert!(SecretSession::open_existing(local.secrets.root(), &store, None).is_ok());
+        }
+    }
+
+    fn restore_preserves_local_facts(version: i32) {
+        let _sync = crate::rt::block_on(sync_mutex().lock());
         let home = TestHome::new();
         let store = MemoryKeyStore::default();
         let source = database(
@@ -1617,8 +1708,74 @@ mod adoption_tests {
             None,
         );
         source.save_provider("claude", &provider).unwrap();
+        if version == 20 {
+            Database::apply_upstream4_migrations_on_conn(&source.conn.lock().unwrap()).unwrap();
+            source.conn.lock().unwrap().execute("INSERT INTO session_log_sync(file_path,last_modified,last_line_offset,last_synced_at) VALUES('synthetic-source-private-session',1,2,3)", []).unwrap();
+        }
+        assert_eq!(
+            Database::get_user_version(&source.conn.lock().unwrap()).unwrap(),
+            version
+        );
         let incoming = snapshot(&source);
+        if version == 20 {
+            assert!(!std::str::from_utf8(&incoming.db_sql)
+                .unwrap()
+                .contains("synthetic-source-private-session"));
+        }
         let local = database(&home.root(), &store, None);
+        let original_session = local.secrets.clone();
+        let device = crate::live::engine::DeviceStore::for_device();
+        let native_path = crate::config::get_claude_settings_path();
+        let native = br#"{"synthetic-user-field":"retained-native"}"#;
+        if version == 20 {
+            Database::apply_upstream4_migrations_on_conn(&local.conn.lock().unwrap()).unwrap();
+            let conn = local.conn.lock().unwrap();
+            conn.execute("INSERT INTO session_log_sync(file_path,last_modified,last_line_offset,last_synced_at,last_byte_offset,last_tail_fingerprint) VALUES('synthetic-local-session',11,22,33,1234,'synthetic-tail')", []).unwrap();
+            conn.execute("INSERT INTO session_usage_dedup(data_source,request_id,semantic_id,has_entry_id) VALUES('synthetic','local-request','local-semantic',1)", []).unwrap();
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,total_cost_usd,latency_ms,status_code,created_at) VALUES('local-request','cloud-provider','claude','synthetic-model','0.125',5,200,44)", []).unwrap();
+            drop(conn);
+            crate::mode::state::update_app(
+                &device,
+                &local.secrets.read().unwrap(),
+                "claude",
+                |entry| {
+                    entry.mode = Some(crate::mode::state::Mode::Direct);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(native_path.starts_with(home.directory.path()));
+            std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+            std::fs::write(&native_path, native).unwrap();
+        }
+        let assert_local = || {
+            assert!(std::sync::Arc::ptr_eq(&original_session, &local.secrets));
+            let conn = local.conn.lock().unwrap();
+            assert_eq!(Database::get_user_version(&conn).unwrap(), version);
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+                24
+            );
+            if version == 20 {
+                let cursor: (i64, i64, i64, i64, String) = conn.query_row("SELECT last_modified,last_line_offset,last_synced_at,last_byte_offset,last_tail_fingerprint FROM session_log_sync WHERE file_path='synthetic-local-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();
+                assert_eq!(cursor, (11, 22, 33, 1234, "synthetic-tail".into()));
+                assert_eq!(conn.query_row("SELECT count(*) FROM session_log_sync WHERE file_path='synthetic-source-private-session'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+                assert_eq!(conn.query_row("SELECT count(*) FROM session_usage_dedup WHERE request_id='local-request' AND semantic_id='local-semantic'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+                assert_eq!(conn.query_row("SELECT total_cost_usd FROM proxy_request_logs WHERE request_id='local-request'", [], |row| row.get::<_, String>(0)).unwrap(), "0.125");
+                drop(conn);
+                assert_eq!(
+                    crate::mode::state::mode_state(
+                        &device,
+                        &local.secrets.read().unwrap(),
+                        "claude"
+                    )
+                    .unwrap()
+                    .mode,
+                    Some(crate::mode::state::Mode::Direct)
+                );
+                assert_eq!(std::fs::read(&native_path).unwrap(), native);
+            }
+        };
         CredentialFile::Codex
             .write(&local.secrets, br#"{"access_token":"local-oauth-canary"}"#)
             .unwrap();
@@ -1661,6 +1818,7 @@ mod adoption_tests {
             &store,
         )
         .unwrap();
+        assert_local();
         assert_eq!(
             local
                 .get_provider_by_id("cloud-provider", "claude")
@@ -1711,6 +1869,7 @@ mod adoption_tests {
             &store,
         )
         .unwrap();
+        assert_local();
         assert_eq!(
             local
                 .get_provider_by_id("cloud-provider", "claude")
@@ -1828,4 +1987,11 @@ mod adoption_tests {
         assert!(!local.secrets.root().join("skills").exists());
         assert!(!local.secrets.root().join(".vault-transition").exists());
     }
+}
+
+/// Both transports and restoration share the device-local upgrade admission.
+pub(crate) fn ensure_upgrade_sync_admitted() -> Result<(), AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_sync_admitted(
+        &crate::live::engine::DeviceStore::for_device(),
+    )
 }

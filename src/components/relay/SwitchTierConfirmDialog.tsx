@@ -33,6 +33,7 @@ export interface SwitchTierConfirmDialogProps {
   /** 要切到的目标显示名；`null` = 不显示弹窗。 */
   targetName: string | null;
   onCancel: () => void;
+  disabled?: boolean;
   /** `quitChatgpt` = 用户选了「退出并切换」还是「只切换，我自己重启」。 */
   onSwitch: (quitChatgpt: boolean) => void;
 }
@@ -41,6 +42,7 @@ export function SwitchTierConfirmDialog({
   targetName,
   onCancel,
   onSwitch,
+  disabled = false,
 }: SwitchTierConfirmDialogProps) {
   const { t } = useTranslation();
   // 在渲染期算而不是 useState/useEffect：平台在一次会话里不会变，
@@ -98,10 +100,21 @@ export function SwitchTierConfirmDialog({
           <Button variant="ghost" onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button variant="outline" onClick={() => onSwitch(false)}>
+          <Button
+            variant="outline"
+            disabled={disabled}
+            onClick={() => {
+              if (!disabled) onSwitch(false);
+            }}
+          >
             {t("loongport.quitConfirm.switchOnly")}
           </Button>
-          <Button onClick={() => onSwitch(true)}>
+          <Button
+            disabled={disabled}
+            onClick={() => {
+              if (!disabled) onSwitch(true);
+            }}
+          >
             {t("loongport.quitConfirm.quitAndSwitch")}
           </Button>
         </DialogFooter>

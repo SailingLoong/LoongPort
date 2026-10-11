@@ -357,6 +357,16 @@ fn verify_installer_signature(
 /// ——updater 插件的验签在 `download()` 内联、不跨进程，`install(bytes)` 不
 /// 重复校验，跨会话复用落盘文件必须自己重新建立信任。
 pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
+    // A retained upgrade checkpoint still owns recovery and explicit restart.
+    // Keep staged installers for the existing owner after review completes.
+    if crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )
+    .is_err()
+    {
+        return;
+    }
+
     // 便携版不能原地升级：不自动装，也不动预下载产物（本来也不会产生）。
     if crate::commands::portable_mode_enabled() {
         return;

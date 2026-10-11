@@ -269,23 +269,10 @@ pub async fn set_claude_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<(), String> {
-    let is_cleared = snippet.trim().is_empty();
-
     if !snippet.trim().is_empty() {
         serde_json::from_str::<serde_json::Value>(&snippet).map_err(invalid_json_format_error)?;
     }
-
-    let value = if is_cleared { None } else { Some(snippet) };
-
-    state
-        .db
-        .set_config_snippet("claude", value)
-        .map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_config_snippet_cleared("claude", is_cleared)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    crate::services::config::ConfigService::set_claude_common_config_snippet(state.inner(), snippet)
 }
 
 #[tauri::command]
@@ -322,76 +309,12 @@ pub async fn set_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<(), String> {
-    let is_cleared = snippet.trim().is_empty();
-    let old_snippet = state
-        .db
-        .get_config_snippet(&app_type)
-        .map_err(|e| e.to_string())?;
-
     validate_common_config_snippet(&app_type, &snippet)?;
-
-    let value = if is_cleared { None } else { Some(snippet) };
-
-    if matches!(app_type.as_str(), "claude" | "codex" | "gemini") {
-        if let Some(legacy_snippet) = old_snippet
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
-            crate::services::provider::ProviderService::migrate_legacy_common_config_usage(
-                state.inner(),
-                app,
-                legacy_snippet,
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-
-    state
-        .db
-        .set_config_snippet(&app_type, value)
-        .map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_config_snippet_cleared(&app_type, is_cleared)
-        .map_err(|e| e.to_string())?;
-
-    if matches!(app_type.as_str(), "claude" | "codex" | "gemini") {
-        let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
-        crate::services::provider::ProviderService::sync_current_provider_for_app(
-            state.inner(),
-            app,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    if app_type == "omo"
-        && state
-            .db
-            .get_current_omo_provider("opencode", "omo")
-            .map_err(|e| e.to_string())?
-            .is_some()
-    {
-        crate::services::OmoService::write_config_to_file(
-            state.inner(),
-            &crate::services::omo::STANDARD,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if app_type == "omo-slim"
-        && state
-            .db
-            .get_current_omo_provider("opencode", "omo-slim")
-            .map_err(|e| e.to_string())?
-            .is_some()
-    {
-        crate::services::OmoService::write_config_to_file(
-            state.inner(),
-            &crate::services::omo::SLIM,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    crate::services::config::ConfigService::set_common_config_snippet(
+        state.inner(),
+        &app_type,
+        snippet,
+    )
 }
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ pub struct StreamingTimeoutConfig {
 /// - 日志标签
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
+    request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 请求开始时间（客户端请求进入代理的时刻）
     pub start_time: Instant,
     /// 最终成功尝试的开始时刻 —— latency/first_token 归因的锚点。
@@ -112,6 +113,16 @@ impl RequestContext {
         app_type_str: &'static str,
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
+        let owner = state.service_owner.upgrade();
+        let _app_guard = match owner.as_ref() {
+            Some(service) => Some(service.lock_switch_for_app(app_type_str).await),
+            None => None,
+        };
+        let request_identity = owner
+            .as_ref()
+            .map(|service| service.request_identity(app_type_str))
+            .transpose()
+            .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
 
         // 从数据库读取应用级代理配置（per-app）
         let app_config = state
@@ -133,7 +144,8 @@ impl RequestContext {
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
         let current_provider_id =
-            super::application_routing::current_provider_id(&state.db, app_type_str)
+            super::application_routing::current_provider_id_checked(&state.db, app_type_str)
+                .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
                 .unwrap_or_default();
 
         // 从请求体提取模型名称
@@ -188,6 +200,7 @@ impl RequestContext {
         );
 
         Ok(Self {
+            request_identity,
             start_time,
             attempt_started_at: start_time,
             app_config,
@@ -264,7 +277,9 @@ impl RequestContext {
             state.codex_chat_history.clone(),
             state.codex_tool_carriers.clone(),
             state.failover_manager.clone(),
+            #[cfg(feature = "gui")]
             state.app_handle.clone(),
+            state.service_owner.clone(),
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
@@ -276,6 +291,7 @@ impl RequestContext {
             max_retries,
             state.model_alignment.clone(),
         )
+        .with_request_identity(self.request_identity.clone())
     }
 
     /// 获取 Provider 列表（用于故障转移）

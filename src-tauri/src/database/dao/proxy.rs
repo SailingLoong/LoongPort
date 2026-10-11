@@ -65,23 +65,35 @@ impl Database {
     /// 获取全局代理配置（统一字段）
     ///
     /// 从 claude 行读取（三行镜像一致）
+    fn get_global_proxy_config_row(
+        conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<GlobalProxyConfig> {
+        conn.query_row(
+            "SELECT proxy_enabled, listen_address, listen_port, enable_logging
+                 FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| {
+                Ok(GlobalProxyConfig {
+                    proxy_enabled: row.get::<_, i32>(0)? != 0,
+                    listen_address: row.get(1)?,
+                    listen_port: row.get::<_, i32>(2)? as u16,
+                    enable_logging: row.get::<_, i32>(3)? != 0,
+                })
+            },
+        )
+    }
+
+    pub(crate) fn get_global_proxy_config_existing(&self) -> Result<GlobalProxyConfig, AppError> {
+        let conn = lock_conn!(self.conn);
+        Self::get_global_proxy_config_row(&conn)
+            .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub async fn get_global_proxy_config(&self) -> Result<GlobalProxyConfig, AppError> {
         // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
         let result = {
             let conn = lock_conn!(self.conn);
-            conn.query_row(
-                "SELECT proxy_enabled, listen_address, listen_port, enable_logging
-                 FROM proxy_config WHERE app_type = 'claude'",
-                [],
-                |row| {
-                    Ok(GlobalProxyConfig {
-                        proxy_enabled: row.get::<_, i32>(0)? != 0,
-                        listen_address: row.get(1)?,
-                        listen_port: row.get::<_, i32>(2)? as u16,
-                        enable_logging: row.get::<_, i32>(3)? != 0,
-                    })
-                },
-            )
+            Self::get_global_proxy_config_row(&conn)
         };
         // conn 已在 block 结束时释放
 
@@ -466,30 +478,39 @@ impl Database {
     // ==================== Legacy Proxy Config (兼容旧代码) ====================
 
     /// 获取代理配置（兼容旧接口，返回 claude 行的配置）
+    fn get_proxy_config_row(conn: &rusqlite::Connection) -> rusqlite::Result<ProxyConfig> {
+        conn.query_row(
+            "SELECT listen_address, listen_port, max_retries,
+                        enable_logging,
+                        streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout
+                 FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| {
+                Ok(ProxyConfig {
+                    listen_address: row.get(0)?,
+                    listen_port: row.get::<_, i32>(1)? as u16,
+                    max_retries: row.get::<_, i32>(2)? as u8,
+                    request_timeout: 600, // 废弃字段，返回默认值
+                    enable_logging: row.get::<_, i32>(3)? != 0,
+                    live_takeover_active: false, // 废弃字段
+                    streaming_first_byte_timeout: row.get::<_, i32>(4).unwrap_or(60) as u64,
+                    streaming_idle_timeout: row.get::<_, i32>(5).unwrap_or(120) as u64,
+                    non_streaming_timeout: row.get::<_, i32>(6).unwrap_or(600) as u64,
+                })
+            },
+        )
+    }
+
+    pub(crate) fn get_proxy_config_existing(&self) -> Result<ProxyConfig, AppError> {
+        let conn = lock_conn!(self.conn);
+        Self::get_proxy_config_row(&conn).map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub async fn get_proxy_config(&self) -> Result<ProxyConfig, AppError> {
         // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
         let result = {
             let conn = lock_conn!(self.conn);
-            conn.query_row(
-                "SELECT listen_address, listen_port, max_retries,
-                        enable_logging,
-                        streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout
-                 FROM proxy_config WHERE app_type = 'claude'",
-                [],
-                |row| {
-                    Ok(ProxyConfig {
-                        listen_address: row.get(0)?,
-                        listen_port: row.get::<_, i32>(1)? as u16,
-                        max_retries: row.get::<_, i32>(2)? as u8,
-                        request_timeout: 600, // 废弃字段，返回默认值
-                        enable_logging: row.get::<_, i32>(3)? != 0,
-                        live_takeover_active: false, // 废弃字段
-                        streaming_first_byte_timeout: row.get::<_, i32>(4).unwrap_or(60) as u64,
-                        streaming_idle_timeout: row.get::<_, i32>(5).unwrap_or(120) as u64,
-                        non_streaming_timeout: row.get::<_, i32>(6).unwrap_or(600) as u64,
-                    })
-                },
-            )
+            Self::get_proxy_config_row(&conn)
         };
         // conn 已在 block 结束时释放
 
@@ -930,6 +951,16 @@ impl Database {
     ///
     /// 用于托盘菜单构建等同步场景
     /// 返回 (enabled, auto_failover_enabled)
+    pub(crate) fn get_proxy_flags_checked(&self, app_type: &str) -> Result<(bool, bool), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT enabled, auto_failover_enabled FROM proxy_config WHERE app_type=?1",
+            [app_type],
+            |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+        )
+        .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub fn get_proxy_flags_sync(&self, app_type: &str) -> (bool, bool) {
         let conn = match self.conn.lock() {
             Ok(c) => c,

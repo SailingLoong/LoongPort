@@ -8,6 +8,144 @@ import type {
 } from "@/types";
 import type { AppId } from "./types";
 import { PROVIDER_SWITCHED } from "./events";
+import type { ApplicationModeState } from "./applicationRouting";
+
+/** Only the existing mode owner decides whether an edit requires U02 preview. */
+export interface ProviderEditSettings {
+  settingsConfig: Record<string, unknown>;
+  modeState: ApplicationModeState | null;
+  /** Original journal result for this app/row, never inferred from row equality. */
+  originalSave?: ProviderEditResult | null;
+}
+
+export interface ProviderEditRequest {
+  id: string;
+  providerId: string;
+  draftDigest: string;
+  revision: string;
+}
+
+export function isProviderEditRequest(
+  value: unknown,
+): value is ProviderEditRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as ProviderEditRequest;
+  return (
+    typeof request.id === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+      request.id,
+    ) &&
+    typeof request.providerId === "string" &&
+    request.providerId.length > 0 &&
+    typeof request.draftDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(request.draftDigest) &&
+    typeof request.revision === "string" &&
+    /^[a-f0-9]{64}$/.test(request.revision)
+  );
+}
+
+export type ProviderEditCode =
+  | "invalidFormat"
+  | "readOnly"
+  | "sourceChanged"
+  | "vaultLocked"
+  | "pendingOperation"
+  | "ownerUnavailable"
+  | "credentialConflict"
+  | "unsupported";
+export interface ProviderEditPreview {
+  app: AppId;
+  request: ProviderEditRequest;
+  status: "ready" | "blocked";
+  action: "saveOnly" | "saveAndApply";
+  fields: Array<
+    "connection" | "authentication" | "models" | "dedicated" | "metadata"
+  >;
+  files: Array<{
+    role:
+      | "claudeSettings"
+      | "codexAuth"
+      | "codexConfig"
+      | "codexCatalog"
+      | "managedAuth"
+      | "deviceAuthStash"
+      | "geminiEnv"
+      | "geminiSettings"
+      | "grokConfig";
+    change: "write" | "delete" | "unchanged";
+  }>;
+  preserves: Array<
+    | "unownedJsonKeys"
+    | "untouchedTomlBytes"
+    | "untouchedDotenvBytes"
+    | "sharedSettings"
+    | "externalCatalog"
+  >;
+  code?: ProviderEditCode;
+}
+
+export interface ProviderEditResult {
+  app: AppId;
+  request: ProviderEditRequest;
+  status:
+    | "completed"
+    | "notRecorded"
+    | "pending"
+    | "partial"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "unknown"
+    | "conflict"
+    | "stale"
+    | "blocked";
+  code?: ProviderEditCode;
+}
+
+export interface ProviderUpdateInput {
+  provider: Provider;
+  originalId?: string;
+  edit?: {
+    request: ProviderEditRequest;
+    deleteCredential: boolean;
+    // Frontend routing only. The query command receives just app + request.
+    queryOnly?: true;
+  };
+}
+export type ProviderUpdateResult = Provider | ProviderEditResult;
+
+export function matchesProviderEditResult(
+  result: unknown,
+  app: AppId,
+  request: ProviderEditRequest,
+): result is ProviderEditResult {
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("request" in result) ||
+    !("app" in result)
+  )
+    return false;
+  const value = result as ProviderEditResult;
+  return (
+    value.app === app &&
+    value.request?.id === request.id &&
+    value.request.providerId === request.providerId &&
+    value.request.draftDigest === request.draftDigest &&
+    value.request.revision === request.revision
+  );
+}
+
+export function completedProviderEdit(
+  result: unknown,
+  app: AppId,
+  request: ProviderEditRequest,
+): result is ProviderEditResult {
+  return (
+    matchesProviderEditResult(result, app, request) &&
+    result.status === "completed"
+  );
+}
 
 export interface ProviderSortUpdate {
   id: string;
@@ -67,8 +205,45 @@ export const providersApi = {
   async getEditSettings(
     id: string,
     appId: AppId,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<ProviderEditSettings> {
     return await invoke("get_provider_edit_settings", { id, app: appId });
+  },
+
+  async previewEdit(
+    provider: Provider,
+    appId: AppId,
+    originalId: string,
+    requestId: string,
+    deleteCredential: boolean,
+  ): Promise<ProviderEditPreview> {
+    return await invoke("preview_provider_edit", {
+      app: appId,
+      provider,
+      originalId,
+      requestId,
+      deleteCredential,
+    });
+  },
+
+  async confirmEdit(
+    input: ProviderUpdateInput,
+    appId: AppId,
+  ): Promise<ProviderEditResult> {
+    if (!input.edit) throw new Error("provider.preview.invalidRequest");
+    return await invoke("confirm_provider_edit", {
+      app: appId,
+      provider: input.provider,
+      originalId: input.originalId,
+      request: input.edit.request,
+      deleteCredential: input.edit.deleteCredential,
+    });
+  },
+
+  async queryEdit(
+    appId: AppId,
+    request: ProviderEditRequest,
+  ): Promise<ProviderEditResult> {
+    return await invoke("query_provider_edit", { app: appId, request });
   },
 
   async add(

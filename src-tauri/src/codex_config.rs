@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -467,7 +468,7 @@ pub fn write_codex_auth_file(auth: &Value) -> Result<(), AppError> {
     write_json_file_private(&get_codex_auth_path(), auth)
 }
 
-fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
+pub(crate) fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
     crate::config::get_app_config_dir().join(CODEX_MANAGED_OAUTH_LIVE_AUTH_MARKER_FILENAME)
 }
 
@@ -1047,7 +1048,7 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     Ok(s)
 }
 
-fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
+pub(crate) fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
     doc.get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
@@ -2313,13 +2314,35 @@ const CODEX_CLI_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_mil
 #[cfg(not(test))]
 const CODEX_CLI_SCAN_LIMIT: std::time::Duration = std::time::Duration::from_secs(6);
 
-#[cfg(any(not(test), unix))]
+#[cfg(not(test))]
 fn probe_codex_cli_sources(
     candidates: &[PathBuf],
     per_candidate: std::time::Duration,
     total: std::time::Duration,
 ) -> Vec<CodexReasoningSource> {
-    let scan_deadline = std::time::Instant::now() + total;
+    probe_codex_cli_sources_with(
+        candidates,
+        per_candidate,
+        total,
+        std::time::Instant::now,
+        crate::process::run_tool_at_path_with_timeout,
+    )
+}
+
+// The production loop and budgets are shared with deterministic scheduling tests.
+#[cfg(any(not(test), unix))]
+fn probe_codex_cli_sources_with(
+    candidates: &[PathBuf],
+    per_candidate: std::time::Duration,
+    total: std::time::Duration,
+    now: impl Fn() -> std::time::Instant,
+    mut run_tool: impl FnMut(
+        &Path,
+        &[&str],
+        std::time::Duration,
+    ) -> Result<std::process::Output, String>,
+) -> Vec<CodexReasoningSource> {
+    let scan_deadline = now() + total;
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
     for candidate in candidates {
@@ -2327,17 +2350,18 @@ fn probe_codex_cli_sources(
         if !seen.insert(identity.clone()) {
             continue;
         }
-        let now = std::time::Instant::now();
-        if now >= scan_deadline {
+        let candidate_started = now();
+        if candidate_started >= scan_deadline {
             log::warn!("Codex metadata scan budget exhausted; only a partial installation scan is available until LoongPort restarts");
             break;
         }
-        let deadline = std::cmp::min(now + per_candidate, scan_deadline);
-        let run = |args: &[&str]| {
+        let deadline = std::cmp::min(candidate_started + per_candidate, scan_deadline);
+        let mut run = |args: &[&str]| {
             let remaining = deadline
-                .checked_duration_since(std::time::Instant::now())
+                .checked_duration_since(now())
+                .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| "Codex metadata probe deadline expired".to_string())?;
-            crate::process::run_tool_at_path_with_timeout(candidate, args, remaining)
+            run_tool(candidate, args, remaining)
         };
         let version = run(&["--version"])
             .ok()
@@ -2364,7 +2388,7 @@ fn probe_codex_cli_sources(
     sources
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
     CODEX_CLI_SOURCES
         .get_or_init(|| {
@@ -2377,7 +2401,7 @@ fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
     // Host executables never enter synthetic CODEX_HOME unit fixtures.
     Vec::new()
@@ -3253,6 +3277,17 @@ pub(crate) fn resolve_cc_switch_catalog_path(
     config_text: &str,
     base_dir: &Path,
 ) -> Option<PathBuf> {
+    let resolved = cc_switch_catalog_reference_path(config_text, base_dir)?;
+    resolve_cc_switch_catalog_reference(&resolved, base_dir)
+}
+
+/// Original lexical owner decision, before filesystem resolution. Upgrade
+/// review uses this same reference to bind its directory/file identity; a
+/// canonical target alone would lose the original symlink alias.
+pub(crate) fn cc_switch_catalog_reference_path(
+    config_text: &str,
+    base_dir: &Path,
+) -> Option<PathBuf> {
     if config_text.trim().is_empty() {
         return None;
     }
@@ -3295,12 +3330,16 @@ pub(crate) fn resolve_cc_switch_catalog_path(
         return None;
     }
 
+    Some(resolved)
+}
+
+fn resolve_cc_switch_catalog_reference(resolved: &Path, base_dir: &Path) -> Option<PathBuf> {
     // 词法包含不等于运行时包含：配置目录内的符号链接（如 ~/.codex/link ->
     // /etc）能让 `link/cc-switch-model-catalog.json` 通过上面的检查，读取却
     // 落到目录外。文件存在时把真实路径 canonicalize 出来再校验一次，并把
     // canonical 路径返回给调用方——后续读取不再经过 symlink 组件。
     if resolved.exists() {
-        let canonical = match fs::canonicalize(&resolved) {
+        let canonical = match fs::canonicalize(resolved) {
             Ok(path) => path,
             Err(error) => {
                 log::warn!(
@@ -3326,7 +3365,7 @@ pub(crate) fn resolve_cc_switch_catalog_path(
         return Some(canonical);
     }
 
-    Some(resolved)
+    Some(resolved.to_path_buf())
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the
@@ -3662,9 +3701,9 @@ pub fn remove_codex_experimental_bearer_token_if(
     if let Some(provider_id) = active_codex_model_provider_id(&doc) {
         if let Some(provider_table) = doc
             .get_mut("model_providers")
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
             .and_then(|table| table.get_mut(provider_id.as_str()))
-            .and_then(|item| item.as_table_mut())
+            .and_then(|item| item.as_table_like_mut())
         {
             let should_remove = provider_table
                 .get("experimental_bearer_token")
@@ -4135,13 +4174,23 @@ pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(),
 /// 回答的是同一个问题——「这次写入动没动 auth.json」——必须消费同一份答案，
 /// 各自重推一遍就是两处判据漂移的起点（官方目标的旧清理闸正是这么长出来的）。
 pub fn codex_live_write_replaces_auth(category: Option<&str>, auth: &Value) -> bool {
+    codex_live_write_replaces_auth_with_policy(
+        category,
+        auth,
+        crate::settings::preserve_codex_official_auth_on_switch(),
+        get_codex_managed_oauth_live_auth_marker_path().exists(),
+    )
+}
+
+/// The same placement rule for callers that already bound settings and marker bytes.
+pub(crate) fn codex_live_write_replaces_auth_with_policy(
+    category: Option<&str>,
+    auth: &Value,
+    preserve: bool,
+    managed_marker: bool,
+) -> bool {
     (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && (!crate::settings::preserve_codex_official_auth_on_switch()
-                // live auth 带 ownership marker = 它是托管 Codex 账号的登录，不是用户
-                // 自己的 ChatGPT 登录缓存 ——「preserve」不适用，切走时按托管事务
-                // 语义整体替换 auth.json，随后的 clear_outgoing 才能收干净。
-                || get_codex_managed_oauth_live_auth_marker_path().exists()))
+        || (category != Some("official") && (!preserve || managed_marker))
 }
 
 /// Route a Codex live write between full auth+config or config-only.
@@ -4295,6 +4344,22 @@ fn codex_provider_table_declares_auth(table: &dyn toml_edit::TableLike) -> bool 
         || (!requires_openai_auth
             && (table_declares_authorization_header(table.get("http_headers"))
                 || table_declares_authorization_header(table.get("env_http_headers"))))
+}
+
+/// Read the selected live placement using the original selector and auth
+/// ownership rules. A planned Bearer alone can also describe a TOML token.
+pub(crate) fn codex_active_custom_route_uses_auth_json(doc: &DocumentMut) -> bool {
+    let Some(id) = active_custom_codex_provider_id(doc) else {
+        return false;
+    };
+    doc.get("model_providers")
+        .and_then(|item| item.as_table_like())
+        .and_then(|providers| providers.get(&id))
+        .and_then(|item| item.as_table_like())
+        .is_some_and(|table| {
+            codex_provider_table_falls_back_to_official_auth(table)
+                && !codex_provider_table_declares_auth(table)
+        })
 }
 
 fn table_declares_authorization_header(item: Option<&toml_edit::Item>) -> bool {
@@ -4978,7 +5043,8 @@ mod tests {
 
     impl CodexLiveTestHome {
         fn new() -> Self {
-            let dir = tempfile::tempdir().expect("create isolated Codex live test home");
+            let dir =
+                crate::secrets::testing::tempdir().expect("create isolated Codex live test home");
             let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
             crate::secrets::testing::initialize_database().expect("initialize isolated settings");
@@ -10485,73 +10551,204 @@ base_url = "https://idle.example/v1"
     }
 
     #[cfg(unix)]
+    fn probe_output(status: i32, stdout: impl Into<Vec<u8>>) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(status << 8),
+            stdout: stdout.into(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn generic_sources_probe_all_installations_and_bound_failures_and_hangs() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let script = |name: &str, version: &str, models: &[Value], hang: bool| {
-            let path = dir.path().join(name);
-            let body = if hang {
-                "sleep 10".to_string()
-            } else {
-                format!("if [ \"$1\" = --version ]; then printf '%s\\n' 'codex-cli {version}'; else cat <<'MODELS'\n{}\nMODELS\nfi", json!({"models":models}))
-            };
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            path
-        };
+    fn generic_sources_probe_all_successful_installations_deterministically() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
         let old =
             reasoning_source_fixture("old", Some("0.155.0"), &[("gpt-7", &["low"], Some("low"))]);
         let new = reasoning_source_fixture(
             "new",
             Some("0.170.0"),
-            &[
-                ("gpt-7", &["high"], Some("high")),
-                ("gpt-100", &["low", "high"], Some("high")),
-            ],
+            &[("gpt-7", &["high"], Some("high"))],
         );
-        let hanging = script("hung", "0.180.0", &[], true);
-        let old_path = script("old-path", "0.155.0", &old.models, false);
-        let plugin = script("new-plugin", "0.170.0", &new.models, false);
-        let candidates = vec![
-            dir.path().join("missing"),
-            hanging.clone(),
-            old_path,
-            plugin,
-        ];
-        let direct = crate::process::run_tool_at_path_with_timeout(
-            &candidates[3],
-            &["--version"],
-            std::time::Duration::from_secs(1),
-        )
-        .expect("fake CLI version must run");
-        assert!(direct.status.success(), "fake CLI error: {:?}", direct);
-        println!(
-            "FAKE_CLI_VERSION={}",
-            String::from_utf8_lossy(&direct.stdout)
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[PathBuf::from("old-install"), PathBuf::from("new-install")],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    remaining,
+                ));
+                elapsed.set(elapsed.get() + Duration::from_millis(50));
+                let source = if path == Path::new("old-install") {
+                    &old
+                } else {
+                    &new
+                };
+                Ok(if args == ["--version"] {
+                    probe_output(
+                        0,
+                        format!("codex-cli {}\n", source.version.as_deref().unwrap()).into_bytes(),
+                    )
+                } else {
+                    probe_output(
+                        0,
+                        serde_json::to_vec(&json!({"models":source.models})).unwrap(),
+                    )
+                })
+            },
         );
-        let start = std::time::Instant::now();
-        let sources = probe_codex_cli_sources(
-            &candidates,
-            std::time::Duration::from_millis(500),
-            std::time::Duration::from_secs(2),
-        );
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
         assert_eq!(sources.len(), 2);
         assert_eq!(
-            select_codex_reasoning_sources(&sources)[1]["default_reasoning_level"],
+            select_codex_reasoning_sources(&sources)[0]["default_reasoning_level"],
             "high"
         );
-        let another_hang = script("also-hung", "0.180.0", &[], true);
-        let start = std::time::Instant::now();
-        assert!(probe_codex_cli_sources(
-            &[hanging, another_hang],
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_millis(150)
-        )
-        .is_empty());
-        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(calls.borrow().len(), 4);
+        assert_eq!(calls.borrow()[0].2, Duration::from_millis(500));
+        assert_eq!(calls.borrow()[1].2, Duration::from_millis(450));
+        assert_eq!(elapsed.get(), Duration::from_millis(200));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_exhausted_version_budget_skips_models_but_keeps_later_candidate() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[PathBuf::from("slow-version"), PathBuf::from("healthy")],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                assert!(
+                    !remaining.is_zero(),
+                    "must not launch a command with exhausted budget"
+                );
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                ));
+                if path == Path::new("slow-version") {
+                    assert_eq!(args, ["--version"]);
+                    elapsed.set(elapsed.get() + Duration::from_millis(500));
+                    Ok(probe_output(0, b"codex-cli 0.155.0\n".to_vec()))
+                } else if args == ["--version"] {
+                    Ok(probe_output(0, b"codex-cli 0.170.0\n".to_vec()))
+                } else {
+                    Ok(probe_output(
+                        0,
+                        br#"{"models":[{"slug":"healthy"}]}"#.to_vec(),
+                    ))
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].models[0]["slug"], "healthy");
+        assert_eq!(calls.borrow().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_total_deadline_preserves_partial_result_without_next_launch() {
+        use std::cell::{Cell, RefCell};
+        use std::time::{Duration, Instant};
+        let elapsed = Cell::new(Duration::ZERO);
+        let start = Instant::now();
+        let calls = RefCell::new(Vec::new());
+        let sources = probe_codex_cli_sources_with(
+            &[
+                PathBuf::from("first"),
+                PathBuf::from("budget-end"),
+                PathBuf::from("must-not-start"),
+            ],
+            Duration::from_secs(1),
+            Duration::from_millis(150),
+            || start + elapsed.get(),
+            |path, args, remaining| {
+                assert_ne!(path, Path::new("must-not-start"));
+                calls.borrow_mut().push((
+                    path.to_owned(),
+                    args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    remaining,
+                ));
+                if path == Path::new("first") {
+                    elapsed.set(elapsed.get() + Duration::from_millis(25));
+                    Ok(if args == ["--version"] {
+                        probe_output(0, b"codex-cli 0.170.0\n".to_vec())
+                    } else {
+                        probe_output(0, br#"{"models":[{"slug":"kept"}]}"#.to_vec())
+                    })
+                } else {
+                    elapsed.set(elapsed.get() + remaining);
+                    Err("synthetic deadline".to_owned())
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].models[0]["slug"], "kept");
+        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(calls.borrow()[2].2, Duration::from_millis(100));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_sources_missing_failed_malformed_and_duplicate_paths_do_not_hide_success() {
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good");
+        fs::write(&good, b"synthetic identity only").unwrap();
+        let alias = dir.path().join("same-installation");
+        std::os::unix::fs::symlink(&good, &alias).unwrap();
+        let calls = RefCell::new(Vec::new());
+        let start = Instant::now();
+        let sources = probe_codex_cli_sources_with(
+            &[
+                dir.path().join("missing"),
+                dir.path().join("nonzero"),
+                dir.path().join("malformed"),
+                good.clone(),
+                alias,
+            ],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            || start,
+            |path, args, _| {
+                calls.borrow_mut().push(path.to_owned());
+                match path.file_name().unwrap().to_str().unwrap() {
+                    "missing" => Err("synthetic missing executable".into()),
+                    "nonzero" => Ok(probe_output(1, Vec::new())),
+                    "malformed" => Ok(probe_output(0, b"not valid version or catalog".to_vec())),
+                    "good" if args == ["--version"] => {
+                        Ok(probe_output(0, b"codex-cli 0.170.0\n".to_vec()))
+                    }
+                    "good" => Ok(probe_output(0, br#"{"models":[{"slug":"good"}]}"#.to_vec())),
+                    _ => panic!("canonical duplicate must not launch"),
+                }
+            },
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].identity,
+            fs::canonicalize(&good).unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            calls.borrow().iter().filter(|path| **path == good).count(),
+            2
+        );
+        assert_eq!(calls.borrow().len(), 8);
+    }
+
     #[test]
     fn generic_sources_optional_default_and_required_description_are_validated() {
         let mut valid =
@@ -10673,5 +10870,267 @@ base_url = "https://idle.example/v1"
             "0.180.0"
         );
         assert_eq!(read_codex_config_text().unwrap(), prepared);
+    }
+}
+
+// Pure native-login predicates retained from fixed upstream v4.0.2.
+pub(crate) fn extract_codex_auth_user_identity(auth: &Value) -> Option<String> {
+    let id_token = auth.pointer("/tokens/id_token")?.as_str()?;
+    extract_codex_id_token_user_identity(id_token)
+}
+
+pub(crate) fn extract_codex_id_token_user_identity(id_token: &str) -> Option<String> {
+    extract_codex_id_token_subject(id_token).map(|subject| format!("sub:{subject}"))
+}
+
+pub(crate) fn extract_codex_id_token_subject(id_token: &str) -> Option<String> {
+    let mut segments = id_token.split('.');
+    let header = segments.next()?;
+    let payload = segments.next()?;
+    segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+
+    let header: Value = URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()
+        .and_then(|decoded| serde_json::from_slice(&decoded).ok())?;
+    header
+        .get("alg")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let claims: Value = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|decoded| serde_json::from_slice(&decoded).ok())?;
+    claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The auth mode Codex resolves for an `auth.json` payload
+/// (`AuthDotJson::resolved_mode`, `codex-rs/login/src/auth/manager.rs`,
+/// 0.153.2): an explicit `auth_mode` wins outright; otherwise presence
+/// decides in this order — `personal_access_token`, `bedrock_api_key`,
+/// `bedrock_access_keys`, `OPENAI_API_KEY` — and everything else is
+/// ChatGPT. Presence is `Option::is_some`, i.e. any non-null value, even an
+/// empty one; the material itself is checked afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexResolvedAuthMode {
+    ApiKey,
+    Chatgpt,
+    ChatgptAuthTokens,
+    Headers,
+    AgentIdentity,
+    PersonalAccessToken,
+    BedrockApiKey,
+    BedrockAccessKeys,
+    /// An `auth_mode` string Codex's serde rejects (`rename_all =
+    /// "lowercase"` plus explicit camelCase renames, exact match): the whole
+    /// file fails to load, which Codex reports as signed out.
+    Unrecognized,
+}
+
+fn codex_auth_resolved_mode(auth: &serde_json::Map<String, Value>) -> CodexResolvedAuthMode {
+    let present = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
+
+    // `auth_mode: null` deserializes to `None` (serde default) and falls
+    // through to the implicit precedence below.
+    if let Some(mode) = auth.get("auth_mode").filter(|value| !value.is_null()) {
+        return match mode.as_str() {
+            Some("apikey") => CodexResolvedAuthMode::ApiKey,
+            Some("chatgpt") => CodexResolvedAuthMode::Chatgpt,
+            Some("chatgptAuthTokens") => CodexResolvedAuthMode::ChatgptAuthTokens,
+            Some("headers") => CodexResolvedAuthMode::Headers,
+            Some("agentIdentity") => CodexResolvedAuthMode::AgentIdentity,
+            Some("personalAccessToken") => CodexResolvedAuthMode::PersonalAccessToken,
+            Some("bedrockApiKey") => CodexResolvedAuthMode::BedrockApiKey,
+            Some("bedrockAccessKeys") => CodexResolvedAuthMode::BedrockAccessKeys,
+            _ => CodexResolvedAuthMode::Unrecognized,
+        };
+    }
+    if present("personal_access_token") {
+        return CodexResolvedAuthMode::PersonalAccessToken;
+    }
+    if present("bedrock_api_key") {
+        return CodexResolvedAuthMode::BedrockApiKey;
+    }
+    if present("bedrock_access_keys") {
+        return CodexResolvedAuthMode::BedrockAccessKeys;
+    }
+    if present("OPENAI_API_KEY") {
+        return CodexResolvedAuthMode::ApiKey;
+    }
+    CodexResolvedAuthMode::Chatgpt
+}
+
+/// Narrow read-only proof for an API-key-only native payload. Reuse the mode
+/// owner, but also reject known fields that would stop Codex's AuthDotJson
+/// deserialization. Other credential carriers are outside this proof; unknown
+/// metadata remains ignored just as it is by the original serde owner.
+pub(crate) fn codex_auth_is_loadable_api_key_only(auth: &Value) -> bool {
+    let Some(auth) = auth.as_object() else {
+        return false;
+    };
+    let Some(key) = auth.get("OPENAI_API_KEY").and_then(Value::as_str) else {
+        return false;
+    };
+    if codex_auth_resolved_mode(auth) != CodexResolvedAuthMode::ApiKey
+        || key.trim().is_empty()
+        || [
+            "tokens",
+            "agent_identity",
+            "personal_access_token",
+            "bedrock_api_key",
+            "bedrock_access_keys",
+        ]
+        .iter()
+        .any(|field| auth.get(*field).is_some_and(|value| !value.is_null()))
+        || auth.get("last_refresh").is_some_and(|value| {
+            serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone()).is_err()
+        })
+    {
+        return false;
+    }
+    // Codex uses the raw stored key when constructing this header. Trimming
+    // first could hide CR/LF that prevents the real auth from being attached.
+    reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).is_ok()
+}
+
+/// True when Codex would load `auth` as a signed-in OpenAI account for a
+/// `requires_openai_auth` provider — the state its login screen and
+/// `ConfiguredModelProvider::account_state` (0.149+) go by. The auth mode is
+/// resolved exactly as Codex does (`codex_auth_resolved_mode`) and only then
+/// is the matching credential checked, so a Bedrock credential outranks a
+/// stale `OPENAI_API_KEY` sitting next to it just as it does in Codex, where
+/// that probe returns `UnsupportedBedrockApiKeyAuth` and fails TUI startup.
+/// Modes Codex cannot load from storage (`headers`, unrecognized) are signed
+/// out. The credential must be non-blank (stricter than Codex's `is_some`,
+/// erring toward "signed out"); metadata such as `last_refresh` never counts.
+pub fn codex_auth_has_openai_account_material(auth: &Value) -> bool {
+    let Some(obj) = auth.as_object() else {
+        return false;
+    };
+
+    let value_present = |value: &Value| match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    let has = |key: &str| obj.get(key).is_some_and(value_present);
+
+    match codex_auth_resolved_mode(obj) {
+        CodexResolvedAuthMode::ApiKey => extract_codex_auth_api_key(auth).is_some(),
+        CodexResolvedAuthMode::PersonalAccessToken => has("personal_access_token"),
+        CodexResolvedAuthMode::AgentIdentity => has("agent_identity"),
+        CodexResolvedAuthMode::Chatgpt | CodexResolvedAuthMode::ChatgptAuthTokens => obj
+            .get("tokens")
+            .and_then(Value::as_object)
+            .is_some_and(|tokens| {
+                ["id_token", "access_token", "refresh_token"]
+                    .iter()
+                    .any(|key| tokens.get(*key).is_some_and(value_present))
+            }),
+        CodexResolvedAuthMode::Headers
+        | CodexResolvedAuthMode::BedrockApiKey
+        | CodexResolvedAuthMode::BedrockAccessKeys
+        | CodexResolvedAuthMode::Unrecognized => false,
+    }
+}
+
+/// Where Codex keeps CLI auth, per the top-level `cli_auth_credentials_store`
+/// key (`codex-rs/config/src/types.rs`, serde lowercase; unset = `file`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexAuthStoreMode {
+    /// `auth.json` is the only store — the file decides login state.
+    File,
+    /// Keyring only; `auth.json` is never read and is deleted after a save.
+    Keyring,
+    /// Keyring first, `auth.json` as fallback for both load and save.
+    Auto,
+    /// In-process only; nothing on disk is ever a login.
+    Ephemeral,
+    /// Unparsable config or a value Codex would reject.
+    Unknown,
+}
+
+pub(crate) fn codex_config_auth_store_mode(config_text: &str) -> CodexAuthStoreMode {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        return CodexAuthStoreMode::Unknown;
+    };
+    let Some(item) = doc.get("cli_auth_credentials_store") else {
+        return CodexAuthStoreMode::File;
+    };
+    match item.as_str() {
+        Some("file") => CodexAuthStoreMode::File,
+        Some("keyring") => CodexAuthStoreMode::Keyring,
+        Some("auto") => CodexAuthStoreMode::Auto,
+        Some("ephemeral") => CodexAuthStoreMode::Ephemeral,
+        Some(_) | None => CodexAuthStoreMode::Unknown,
+    }
+}
+
+/// Pure serialization for the existing LoongPort marker identity/version.
+pub(crate) fn codex_managed_oauth_marker_bytes(
+    auth: &Value,
+    account: &str,
+) -> Result<Vec<u8>, AppError> {
+    if extract_codex_managed_oauth_account_id(auth).as_deref() != Some(account) {
+        return Err(AppError::Config("codex.managed_identity_mismatch".into()));
+    }
+    crate::config::serialize_json_bytes(&CodexManagedOAuthLiveAuthMarker {
+        version: 2,
+        account_id: account.into(),
+    })
+}
+
+/// Whether the original catalog planner would need external model discovery.
+pub(crate) fn codex_has_catalog_model_specs(settings: &Value) -> bool {
+    !codex_catalog_model_specs(settings).is_empty()
+}
+
+/// Upstream planner boundary, using LoongPort's existing capability projection.
+/// No catalog/config file is written here.
+pub(crate) fn plan_codex_model_catalog(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider: &crate::provider::Provider,
+) -> Result<Option<Value>, AppError> {
+    if !codex_has_catalog_model_specs(settings) {
+        return Ok(None);
+    }
+    Ok(
+        match codex_catalog_projection_from_settings(
+            settings,
+            config_text,
+            profile,
+            Some(provider),
+        )? {
+            CodexCatalogProjection::Generated(catalog) => Some(catalog),
+            CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => None,
+        },
+    )
+}
+
+pub(crate) fn codex_disables_web_search(
+    _settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> bool {
+    match profile {
+        CodexCatalogToolProfile::Anthropic => true,
+        CodexCatalogToolProfile::NativeResponses => {
+            codex_native_gateway_rejects_web_search(config_text)
+        }
+        CodexCatalogToolProfile::ProxyChat => false,
     }
 }

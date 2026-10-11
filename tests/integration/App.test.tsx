@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -12,11 +13,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 // 在收集阶段完成模块加载：若把 import 留在用例体内，超时后它仍可能续跑并越过 cleanup 再挂载 App。
 import App from "@/App";
+import type { ApplicationRouting } from "@/lib/api/applicationRouting";
 import {
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
 } from "@/config/constants";
 import {
+  getProviders,
   resetProviderState,
   setCurrentProviderId,
   setLiveProviderIds,
@@ -25,8 +28,11 @@ import {
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
 
+const workspaceHarness = vi.hoisted(() => ({ real: false }));
+const editResultMock = vi.hoisted(() => vi.fn());
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const toastInfoMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
   checkUpdates: vi.fn(),
   openDiscovery: vi.fn(),
@@ -36,21 +42,38 @@ vi.mock("sonner", () => ({
   toast: {
     success: (...args: unknown[]) => toastSuccessMock(...args),
     error: (...args: unknown[]) => toastErrorMock(...args),
+    info: (...args: unknown[]) => toastInfoMock(...args),
   },
 }));
 
 // These integration cases exercise provider actions; workspace presentation has
 // its own interaction tests. Keep the existing action harness immediately visible.
-vi.mock("@/components/applications/ApplicationWorkspace", () => ({
-  ApplicationWorkspace: ({ children, onOpenAccount }: any) => (
-    <>
-      {children}
-      <button onClick={() => onOpenAccount({ kind: "relay", id: 1 })}>
-        open-account
-      </button>
-    </>
-  ),
-}));
+vi.mock(
+  "@/components/applications/ApplicationWorkspace",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/components/applications/ApplicationWorkspace")
+      >();
+    return {
+      ApplicationWorkspace: (props: any) =>
+        workspaceHarness.real ? (
+          <actual.ApplicationWorkspace {...props} />
+        ) : (
+          <>
+            {typeof props.children === "function"
+              ? props.children(false)
+              : props.children}
+            <button
+              onClick={() => props.onOpenAccount({ kind: "relay", id: 1 })}
+            >
+              open-account
+            </button>
+          </>
+        ),
+    };
+  },
+);
 
 vi.mock("@/components/providers/ProviderList", () => ({
   ProviderList: ({
@@ -126,9 +149,18 @@ vi.mock("@/components/relay/AddHubPage", () => ({
 }));
 
 vi.mock("@/components/providers/EditProviderDialog", () => ({
-  EditProviderDialog: ({ open, provider, onSubmit, onOpenChange }: any) =>
+  EditProviderDialog: ({
+    open,
+    provider,
+    onSubmit,
+    onOpenChange,
+    mutationsDisabled,
+  }: any) =>
     open ? (
-      <div data-testid="edit-provider-dialog">
+      <div
+        data-testid="edit-provider-dialog"
+        data-mutations-disabled={String(!!mutationsDisabled)}
+      >
         <button
           onClick={() =>
             onSubmit({
@@ -142,6 +174,32 @@ vi.mock("@/components/providers/EditProviderDialog", () => ({
         >
           confirm-edit
         </button>
+        {[false, true].map((queryOnly) => (
+          <button
+            key={String(queryOnly)}
+            onClick={() => {
+              const request = {
+                id: "094b4732-d3c9-43f4-a123-009293a85273",
+                providerId: provider.id,
+                draftDigest: "a".repeat(64),
+                revision: "b".repeat(64),
+              };
+              void Promise.resolve(
+                onSubmit({
+                  provider,
+                  originalId: provider.id,
+                  edit: {
+                    request,
+                    deleteCredential: false,
+                    ...(queryOnly ? { queryOnly: true } : {}),
+                  },
+                }),
+              ).then(editResultMock);
+            }}
+          >
+            {queryOnly ? "query-original-edit" : "confirm-bound-edit"}
+          </button>
+        ))}
         <button onClick={() => onOpenChange(false)}>close-edit</button>
       </div>
     ) : null,
@@ -158,16 +216,22 @@ vi.mock("@/components/UsageScriptModal", () => ({
     ) : null,
 }));
 
-vi.mock("@/components/ConfirmDialog", () => ({
-  ConfirmDialog: ({ isOpen, message, onConfirm, onCancel }: any) =>
-    isOpen ? (
-      <div data-testid="confirm-dialog">
-        <div data-testid="confirm-message">{message}</div>
-        <button onClick={() => onConfirm()}>confirm-delete</button>
-        <button onClick={() => onCancel()}>cancel-delete</button>
-      </div>
-    ) : null,
-}));
+vi.mock("@/components/ConfirmDialog", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/ConfirmDialog")>();
+  return {
+    ConfirmDialog: (props: any) =>
+      workspaceHarness.real ? (
+        <actual.ConfirmDialog {...props} />
+      ) : props.isOpen ? (
+        <div data-testid="confirm-dialog">
+          <div data-testid="confirm-message">{props.message}</div>
+          <button onClick={() => props.onConfirm()}>confirm-delete</button>
+          <button onClick={() => props.onCancel()}>cancel-delete</button>
+        </div>
+      ) : null,
+  };
+});
 
 vi.mock("@/components/skills/UnifiedSkillsPanel", async () => {
   const React = await import("react");
@@ -212,8 +276,16 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
-const renderApp = () => {
-  const client = new QueryClient();
+const renderApp = (client = new QueryClient()) => {
+  // This harness mocks the workspace; seed its successful read in the shared cache.
+  for (const app of workspaceHarness.real
+    ? []
+    : ["claude", "codex", "gemini", "grok"]) {
+    client.setQueryData(["applicationRouting", app], {
+      autoFailoverEnabled: false,
+      routingActive: false,
+    });
+  }
   return render(
     <QueryClientProvider client={client}>
       <Suspense fallback={<div data-testid="loading">loading</div>}>
@@ -231,14 +303,344 @@ async function selectApplication(name: string) {
   await user.click(await screen.findByRole("button", { name }));
 }
 
+async function renderRoutingDraft(client = new QueryClient()) {
+  workspaceHarness.real = true;
+  const apply = vi.fn();
+  server.use(
+    http.post(
+      "http://tauri.local/get_application_routing",
+      async ({ request }) => {
+        const { appType } = (await request.json()) as {
+          appType: Parameters<typeof getProviders>[0];
+        };
+        const ids = Object.keys(getProviders(appType));
+        return HttpResponse.json({
+          autoFailoverEnabled: true,
+          routingActive: true,
+          chainIds: ids,
+          model: null,
+          modelOptions: [],
+          tiers: ids.map((id, index) => ({
+            providerId: id,
+            position: index,
+            isCurrent: index === 0,
+            canFailover: true,
+            canVerifyModels: false,
+            skipReason: null,
+            models: [],
+            subscriptionWindows: [],
+          })),
+        });
+      },
+    ),
+    http.post("http://tauri.local/get_order_profiles", () =>
+      HttpResponse.json({ profiles: [], current: "default" }),
+    ),
+    http.post("http://tauri.local/get_model_verification_summaries", () =>
+      HttpResponse.json([]),
+    ),
+    http.post("http://tauri.local/apply_application_routing", () => {
+      apply();
+      return HttpResponse.json({ status: "switched", warnings: [] });
+    }),
+  );
+  renderApp(client);
+  await userEvent.type(await screen.findByRole("searchbox"), "Custom");
+  expect(await screen.findByText("applications.pendingChanges")).toBeVisible();
+  return apply;
+}
+
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
+    workspaceHarness.real = false;
+    editResultMock.mockReset();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    toastInfoMock.mockReset();
     // Start each independent flow from the persisted application view.
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  });
+
+  it("asks before leaving a real routing draft through the sidebar", async () => {
+    const apply = await renderRoutingDraft();
+    await userEvent.click(
+      screen.getByRole("button", { name: "client.services" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "applications.leaveDraftTitle" }),
+    ).toBeVisible();
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it.each(["continue", "Escape", "close"] as const)(
+    "keeps the real draft and forgets the deferred destination after %s",
+    async (dismiss) => {
+      const apply = await renderRoutingDraft();
+      await userEvent.click(
+        screen.getByRole("button", { name: "client.services" }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: "applications.leaveDraftTitle",
+      });
+      if (dismiss === "Escape") await userEvent.keyboard("{Escape}");
+      else
+        await userEvent.click(
+          within(dialog).getByRole("button", {
+            name:
+              dismiss === "close"
+                ? "common.close"
+                : "loongport.tier.editConfirmButton",
+          }),
+        );
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+      expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+      await selectApplication("Codex");
+      await userEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() =>
+        expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex"),
+      );
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      expect(apply).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the displayed app and restore key on cancel, then discards only the local draft on confirmed app switch", async () => {
+    const apply = await renderRoutingDraft();
+    const claudeTab = screen.getByRole("button", { name: "Claude Code" });
+    await selectApplication("Codex");
+    expect(claudeTab).toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+    await userEvent.click(
+      screen.getByRole("button", { name: "loongport.tier.editConfirmButton" }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(claudeTab).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+    await selectApplication("Codex");
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex"),
+    );
+    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await selectApplication("Claude Code");
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude"),
+    );
+    expect(await screen.findByRole("searchbox")).toHaveValue("");
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("keeps the first pending destination and consumes repeated confirmation only once", async () => {
+    const apply = await renderRoutingDraft();
+    const services = screen.getByRole("button", { name: "client.services" });
+    const resources = screen.getByRole("button", { name: "client.resources" });
+    act(() => {
+      fireEvent.click(services);
+      fireEvent.click(resources);
+    });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const discard = screen.getByRole("button", {
+      name: "applications.discardAndLeave",
+    });
+    act(() => {
+      fireEvent.click(discard);
+      fireEvent.click(discard);
+    });
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("services"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "client.applications" }),
+    );
+    expect(await screen.findByRole("searchbox")).toHaveValue("");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("does not prompt for the same destination or a clean workspace", async () => {
+    const apply = await renderRoutingDraft();
+    await userEvent.click(
+      screen.getByRole("button", { name: "client.applications" }),
+    );
+    await selectApplication("Claude Code");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.discardOrder" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "client.services" }),
+    );
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("services"),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("keeps an in-flight apply on its workspace and only discards unsubmitted changes after it settles", async () => {
+    const apply = await renderRoutingDraft();
+    let settle!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      settle = resolve;
+    });
+    server.use(
+      http.post("http://tauri.local/apply_application_routing", () => {
+        apply();
+        return response;
+      }),
+    );
+    try {
+      await userEvent.click(
+        screen.getByRole("button", { name: /applications.applyOrder/ }),
+      );
+      await userEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "applications.reviewChanges" }),
+        ).getByRole("button", { name: "common.confirm" }),
+      );
+      await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+      const services = screen.getByRole("button", { name: "client.services" });
+      await userEvent.click(services);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await selectApplication("Codex");
+      await userEvent.click(services);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Claude Code" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(
+        screen.getByRole("button", { name: "applications.discardOrder" }),
+      ).toBeDisabled();
+      expect(toastInfoMock).toHaveBeenCalledWith("common.saving");
+      expect(apply).toHaveBeenCalledTimes(1);
+      settle(
+        HttpResponse.json(
+          { message: "The application result is unavailable" },
+          { status: 500 },
+        ),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "applications.discardOrder" }),
+        ).toBeEnabled(),
+      );
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      await userEvent.click(services);
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      await userEvent.click(services);
+      await userEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() =>
+        expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("services"),
+      );
+      expect(apply).toHaveBeenCalledTimes(1);
+    } finally {
+      settle(
+        HttpResponse.json(
+          { message: "The application result is unavailable" },
+          { status: 500 },
+        ),
+      );
+    }
+  });
+
+  it("does not confuse a read-only routing refresh with an in-flight write", async () => {
+    const client = new QueryClient();
+    const apply = await renderRoutingDraft(client);
+    const key = ["applicationRouting", "claude"];
+    const facts = client.getQueryData<ApplicationRouting>(key);
+    let finish!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    server.use(
+      http.post("http://tauri.local/get_application_routing", () => response),
+    );
+    try {
+      void client.invalidateQueries({ queryKey: key });
+      await waitFor(() => expect(client.isFetching({ queryKey: key })).toBe(1));
+      await userEvent.click(
+        screen.getByRole("button", { name: "client.services" }),
+      );
+      expect(
+        screen.getByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).toBeVisible();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+      expect(toastInfoMock).not.toHaveBeenCalled();
+      expect(apply).not.toHaveBeenCalled();
+    } finally {
+      finish(HttpResponse.json(facts));
+      await waitFor(() => expect(client.isFetching({ queryKey: key })).toBe(0));
+    }
+  });
+
+  it("guards the existing settings shortcut and cancels without triggering Back", async () => {
+    const apply = await renderRoutingDraft();
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    expect(
+      screen.getByRole("dialog", { name: "applications.leaveDraftTitle" }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
+    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("settings"),
+    );
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("connects the compact page header and sidebar skip link to the main content", async () => {
+    renderApp();
+    await screen.findByRole("navigation", { name: "client.navigation" });
+    expect(screen.getByRole("banner")).toHaveStyle({ height: "52px" });
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
   });
 
   it("opens ZCode without using provider-store or environment commands", async () => {
@@ -569,6 +971,7 @@ describe("App integration with MSW", () => {
     });
 
     toastErrorMock.mockReset();
+    toastInfoMock.mockReset();
     expect(() => {
       emitTauriEvent("s3-sync-status-updated", null);
     }).not.toThrow();
@@ -707,5 +1110,99 @@ describe("App integration with MSW", () => {
 
     expect(skillsPanelMocks.openDiscovery).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("unified-skills-panel")).toBeInTheDocument();
+  });
+});
+
+describe("U02 App original result callback", () => {
+  it("returns the original outcome and permits a read-only query while application writes are blocked", async () => {
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+    const row = {
+      id: "u02-app-row",
+      name: "Synthetic App row",
+      settingsConfig: {},
+    };
+    setProviders("claude", { [row.id]: row });
+    setCurrentProviderId("claude", row.id);
+    const confirms = vi.fn();
+    const queries = vi.fn();
+    server.use(
+      http.post(
+        "http://tauri.local/confirm_provider_edit",
+        async ({ request }) => {
+          const input = (await request.json()) as any;
+          confirms();
+          return HttpResponse.json({
+            app: input.app,
+            request: input.request,
+            status: "unknown",
+          });
+        },
+      ),
+      http.post(
+        "http://tauri.local/query_provider_edit",
+        async ({ request }) => {
+          const input = (await request.json()) as any;
+          queries();
+          return HttpResponse.json({
+            app: input.app,
+            request: input.request,
+            status: "completed",
+          });
+        },
+      ),
+    );
+    editResultMock.mockReset();
+    const client = new QueryClient();
+    const view = renderApp(client);
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list").textContent).toContain(
+          row.id,
+        ),
+      );
+      fireEvent.click(screen.getByText("edit"));
+      await screen.findByTestId("edit-provider-dialog");
+      fireEvent.click(screen.getByText("confirm-bound-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "unknown" }),
+        ),
+      );
+      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+      act(() => {
+        client.setQueryData(["applicationRouting", "claude"], {
+          autoFailoverEnabled: false,
+          routingActive: false,
+          modeState: { canWrite: false, status: "pending" },
+        });
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("edit-provider-dialog")).toHaveAttribute(
+          "data-mutations-disabled",
+          "true",
+        ),
+      );
+      fireEvent.click(screen.getByText("confirm-bound-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "blocked" }),
+        ),
+      );
+      fireEvent.click(screen.getByText("query-original-edit"));
+      await waitFor(() =>
+        expect(editResultMock).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "completed" }),
+        ),
+      );
+      expect(confirms).toHaveBeenCalledTimes(1);
+      expect(queries).toHaveBeenCalledTimes(1);
+      // The actual dialog, not App's callback, decides whether its draft/session can close.
+      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      await client.cancelQueries();
+      client.clear();
+    }
   });
 });

@@ -162,7 +162,7 @@ mod tests {
     impl TempHome {
         fn new() -> Self {
             let home = Self {
-                dir: tempfile::tempdir().expect("create isolated home"),
+                dir: crate::secrets::testing::tempdir().expect("create isolated home"),
                 previous: std::env::var_os("CC_SWITCH_TEST_HOME"),
             };
             std::env::set_var("CC_SWITCH_TEST_HOME", home.dir.path());
@@ -389,7 +389,7 @@ mod tests {
         state.db.update_global_proxy_config(config).await.unwrap();
         state.proxy_service.start().await.unwrap();
         let mirror_during_commit = std::cell::Cell::new(false);
-        let error = crate::services::application_selection::select_with_commit(
+        let error = crate::services::application_selection::select_legacy_with_commit(
             &state,
             &AppType::Claude,
             &crate::services::application_selection::TierSelection {

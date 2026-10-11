@@ -1,0 +1,766 @@
+//! Startup owns passive inspection before any recovery or runtime publication.
+
+use super::{session, VaultContext, VaultMetadata};
+use crate::{
+    database::{self, inspection, Database},
+    error::AppError,
+    live::engine::DeviceStore,
+};
+use std::path::Path;
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SchemaVersions {
+    pub upstream: i32,
+    pub loongport: i32,
+}
+
+pub(crate) enum UpgradeInspection {
+    Stable(Box<StableInspection>),
+    RecoveryRequired(RecoveryEvidence),
+}
+
+/// Private journal captures bind a user action to the inspected operation.
+/// Only the digest is exposed; each original owner authenticates its own bytes.
+pub(crate) struct RecoveryEvidence {
+    records: [Option<Vec<u8>>; 4],
+    device: DeviceStore,
+}
+impl RecoveryEvidence {
+    pub(super) fn from_publication_intent(device: &DeviceStore, intent: Vec<u8>) -> Self {
+        Self {
+            records: [None, None, Some(intent), None],
+            device: device.clone(),
+        }
+    }
+    fn capture(root: &Path, device: &DeviceStore) -> Result<Self, AppError> {
+        Ok(Self {
+            records: Self::records(root)?,
+            device: device.clone(),
+        })
+    }
+    fn records(root: &Path) -> Result<[Option<Vec<u8>>; 4], AppError> {
+        Ok([
+            super::reset::pending_record(root)?,
+            super::bootstrap_restore::pending_record(root)?,
+            super::transition::pending_record(root)?,
+            super::rewrap::pending_record(root)?,
+        ])
+    }
+    pub(crate) fn token(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        for record in &self.records {
+            match record {
+                Some(bytes) => {
+                    digest.update([1]);
+                    digest.update((bytes.len() as u64).to_le_bytes());
+                    digest.update(bytes);
+                }
+                None => digest.update([0]),
+            }
+        }
+        hex::encode(digest.finalize())
+    }
+    pub(crate) fn verify_unchanged(&self, root: &Path, token: &str) -> Result<(), AppError> {
+        if token != self.token() || Self::records(root)? != self.records {
+            return Err(changed());
+        }
+        Ok(())
+    }
+    pub(crate) fn recover(
+        &self,
+        root: &Path,
+        token: &str,
+        store: &dyn super::key_store::KeyStore,
+        password: &str,
+    ) -> Result<UpgradeInspection, AppError> {
+        self.verify_unchanged(root, token)?;
+        if let Some(record) = &self.records[0] {
+            super::reset::recover_inspected(root, Some(password), record)?;
+        }
+        if let Some(record) = &self.records[1] {
+            super::bootstrap_restore::recover_inspected(root, store, Some(password), record)?;
+        }
+        // Bootstrap recovery may have settled its child transition itself.
+        if let Some(record) = &self.records[2] {
+            if self.records[1].is_none() || super::transition::pending_record(root)?.is_some() {
+                super::transition::recover_inspected(
+                    root,
+                    self.device.root(),
+                    store,
+                    Some(password),
+                    record,
+                )?;
+            }
+        }
+        if let Some(record) = &self.records[3] {
+            super::rewrap::recover_password_inspected(root, store, Some(password), record)?;
+        }
+        let inspected = inspect(root, &self.device)?;
+        inspected.verify_unchanged(root)?;
+        let resumed_database = inspected.is_database_resume_candidate();
+        if inspected.future_version().is_some() && !resumed_database {
+            return Err(AppError::Config("upgrade.future_version".into()));
+        }
+        let vault = session::authenticate_existing(root, store, Some(password))?;
+        if resumed_database {
+            // The original published checkpoint authenticates the whole
+            // inventory. Future/pending app facts remain isolated and are
+            // neither decoded as a default mode nor replayed by DB recovery.
+            checkpoint::verified_database_id(root, &self.device, &vault)?.ok_or_else(changed)?;
+        } else {
+            inspected.validate_device_state(&vault)?;
+        }
+        inspected.validate_database(root, &vault)?;
+        inspected.verify_unchanged(root)?;
+        Ok(inspected)
+    }
+}
+
+pub(crate) struct StableInspection {
+    pub source_versions: Option<SchemaVersions>,
+    revision: Option<inspection::SourceRevision>,
+    vault: Option<(VaultMetadata, bool, String)>,
+    device: DeviceStore,
+    device_files: Vec<(super::owned_file::DeviceFile, std::path::PathBuf, Vec<u8>)>,
+}
+
+/// Safe startup projection only. Captured revisions, roots and vault metadata
+/// stay private to their original owners; checkpoint presence is not verification.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartupUpgradeView {
+    pub(crate) source_versions: Option<SchemaVersions>,
+    pub(crate) target_versions: SchemaVersions,
+    pub(crate) status: &'static str,
+    pub(crate) checkpoint_present: bool,
+    pub(crate) checkpoint_id: Option<String>,
+    pub(crate) review_token: Option<String>,
+    pub(crate) requires_authentication: bool,
+    pub(crate) can_authenticate: bool,
+    pub(crate) can_check_and_backup: bool,
+    pub(crate) can_start_upgrade: bool,
+}
+
+/// Older-binary recovery deliberately has no runtime coordinator. Keep that
+/// permission boundary and return its existing safe error rather than a panic.
+pub(crate) fn startup_upgrade_unavailable(init_error_kind: Option<&str>) -> &'static str {
+    if init_error_kind == Some("db_version_too_new") {
+        "upgrade.future_version"
+    } else {
+        "secret.startup_unavailable"
+    }
+}
+
+impl StartupUpgradeView {
+    pub(crate) fn blocked(status: &'static str) -> Self {
+        Self {
+            source_versions: None,
+            target_versions: SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            },
+            status,
+            checkpoint_present: false,
+            checkpoint_id: None,
+            review_token: None,
+            requires_authentication: false,
+            can_authenticate: false,
+            can_check_and_backup: false,
+            can_start_upgrade: false,
+        }
+    }
+}
+
+impl UpgradeInspection {
+    pub(crate) fn upgrade_view(&self, root: &Path) -> Result<StartupUpgradeView, AppError> {
+        let stable = match self {
+            Self::RecoveryRequired(evidence) => {
+                evidence.verify_unchanged(root, &evidence.token())?;
+                return Ok(StartupUpgradeView::blocked("recovery_required"));
+            }
+            Self::Stable(stable) => stable,
+        };
+        let mut view = StartupUpgradeView::blocked("not_applicable");
+        view.source_versions = stable.source_versions;
+        if stable.future_version().is_some() && !stable.is_database_resume_candidate() {
+            // Preserve existing newer-binary precedence: do not parse a vault
+            // format the current binary cannot understand.
+            if pending_generation(root)? {
+                return Err(changed());
+            }
+            if let Some(revision) = &stable.revision {
+                inspection::verify_unchanged(&root.join(crate::config::DB_FILE_NAME), revision)?;
+            }
+            view.status = "newer_binary_required";
+            return Ok(view);
+        }
+        stable.verify_unchanged(root)?;
+        view.checkpoint_present = stable
+            .device_files
+            .iter()
+            .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE));
+        if view.checkpoint_present {
+            if stable.vault.is_none() {
+                return Err(AppError::Config("secret.metadata_missing".into()));
+            }
+            view.status = "checkpoint_requires_verification";
+            view.requires_authentication = true;
+            return Ok(view);
+        }
+        let Some(source) = stable.source_versions else {
+            return Ok(view);
+        };
+        if source.upstream == database::UPSTREAM4_SOURCE_SCHEMA_VERSION && stable.vault.is_none() {
+            view.status = "data_protection_required";
+            return Ok(view);
+        }
+        if source.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+            || source.loongport != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            view.status = "unsupported_source";
+            return Ok(view);
+        }
+        view.requires_authentication = true;
+        view.status = "authentication_required";
+        // Actions remain unavailable until the real coordinator actions exist.
+        Ok(view)
+    }
+
+    /// Routes only an unverified exact target checkpoint to the original coordinator.
+    /// It never permits runtime initialization, file publication or app recovery.
+    pub(crate) fn is_database_resume_candidate(&self) -> bool {
+        matches!(self, Self::Stable(stable) if stable.is_database_resume_candidate())
+    }
+
+    pub(crate) fn ensure_runtime_admitted(&self) -> Result<(), AppError> {
+        let device = match self {
+            Self::Stable(stable) => &stable.device,
+            Self::RecoveryRequired(evidence) => &evidence.device,
+        };
+        checkpoint::ensure_sync_admitted(device)
+    }
+    pub(crate) fn is_recovery_required(&self) -> bool {
+        matches!(self, Self::RecoveryRequired(_))
+    }
+    pub(crate) fn future_version(&self) -> Option<(i32, i32)> {
+        match self {
+            Self::Stable(inspected) => inspected.future_version(),
+            Self::RecoveryRequired(_) => None,
+        }
+    }
+    pub(crate) fn has_vault(&self) -> bool {
+        matches!(self, Self::Stable(inspected) if inspected.vault.is_some())
+    }
+    pub(crate) fn has_device_files(&self) -> bool {
+        matches!(self, Self::Stable(inspected) if !inspected.device_files.is_empty())
+    }
+    pub(crate) fn verify_unchanged(&self, root: &Path) -> Result<(), AppError> {
+        match self {
+            Self::Stable(inspected) => inspected.verify_unchanged(root),
+            Self::RecoveryRequired(_) => Err(AppError::Config("secret.recovery_required".into())),
+        }
+    }
+    pub(crate) fn validate_device_state(&self, vault: &VaultContext) -> Result<(), AppError> {
+        match self {
+            Self::Stable(inspected) => inspected.validate_device_state(vault),
+            Self::RecoveryRequired(_) => Err(AppError::Config("secret.recovery_required".into())),
+        }
+    }
+    pub(crate) fn validate_database(
+        &self,
+        root: &Path,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        self.verify_unchanged(root)?;
+        if let Some(db) = inspection::capture(&root.join(crate::config::DB_FILE_NAME))? {
+            database::vault::check_identity(&db.image, vault)?;
+            super::inventory::validate_database(&db.image, vault)?;
+        }
+        self.verify_unchanged(root)
+    }
+}
+
+impl StableInspection {
+    fn is_database_resume_candidate(&self) -> bool {
+        self.source_versions
+            == Some(SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            })
+            && self
+                .device_files
+                .iter()
+                .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
+    }
+
+    /// Keep the original checkpoint binding while letting each app own its
+    /// post-DB facts. Peer client/device changes are not DB completion authority.
+    fn verify_resume_checkpoint(&self, root: &Path) -> Result<(), AppError> {
+        if pending_generation(root)? || read_vault(root)? != self.vault {
+            return Err(changed());
+        }
+        let expected = self
+            .device_files
+            .iter()
+            .find(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
+            .ok_or_else(changed)?;
+        if checkpoint::resume_candidate_bytes(&self.device)?.as_deref()
+            != Some(expected.2.as_slice())
+        {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn future_version(&self) -> Option<(i32, i32)> {
+        let versions = self.source_versions?;
+        if versions.upstream > database::SCHEMA_VERSION {
+            Some((versions.upstream, database::SCHEMA_VERSION))
+        } else if versions.loongport > database::loongport_schema::LOONGPORT_SCHEMA_VERSION {
+            Some((
+                versions.loongport,
+                database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn verify_database_and_vault(&self, root: &Path) -> Result<(), AppError> {
+        if pending_generation(root)? {
+            return Err(changed());
+        }
+        let path = root.join(crate::config::DB_FILE_NAME);
+        match &self.revision {
+            Some(revision) => inspection::verify_unchanged(&path, revision)?,
+            None if inspection::capture(&path)?.is_some() => return Err(changed()),
+            None => {}
+        }
+        if read_vault(root)? != self.vault {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_unchanged(&self, root: &Path) -> Result<(), AppError> {
+        self.verify_database_and_vault(root)?;
+        if self.is_database_resume_candidate() {
+            return self.verify_resume_checkpoint(root);
+        }
+        if read_device(&self.device)? != self.device_files {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    /// Verify only this authenticated output's absence; retain all other evidence.
+    fn verify_checkpoint_removed(&self, root: &Path, bytes: &[u8]) -> Result<(), AppError> {
+        let path = self.device.root().join(checkpoint::FILE);
+        if !self
+            .device_files
+            .iter()
+            .any(|(_, p, b)| p == &path && b == bytes)
+        {
+            return Err(changed());
+        }
+        self.verify_database_and_vault(root)?;
+        let expected = self
+            .device_files
+            .iter()
+            .filter(|(_, p, _)| p != &path)
+            .cloned()
+            .collect::<Vec<_>>();
+        if read_device(&self.device)? != expected {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    fn acknowledge_checkpoint_removed(
+        &mut self,
+        root: &Path,
+        bytes: &[u8],
+    ) -> Result<(), AppError> {
+        self.verify_checkpoint_removed(root, bytes)?;
+        let path = self.device.root().join(checkpoint::FILE);
+        self.device_files.retain(|(_, p, _)| p != &path);
+        Ok(())
+    }
+
+    /// Adopt only the authenticated checkpoint output after its original owner
+    /// verified it. Every other startup input must retain the old evidence.
+    fn acknowledge_checkpoint(
+        &mut self,
+        root: &Path,
+        checkpoint_bytes: &[u8],
+    ) -> Result<(), AppError> {
+        let path = self.device.root().join(checkpoint::FILE);
+        if self
+            .device_files
+            .iter()
+            .any(|(_, original, _)| original == &path)
+        {
+            return Err(changed());
+        }
+        let current = read_device(&self.device)?;
+        let output = current
+            .iter()
+            .find(|(_, candidate, _)| candidate == &path)
+            .ok_or_else(changed)?;
+        if output.2 != checkpoint_bytes {
+            return Err(changed());
+        }
+        if current
+            .iter()
+            .filter(|(_, candidate, _)| candidate != &path)
+            .cloned()
+            .collect::<Vec<_>>()
+            != self.device_files
+        {
+            return Err(changed());
+        }
+        let original = std::mem::replace(&mut self.device_files, current);
+        if let Err(error) = self.verify_unchanged(root) {
+            self.device_files = original;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_device_state(&self, vault: &VaultContext) -> Result<(), AppError> {
+        for (file, path, bytes) in &self.device_files {
+            let plaintext = file.decode(vault, bytes)?;
+            if path == &self.device.state_path() {
+                crate::mode::state::validate_envelope(&plaintext)
+                    .map_err(|_| AppError::Config("upgrade.invalid_mode_state".into()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn changed() -> AppError {
+    AppError::Config("upgrade.source_changed".into())
+}
+
+fn pending_generation(root: &Path) -> Result<bool, AppError> {
+    Ok(super::reset::pending(root)?
+        || super::bootstrap_restore::pending(root)?
+        || super::rewrap::pending(root)?)
+}
+
+fn read_vault(root: &Path) -> Result<Option<(VaultMetadata, bool, String)>, AppError> {
+    super::files::device_directory_exists(root)?;
+    match std::fs::symlink_metadata(root.join("vault.json")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AppError::io(root.join("vault.json"), e)),
+        Ok(_) => {
+            let saved = session::read_metadata(root)?;
+            saved
+                .metadata
+                .validate()
+                .map_err(super::error::secret_error)?;
+            Ok(Some((
+                saved.metadata,
+                saved.automatic_unlock,
+                saved.migration_state,
+            )))
+        }
+    }
+}
+
+fn read_device(
+    device: &DeviceStore,
+) -> Result<Vec<(super::owned_file::DeviceFile, std::path::PathBuf, Vec<u8>)>, AppError> {
+    super::files::device_file_paths(device.root())?
+        .into_iter()
+        .map(|(file, path)| {
+            let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+            Ok((file, path, bytes))
+        })
+        .collect()
+}
+
+pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspection, AppError> {
+    super::files::device_directory_exists(root)?;
+    // A generation journal belongs to its authenticated recovery owner. Its
+    // database, local metadata and device files may be between generations.
+    if pending_generation(root)? {
+        return Ok(UpgradeInspection::RecoveryRequired(
+            RecoveryEvidence::capture(root, device)?,
+        ));
+    }
+    let captured = inspection::capture(&root.join(crate::config::DB_FILE_NAME))?;
+    let source_versions = captured
+        .as_ref()
+        .map(|db| {
+            Ok::<_, AppError>(SchemaVersions {
+                upstream: Database::get_user_version(&db.image)?,
+                loongport: database::loongport_schema::read_stored_version(&db.image)?,
+            })
+        })
+        .transpose()?;
+    let mut result = StableInspection {
+        source_versions,
+        revision: captured.as_ref().map(|db| db.revision.clone()),
+        vault: None,
+        device: device.clone(),
+        device_files: Vec::new(),
+    };
+    // An older binary must still present its existing newer-database recovery.
+    if result.future_version().is_some() {
+        if result.source_versions
+            != Some(SchemaVersions {
+                upstream: database::UPSTREAM4_SCHEMA_VERSION,
+                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            })
+        {
+            return Ok(UpgradeInspection::Stable(Box::new(result)));
+        }
+        let Some(bytes) = checkpoint::resume_candidate_bytes(device)? else {
+            return Ok(UpgradeInspection::Stable(Box::new(result)));
+        };
+        result.device_files = vec![(
+            super::owned_file::DeviceFile::registered(checkpoint::FILE)?,
+            device.root().join(checkpoint::FILE),
+            bytes,
+        )];
+    } else {
+        result.device_files = read_device(device)?;
+    }
+    result.vault = read_vault(root)?;
+    if let Some(db) = captured.as_ref() {
+        // The original preflight admits only the running source schema. A
+        // target checkpoint candidate is authenticated by its existing owner;
+        // it must not be rejected here before that proof can be checked.
+        if !result.is_database_resume_candidate() {
+            database::vault::preflight_connection(&db.image)?;
+        }
+        let stored = database::vault::stored_metadata(&db.image)?;
+        match (&stored, &result.vault) {
+            (None, _) if result.is_database_resume_candidate() => {
+                return Err(AppError::Config("secret.metadata_missing".into()))
+            }
+            (Some(_), None) => return Err(AppError::Config("secret.metadata_missing".into())),
+            (Some(stored), Some((local, _, _))) if stored != local => {
+                return Err(AppError::Config("secret.identity_mismatch".into()))
+            }
+            _ => {}
+        }
+    }
+    result.verify_unchanged(root)?;
+    Ok(UpgradeInspection::Stable(Box::new(result)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_inspection_reads_both_version_domains_and_rejects_malformed_counter() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let path = dir.path().join(crate::config::DB_FILE_NAME);
+        let device = DeviceStore::at(dir.path().join("device"));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version=17; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER)").unwrap();
+        conn.execute(
+            "INSERT INTO loongport_schema_version VALUES(1,?1)",
+            [database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
+        )
+        .unwrap();
+        drop(conn);
+        let original = std::fs::read(&path).unwrap();
+        let inspected = inspect(dir.path(), &device).unwrap();
+        assert_eq!(
+            inspected.future_version(),
+            Some((
+                database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1,
+                database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            ))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("UPDATE loongport_schema_version SET version='malformed'")
+            .unwrap();
+        drop(conn);
+        let original = std::fs::read(&path).unwrap();
+        assert!(inspect(dir.path(), &device).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn startup_inspection_neither_creates_fresh_storage_nor_migrates_existing_tables() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let root = dir.path().join("source");
+        let device = DeviceStore::at(dir.path().join("device"));
+        let inspected = inspect(&root, &device).unwrap();
+        assert!(!inspected.has_vault());
+        assert!(!root.exists());
+        assert!(!device.root().exists());
+        crate::config_file_io::ensure_private_directory(&root).unwrap();
+        let path = root.join(crate::config::DB_FILE_NAME);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated(id INTEGER)")
+            .unwrap();
+        drop(conn);
+        let original = std::fs::read(&path).unwrap();
+        let inspected = inspect(&root, &device).unwrap();
+        assert!(
+            matches!(inspected, UpgradeInspection::Stable(ref stable) if stable.source_versions == Some(SchemaVersions { upstream: 0, loongport: 0 }))
+        );
+        inspected.verify_unchanged(&root).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn startup_inspection_accepts_matching_vault_and_leaves_encrypted_database_unchanged() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let path = dir.path().join(crate::config::DB_FILE_NAME);
+        let device = DeviceStore::at(dir.path().join("device"));
+        let vault = VaultContext::generate().unwrap();
+        session::write_metadata(
+            dir.path(),
+            &session::completed_metadata(&vault, false).unwrap(),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version=17; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER); INSERT INTO loongport_schema_version VALUES(1,24)").unwrap();
+        database::vault::stamp(&conn, &vault).unwrap();
+        drop(conn);
+        let original = std::fs::read(&path).unwrap();
+        let inspected = inspect(dir.path(), &device).unwrap();
+        assert!(inspected.has_vault());
+        inspected.validate_device_state(&vault).unwrap();
+        inspected.verify_unchanged(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn startup_inspection_defers_interrupted_generation_to_its_recovery_owner() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let root = dir.path().join("source");
+        let device = DeviceStore::at(dir.path().join("device"));
+        crate::config_file_io::ensure_private_directory(&root).unwrap();
+        let marker = root.join(super::super::transition::INTENT);
+        let initial = inspect(&root, &device).unwrap();
+        std::fs::write(&marker, b"pending-generation-fixture").unwrap();
+        assert!(
+            matches!(initial.verify_unchanged(&root), Err(AppError::Config(code)) if code == "upgrade.source_changed")
+        );
+        let path = root.join(crate::config::DB_FILE_NAME);
+        std::fs::write(&path, b"database-between-generations").unwrap();
+        std::fs::write(root.join("vault.json"), b"metadata-between-generations").unwrap();
+        let inspected = inspect(&root, &device).unwrap();
+        assert!(matches!(inspected, UpgradeInspection::RecoveryRequired(_)));
+        assert!(
+            matches!(inspected.verify_unchanged(&root), Err(AppError::Config(code)) if code == "secret.recovery_required")
+        );
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"pending-generation-fixture"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"database-between-generations"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn startup_inspection_keeps_future_version_recovery_before_vault_parsing() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let path = dir.path().join(crate::config::DB_FILE_NAME);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", database::SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+        std::fs::write(dir.path().join("vault.json"), b"future-format-fixture").unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let inspected = inspect(dir.path(), &DeviceStore::at(dir.path().join("device"))).unwrap();
+        assert_eq!(
+            inspected.future_version(),
+            Some((database::SCHEMA_VERSION + 1, database::SCHEMA_VERSION))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn startup_inspection_is_passive_and_blocks_changed_vault_or_device_membership() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let root = dir.path().join("source");
+        let device = DeviceStore::at(dir.path().join("device"));
+        crate::config_file_io::ensure_private_directory(&root).unwrap();
+        let vault = VaultContext::generate().unwrap();
+        session::write_metadata(&root, &session::completed_metadata(&vault, false).unwrap())
+            .unwrap();
+        let before = std::fs::read(root.join("vault.json")).unwrap();
+        let inspected = inspect(&root, &device).unwrap();
+        assert!(inspected.has_vault());
+        assert!(!inspected.has_device_files());
+        inspected.verify_unchanged(&root).unwrap();
+        assert_eq!(std::fs::read(root.join("vault.json")).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        crate::config_file_io::ensure_private_directory(device.root()).unwrap();
+        std::fs::write(device.state_path(), b"device-fixture").unwrap();
+        assert!(
+            matches!(inspected.verify_unchanged(&root), Err(AppError::Config(code)) if code == "upgrade.source_changed")
+        );
+        std::fs::remove_file(device.state_path()).unwrap();
+        let saved = session::completed_metadata(&vault, true).unwrap();
+        session::write_metadata(&root, &saved).unwrap();
+        assert!(
+            matches!(inspected.verify_unchanged(&root), Err(AppError::Config(code)) if code == "upgrade.source_changed")
+        );
+    }
+
+    #[test]
+    fn startup_inspection_refuses_encrypted_database_without_local_vault() {
+        let dir = super::super::testing::tempdir().unwrap();
+        let path = dir.path().join(crate::config::DB_FILE_NAME);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version=17; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER); INSERT INTO loongport_schema_version VALUES(1,24)").unwrap();
+        database::vault::stamp(&conn, &super::super::VaultContext::generate().unwrap()).unwrap();
+        drop(conn);
+        let original = std::fs::read(&path).unwrap();
+        assert!(inspect(dir.path(), &DeviceStore::at(dir.path().join("device"))).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "upgrade_checkpoint_tests.rs"]
+mod checkpoint_tests;
+
+#[allow(dead_code)]
+#[path = "upgrade_checkpoint.rs"]
+pub(crate) mod checkpoint;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "upgrade_review_tests.rs"]
+pub(crate) mod review_tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "upgrade_auth_tests.rs"]
+pub(crate) mod auth_tests;
+
+#[path = "upgrade_review_session.rs"]
+mod review_session;
+pub(crate) use review_session::{
+    ensure_native_app_write_admitted, AuthenticatedUpgrade, UpgradeAppReview, UpgradeModeChoice,
+};
+
+#[path = "upgrade_staged_review.rs"]
+mod staged_review;
+pub(crate) use staged_review::StagedUpgradeReview;
+
+#[path = "upgrade_live_review.rs"]
+mod live_review;
+
+#[path = "upgrade_projection_review.rs"]
+mod projection_review;

@@ -40,6 +40,7 @@ struct RemoteSnapshot {
 
 /// Check WebDAV connectivity and ensure remote directory structure.
 pub async fn check_connection(settings: &WebDavSyncSettings) -> Result<(), AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let auth = auth_for(settings);
     test_connection(&settings.base_url, &auth).await?;
@@ -53,6 +54,7 @@ pub async fn upload(
     db: &crate::database::Database,
     settings: &mut WebDavSyncSettings,
 ) -> Result<Value, AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let snapshot = build_local_snapshot(db)?;
     let manifest: SyncManifest =
@@ -127,6 +129,7 @@ pub async fn upload(
 pub(crate) async fn fetch_snapshot(
     settings: &WebDavSyncSettings,
 ) -> Result<DownloadedSnapshot, AppError> {
+    super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let auth = auth_for(settings);
     let snapshot = find_remote_snapshot(settings, &auth)

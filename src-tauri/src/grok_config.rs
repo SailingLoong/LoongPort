@@ -236,6 +236,21 @@ pub fn update_selected_model_string(
     field: &str,
     value: &str,
 ) -> Result<String, AppError> {
+    change_selected_model_string(config_toml, field, Some(value))
+}
+
+pub(crate) fn remove_selected_model_string(
+    config_toml: &str,
+    field: &str,
+) -> Result<String, AppError> {
+    change_selected_model_string(config_toml, field, None)
+}
+
+fn change_selected_model_string(
+    config_toml: &str,
+    field: &str,
+    value: Option<&str>,
+) -> Result<String, AppError> {
     let mut document = config_toml
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| {
@@ -271,7 +286,11 @@ pub fn update_selected_model_string(
                 format!("Grok Build configuration is missing [model.\"{default_model}\"]"),
             )
         })?;
-    selected_model.insert(field, toml_edit::value(value));
+    if let Some(value) = value {
+        selected_model.insert(field, toml_edit::value(value));
+    } else {
+        selected_model.remove(field);
+    }
     Ok(document.to_string())
 }
 

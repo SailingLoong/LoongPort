@@ -455,16 +455,34 @@ pub(crate) fn recover(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
-    let path = root.join(INTENT);
-    if !regular(&path)? {
-        return Ok(());
+    recover_record(root, store, password, None)
+}
+pub(crate) fn recover_inspected(
+    root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    recover_record(root, store, password, Some(expected))
+}
+fn recover_record(
+    root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
+    let _skills = crate::services::skill::skill_state_write_guard();
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
+    };
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
     if !directory(root)? {
-        return Err(invalid());
-    }
-    let _skills = crate::services::skill::skill_state_write_guard();
-    let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
-    if bytes.len() > 1024 * 1024 {
         return Err(invalid());
     }
     let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
@@ -525,6 +543,18 @@ pub(crate) fn recover(
     })?;
     Ok(())
 }
+/// Passive journal bytes; authentication and recovery remain with this owner.
+pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = root.join(INTENT);
+    crate::config_file_io::read_regular_file(&path, 1024 * 1024).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            invalid()
+        } else {
+            AppError::io(&path, error)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,7 +566,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
             Self { home, previous }
@@ -886,6 +916,14 @@ mod tests {
                 .is_err()
             );
             assert!(pending(&root).unwrap());
+            assert!(matches!(
+                super::super::upgrade::inspect(
+                    &root,
+                    &crate::live::engine::DeviceStore::at(root.join("fixture-device"))
+                )
+                .unwrap(),
+                super::super::upgrade::UpgradeInspection::RecoveryRequired(_)
+            ));
             let session =
                 SecretSession::open_existing(&root, &store, Some("remote recovery password"))
                     .unwrap();

@@ -58,7 +58,9 @@ impl SecretError {
 pub(crate) fn public_code(error: crate::error::AppError) -> String {
     match error {
         crate::error::AppError::Config(code)
-            if code.starts_with("secret.") || code.starts_with("settings.") =>
+            if code.starts_with("secret.")
+                || code.starts_with("settings.")
+                || code.starts_with("upgrade.") =>
         {
             code
         }

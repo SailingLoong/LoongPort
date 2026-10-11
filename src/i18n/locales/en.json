@@ -54,6 +54,7 @@
     "invalidJson": "Invalid JSON format"
   },
   "commonConfig": {
+    "frozenHint": "Legacy common snippets are currently read-only. Saved content remains available for compatibility and recovery.",
     "guideTitle": "What is a Common Config Snippet?",
     "guidePurpose": "It lets you share non-sensitive settings (plugins, environment variables, etc.) across different providers. These settings won't be lost when you switch providers.",
     "guideUsage": "How to use: ① Click \"Extract from Editor\" to save the common parts  ② Check \"Apply Common Config\" when creating a new provider",
@@ -172,7 +173,76 @@
     "duplicateFailed": "Failed to duplicate provider",
     "needsRouting": "Needs Routing",
     "noRoutingSupport": "No Routing Support",
-    "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again"
+    "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again",
+    "preview": {
+      "preview": "Preview changes",
+      "saveOnly": "Save configuration",
+      "saveAndApply": "Save and apply to current configuration",
+      "fields": "Fields to change",
+      "files": "Affected files",
+      "reading": "Reading configuration and current state…",
+      "reread": "Read again",
+      "sourceUnavailable": "The configuration source could not be verified. Read it again.",
+      "invalidFormat": "The configuration format is invalid. Return to editing.",
+      "readOnly": "A required file is read-only. Saving is unavailable.",
+      "sourceChanged": "The configuration or files changed. Generate a new preview.",
+      "vaultLocked": "Credential storage is locked. Unlock it first.",
+      "pendingOperation": "An original operation needs verification. Recheck it first.",
+      "ownerUnavailable": "The existing configuration or authentication owner cannot prove this write.",
+      "credentialConflict": "A key cannot be deleted and replaced together. Clear its input first.",
+      "unsupported": "A verifiable write plan is unavailable for this configuration.",
+      "savedPreviousDraft": "The original save completed. Your newer draft is still unsaved.",
+      "queryOriginal": "Check original operation",
+      "backToEdit": "Return to editing",
+      "deleteCredential": "Explicitly delete this configuration's key",
+      "deleteCredentialHint": "Only the key identified by this configuration's owner is affected, not account sign-in. Clear the key input before selecting deletion. A blank input alone preserves the current key.",
+      "noPreview": "Generate a preview before confirming the save.",
+      "noLiveWrite": "Only this record is saved. Client files and the current selection stay unchanged.",
+      "plannedOnly": "These changes and preserved fields are planned, not yet written.",
+      "field": {
+        "connection": "Connection fields",
+        "authentication": "Authentication fields",
+        "models": "Model fields",
+        "dedicated": "Configuration-owned fields",
+        "metadata": "Name and configuration metadata"
+      },
+      "file": {
+        "claudeSettings": "Claude settings.json",
+        "codexAuth": "Codex auth.json",
+        "codexConfig": "Codex config.toml",
+        "codexCatalog": "Codex managed model catalog",
+        "managedAuth": "Managed authentication ownership marker",
+        "deviceAuthStash": "Encrypted device authentication stash",
+        "geminiEnv": "Gemini .env",
+        "geminiSettings": "Gemini settings.json",
+        "grokConfig": "Grok Build config.toml"
+      },
+      "change": {
+        "write": "Write",
+        "delete": "Delete",
+        "unchanged": "Unchanged"
+      },
+      "preserve": {
+        "unownedJsonKeys": "Unowned JSON keys and values are planned to be preserved.",
+        "untouchedTomlBytes": "Untouched TOML content is planned to be preserved byte for byte.",
+        "untouchedDotenvBytes": "Untouched dotenv content is planned to be preserved byte for byte.",
+        "sharedSettings": "Shared settings stay unchanged and are not saved with this configuration.",
+        "externalCatalog": "The external catalog is preserved. LoongPort model mappings may not take effect."
+      },
+      "result": {
+        "completed": "The original operation completed and passed readback verification.",
+        "notRecorded": "This save was not recorded in the operation journal.",
+        "pending": "The original operation has not completed.",
+        "partial": "The original operation partially wrote files. Recheck it.",
+        "verificationRequired": "The original operation requires verification of actual files.",
+        "discarded": "The original operation was not published; staging was discarded.",
+        "abandoned": "The source changed and the original operation was abandoned.",
+        "unknown": "The outcome is unknown. Check the original operation.",
+        "conflict": "The request identity conflicts. Check the original operation.",
+        "stale": "The preview expired. Return to editing and preview again.",
+        "blocked": "This configuration cannot be saved now."
+      }
+    }
   },
   "claudeCode": {
     "needsRouting": "Needs Routing",
@@ -3856,6 +3926,9 @@
     "hide": "Hide from homepage"
   },
   "client": {
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "skipToContent": "Skip to content",
     "navigation": "Main navigation",
     "applications": "Applications",
     "services": "Services & accounts",
@@ -3905,6 +3978,14 @@
     }
   },
   "applications": {
+    "routingModeDirect": "Direct",
+    "routingModeProxy": "Proxy · attached",
+    "routingModeDetached": "Proxy · detached",
+    "operationNeedsVerification": "This application needs verification before changes can be applied.",
+    "operationPublicationStarted": "Configuration publication may have begun. Check the application state before applying again.",
+    "lastSuccessfulRead": "Last successful read: {{time}}",
+    "recheckOperation": "Recheck status",
+    "routingModeUnknown": "Unknown",
     "currentConfiguration": "Current configuration",
     "enabledConfigurations": "Enabled configurations",
     "currentDescription": "Configurations saved to this application.",
@@ -4004,9 +4085,25 @@
     "order": "Order",
     "noTiers": "No tiers added yet",
     "outsideChain": "Not in automatic failover",
-    "noSwitchableTier": "No available tier supports the selected model"
+    "noSwitchableTier": "No available tier supports the selected model",
+    "reviewChanges": "Review changes",
+    "reviewChangesDescription": "Confirm the applied list and order below. Tiers left out will not be used for automatic failover. Cancel keeps your draft.",
+    "appliedOrder": "Currently applied order",
+    "proposedOrder": "Order to apply",
+    "requestedSelection": "Requested current tier and model",
+    "noExplicitSelection": "This request does not explicitly select a different current tier or model. Runtime selection is determined by the routing service.",
+    "reviewChanged": "The draft or applied state has changed. Cancel and select Apply changes again to review the latest impact.",
+    "leaveDraftTitle": "Discard local changes?",
+    "leaveDraftDescription": "Continue editing to keep the draft, or discard unsubmitted local changes and leave this workspace. Discarding does not cancel or undo operations already submitted.",
+    "discardAndLeave": "Discard and leave"
   },
   "secrets": {
+    "recoveryTitle": "Resume recovery",
+    "recoveryDescription": "An interrupted data protection operation needs your recovery password.",
+    "resumeRecovery": "Resume recovery",
+    "recheckOperation": "Check operation",
+    "recoveryCompleted": "Recovery is verified. Restart the app to continue.",
+    "recoveryVerificationRequired": "The operation has changed. Restart the app to check it again.",
     "unlockTitle": "Unlock credentials",
     "unlockDescription": "Enter your protection password, or retry using the system credential store.",
     "password": "Protection password",
@@ -4574,5 +4671,55 @@
       "unavailable": "Currently unavailable",
       "needsVerification": "Verification required"
     }
+  },
+  "startupUpgrade": {
+    "chooseModeLabel": "Choose the missing mode",
+    "chooseMode": {
+      "direct": "Choose Direct",
+      "proxy": "Choose Proxy"
+    },
+    "chooseProxyRouteLabel": "Choose the proxy route",
+    "nativeProvider": "Provider matching the client files",
+    "continue": "Continue to workbench",
+    "reviewApps": "Review upgrade apps",
+    "title": "Upgrade and recovery review",
+    "databaseOnly": "Database verified; review each app’s actual configuration next.",
+    "verificationRequired": "Verification is incomplete. Upgrade completion is unavailable.",
+    "cancelled": "The unpublished upgrade checkpoint was abandoned.",
+    "queryFailed": "The original operation could not be verified. Recheck before upgrading or completing.",
+    "appQueryFailed": "This app needs verification. Other apps can be checked or recovered independently.",
+    "authenticate": "Unlock and review",
+    "checkBackup": "Check and back up",
+    "start": "Start upgrade",
+    "cancel": "Abandon unpublished upgrade",
+    "recheck": "Recheck original operation",
+    "recover": "Review and recover",
+    "complete": "Complete upgrade",
+    "exit": "Exit",
+    "later": "Continue later and exit",
+    "publishedExit": "Keep published data and the original operation record. Continue from actual state next time without rolling back.",
+    "notComplete": "Completion becomes available after the original flow verifies files, pointers and mode together.",
+    "modeLabel": "Saved mode",
+    "journalLabel": "Pending operation",
+    "pointerLabel": "Pointers agree",
+    "fieldsLabel": "Client fields agree",
+    "keepFiles": "Keep existing files",
+    "noTakeover": "No automatic takeover",
+    "yes": "Yes",
+    "no": "No",
+    "unknown": "Needs verification",
+    "mode": {
+      "direct": "Direct (saved)",
+      "proxy": "Proxy (saved)"
+    },
+    "providerLabel": "Provider",
+    "resolution": {
+      "preserved": "Preserved",
+      "missing": "Missing",
+      "conflict": "Conflicting",
+      "verification_required": "Verification required"
+    },
+    "modeChoiceRequired": "This app requires a mode choice because the saved value is missing or conflicting.",
+    "providerChoiceRequired": "This app requires a provider choice because the saved value is missing or conflicting."
   }
 }

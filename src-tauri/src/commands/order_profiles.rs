@@ -20,7 +20,15 @@ pub fn save_order_profile(
     name: String,
     provider_ids: Vec<String>,
 ) -> Result<(), String> {
-    profiles::save(&state.db, &app_type, &name, &provider_ids).map_err(|e| e.to_string())
+    crate::services::application_selection::save_order_profile(
+        &state,
+        &app_type
+            .parse()
+            .map_err(|error: crate::error::AppError| error.to_string())?,
+        &name,
+        &provider_ids,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -30,7 +38,15 @@ pub fn rename_order_profile(
     from: String,
     to: String,
 ) -> Result<(), String> {
-    profiles::rename(&state.db, &app_type, &from, &to).map_err(|e| e.to_string())
+    crate::services::application_selection::rename_order_profile(
+        &state,
+        &app_type
+            .parse()
+            .map_err(|error: crate::error::AppError| error.to_string())?,
+        &from,
+        &to,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -39,7 +55,14 @@ pub fn delete_order_profile(
     app_type: String,
     name: String,
 ) -> Result<(), String> {
-    profiles::remove(&state.db, &app_type, &name).map_err(|e| e.to_string())
+    crate::services::application_selection::remove_order_profile(
+        &state,
+        &app_type
+            .parse()
+            .map_err(|error: crate::error::AppError| error.to_string())?,
+        &name,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// 导出全部配置档为 JSON 文件（自带保存对话框）。返回写入路径；用户取消返回 None。
@@ -84,7 +107,13 @@ pub async fn import_order_profiles<R: tauri::Runtime>(
     let raw = std::fs::read_to_string(PathBuf::from(&path)).map_err(|e| e.to_string())?;
     let parsed: Vec<OrderProfile> =
         serde_json::from_str(&raw).map_err(|e| format!("invalid profile file: {e}"))?;
-    profiles::import(&state.db, &app_type, parsed)
-        .map(Some)
-        .map_err(|e| e.to_string())
+    crate::services::application_selection::import_order_profiles(
+        &state,
+        &app_type
+            .parse()
+            .map_err(|error: crate::error::AppError| error.to_string())?,
+        parsed,
+    )
+    .map(Some)
+    .map_err(|e| e.to_string())
 }

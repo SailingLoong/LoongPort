@@ -14,7 +14,7 @@ const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
 
 // Modal layers start above the app header (50) and custom window drag region (70).
-const DIALOG_Z_INDEX_CLASS = {
+export const DIALOG_Z_INDEX_CLASS = {
   base: "z-[80]",
   nested: "z-[90]",
   alert: "z-[100]",

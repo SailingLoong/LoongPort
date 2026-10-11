@@ -129,6 +129,73 @@ pub(crate) struct ValidatedSyncSnapshot {
 }
 
 impl Database {
+    /// Complete logical image fingerprint used by explicit upgrade verification.
+    #[allow(dead_code)]
+    pub(crate) fn content_digest(conn: &Connection) -> Result<String, AppError> {
+        use sha2::{Digest, Sha256};
+        fn frame(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        let mut hash = Sha256::new();
+        frame(&mut hash, b"loongport-database-content-v1");
+        frame(&mut hash, &Self::get_user_version(conn)?.to_le_bytes());
+        let mut statement =
+            conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name,type")?;
+        let objects = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for object in objects {
+            let encoded = serde_json::to_vec(&object)
+                .map_err(|_| AppError::Database("Cannot encode database fingerprint".into()))?;
+            frame(&mut hash, &encoded);
+            if object.0 != "table" {
+                continue;
+            }
+            let columns = Self::get_table_columns(conn, &object.1)?;
+            let columns_encoded = serde_json::to_vec(&columns)
+                .map_err(|_| AppError::Database("Cannot encode database fingerprint".into()))?;
+            frame(&mut hash, &columns_encoded);
+            if columns.is_empty() {
+                continue;
+            }
+            let names = columns
+                .iter()
+                .map(|name| Self::quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = conn.prepare(&format!(
+                "SELECT {names} FROM {}",
+                Self::quote_identifier(&object.1)
+            ))?;
+            let mut rows = statement.query([])?;
+            let mut row_hashes = Vec::<[u8; 32]>::new();
+            while let Some(row) = rows.next()? {
+                let mut values = zeroize::Zeroizing::new(Vec::with_capacity(columns.len()));
+                for index in 0..columns.len() {
+                    values.push(Self::format_sql_value(row.get_ref(index)?)?);
+                }
+                let encoded =
+                    zeroize::Zeroizing::new(serde_json::to_vec(&*values).map_err(|_| {
+                        AppError::Database("Cannot encode database fingerprint".into())
+                    })?);
+                row_hashes.push(Sha256::digest(&*encoded).into());
+            }
+            row_hashes.sort_unstable();
+            frame(&mut hash, &(row_hashes.len() as u64).to_le_bytes());
+            for row_hash in row_hashes {
+                frame(&mut hash, &row_hash);
+            }
+        }
+        Ok(hex::encode(hash.finalize()))
+    }
     /// Raw snapshots are test fixtures; public file exports require portable keys.
     #[cfg(test)]
     pub(crate) fn export_sql_string(&self) -> Result<String, AppError> {
@@ -232,6 +299,55 @@ impl Database {
         })
     }
 
+    /// Validate a sync image against the existing authenticated receiver.
+    /// Ordinary imports keep their original ceiling; only an existing exact
+    /// upstream4 receiver can stage the same tuple without a schema migration.
+    pub(crate) fn validate_sync_snapshot_for_current(
+        &self,
+        sql: &str,
+        expected: &VaultMetadata,
+        vault: &VaultContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let current = self.secrets.read()?;
+        let conn = self.conn.lock()?;
+        super::vault::check_identity(&conn, &current)?;
+        let version = Self::get_user_version(&conn)?;
+        let loongport = super::loongport_schema::read_stored_version(&conn)?;
+        if version <= super::SCHEMA_VERSION {
+            super::vault::preflight_connection(&conn)?;
+            drop(conn);
+            drop(current);
+            return Self::validate_sync_snapshot(sql, expected, vault);
+        }
+        if version != super::UPSTREAM4_SCHEMA_VERSION
+            || loongport != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config("secret.database_version_too_new".into()));
+        }
+        drop(conn);
+        Self::validate_sync_source(vault, expected)?;
+        let connection = Self::stage_import_sql(sql, true)?;
+        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        if Self::get_user_version(&connection)? != version
+            || super::loongport_schema::read_stored_version(&connection)? != loongport
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        let source = VaultContext::from_key(expected.clone(), vault.export_key())
+            .map_err(crate::secrets::inventory::secret_error)?;
+        crate::secrets::inventory::validate_database(&connection, &source)?;
+        crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
+        super::vault::stamp(&connection, vault)?;
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: vault.metadata().clone(),
+        })
+    }
+
     /// Preserve device-local rows under the incoming key while the transition
     /// engine holds the current session generation and database connection.
     pub(crate) fn prepare_sync_join(
@@ -244,9 +360,30 @@ impl Database {
             return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
         super::vault::check_identity(current_conn, current)?;
+        let version = Self::get_user_version(current_conn)?;
+        // Joining vault generations is not a schema upgrade/downgrade owner.
+        // Explicitly staged v4 databases retain their cursor columns in the
+        // private rewrapping copy; ordinary import/startup admission is unchanged.
+        if !matches!(
+            version,
+            super::SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
+        ) || Self::get_user_version(&incoming.connection)? != version
+            || super::loongport_schema::read_stored_version(current_conn)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || super::loongport_schema::read_stored_version(&incoming.connection)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
         let local = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&local)?;
+        Self::apply_schema_migrations_on_conn(&local)?;
         super::loongport_schema::apply(&local)?;
+        if version == super::UPSTREAM4_SCHEMA_VERSION {
+            Self::apply_upstream4_migrations_on_conn(&local)?;
+        }
         Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
         crate::secrets::inventory::transform_database(&local, Some(current), next)?;
         Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
@@ -1463,6 +1600,38 @@ mod tests {
     use rusqlite::Connection;
     use serial_test::serial;
 
+    #[test]
+    fn upgrade_fingerprint_tracks_all_logical_rows_and_ignores_page_layout() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "PRAGMA user_version=17;
+            CREATE TABLE entries(id INTEGER PRIMARY KEY,body TEXT,payload BLOB);
+            CREATE TABLE counters(id INTEGER PRIMARY KEY AUTOINCREMENT);
+            INSERT INTO counters DEFAULT VALUES;
+            DELETE FROM counters;",
+        )?;
+        for id in 0..80 {
+            conn.execute(
+                "INSERT INTO entries VALUES(?1,?2,?3)",
+                rusqlite::params![id, "synthetic\0value", vec![id as u8; 128]],
+            )?;
+        }
+        conn.execute("DELETE FROM entries WHERE id%2=0", [])?;
+        let source = Database::content_digest(&conn)?;
+        conn.execute_batch("VACUUM; PRAGMA reverse_unordered_selects=ON;")?;
+        assert_eq!(Database::content_digest(&conn)?, source);
+        conn.execute("UPDATE entries SET payload=X'00' WHERE id=1", [])?;
+        assert_ne!(Database::content_digest(&conn)?, source);
+        let changed = Database::content_digest(&conn)?;
+        conn.execute("UPDATE sqlite_sequence SET seq=2 WHERE name='counters'", [])?;
+        assert_ne!(Database::content_digest(&conn)?, changed);
+        let changed = Database::content_digest(&conn)?;
+        conn.pragma_update(None, "user_version", 18)?;
+        assert_ne!(Database::content_digest(&conn)?, changed);
+        Ok(())
+    }
+
     fn sync_test_database(vault: &VaultContext, root: &std::path::Path) -> Database {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;")
@@ -1771,7 +1940,7 @@ mod tests {
 
     impl TestHomeGuard {
         fn new() -> Self {
-            let temp_dir = tempfile::tempdir().expect("create isolated test home");
+            let temp_dir = crate::secrets::testing::tempdir().expect("create isolated test home");
             let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temp_dir.path());
             // Prevent the Windows legacy-HOME fallback without mutating HOME:
@@ -3997,5 +4166,17 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_sync_tests.rs"]
+mod sync_join_tests;
+
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_versioned_sync_join() {
+        sync_join_tests::verify();
     }
 }

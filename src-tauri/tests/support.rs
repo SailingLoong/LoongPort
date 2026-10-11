@@ -47,7 +47,10 @@ impl KeyStore for TestKeyStore {
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join(format!("cc-switch-test-home-{}", std::process::id()));
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("resolve physical test temporary directory")
+            .join(format!("cc-switch-test-home-{}", std::process::id()));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }

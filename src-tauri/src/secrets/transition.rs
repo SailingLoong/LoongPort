@@ -3,6 +3,7 @@ use super::{
     files::{self, OwnedFile},
     inventory,
     key_store::{save_verified, KeyStore},
+    owned_file::DeviceFile,
     session::{read_metadata, write_durable, write_metadata, LocalVault},
     VaultContext,
 };
@@ -17,7 +18,15 @@ use std::path::{Component, Path, PathBuf};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const INTENT: &str = ".vault-transition";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+const LEGACY_FORMAT: u32 = 1;
+
+#[cfg(any(test, feature = "test-hooks"))]
+mod codex_pending_tests;
+mod device;
+#[cfg(feature = "test-hooks")]
+pub(crate) use codex_pending_tests::verify as verify_codex_pending;
+use device::{RootBindings, Roots};
 
 pub(crate) struct SkillsReplacement {
     pub source: PathBuf,
@@ -41,6 +50,27 @@ struct Manifest {
     next: LocalVault,
     artifacts: Vec<Artifact>,
     skills: Option<SkillsTree>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roots: Option<RootBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upgrade: Option<UpgradeBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database: Option<DatabaseBinding>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DatabaseBinding {
+    upstream: i32,
+    loongport: i32,
+    source_database: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpgradeBinding {
+    source_database: String,
+    target_database: String,
 }
 impl Drop for Manifest {
     fn drop(&mut self) {
@@ -59,10 +89,24 @@ struct Artifact {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Destination {
     Database,
-    DatabaseBackup { name: String },
-    Owned { relative: String, recovery: bool },
-    Settings { recovery: bool },
-    SkillFile { relative: String },
+    DatabaseBackup {
+        name: String,
+    },
+    Owned {
+        relative: String,
+        recovery: bool,
+    },
+    Device {
+        relative: String,
+        #[serde(rename = "sourceDigest")]
+        source_digest: String,
+    },
+    Settings {
+        recovery: bool,
+    },
+    SkillFile {
+        relative: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,7 +117,7 @@ struct SkillsTree {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Checkpoint {
+pub(crate) enum Checkpoint {
     Staged,
     Intent,
     Database,
@@ -158,11 +202,14 @@ fn directory_chain(boundary: &Path, path: &Path) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn validate_destination(root: &Path, target: &Destination) -> Result<(), AppError> {
-    if let Some(path) = destination(root, target)? {
+fn validate_destination(roots: Roots<'_>, target: &Destination) -> Result<(), AppError> {
+    let root = roots.data;
+    if let Some(path) = destination(roots, target)? {
         let home = crate::config::get_home_dir();
         let boundary = if matches!(target, Destination::Settings { recovery: false }) {
             home.as_path()
+        } else if matches!(target, Destination::Device { .. }) {
+            roots.device
         } else {
             root
         };
@@ -287,6 +334,45 @@ where
     )
 }
 
+pub(crate) struct UpgradeCheckpointReplacement {
+    pub(crate) source_digest: String,
+    pub(crate) ciphertext: Vec<u8>,
+}
+type UpgradeCheckpointBuilder<'a> =
+    dyn FnMut(&Connection, &VaultContext) -> Result<UpgradeCheckpointReplacement, AppError> + 'a;
+
+/// Same-generation schema publication: only the DB and original device inventory.
+/// The checkpoint replacement is prepared and authenticated before the intent.
+pub(crate) fn install_upgrade_database<F>(
+    db: &Database,
+    store: &dyn KeyStore,
+    device_root: &Path,
+    prepare_database: F,
+    checkpoint: &mut UpgradeCheckpointBuilder<'_>,
+    hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    original_intent: Option<&mut Option<Vec<u8>>>,
+) -> Result<(), AppError>
+where
+    F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
+{
+    let automatic = read_metadata(db.secret_session().root())?.automatic_unlock;
+    install_with_roots_scoped(
+        db,
+        store,
+        |current| Ok(current.clone()),
+        automatic,
+        prepare_database,
+        Replacements {
+            skills: None,
+            settings: None,
+        },
+        device_root,
+        Some(checkpoint),
+        hook,
+        original_intent,
+    )
+}
+
 /// Replacement assets written when a prepared generation is installed.
 pub(crate) struct Replacements {
     pub(crate) skills: Option<SkillsReplacement>,
@@ -306,20 +392,116 @@ where
     N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
 {
+    let device = crate::live::engine::DeviceStore::for_device();
+    install_with_roots(
+        db,
+        store,
+        make_next,
+        automatic_unlock,
+        prepare_database,
+        replacements,
+        device.root(),
+        hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_with_roots<N, F>(
+    db: &Database,
+    store: &dyn KeyStore,
+    make_next: N,
+    automatic_unlock: bool,
+    prepare_database: F,
+    replacements: Replacements,
+    device_root: &Path,
+    hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+) -> Result<(), AppError>
+where
+    N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
+    F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
+{
+    install_with_roots_scoped(
+        db,
+        store,
+        make_next,
+        automatic_unlock,
+        prepare_database,
+        replacements,
+        device_root,
+        None,
+        hook,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_with_roots_scoped<N, F>(
+    db: &Database,
+    store: &dyn KeyStore,
+    make_next: N,
+    automatic_unlock: bool,
+    prepare_database: F,
+    replacements: Replacements,
+    device_root: &Path,
+    mut upgrade: Option<&mut UpgradeCheckpointBuilder<'_>>,
+    hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    original_intent: Option<&mut Option<Vec<u8>>>,
+) -> Result<(), AppError>
+where
+    N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
+    F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
+{
     let session = &db.secrets;
     let mut current = session.write()?;
     let root = session.root();
+    let roots = Roots {
+        data: root,
+        device: device_root,
+    };
+    roots.validate()?;
+    // The upgrade seam preserves the exact Vault generation and device
+    // ciphertext. Pending app facts stay with their original owners; only a
+    // generation-changing install could strand their encrypted staging.
+    if upgrade.is_none() {
+        device::ensure_no_pending_mode_operation(roots, &current)?;
+    }
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
         if regular_file(&root.join(name))? {
             return Err(AppError::Config("secret.recovery_required".into()));
         }
     }
+    if upgrade.is_none() {
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+            &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
+        )?;
+    }
     let mut conn = db
         .conn
         .lock()
         .map_err(|_| AppError::Config("secret.session_unavailable".into()))?;
+    if upgrade.is_some()
+        && conn.path().map(Path::new) != Some(root.join(crate::config::DB_FILE_NAME).as_path())
+    {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
     vault::check_identity(&conn, &current)?;
+    let database = if upgrade.is_none()
+        && Database::get_user_version(&conn)? == crate::database::UPSTREAM4_SCHEMA_VERSION
+        && crate::database::loongport_schema::read_stored_version(&conn)?
+            == crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        Some(DatabaseBinding {
+            upstream: crate::database::UPSTREAM4_SCHEMA_VERSION,
+            loongport: crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            source_database: Database::content_digest(&conn)?,
+        })
+    } else {
+        if upgrade.is_none() {
+            vault::preflight_connection(&conn)?;
+        }
+        None
+    };
     let previous = read_metadata(root)?;
     if previous.metadata != *current.metadata() {
         return Err(invalid());
@@ -342,12 +524,16 @@ where
     {
         return Err(AppError::Config("secret.stale_generation".into()));
     }
-    let next_local = LocalVault {
-        metadata: next.metadata().clone(),
-        automatic_unlock,
-        migration_state: next
-            .seal(&["local", "migration-state"], &migration)
-            .map_err(inventory::secret_error)?,
+    let next_local = if upgrade.is_some() {
+        previous.clone()
+    } else {
+        LocalVault {
+            metadata: next.metadata().clone(),
+            automatic_unlock,
+            migration_state: next
+                .seal(&["local", "migration-state"], &migration)
+                .map_err(inventory::secret_error)?,
+        }
     };
     let id = uuid::Uuid::new_v4().to_string();
     let staging = stage_root(root, &id)?;
@@ -364,9 +550,22 @@ where
         next: next_local.clone(),
         artifacts: Vec::new(),
         skills: None,
+        roots: Some(roots.bindings()),
+        upgrade: None,
+        database,
     };
     let capture = (|| {
         let memory = prepare_database(&conn, &current, &next)?;
+        let checkpoint_replacement = if let Some(prepare) = upgrade.as_mut() {
+            let bytes = prepare(&memory, &current)?;
+            manifest.upgrade = Some(UpgradeBinding {
+                source_database: Database::content_digest(&conn)?,
+                target_database: Database::content_digest(&memory)?,
+            });
+            Some(bytes)
+        } else {
+            None
+        };
         stage_database(
             root,
             &id,
@@ -375,97 +574,157 @@ where
             &memory,
             &next,
         )?;
-        for path in database_backups(root)? {
-            let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(db_error)?;
-            if vault::is_prefork_relic(&source)? {
-                log::warn!(
-                    "跳过前代上游备份（本代无法迁移，保留原样、可能含明文）: {}",
-                    path.display()
-                );
-                drop(source);
-                continue;
+        if upgrade.is_none() {
+            for path in database_backups(root)? {
+                let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(db_error)?;
+                if vault::is_prefork_relic(&source)? {
+                    log::warn!(
+                        "跳过前代上游备份（本代无法迁移，保留原样、可能含明文）: {}",
+                        path.display()
+                    );
+                    drop(source);
+                    continue;
+                }
+                let metadata = vault::stored_metadata(&source)?
+                    .ok_or_else(|| AppError::Config("secret.plaintext_backup".into()))?;
+                if metadata.vault_id != current.metadata().vault_id
+                    || metadata.key_id != current.metadata().key_id
+                {
+                    return Err(AppError::Config("secret.source_key_required".into()));
+                }
+                let source_vault = VaultContext::from_key(metadata, current.export_key())
+                    .map_err(inventory::secret_error)?;
+                inventory::validate_database(&source, &source_vault)?;
+                let mut memory = Connection::open_in_memory().map_err(db_error)?;
+                vault::copy(&source, &mut memory)?;
+                inventory::transform_database(&memory, Some(&source_vault), &next)?;
+                vault::stamp(&memory, &next)?;
+                stage_database(
+                    root,
+                    &id,
+                    &mut manifest,
+                    Destination::DatabaseBackup {
+                        name: path
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .ok_or_else(invalid)?
+                            .to_owned(),
+                    },
+                    &memory,
+                    &next,
+                )?;
             }
-            let metadata = vault::stored_metadata(&source)?
-                .ok_or_else(|| AppError::Config("secret.plaintext_backup".into()))?;
-            if metadata.vault_id != current.metadata().vault_id
-                || metadata.key_id != current.metadata().key_id
-            {
-                return Err(AppError::Config("secret.source_key_required".into()));
+            for plan in files::stage_owned_files_with_vault(root, &current, false)? {
+                let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
+                let bytes = plan.file.encode(&next, &plaintext)?;
+                let recovery = plan.source.starts_with(root.join("backups/vault-recovery"));
+                stage_bytes(
+                    root,
+                    &id,
+                    &mut manifest,
+                    Destination::Owned {
+                        relative: plan
+                            .file
+                            .relative_path()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        recovery,
+                    },
+                    &bytes,
+                )?;
             }
-            let source_vault = VaultContext::from_key(metadata, current.export_key())
-                .map_err(inventory::secret_error)?;
-            inventory::validate_database(&source, &source_vault)?;
-            let mut memory = Connection::open_in_memory().map_err(db_error)?;
-            vault::copy(&source, &mut memory)?;
-            inventory::transform_database(&memory, Some(&source_vault), &next)?;
-            vault::stamp(&memory, &next)?;
-            stage_database(
-                root,
-                &id,
-                &mut manifest,
-                Destination::DatabaseBackup {
-                    name: path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .ok_or_else(invalid)?
-                        .to_owned(),
-                },
-                &memory,
-                &next,
-            )?;
         }
-        for plan in files::stage_owned_files_with_vault(root, &current, false)? {
-            let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
-            let bytes = plan.file.encode(&next, &plaintext)?;
-            let recovery = plan.source.starts_with(root.join("backups/vault-recovery"));
+        let same_key = (
+            current.metadata().vault_id.as_str(),
+            current.metadata().key_id.as_str(),
+        ) == (
+            next.metadata().vault_id.as_str(),
+            next.metadata().key_id.as_str(),
+        );
+        for plan in files::stage_device_files_with_vault(roots.device, &current)? {
+            let source_digest = hash(&plan.ciphertext);
+            let replacement = checkpoint_replacement.as_ref().filter(|_| {
+                plan.file.relative_path()
+                    == Path::new(crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE)
+            });
+            let bytes = if let Some(replacement) = replacement {
+                if replacement.source_digest != source_digest {
+                    return Err(AppError::Config("upgrade.source_changed".into()));
+                }
+                replacement.ciphertext.clone()
+            } else if same_key {
+                plan.file.decode(&next, &plan.ciphertext)?;
+                plan.ciphertext
+            } else {
+                let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
+                plan.file.encode(&next, &plaintext)?
+            };
+            if roots.device.join(plan.file.relative_path()) != plan.source {
+                return Err(invalid());
+            }
             stage_bytes(
                 root,
                 &id,
                 &mut manifest,
-                Destination::Owned {
+                Destination::Device {
                     relative: plan
                         .file
                         .relative_path()
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    recovery,
+                        .to_str()
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                    source_digest,
                 },
                 &bytes,
             )?;
         }
-        for recovery in [false, true] {
-            let path = settings_destination(root, recovery);
-            let staged_settings = (!recovery)
-                .then_some(replacements.settings.as_ref())
-                .flatten();
-            if let Some(settings) = staged_settings {
-                let bytes = crate::settings::encode_settings_with_vault(settings, &next)?;
-                stage_bytes(
-                    root,
-                    &id,
-                    &mut manifest,
-                    Destination::Settings { recovery },
-                    &bytes,
-                )?;
-            } else if regular_file(&path)? {
-                let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
-                let settings = crate::settings::decode_settings_with_vault(&bytes, &current)?;
-                let bytes = crate::settings::encode_settings_with_vault(&settings, &next)?;
-                stage_bytes(
-                    root,
-                    &id,
-                    &mut manifest,
-                    Destination::Settings { recovery },
-                    &bytes,
-                )?;
+        if upgrade.is_none() {
+            for recovery in [false, true] {
+                let path = settings_destination(root, recovery);
+                let staged_settings = (!recovery)
+                    .then_some(replacements.settings.as_ref())
+                    .flatten();
+                if let Some(settings) = staged_settings {
+                    let bytes = crate::settings::encode_settings_with_vault(settings, &next)?;
+                    stage_bytes(
+                        root,
+                        &id,
+                        &mut manifest,
+                        Destination::Settings { recovery },
+                        &bytes,
+                    )?;
+                } else if regular_file(&path)? {
+                    let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+                    let settings = crate::settings::decode_settings_with_vault(&bytes, &current)?;
+                    let bytes = crate::settings::encode_settings_with_vault(&settings, &next)?;
+                    stage_bytes(
+                        root,
+                        &id,
+                        &mut manifest,
+                        Destination::Settings { recovery },
+                        &bytes,
+                    )?;
+                }
+            }
+            if let Some(skills) = replacements.skills {
+                capture_skills(root, &id, &next, &mut manifest, &skills)?;
             }
         }
-        if let Some(skills) = replacements.skills {
-            capture_skills(root, &id, &next, &mut manifest, &skills)?;
-        }
-        validate_stages(root, &id, &next, &manifest)?;
+        validate_stages(roots, &id, &next, &manifest)?;
+        device::validate_sources(roots, &manifest)?;
         hook(Checkpoint::Staged)?;
+        if let Some(binding) = &manifest.database {
+            validate_database_version(&conn, Some(binding), true)?;
+            if Database::content_digest(&conn)? != binding.source_database {
+                return Err(invalid());
+            }
+        }
+        if manifest.upgrade.is_some() {
+            validate_stages(roots, &id, &next, &manifest)?;
+            device::validate_sources(roots, &manifest)?;
+            validate_upgrade_database(&conn, &manifest)?;
+        }
         Ok(())
     })();
     if let Err(error) = capture {
@@ -485,9 +744,14 @@ where
     let bytes = serde_json::to_vec(&intent).map_err(|_| invalid())?;
     session.set_blocked(true);
     write_durable(&root.join(INTENT), &bytes)?;
+    if let Some(original) = original_intent {
+        // The existing publication owner retains its actual serialized intent
+        // before any interruption hook; never recapture an unrelated journal.
+        *original = Some(bytes);
+    }
     hook(Checkpoint::Intent)?;
     finish(
-        root,
+        roots,
         &intent,
         &manifest,
         &next,
@@ -563,7 +827,8 @@ fn settings_destination(root: &Path, recovery: bool) -> PathBuf {
         crate::settings::settings_path()
     }
 }
-fn destination(root: &Path, target: &Destination) -> Result<Option<PathBuf>, AppError> {
+fn destination(roots: Roots<'_>, target: &Destination) -> Result<Option<PathBuf>, AppError> {
+    let root = roots.data;
     Ok(Some(match target {
         Destination::Database => root.join(crate::config::DB_FILE_NAME),
         Destination::DatabaseBackup { name } => {
@@ -582,6 +847,10 @@ fn destination(root: &Path, target: &Destination) -> Result<Option<PathBuf>, App
                 root.join(file.relative_path())
             }
         }
+        Destination::Device { relative, .. } => {
+            let file = DeviceFile::registered(relative)?;
+            roots.device.join(file.relative_path())
+        }
         Destination::Settings { recovery } => settings_destination(root, *recovery),
         Destination::SkillFile { relative } => {
             safe_relative(relative)?;
@@ -590,7 +859,12 @@ fn destination(root: &Path, target: &Destination) -> Result<Option<PathBuf>, App
     }))
 }
 
-fn database_image(bytes: &[u8], next: &VaultContext) -> Result<Connection, AppError> {
+fn database_image(
+    bytes: &[u8],
+    next: &VaultContext,
+    manifest: &Manifest,
+    primary: bool,
+) -> Result<Connection, AppError> {
     let mut memory = Connection::open_in_memory().map_err(db_error)?;
     memory
         .deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), false)
@@ -601,11 +875,64 @@ fn database_image(bytes: &[u8], next: &VaultContext) -> Result<Connection, AppEr
     if integrity != "ok" {
         return Err(invalid());
     }
-    vault::preflight_connection(&memory)?;
+    if manifest.upgrade.is_some() {
+        if Database::get_user_version(&memory)? != crate::database::UPSTREAM4_SCHEMA_VERSION
+            || crate::database::loongport_schema::read_stored_version(&memory)?
+                != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(invalid());
+        }
+    } else {
+        validate_database_version(&memory, manifest.database.as_ref(), primary)?;
+    }
     vault::check_identity(&memory, next)?;
     inventory::validate_database(&memory, next)?;
     Ok(memory)
 }
+// Only the original authenticated journal can carry the exact current tuple.
+// A missing binding retains the legacy ceiling, including old recovery records.
+fn validate_database_version(
+    conn: &Connection,
+    binding: Option<&DatabaseBinding>,
+    primary: bool,
+) -> Result<(), AppError> {
+    let Some(binding) = binding else {
+        return vault::preflight_connection(conn);
+    };
+    if binding.upstream != crate::database::UPSTREAM4_SCHEMA_VERSION
+        || binding.loongport != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        return Err(invalid());
+    }
+    let version = Database::get_user_version(conn)?;
+    if !primary && version <= crate::database::SCHEMA_VERSION {
+        return vault::preflight_connection(conn);
+    }
+    if version != binding.upstream
+        || crate::database::loongport_schema::read_stored_version(conn)? != binding.loongport
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn bound_target_digest(
+    root: &Path,
+    id: &str,
+    next: &VaultContext,
+    manifest: &Manifest,
+) -> Result<String, AppError> {
+    let (index, artifact) = manifest
+        .artifacts
+        .iter()
+        .enumerate()
+        .find(|(_, artifact)| matches!(artifact.destination, Destination::Database))
+        .ok_or_else(invalid)?;
+    let bytes = read_stage(root, id, index, artifact)?;
+    let image = database_image(&bytes, next, manifest, true)?;
+    Database::content_digest(&image)
+}
+
 fn read_stage(
     root: &Path,
     id: &str,
@@ -626,11 +953,16 @@ fn read_stage(
     Ok(bytes)
 }
 fn validate_stages(
-    root: &Path,
+    roots: Roots<'_>,
     id: &str,
     next: &VaultContext,
     manifest: &Manifest,
 ) -> Result<(), AppError> {
+    let root = roots.data;
+    roots.validate()?;
+    if manifest.upgrade.is_some() && manifest.database.is_some() {
+        return Err(invalid());
+    }
     if manifest.artifacts.is_empty()
         || manifest
             .artifacts
@@ -641,20 +973,107 @@ fn validate_stages(
     {
         return Err(invalid());
     }
+    if let Some(binding) = &manifest.upgrade {
+        if !same_local(&manifest.previous, &manifest.next)
+            || manifest.skills.is_some()
+            || manifest.artifacts.iter().any(|a| {
+                !matches!(
+                    a.destination,
+                    Destination::Database | Destination::Device { .. }
+                )
+            })
+        {
+            return Err(invalid());
+        }
+        let checkpoint = manifest.artifacts.iter().enumerate().find(|(_, a)| matches!(&a.destination,
+            Destination::Device { relative, .. } if relative == crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE)).ok_or_else(invalid)?;
+        for a in &manifest.artifacts {
+            if let Destination::Device {
+                relative,
+                source_digest,
+            } = &a.destination
+            {
+                if relative != crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE
+                    && source_digest != &a.digest
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        let bytes = read_stage(root, id, checkpoint.0, checkpoint.1)?;
+        let (source, target) = crate::secrets::upgrade::checkpoint::validate_publication_payload(
+            roots.data,
+            &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
+            next,
+            &bytes,
+        )?;
+        if source != binding.source_database || target != binding.target_database {
+            return Err(invalid());
+        }
+    }
     let mut destinations = std::collections::HashSet::new();
+    let mut paths = std::collections::HashSet::new();
+    #[cfg(unix)]
+    let mut file_identities = std::collections::HashSet::new();
     for (index, artifact) in manifest.artifacts.iter().enumerate() {
         let encoded = serde_json::to_string(&artifact.destination).map_err(|_| invalid())?;
         if !destinations.insert(encoded) {
             return Err(invalid());
         }
-        validate_destination(root, &artifact.destination)?;
+        validate_destination(roots, &artifact.destination)?;
+        let path = match &artifact.destination {
+            Destination::SkillFile { relative } => {
+                let skills = manifest.skills.as_ref().ok_or_else(invalid)?;
+                Some(skills_destination(root, skills).join(safe_relative(relative)?))
+            }
+            other => destination(roots, other)?,
+        };
+        if let Some(path) = path {
+            // Canonicalization is only an alias check after path guards. It
+            // cannot turn a rejected device/data symlink into write authority.
+            let resolved = if !matches!(artifact.destination, Destination::SkillFile { .. })
+                && regular_file(&path)?
+            {
+                std::fs::canonicalize(&path).map_err(|e| AppError::io(&path, e))?
+            } else {
+                path.clone()
+            };
+            if !paths.insert(resolved) {
+                return Err(invalid());
+            }
+            #[cfg(unix)]
+            if regular_file(&path)? {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&path).map_err(|e| AppError::io(&path, e))?;
+                if !file_identities.insert((metadata.dev(), metadata.ino())) {
+                    return Err(invalid());
+                }
+            }
+        }
         let bytes = read_stage(root, id, index, artifact)?;
         match &artifact.destination {
             Destination::Database | Destination::DatabaseBackup { .. } => {
-                database_image(&bytes, next)?;
+                let image = database_image(
+                    &bytes,
+                    next,
+                    manifest,
+                    matches!(artifact.destination, Destination::Database),
+                )?;
+                if let Some(binding) = &manifest.upgrade {
+                    if Database::content_digest(&image)? != binding.target_database {
+                        return Err(invalid());
+                    }
+                }
             }
             Destination::Owned { relative, .. } => {
                 OwnedFile::registered(relative)?.decode(next, &bytes)?;
+            }
+            Destination::Device {
+                relative,
+                source_digest,
+            } => {
+                device::validate_digest(source_digest)?;
+                DeviceFile::registered(relative)?.decode(next, &bytes)?;
             }
             Destination::Settings { .. } => {
                 crate::settings::decode_settings_with_vault(&bytes, next)?;
@@ -679,6 +1098,16 @@ fn validate_stages(
     }
     Ok(())
 }
+fn validate_upgrade_database(conn: &Connection, manifest: &Manifest) -> Result<(), AppError> {
+    if let Some(binding) = &manifest.upgrade {
+        let current = Database::content_digest(conn)?;
+        if current != binding.source_database && current != binding.target_database {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+    }
+    Ok(())
+}
+
 fn validate_authorization(
     root: &Path,
     intent: &Intent,
@@ -713,7 +1142,7 @@ fn remove_key(store: &dyn KeyStore, vault_id: &str, key_id: &str) -> Result<(), 
     Ok(())
 }
 fn finish(
-    root: &Path,
+    roots: Roots<'_>,
     intent: &Intent,
     manifest: &Manifest,
     next: &VaultContext,
@@ -721,9 +1150,29 @@ fn finish(
     active: Option<&mut Connection>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    let root = roots.data;
+    device::validate_bindings(roots, intent.version, manifest)?;
     validate_authorization(root, intent, manifest)?;
-    validate_stages(root, &intent.id, next, manifest)?;
-    if manifest.next.automatic_unlock {
+    validate_stages(roots, &intent.id, next, manifest)?;
+    device::validate_sources(roots, manifest)?;
+    let main_path = root.join(crate::config::DB_FILE_NAME);
+    if manifest.database.is_some() {
+        let captured = crate::database::inspection::capture(&main_path)?.ok_or_else(invalid)?;
+        validate_database_version(&captured.image, manifest.database.as_ref(), true)?;
+        let digest = Database::content_digest(&captured.image)?;
+        if digest
+            != manifest
+                .database
+                .as_ref()
+                .ok_or_else(invalid)?
+                .source_database
+            && digest != bound_target_digest(root, &intent.id, next, manifest)?
+        {
+            return Err(invalid());
+        }
+        crate::database::inspection::verify_unchanged(&main_path, &captured.revision)?;
+    }
+    if manifest.next.automatic_unlock && manifest.upgrade.is_none() {
         save_verified(
             store,
             &next.metadata().vault_id,
@@ -732,8 +1181,9 @@ fn finish(
         )
         .map_err(|_| AppError::Config("secret.store_unavailable".into()))?;
     }
-    let main_path = root.join(crate::config::DB_FILE_NAME);
-    vault::preflight(&main_path)?;
+    if manifest.upgrade.is_none() && manifest.database.is_none() {
+        vault::preflight(&main_path)?;
+    }
     let mut opened;
     let connection = if let Some(active) = active {
         active
@@ -748,6 +1198,16 @@ fn finish(
     if stored != manifest.previous.metadata && stored != manifest.next.metadata {
         return Err(AppError::Config("secret.identity_mismatch".into()));
     }
+    validate_upgrade_database(connection, manifest)?;
+    if let Some(binding) = &manifest.database {
+        validate_database_version(connection, Some(binding), true)?;
+        let digest = Database::content_digest(connection)?;
+        if digest != binding.source_database
+            && digest != bound_target_digest(root, &intent.id, next, manifest)?
+        {
+            return Err(invalid());
+        }
+    }
     if let Some(skills) = &manifest.skills {
         prepare_skills_install(root, &intent.id, next, manifest, skills)?;
     }
@@ -755,7 +1215,7 @@ fn finish(
         let bytes = read_stage(root, &intent.id, index, artifact)?;
         match &artifact.destination {
             Destination::Database => {
-                let memory = database_image(&bytes, next)?;
+                let memory = database_image(&bytes, next, manifest, true)?;
                 connection
                     .execute_batch("PRAGMA secure_delete=ON;")
                     .map_err(db_error)?;
@@ -773,8 +1233,24 @@ fn finish(
                 hook(Checkpoint::Database)?;
             }
             Destination::SkillFile { .. } => {}
+            Destination::Device { source_digest, .. } => {
+                // Recheck after earlier publication hooks. Exact staged bytes are
+                // already installed during replay or a same-key content install.
+                device::validate_sources(roots, manifest)?;
+                let path = destination(roots, &artifact.destination)?.ok_or_else(invalid)?;
+                let current = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+                let digest = hash(&current);
+                if digest != artifact.digest {
+                    if digest != *source_digest {
+                        return Err(AppError::Config("secret.device_transition_conflict".into()));
+                    }
+                    validate_destination(roots, &artifact.destination)?;
+                    write_durable(&path, &bytes)?;
+                }
+                hook(Checkpoint::Artifact(index))?;
+            }
             other => {
-                write_durable(&destination(root, other)?.ok_or_else(invalid)?, &bytes)?;
+                write_durable(&destination(roots, other)?.ok_or_else(invalid)?, &bytes)?;
                 hook(Checkpoint::Artifact(index))?;
             }
         }
@@ -782,7 +1258,10 @@ fn finish(
     if let Some(skills) = &manifest.skills {
         commit_skills(root, &intent.id, skills)?;
     }
-    write_metadata(root, &manifest.next)?;
+    device::validate_installed_device_files(roots, intent.version, manifest, next)?;
+    if manifest.upgrade.is_none() {
+        write_metadata(root, &manifest.next)?;
+    }
     hook(Checkpoint::Metadata)?;
     let previous = &manifest.previous.metadata;
     let key_changed = (previous.vault_id.as_str(), previous.key_id.as_str())
@@ -790,12 +1269,47 @@ fn finish(
             next.metadata().vault_id.as_str(),
             next.metadata().key_id.as_str(),
         );
+    device::validate_installed_device_files(roots, intent.version, manifest, next)?;
     // The journal fixes both policies before any key-store write. Only the
     // previous automatic-unlock owner can owe revocation of an existing key.
     if manifest.previous.automatic_unlock && (key_changed || !manifest.next.automatic_unlock) {
         remove_key(store, &previous.vault_id, &previous.key_id)?;
     }
     hook(Checkpoint::Keys)?;
+    if let Some(binding) = &manifest.upgrade {
+        // A late external write is a resumable conflict, never a successful
+        // publication whose intent can be discarded.
+        if Database::content_digest(connection)? != binding.target_database {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        validate_stages(roots, &intent.id, next, manifest)?;
+        device::validate_installed_device_files(roots, intent.version, manifest, next)?;
+        // SQLite keeps the old inode after an atomic path replacement. Read
+        // the guarded destination afresh instead of trusting that handle.
+        let installed = crate::database::inspection::capture(&main_path)?.ok_or_else(invalid)?;
+        vault::check_identity(&installed.image, next)?;
+        inventory::validate_database(&installed.image, next)?;
+        if Database::content_digest(&installed.image)? != binding.target_database {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        crate::database::inspection::verify_unchanged(&main_path, &installed.revision)?;
+    }
+    if manifest.database.is_some() {
+        validate_stages(roots, &intent.id, next, manifest)?;
+        device::validate_installed_device_files(roots, intent.version, manifest, next)?;
+        let target = bound_target_digest(root, &intent.id, next, manifest)?;
+        if Database::content_digest(connection)? != target {
+            return Err(invalid());
+        }
+        let installed = crate::database::inspection::capture(&main_path)?.ok_or_else(invalid)?;
+        validate_database_version(&installed.image, manifest.database.as_ref(), true)?;
+        vault::check_identity(&installed.image, next)?;
+        inventory::validate_database(&installed.image, next)?;
+        if Database::content_digest(&installed.image)? != target {
+            return Err(invalid());
+        }
+        crate::database::inspection::verify_unchanged(&main_path, &installed.revision)?;
+    }
     remove_durable(&root.join(INTENT))?;
     // Once intent removal is durable, only obsolete staging artifacts remain.
     if let Some(skills) = &manifest.skills {
@@ -811,20 +1325,49 @@ pub(crate) fn recover(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
-    let path = root.join(INTENT);
-    if !regular_file(&path)? {
-        return Ok(());
+    let device = crate::live::engine::DeviceStore::for_device();
+    recover_with_device_root(root, device.root(), store, password)
+}
+
+fn recover_with_device_root(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+) -> Result<(), AppError> {
+    recover_record(root, device_root, store, password, None)
+}
+pub(crate) fn recover_inspected(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    recover_record(root, device_root, store, password, Some(expected))
+}
+fn recover_record(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: Option<&[u8]>,
+) -> Result<(), AppError> {
+    let Some(bytes) = pending_record(root)? else {
+        return if expected.is_some() {
+            Err(AppError::Config("upgrade.source_changed".into()))
+        } else {
+            Ok(())
+        };
+    };
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
     }
     if regular_file(&root.join(".vault-rewrap"))? {
         return Err(AppError::Config("secret.conflicting_transition".into()));
     }
-    let metadata = std::fs::metadata(&path).map_err(|e| AppError::io(&path, e))?;
-    if metadata.len() > 32 * 1024 * 1024 {
-        return Err(invalid());
-    }
-    let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
     let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if intent.version != FORMAT {
+    if ![LEGACY_FORMAT, FORMAT].contains(&intent.version) {
         return Err(invalid());
     }
     stage_root(root, &intent.id)?;
@@ -847,7 +1390,10 @@ pub(crate) fn recover(
         .map_err(inventory::secret_error)?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     finish(
-        root,
+        Roots {
+            data: root,
+            device: device_root,
+        },
         &intent,
         &manifest,
         &next,
@@ -995,6 +1541,18 @@ fn commit_skills(root: &Path, id: &str, skills: &SkillsTree) -> Result<(), AppEr
     sync_directory(destination.parent().ok_or_else(invalid)?)?;
     sync_directory(&staging)
 }
+/// Passive journal bytes; authentication and recovery remain with this owner.
+pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    let path = root.join(INTENT);
+    crate::config_file_io::read_regular_file(&path, 32 * 1024 * 1024).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            invalid()
+        } else {
+            AppError::io(&path, error)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,10 +1572,18 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let temporary = tempfile::tempdir().unwrap();
+            Self::with_separate_data_root(false)
+        }
+        fn with_separate_data_root(separate: bool) -> Self {
+            let temporary =
+                tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
             let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temporary.path());
-            let root = temporary.path().join(crate::APP_DIR_NAME);
+            let root = temporary.path().join(if separate {
+                "shared-data"
+            } else {
+                crate::APP_DIR_NAME
+            });
             let store = MemoryKeyStore::default();
             let session = SecretSession::open(&root, &store, None).unwrap();
             let conn = vault::prepare(
@@ -1066,6 +1632,135 @@ mod tests {
                 Some(home) => std::env::set_var("CC_SWITCH_TEST_HOME", home),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream4_transition_replays_schema20_with_original_journal() {
+        let _sync = crate::rt::block_on(crate::services::sync_protocol::sync_mutex().lock());
+        for point in [Checkpoint::Intent, Checkpoint::Database] {
+            let fixture = Fixture::new();
+            Database::apply_upstream4_migrations_on_conn(&fixture.db.conn.lock().unwrap()).unwrap();
+            fixture.db.conn.lock().unwrap().execute("INSERT INTO session_log_sync(file_path,last_modified,last_line_offset,last_synced_at,last_byte_offset,last_tail_fingerprint) VALUES('synthetic-replay-session',11,22,33,1234,'synthetic-tail')", []).unwrap();
+            let device = crate::live::engine::DeviceStore::for_device();
+            crate::mode::state::update_app(
+                &device,
+                &fixture.db.secrets.read().unwrap(),
+                "claude",
+                |entry| {
+                    entry.mode = Some(crate::mode::state::Mode::Direct);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let native_path = crate::config::get_claude_settings_path();
+            assert!(native_path.starts_with(fixture._temporary.path()));
+            std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+            let native = br#"{"synthetic-user-field":"transition-retained"}"#;
+            std::fs::write(&native_path, native).unwrap();
+            fixture.interrupt(point);
+            assert!(
+                fixture.root.join(INTENT).exists(),
+                "schema20 must publish its original journal before interruption"
+            );
+            let intent = fixture.intent();
+            let next =
+                VaultContext::from_password(intent.next.metadata.clone(), "next recovery password")
+                    .unwrap();
+            let plaintext = next
+                .open(
+                    &["local", "generation-transition", &intent.id],
+                    &intent.manifest,
+                )
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+            assert_eq!(value["database"]["upstream"], 20);
+            assert_eq!(value["database"]["loongport"], 24);
+            assert_eq!(
+                value["database"]["sourceDatabase"].as_str().unwrap().len(),
+                64
+            );
+            assert!(
+                value.get("upgrade").is_none(),
+                "ordinary transition must retain its generation protections"
+            );
+            super::recover(
+                &fixture.root,
+                &fixture.store,
+                Some("next recovery password"),
+            )
+            .unwrap();
+            let session = SecretSession::open_existing(
+                &fixture.root,
+                &fixture.store,
+                Some("next recovery password"),
+            )
+            .unwrap();
+            let vault = session.read().unwrap();
+            let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+                24
+            );
+            vault::check_identity(&conn, &vault).unwrap();
+            inventory::validate_database(&conn, &vault).unwrap();
+            let cursor: (i64, String) = conn.query_row("SELECT last_byte_offset,last_tail_fingerprint FROM session_log_sync WHERE file_path='synthetic-replay-session'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(cursor, (1234, "synthetic-tail".into()));
+            assert_eq!(
+                crate::mode::state::mode_state(&device, &vault, "claude")
+                    .unwrap()
+                    .mode,
+                Some(crate::mode::state::Mode::Direct)
+            );
+            assert_eq!(std::fs::read(&native_path).unwrap(), native);
+            assert_eq!(
+                &*CredentialFile::Codex
+                    .decode(
+                        &vault,
+                        &std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap()
+                    )
+                    .unwrap(),
+                br#"{"token":"checkpoint-canary"}"#
+            );
+            assert!(!fixture.root.join(INTENT).exists());
+            assert!(
+                matches!(vault::preflight(&fixture.root.join(crate::config::DB_FILE_NAME)), Err(AppError::Config(code)) if code == "secret.database_version_too_new")
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream4_transition_replay_retains_journal_after_primary_content_drift() {
+        let _sync = crate::rt::block_on(crate::services::sync_protocol::sync_mutex().lock());
+        for point in [Checkpoint::Intent, Checkpoint::Database, Checkpoint::Keys] {
+            let fixture = Fixture::new();
+            Database::apply_upstream4_migrations_on_conn(&fixture.db.conn.lock().unwrap()).unwrap();
+            fixture.interrupt(point);
+            assert!(fixture.root.join(INTENT).exists());
+            let primary = fixture.root.join(crate::config::DB_FILE_NAME);
+            let connection = Connection::open(&primary).unwrap();
+            connection.execute("INSERT INTO session_log_sync(file_path,last_modified,last_line_offset,last_synced_at,last_byte_offset,last_tail_fingerprint) VALUES('synthetic-late-drift',1,2,3,456,'retained-tail')", []).unwrap();
+            let before = Database::content_digest(&connection).unwrap();
+            let metadata = std::fs::read(fixture.root.join("vault.json")).unwrap();
+            let journal = std::fs::read(fixture.root.join(INTENT)).unwrap();
+            let error = super::recover(
+                &fixture.root,
+                &fixture.store,
+                Some("next recovery password"),
+            )
+            .unwrap_err();
+            assert!(matches!(error, AppError::Config(code) if code == "secret.invalid_transition"));
+            assert_eq!(Database::content_digest(&connection).unwrap(), before);
+            assert_eq!(
+                std::fs::read(fixture.root.join("vault.json")).unwrap(),
+                metadata
+            );
+            assert_eq!(std::fs::read(fixture.root.join(INTENT)).unwrap(), journal);
+            assert_eq!(Database::get_user_version(&connection).unwrap(), 20);
+            assert_eq!(connection.query_row("SELECT last_byte_offset FROM session_log_sync WHERE file_path='synthetic-late-drift'", [], |row| row.get::<_, i64>(0)).unwrap(), 456);
         }
     }
 
@@ -1208,12 +1903,29 @@ mod tests {
             }
             assert!(fixture.db.secrets.read().is_err());
             assert!(fixture.root.join(INTENT).exists());
-            assert!(SecretSession::open_existing(
+            let inspected = super::super::upgrade::inspect(
                 &fixture.root,
-                &fixture.store,
-                Some("wrong password")
+                &crate::live::engine::DeviceStore::for_device(),
             )
-            .is_err());
+            .unwrap();
+            let super::super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = inspected
+            else {
+                panic!("interrupted generation must defer to its owner");
+            };
+            let token = evidence.token();
+            assert!(evidence
+                .recover(&fixture.root, &token, &fixture.store, "wrong password")
+                .is_err());
+            evidence.verify_unchanged(&fixture.root, &token).unwrap();
+            let settled = evidence
+                .recover(
+                    &fixture.root,
+                    &token,
+                    &fixture.store,
+                    "next recovery password",
+                )
+                .unwrap();
+            assert!(!settled.is_recovery_required());
             let recovered = SecretSession::open_existing(
                 &fixture.root,
                 &fixture.store,
@@ -1497,7 +2209,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn rotation_reencrypts_current_database_owned_files_settings_and_backups() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temporary.path());
         struct RestoreHome(Option<std::ffi::OsString>);
@@ -1625,4 +2337,5 @@ mod tests {
         SecretSession::open_existing(&root, &store, Some("new generation protection password"))
             .unwrap();
     }
+    include!("transition/device_tests.rs");
 }

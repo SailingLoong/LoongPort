@@ -94,7 +94,9 @@ describe("供应商业务事实由后端定义", () => {
     expect(editDialog).not.toContain("providersApi.getCurrent(appId)");
     expect(editDialog).not.toContain("vscodeApi.getLiveProviderSettings");
     expect(editDialog).not.toContain("openclawApi.getLiveProvider");
-    expect(editDialog).toContain("providersApi.getEditSettings(provider.id");
+    expect(editDialog).toMatch(
+      /\bprovidersApi\s*\.\s*getEditSettings\s*\(\s*provider\s*\.\s*id\s*,\s*appId\s*\)/,
+    );
     expect(mutations).not.toContain("generateUUID");
     expect(providerForm).not.toContain("getOpenCodeLiveProviderIds");
     expect(providerForm).not.toContain("useOpenClawLiveProviderIds");

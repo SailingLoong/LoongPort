@@ -10,7 +10,7 @@ use crate::{
 use rusqlite::OptionalExtension;
 use std::{collections::HashSet, str::FromStr};
 
-fn priority_key(app: &str) -> String {
+pub(crate) fn priority_key(app: &str) -> String {
     format!("application_priority_{app}")
 }
 
@@ -26,6 +26,19 @@ pub fn blocked_tier_ids(db: &Database, app: &str) -> HashSet<String> {
         .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
         .map(|ids| ids.into_iter().collect())
         .unwrap_or_default()
+}
+
+/// Operational admission cannot treat unavailable/corrupt blocked facts as empty.
+pub(crate) fn blocked_tier_ids_checked(
+    db: &Database,
+    app: &str,
+) -> Result<HashSet<String>, AppError> {
+    match db.get_setting(&blocked_key(app))? {
+        None => Ok(HashSet::new()),
+        Some(raw) => serde_json::from_str::<Vec<String>>(&raw)
+            .map(|ids| ids.into_iter().collect())
+            .map_err(|_| AppError::Config("routing.invalid_blocked_inventory".into())),
+    }
 }
 
 /// 屏蔽是用户显式意图：写入即生效（选路侧每次现读，无需失效通知）。
@@ -159,10 +172,25 @@ pub fn note_provider_created(db: &Database, app: &str, id: &str) -> Result<(), A
 
 /// Read local selection without the legacy getter's stale-setting cleanup.
 pub fn current_provider_id(db: &Database, app: &str) -> Option<String> {
-    let app_type = AppType::from_str(app).ok()?;
-    crate::settings::get_current_provider(&app_type)
+    current_provider_id_checked(db, app).ok().flatten()
+}
+
+/// Requests and failover retain unknown/corrupt mode as a visible barrier.
+pub(crate) fn current_provider_id_checked(
+    db: &Database,
+    app: &str,
+) -> Result<Option<String>, AppError> {
+    let app_type = AppType::from_str(app)?;
+    if app_type.supports_local_proxy() && crate::mode::operation::uses_upstream4_schema(db)? {
+        return crate::mode::current::provider_for(
+            db,
+            &app_type,
+            crate::mode::current::Purpose::InUse,
+        );
+    }
+    Ok(crate::settings::get_current_provider(&app_type)
         .filter(|id| db.get_provider_by_id(id, app).ok().flatten().is_some())
-        .or_else(|| db.get_current_provider(app).ok().flatten())
+        .or_else(|| db.get_current_provider(app).ok().flatten()))
 }
 
 /// A static exclusion shared by route selection and its presentation.
@@ -246,6 +274,11 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
 /// 新档位由 [`note_provider_created`] 在创建时自动垫底；删除时同事务维护链和配置档。
 /// 显式应用拒绝空列表；删除最后一个成员可以让已有链变空。
 pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppError> {
+    if AppType::from_str(app)?.supports_local_proxy()
+        && crate::mode::operation::uses_upstream4_schema(db)?
+    {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
     crate::services::order_profiles::apply_current_order(db, app, ids)
 }
 

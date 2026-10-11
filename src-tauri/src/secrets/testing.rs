@@ -53,3 +53,57 @@ pub(crate) fn initialize_database() -> Result<Database, AppError> {
     crate::settings::unlock_settings_for_test(session.clone())?;
     Database::init_with_secrets(session)
 }
+
+/// Allocate an isolated storage fixture using the physical temporary directory.
+/// Storage tests must not inherit system path aliases from the temporary base.
+pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}
+
+/// Select a physical isolated home while holding the test's serial guard.
+/// Restore the previous override before deleting the temporary directory.
+pub(crate) struct TestHome {
+    previous: Option<std::ffi::OsString>,
+    settings: crate::settings::TestSettingsScope,
+    directory: tempfile::TempDir,
+}
+
+impl TestHome {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        Self::from_directory(tempdir()?)
+    }
+
+    pub(crate) fn from_directory(directory: tempfile::TempDir) -> std::io::Result<Self> {
+        let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
+        let settings = match crate::settings::TestSettingsScope::enter() {
+            Ok(settings) => settings,
+            Err(error) => {
+                match &previous {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+                return Err(std::io::Error::other(error.to_string()));
+            }
+        };
+        Ok(Self {
+            previous,
+            settings,
+            directory,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+}
+
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        self.settings.restore();
+    }
+}

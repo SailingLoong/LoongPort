@@ -59,6 +59,7 @@ pub struct TrayTexts {
     pub show_main: &'static str,
     pub open_website: &'static str,
     pub no_providers_label: &'static str,
+    pub review_settings_label: &'static str,
     pub lightweight_mode: &'static str,
     pub quit: &'static str,
     pub _auto_label: &'static str,
@@ -88,6 +89,7 @@ impl TrayTexts {
                 show_main: "Open main window",
                 open_website: "Open Official Website",
                 no_providers_label: "(no providers)",
+                review_settings_label: "(review app settings)",
                 lightweight_mode: "Lightweight Mode",
                 quit: "Quit",
                 _auto_label: "Auto (Failover)",
@@ -106,6 +108,7 @@ impl TrayTexts {
                 show_main: "メインウィンドウを開く",
                 open_website: "公式サイトを開く",
                 no_providers_label: "(プロバイダーなし)",
+                review_settings_label: "(アプリ設定の確認が必要)",
                 lightweight_mode: "軽量モード",
                 quit: "終了",
                 _auto_label: "自動 (フェイルオーバー)",
@@ -123,6 +126,7 @@ impl TrayTexts {
                 show_main: "開啟主介面",
                 open_website: "開啟官方網站",
                 no_providers_label: "(無供應商)",
+                review_settings_label: "(需檢查應用設定)",
                 lightweight_mode: "輕量模式",
                 quit: "退出",
                 _auto_label: "自動 (故障轉移)",
@@ -140,6 +144,7 @@ impl TrayTexts {
                 show_main: "打开主界面",
                 open_website: "打开官方网站",
                 no_providers_label: "(无供应商)",
+                review_settings_label: "(需检查应用设置)",
                 lightweight_mode: "轻量模式",
                 quit: "退出",
                 _auto_label: "自动 (故障转移)",
@@ -519,7 +524,7 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
                     let app_handle2 = app_handle.clone();
                     let proxy_service = app_state.proxy_service.clone();
                     tauri::async_runtime::spawn(async move {
-                        if let Err(e) = proxy_service.stop().await {
+                        if let Err(e) = proxy_service.stop_when_unused().await {
                             log::warn!("托盘切换项目后停止代理服务失败: {e}");
                         }
                         if let Some(state) = app_handle2.try_state::<AppState>() {
@@ -828,6 +833,26 @@ fn show_tier_switch_error(app: &tauri::AppHandle, error: &AppError) {
         .blocking_show();
 }
 
+/// Transient per-app menu presentation; shared storage errors still fail startup.
+#[derive(Debug, PartialEq)]
+pub(crate) enum TrayProviderSelection {
+    Ready(Option<String>),
+    RequiresReview,
+}
+
+pub(crate) fn tray_provider_selection(
+    db: &crate::database::Database,
+    app: &AppType,
+) -> Result<TrayProviderSelection, AppError> {
+    match crate::settings::get_effective_current_provider(db, app) {
+        Ok(id) => Ok(TrayProviderSelection::Ready(id)),
+        Err(AppError::Config(code)) if code == "mode.verification_required" => {
+            Ok(TrayProviderSelection::RequiresReview)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// 创建动态托盘菜单
 pub fn create_tray_menu(
     app: &tauri::AppHandle,
@@ -878,9 +903,16 @@ pub fn create_tray_menu(
         let app_type_str = section.app_type.as_str();
         let providers = app_state.db.get_all_providers(app_type_str)?;
 
-        let current_id =
-            crate::settings::get_effective_current_provider(&app_state.db, &section.app_type)?
-                .unwrap_or_default();
+        let current_id = match tray_provider_selection(&app_state.db, &section.app_type)? {
+            TrayProviderSelection::Ready(id) => id.unwrap_or_default(),
+            TrayProviderSelection::RequiresReview => {
+                let label = format!("{} {}", section.label, tray_texts.review_settings_label);
+                let item = MenuItem::with_id(app, section.empty_id(), &label, false, None::<&str>)
+                    .map_err(|error| AppError::Message(format!("创建应用设置提示失败: {error}")))?;
+                menu_builder = menu_builder.item(&item);
+                continue;
+            }
+        };
 
         let menu_providers = tray_menu_providers(&providers);
 

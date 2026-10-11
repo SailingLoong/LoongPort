@@ -2,11 +2,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::secrets::{session::SecretSession, VaultContext};
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "settings_vault_guard_tests.rs"]
+mod vault_guard_tests;
 
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -912,10 +917,109 @@ pub(crate) fn encode_settings_with_vault(
 }
 
 /// Normal runtime decoding is ciphertext-only for every registered protected field.
+type UnownedSettings = std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>;
+
+const UPGRADE_APP_POINTER_FIELDS: [&str; 4] = [
+    "currentProviderClaude",
+    "currentProviderCodex",
+    "currentProviderGemini",
+    "currentProviderGrokbuild",
+];
+
+/// Only the original authenticated, published checkpoint permits a runtime
+/// projection of conflicting app pointers. Selected native reads remain strict.
+fn decode_runtime_settings_document(
+    bytes: &[u8],
+    vault: &VaultContext,
+    root: &Path,
+) -> Result<(AppSettings, UnownedSettings), AppError> {
+    let strict = decode_settings_document_with_vault(bytes, vault);
+    if !matches!(&strict, Err(AppError::Json { .. })) {
+        return strict;
+    }
+    let mut fields: UnownedSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let conflicts: Vec<_> = UPGRADE_APP_POINTER_FIELDS
+        .into_iter()
+        .filter(|field| {
+            fields
+                .get(*field)
+                .is_some_and(|raw| serde_json::from_str::<Option<String>>(raw.get()).is_err())
+        })
+        .collect();
+    if conflicts.is_empty() {
+        return strict;
+    }
+    let device = crate::live::engine::DeviceStore::for_device();
+    match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(&device) {
+        Ok(()) => return strict,
+        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {}
+        Err(error) => return Err(error),
+    }
+    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, vault)?.is_none() {
+        return strict;
+    }
+    let opaque: UnownedSettings = conflicts
+        .into_iter()
+        .filter_map(|field| fields.remove(field).map(|value| (field.to_owned(), value)))
+        .collect();
+    let projected = zeroize::Zeroizing::new(
+        serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
+    );
+    let (settings, mut unowned) = decode_settings_document_with_vault(&projected, vault)?;
+    unowned.extend(opaque);
+    Ok((settings, unowned))
+}
+
+pub(crate) fn validate_runtime_settings_with_vault(
+    bytes: &[u8],
+    vault: &VaultContext,
+    root: &Path,
+) -> Result<(), AppError> {
+    decode_runtime_settings_document(bytes, vault, root).map(|_| ())
+}
+
+fn validate_selected_pointer_at(path: &Path, app: &AppType) -> Result<(), AppError> {
+    let field = match app {
+        AppType::Claude => UPGRADE_APP_POINTER_FIELDS[0],
+        AppType::Codex => UPGRADE_APP_POINTER_FIELDS[1],
+        AppType::Gemini => UPGRADE_APP_POINTER_FIELDS[2],
+        AppType::GrokBuild => UPGRADE_APP_POINTER_FIELDS[3],
+        _ => return Ok(()),
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::io(path, error)),
+    };
+    let fields: UnownedSettings =
+        serde_json::from_slice(&bytes).map_err(|source| AppError::json("settings.json", source))?;
+    if let Some(raw) = fields.get(field) {
+        serde_json::from_str::<Option<String>>(raw.get())
+            .map_err(|_| AppError::Config("mode.verification_required".into()))?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct SettingsProjection {
+    #[serde(flatten)]
+    settings: AppSettings,
+    #[serde(flatten)]
+    unowned: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+}
+
 pub(crate) fn decode_settings_with_vault(
     bytes: &[u8],
     vault: &crate::secrets::VaultContext,
 ) -> Result<AppSettings, AppError> {
+    decode_settings_document_with_vault(bytes, vault).map(|(settings, _)| settings)
+}
+
+fn decode_settings_document_with_vault(
+    bytes: &[u8],
+    vault: &crate::secrets::VaultContext,
+) -> Result<(AppSettings, UnownedSettings), AppError> {
     let mut value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
     let object = settings_object(&mut value)?;
@@ -935,10 +1039,17 @@ pub(crate) fn decode_settings_with_vault(
         *protected = serde_json::from_slice(&plaintext)
             .map_err(|_| AppError::Config("secret.invalid_settings_payload".into()))?;
     }
-    let mut settings: AppSettings =
+    let projection: SettingsProjection =
         serde_json::from_value(value).map_err(|source| AppError::json("settings.json", source))?;
+    // Classify fields through the original AppSettings serde contract, including
+    // optional fields absent from its default serialization. Keep foreign values
+    // from the original bytes so large numbers and future shapes are never rounded.
+    let mut unowned: UnownedSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    unowned.retain(|field, _| projection.unowned.contains_key(field));
+    let mut settings = projection.settings;
     settings.normalize_paths();
-    Ok(settings)
+    Ok((settings, unowned))
 }
 
 /// Controlled migration entrypoint. Normal reads never accept this plaintext form.
@@ -1081,7 +1192,8 @@ fn read_encrypted_at(
     match fs::read(path) {
         Ok(bytes) => {
             let vault = session.read()?;
-            decode_settings_with_vault(&bytes, &vault)
+            decode_runtime_settings_document(&bytes, &vault, session.root())
+                .map(|(settings, _)| settings)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
         Err(error) => Err(AppError::io(path, error)),
@@ -1155,26 +1267,112 @@ impl SettingsStore {
     {
         // The session read guard pins one key generation through encryption and publication.
         let vault = self.session.read()?;
+        self.mutate_pinned(&vault, mutator, |_, _, _| Ok(()))
+    }
+
+    /// The caller must supply a guard borrowed from `session`, held for the
+    /// whole operation. Never reacquire its read lock: a queued key writer
+    /// would otherwise deadlock this already-admitted operation.
+    fn mutate_with_vault<F, T, V>(
+        &self,
+        session: &SecretSession,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        mutator: F,
+        verify: V,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(&mut AppSettings) -> T,
+        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+    {
+        if !std::ptr::eq(session, self.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
+        self.mutate_pinned(vault, mutator, verify)
+    }
+
+    fn mutate_pinned<F, T, V>(
+        &self,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+        mutator: F,
+        verify: V,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce(&mut AppSettings) -> T,
+        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+    {
         let mut state = self.state.write()?;
         if let Some(error) = &state.failure {
             return Err(AppError::Config(error.clone()));
         }
+        // Read foreign fields freshly under the original settings write lock and
+        // caller's existing vault guard. They never enter the frontend projection.
+        let unowned = match fs::read(&self.path) {
+            Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())?.1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => UnownedSettings::new(),
+            Err(error) => return Err(AppError::io(&self.path, error)),
+        };
         let mut next = state.settings.clone();
         let result = mutator(&mut next);
         next.normalize_paths();
-        let bytes = encode_settings_with_vault(&next, &vault)?;
+        let encoded = encode_settings_with_vault(&next, vault)?;
+        let mut fields: UnownedSettings = serde_json::from_slice(&encoded)
+            .map_err(|source| AppError::json("settings.json", source))?;
+        // A DTO cannot replace an unresolved pointer with a new selection. Its
+        // exact disk value remains owned by the original app difference review.
+        if UPGRADE_APP_POINTER_FIELDS
+            .iter()
+            .any(|field| unowned.contains_key(*field) && fields.contains_key(*field))
+        {
+            return Err(AppError::Config("mode.verification_required".into()));
+        }
+        fields.extend(unowned);
+        let bytes = serde_json::to_vec_pretty(&fields)
+            .map_err(|source| AppError::JsonSerialize { source })?;
         crate::config::atomic_write_private(&self.path, &bytes)?;
+        verify(&self.path, vault, &result)?;
         state.settings = next;
         Ok(result)
+    }
+
+    fn set_current_provider_with_vault(
+        &self,
+        app_type: &AppType,
+        id: Option<&str>,
+        session: &SecretSession,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<(), AppError> {
+        if !std::ptr::eq(session, self.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
+        self.ready_snapshot()?;
+        validate_selected_pointer_at(&self.path, app_type)?;
+        self.mutate_with_vault(
+            session,
+            vault,
+            |settings| {
+                let current = current_provider_slot(settings, app_type)?;
+                *current = id.map(str::to_owned);
+                current.clone()
+            },
+            |path, vault, expected| verify_current_provider_at(path, vault, app_type, expected),
+        )?;
+        Ok(())
     }
 
     fn reload(&self) -> Result<(), AppError> {
         // Match mutate's lock order so reload cannot replace a newer in-memory write
         // with a stale file snapshot.
         let vault = self.session.read()?;
+        self.reload_pinned(&vault)
+    }
+
+    fn reload_pinned(&self, vault: &VaultContext) -> Result<(), AppError> {
         let mut state = self.state.write()?;
         let loaded = match fs::read(&self.path) {
-            Ok(bytes) => decode_settings_with_vault(&bytes, &vault),
+            Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())
+                .map(|(settings, _)| settings),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(AppSettings::default())
             }
@@ -1241,7 +1439,7 @@ pub fn unlock_settings(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn unlock_settings_for_test(
     session: Arc<crate::secrets::session::SecretSession>,
 ) -> Result<(), AppError> {
@@ -1251,6 +1449,49 @@ pub(crate) fn unlock_settings_for_test(
     runtime.bootstrap = bootstrap;
     runtime.failure = None;
     runtime.unlocked = Some(store);
+    Ok(())
+}
+
+/// Scope the existing settings owner to a synthetic home. This never opens a key.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) struct TestSettingsScope(Option<SettingsRuntime>);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestSettingsScope {
+    pub(crate) fn enter() -> Result<Self, AppError> {
+        // Read first: a failed fixture must leave the previous owner untouched.
+        let bootstrap = read_bootstrap_at(&settings_path())?;
+        let mut runtime = settings_store().write()?;
+        let previous = std::mem::replace(
+            &mut *runtime,
+            SettingsRuntime {
+                bootstrap,
+                failure: None,
+                unlocked: None,
+            },
+        );
+        Ok(Self(Some(previous)))
+    }
+
+    pub(crate) fn restore(&mut self) {
+        if let Some(previous) = self.0.take() {
+            *settings_store()
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = previous;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Drop for TestSettingsScope {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_settings_vault_guard() -> Result<(), AppError> {
+    vault_guard_tests::run();
     Ok(())
 }
 
@@ -1496,6 +1737,24 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
     })
 }
 
+/// Refresh the original unlocked cache while its caller retains the Vault guard.
+pub(crate) fn reload_settings_with_vault(
+    session: &SecretSession,
+    vault: &VaultContext,
+) -> Result<(), AppError> {
+    let store = settings_store()
+        .read()?
+        .unlocked
+        .clone()
+        .ok_or_else(|| AppError::Config("secret.locked".into()))?;
+    if !std::ptr::eq(session, store.session.as_ref()) {
+        return Err(AppError::Config("settings.session_mismatch".into()));
+    }
+    session.ensure_available()?;
+    store.reload_pinned(vault)?;
+    refresh_bootstrap_from(&store)
+}
+
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
@@ -1605,19 +1864,188 @@ pub fn unify_codex_session_history() -> bool {
 /// 这是设备级别的设置，不随数据库同步。
 /// 如果本地没有设置，调用者应该 fallback 到数据库的 `is_current` 字段。
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
-    let settings = get_settings();
+    current_provider_slot(&mut get_settings(), app_type).and_then(|current| current.clone())
+}
+
+/// Fallible pointer read for write admission. Presentation can retain the last
+/// good snapshot, but a known settings failure must not authorize publication.
+/// This reads the existing store only and never reacquires its vault guard.
+pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<String>, AppError> {
+    let mut settings = unlocked_settings_store()?.ready_snapshot()?;
+    validate_selected_pointer_at(&settings_path(), app_type)?;
+    Ok(current_provider_slot(&mut settings, app_type).and_then(|current| current.clone()))
+}
+
+/// Original settings owner exposes only a transient authenticated startup read.
+/// No runtime store/cache is unlocked and no protected bundle is re-encrypted.
+pub(crate) fn read_upgrade_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+) -> Result<AppSettings, AppError> {
+    read_app_settings_with_vault(app, session, vault, max_bytes, false)
+}
+
+/// Read current native app inputs through the original unlocked settings owner.
+/// The caller keeps that owner's vault guard; disk facts must match its ready pointer.
+pub(crate) fn read_native_app_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+) -> Result<AppSettings, AppError> {
+    read_app_settings_with_vault(app, session, vault, max_bytes, true)
+}
+
+fn read_app_settings_with_vault(
+    app: &AppType,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+    max_bytes: u64,
+    native: bool,
+) -> Result<AppSettings, AppError> {
+    session.ensure_available()?;
+    if session.root() != crate::config::get_app_config_dir() {
+        return Err(AppError::Config("settings.session_mismatch".into()));
+    }
+    let runtime = settings_store().read()?;
+    let mut ready = if native {
+        if let Some(error) = &runtime.failure {
+            return Err(AppError::Config(error.clone()));
+        }
+        let store = runtime
+            .unlocked
+            .as_ref()
+            .ok_or_else(|| AppError::Config("secret.locked".into()))?;
+        if !std::ptr::eq(session, store.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        Some(store.ready_snapshot()?)
+    } else {
+        if runtime.unlocked.is_some() {
+            return Err(AppError::Config("settings.already_unlocked".into()));
+        }
+        None
+    };
+    let path = settings_path();
+    let (pointer_field, directory_field) = match app {
+        AppType::Claude => ("currentProviderClaude", "claudeConfigDir"),
+        AppType::Codex => ("currentProviderCodex", "codexConfigDir"),
+        AppType::Gemini => ("currentProviderGemini", "geminiConfigDir"),
+        AppType::GrokBuild => ("currentProviderGrokbuild", "grokConfigDir"),
+        _ => return Err(AppError::Config("mode.verification_required".into())),
+    };
+    let mut settings = match crate::config_file_io::read_regular_file(&path, max_bytes)
+        .map_err(|error| AppError::io(&path, error))?
+    {
+        Some(bytes) => {
+            serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(&bytes)
+                .map_err(|source| AppError::json("settings.json", source))?;
+            let mut fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_slice(&bytes)
+                    .map_err(|source| AppError::json("settings.json", source))?;
+            // Unknown peer pointer values are opaque. Validate the original
+            // registered protected bundles without interpreting another app.
+            fields.retain(|field, _| {
+                field == pointer_field
+                    || field == directory_field
+                    || (*app == AppType::Codex
+                        && matches!(
+                            field.as_str(),
+                            "preserveCodexOfficialAuthOnSwitch" | "unifyCodexSessionHistory"
+                        ))
+                    || PROTECTED_SETTINGS_FIELDS.contains(&field.as_str())
+            });
+            let projected = zeroize::Zeroizing::new(
+                serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
+            );
+            let mut selected = decode_settings_with_vault(&projected, vault)?;
+            clear_protected_settings(&mut selected);
+            selected
+        }
+        None => AppSettings::default(),
+    };
+    if ready.as_mut().is_some_and(|ready| {
+        current_provider_from_settings(ready, app)
+            != current_provider_from_settings(&mut settings, app)
+            || (*app == AppType::Codex
+                && (ready.preserve_codex_official_auth_on_switch
+                    != settings.preserve_codex_official_auth_on_switch
+                    || ready.unify_codex_session_history != settings.unify_codex_session_history))
+    }) {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    // Resolve paths through the existing bootstrap owner, never a second resolver.
+    let (actual, bound) = match app {
+        AppType::Claude => (
+            &settings.claude_config_dir,
+            &runtime.bootstrap.claude_config_dir,
+        ),
+        AppType::Codex => (
+            &settings.codex_config_dir,
+            &runtime.bootstrap.codex_config_dir,
+        ),
+        AppType::Gemini => (
+            &settings.gemini_config_dir,
+            &runtime.bootstrap.gemini_config_dir,
+        ),
+        AppType::GrokBuild => (
+            &settings.grok_config_dir,
+            &runtime.bootstrap.grok_config_dir,
+        ),
+        _ => return Err(AppError::Config("mode.verification_required".into())),
+    };
+    if actual != bound {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    Ok(settings)
+}
+
+/// Read a caller-authenticated settings snapshot without unlocking runtime state.
+pub(crate) fn current_provider_from_settings(
+    settings: &mut AppSettings,
+    app: &AppType,
+) -> Option<String> {
+    current_provider_slot(settings, app).and_then(|current| current.clone())
+}
+
+fn current_provider_slot<'a>(
+    settings: &'a mut AppSettings,
+    app_type: &AppType,
+) -> Option<&'a mut Option<String>> {
     match app_type {
-        AppType::Claude => settings.current_provider_claude.clone(),
-        AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
-        AppType::Codex => settings.current_provider_codex.clone(),
-        AppType::CodexImage => settings.current_provider_codex_image.clone(),
-        AppType::Gemini => settings.current_provider_gemini.clone(),
-        AppType::GrokBuild => settings.current_provider_grokbuild.clone(),
-        AppType::OpenCode => settings.current_provider_opencode.clone(),
-        AppType::OpenClaw => settings.current_provider_openclaw.clone(),
-        AppType::Hermes => settings.current_provider_hermes.clone(),
+        AppType::Claude => Some(&mut settings.current_provider_claude),
+        AppType::ClaudeDesktop => Some(&mut settings.current_provider_claude_desktop),
+        AppType::Codex => Some(&mut settings.current_provider_codex),
+        AppType::CodexImage => Some(&mut settings.current_provider_codex_image),
+        AppType::Gemini => Some(&mut settings.current_provider_gemini),
+        AppType::GrokBuild => Some(&mut settings.current_provider_grokbuild),
+        AppType::OpenCode => Some(&mut settings.current_provider_opencode),
+        AppType::OpenClaw => Some(&mut settings.current_provider_openclaw),
+        AppType::Hermes => Some(&mut settings.current_provider_hermes),
         AppType::Pi => None,
     }
+}
+
+fn verify_current_provider_at(
+    path: &Path,
+    vault: &VaultContext,
+    app_type: &AppType,
+    expected: &Option<String>,
+) -> Result<(), AppError> {
+    let bytes = fs::read(path).map_err(|error| AppError::io(path, error))?;
+    validate_selected_pointer_at(path, app_type)?;
+    let mut persisted =
+        decode_runtime_settings_document(&bytes, vault, &crate::config::get_app_config_dir())?.0;
+    let actual =
+        current_provider_slot(&mut persisted, app_type).and_then(|current| current.clone());
+    if actual != *expected {
+        return Err(AppError::Config(
+            "settings.current_provider_readback_mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 生图工具是否注册进 codex / claude / gemini（MCP）。缺省 = 开：
@@ -1648,19 +2076,29 @@ pub fn set_imagegen_output_dir(dir: String) -> Result<(), AppError> {
 /// 这是设备级别的设置，不随数据库同步。
 /// 传入 `None` 会清除当前供应商设置。
 pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
-    let id_owned = id.map(|s| s.to_string());
-    mutate_settings(|settings| match app_type {
-        AppType::Claude => settings.current_provider_claude = id_owned.clone(),
-        AppType::ClaudeDesktop => settings.current_provider_claude_desktop = id_owned.clone(),
-        AppType::Codex => settings.current_provider_codex = id_owned.clone(),
-        AppType::CodexImage => settings.current_provider_codex_image = id_owned.clone(),
-        AppType::Gemini => settings.current_provider_gemini = id_owned.clone(),
-        AppType::GrokBuild => settings.current_provider_grokbuild = id_owned.clone(),
-        AppType::OpenCode => settings.current_provider_opencode = id_owned.clone(),
-        AppType::OpenClaw => settings.current_provider_openclaw = id_owned.clone(),
-        AppType::Hermes => settings.current_provider_hermes = id_owned.clone(),
-        AppType::Pi => {}
+    unlocked_settings_store()?.ready_snapshot()?;
+    validate_selected_pointer_at(&settings_path(), app_type)?;
+    mutate_settings(|settings| {
+        if let Some(current) = current_provider_slot(settings, app_type) {
+            *current = id.map(str::to_owned);
+        }
     })
+}
+
+/// Commit the device pointer inside an operation that already pins its vault.
+/// `vault` must have been obtained from `session`; this trusted internal seam
+/// verifies that session belongs to the unlocked store without taking another
+/// key lock. Readback failure leaves the previous cache and returns an error;
+/// the operation journal, not settings, owns recovery of published bytes.
+pub(crate) fn set_current_provider_with_vault(
+    app_type: &AppType,
+    id: Option<&str>,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<(), AppError> {
+    let store = unlocked_settings_store()?;
+    store.set_current_provider_with_vault(app_type, id, session, vault)?;
+    refresh_bootstrap_from(&store)
 }
 
 /// Resolve presentation state without cleaning stale local selections. Reads of
@@ -1669,6 +2107,7 @@ pub fn get_effective_current_provider_readonly(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     if let Some(local_id) = get_current_provider(app_type) {
         if db
             .get_all_providers(app_type.as_str())?
@@ -1693,6 +2132,7 @@ pub fn get_effective_current_provider(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    validate_selected_pointer_at(&settings_path(), app_type)?;
     // 1. 从本地 settings 读取
     if let Some(local_id) = get_current_provider(app_type) {
         // 2. 验证该 ID 在数据库中存在
@@ -1700,6 +2140,18 @@ pub fn get_effective_current_provider(
         if providers.contains_key(&local_id) {
             // 存在，直接返回
             return Ok(Some(local_id));
+        }
+
+        // The original review owns an unresolved selection while its checkpoint
+        // is retained. A tray/query refresh must not repair away that evidence.
+        match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+            &crate::live::engine::DeviceStore::for_device(),
+        ) {
+            Ok(()) => {}
+            Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {
+                return Err(AppError::Config("mode.verification_required".into()));
+            }
+            Err(error) => return Err(error),
         }
 
         // 3. 不存在，清理本地 settings
@@ -1957,6 +2409,44 @@ mod tests {
             restored.webdav_backup.unwrap()["password"],
             "legacy-canary-secret"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_upgrade_settings_projection_uses_existing_pointer_slots() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            VaultContext::generate().unwrap(),
+        );
+        let mut settings = AppSettings::default();
+        for app in crate::mode::controller::PROXY_APPS {
+            *current_provider_slot(&mut settings, &app).unwrap() =
+                Some(format!("synthetic-{}", app.as_str()));
+        }
+        let vault = session.read().unwrap();
+        fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            settings_path(),
+            encode_settings_with_vault(&settings, &vault).unwrap(),
+        )
+        .unwrap();
+        let bytes = fs::read(settings_path()).unwrap();
+        for app in crate::mode::controller::PROXY_APPS {
+            let mut selected =
+                read_upgrade_settings_with_vault(&app, &session, &vault, 1024 * 1024).unwrap();
+            assert_eq!(
+                current_provider_from_settings(&mut selected, &app),
+                Some(format!("synthetic-{}", app.as_str()))
+            );
+            for peer in crate::mode::controller::PROXY_APPS {
+                if peer != app {
+                    assert!(current_provider_from_settings(&mut selected, &peer).is_none());
+                }
+            }
+        }
+        assert_eq!(fs::read(settings_path()).unwrap(), bytes);
+        assert!(get_current_provider_ready(&AppType::Codex).is_err());
     }
 
     #[test]
@@ -2237,5 +2727,135 @@ mod app_visibility_tests {
         visible.set_visible(&AppType::Codex, false).unwrap();
         assert!(visible.pi);
         assert!(!visible.codex);
+    }
+}
+
+#[cfg(test)]
+mod u03_foreign_settings_tests {
+    use super::*;
+    use crate::secrets::testing::TestHome;
+    use std::collections::BTreeMap;
+
+    const FOREIGN: &str = r#"{"mode":"future-mode", "opaque":900719925474099312345, "keep":true}"#;
+    const UPDATED: &str = r#"{"mode":"future-mode", "opaque":900719925474099312346, "keep":false}"#;
+
+    fn write_foreign(value: &str) {
+        let bytes = fs::read(settings_path()).unwrap();
+        let mut fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&bytes).unwrap();
+        fields.insert(
+            "futureCodexSettings".into(),
+            serde_json::value::RawValue::from_string(value.into()).unwrap(),
+        );
+        fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
+    }
+
+    fn fixture() -> TestHome {
+        let home = TestHome::new().unwrap();
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            VaultContext::generate().unwrap(),
+        );
+        let settings = AppSettings {
+            current_provider_claude: Some("synthetic-claude".into()),
+            current_provider_codex: Some("synthetic-codex".into()),
+            ..Default::default()
+        };
+        fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
+        fs::write(
+            settings_path(),
+            encode_settings_with_vault(&settings, &session.read().unwrap()).unwrap(),
+        )
+        .unwrap();
+        write_foreign(FOREIGN);
+        unlock_settings(session).unwrap();
+        home
+    }
+
+    fn foreign() -> String {
+        let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&fs::read(settings_path()).unwrap()).unwrap();
+        fields
+            .get("futureCodexSettings")
+            .expect("unowned peer settings survive")
+            .get()
+            .into()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_ordinary_effective_query_retains_original_stale_pointer_cleanup() {
+        let _home = fixture();
+        let session = unlocked_settings_store().unwrap().session.clone();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::Database::create_tables_on_conn(&conn).unwrap();
+        crate::database::Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        crate::database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+        let db = crate::database::Database::from_connection(conn, session);
+        assert!(get_effective_current_provider(&db, &AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert!(get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+        assert_eq!(foreign(), FOREIGN);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_runtime_settings_preserve_exact_foreign_peer_without_exposing_it() {
+        let _home = fixture();
+        let frontend = serde_json::to_string(&get_settings_for_frontend().unwrap()).unwrap();
+        assert!(!frontend.contains("futureCodexSettings"));
+        mutate_settings(|settings| settings.language = Some("zh".into())).unwrap();
+        assert_eq!(foreign(), FOREIGN);
+        assert_eq!(
+            get_current_provider_ready(&AppType::Claude)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-claude")
+        );
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_unrelated_settings_write_preserves_newer_foreign_peer_bytes() {
+        let _home = fixture();
+        write_foreign(UPDATED);
+        mutate_settings(|settings| settings.language = Some("en".into())).unwrap();
+        assert_eq!(foreign(), UPDATED);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_provider_clear_does_not_resurrect_known_slot_from_foreign_fields() {
+        let _home = fixture();
+        set_current_provider(&AppType::Claude, None).unwrap();
+        assert_eq!(foreign(), FOREIGN);
+        assert!(get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_current_provider_ready(&AppType::Codex)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-codex")
+        );
+        let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(&fs::read(settings_path()).unwrap()).unwrap();
+        assert!(!fields.contains_key("currentProviderClaude"));
     }
 }

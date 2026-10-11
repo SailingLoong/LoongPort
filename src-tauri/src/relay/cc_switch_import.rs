@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     #[serial]
     fn replacement_import_maintains_saved_orders_before_export_round_trip() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::secrets::testing::tempdir().unwrap();
         let _home = TestHomeGuard::set(home.path());
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());

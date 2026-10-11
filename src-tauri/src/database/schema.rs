@@ -15,6 +15,11 @@ struct LegacySkillMigrationRow {
 }
 
 impl Database {
+    /// Explicit upgrade staging; ordinary initialization retains its current target.
+    #[allow(dead_code)]
+    pub(crate) fn apply_upstream4_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
+        Self::apply_schema_migrations_to(conn, super::UPSTREAM4_SCHEMA_VERSION)
+    }
     /// 创建所有数据库表
     pub(crate) fn create_tables(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
@@ -494,21 +499,25 @@ impl Database {
     /// 应用 Schema 迁移
     /// 在指定连接上应用 Schema 迁移
     pub(crate) fn apply_schema_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
+        Self::apply_schema_migrations_to(conn, SCHEMA_VERSION)
+    }
+
+    fn apply_schema_migrations_to(conn: &Connection, target_version: i32) -> Result<(), AppError> {
         conn.execute("SAVEPOINT schema_migration;", [])
             .map_err(|e| AppError::Database(format!("开启迁移 savepoint 失败: {e}")))?;
 
         let mut version = Self::get_user_version(conn)?;
 
-        if version > SCHEMA_VERSION {
+        if version > target_version {
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(AppError::Database(format!(
-                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
+                "数据库版本过新（{version}），当前应用仅支持 {target_version}，请升级应用后再尝试。"
             )));
         }
 
         let result = (|| {
-            while version < SCHEMA_VERSION {
+            while version < target_version {
                 match version {
                     0 => {
                         log::info!("检测到 user_version=0，迁移到 1（补齐缺失列并设置版本）");
@@ -597,9 +606,39 @@ impl Database {
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
                     }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（会话日志字节游标列）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
+                    }
+                    18 => {
+                        for table in ["mcp_servers", "skills"] {
+                            if Self::table_exists(conn, table)? {
+                                Self::add_column_if_missing(
+                                    conn,
+                                    table,
+                                    "enabled_mcode",
+                                    "BOOLEAN NOT NULL DEFAULT 0",
+                                )?;
+                            }
+                        }
+                        Self::set_user_version(conn, 19)?;
+                    }
+                    19 => {
+                        log::info!("迁移数据库从 v19 到 v20（MCP 添加 Pi 支持）");
+                        if Self::table_exists(conn, "mcp_servers")? {
+                            Self::add_column_if_missing(
+                                conn,
+                                "mcp_servers",
+                                "enabled_pi",
+                                "BOOLEAN NOT NULL DEFAULT 0",
+                            )?;
+                        }
+                        Self::set_user_version(conn, 20)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
-                            "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
+                            "未知的数据库版本 {version}，无法迁移到 {target_version}"
                         )));
                     }
                 }
@@ -1629,6 +1668,20 @@ impl Database {
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
         .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))?;
+        Ok(())
+    }
+
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        // 缺表的库（异常/测试夹具）跳过：create_tables 会以含列的新 DDL 建表。
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
+        }
         Ok(())
     }
 
@@ -3590,6 +3643,52 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream4_staging_preserves_existing_rows_and_the_independent_schema_domain(
+    ) -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA user_version=17;
+            CREATE TABLE session_log_sync(file_path TEXT PRIMARY KEY,last_line INTEGER);
+            INSERT INTO session_log_sync VALUES('synthetic-session.jsonl',42);
+            CREATE TABLE mcp_servers(id TEXT PRIMARY KEY,enabled_claude BOOLEAN NOT NULL,enabled_codex BOOLEAN NOT NULL);
+            INSERT INTO mcp_servers VALUES('synthetic-mcp',1,0);
+            CREATE TABLE skills(id TEXT PRIMARY KEY,enabled_claude BOOLEAN NOT NULL);
+            INSERT INTO skills VALUES('synthetic-skill',1);
+            CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER);
+            INSERT INTO loongport_schema_version VALUES(1,24);")?;
+        Database::apply_upstream4_migrations_on_conn(&conn)?;
+        assert_eq!(Database::get_user_version(&conn)?, 20);
+        let cursor: (i64, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_line,last_byte_offset,last_tail_fingerprint FROM session_log_sync",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(cursor, (42, None, None));
+        let mcp: (bool, bool, bool, bool) = conn.query_row(
+            "SELECT enabled_claude,enabled_codex,enabled_mcode,enabled_pi FROM mcp_servers",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(mcp, (true, false, false, false));
+        let skills: (bool, bool) = conn.query_row(
+            "SELECT enabled_claude,enabled_mcode FROM skills",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(skills, (true, false));
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn)?,
+            24
+        );
+        Database::apply_upstream4_migrations_on_conn(&conn)?;
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        Ok(())
+    }
 
     #[test]
     fn migrate_v12_to_v13_adds_input_token_semantics_columns() -> Result<(), AppError> {

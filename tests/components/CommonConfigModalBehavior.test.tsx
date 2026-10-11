@@ -121,3 +121,60 @@ describe("Common config modals", () => {
     );
   });
 });
+
+it.each(["codex", "gemini"])(
+  "makes an already-open %s snippet modal read-only without disabling cancel",
+  (app) => {
+    const onSave = vi.fn(() => true),
+      onExtract = vi.fn();
+    const common = {
+      useCommonConfig: false,
+      onCommonConfigToggle: vi.fn(),
+      commonConfigSnippet: "",
+      onCommonConfigSnippetChange: onSave,
+      onCommonConfigErrorClear: vi.fn(),
+      commonConfigError: "",
+      configError: "",
+      onExtract,
+    };
+    const content = (commonConfigReadOnly: boolean) =>
+      app === "codex" ? (
+        <CodexConfigEditor
+          {...common}
+          commonConfigReadOnly={commonConfigReadOnly}
+          authValue="{}"
+          configValue=""
+          onAuthChange={vi.fn()}
+          onConfigChange={vi.fn()}
+          authError=""
+        />
+      ) : (
+        <GeminiConfigEditor
+          {...common}
+          commonConfigReadOnly={commonConfigReadOnly}
+          envValue=""
+          configValue="{}"
+          onEnvChange={vi.fn()}
+          onConfigChange={vi.fn()}
+          envError=""
+        />
+      );
+    const { rerender } = render(content(false));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: new RegExp(`${app}Config.editCommonConfig|编辑通用配置`),
+      }),
+    );
+    rerender(content(true));
+    expect(screen.getByRole("button", { name: "common.save" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", {
+        name: new RegExp(`${app}Config.extractFromCurrent|从编辑内容提取`),
+      }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(screen.queryByTestId("common-config-panel")).not.toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onExtract).not.toHaveBeenCalled();
+  },
+);

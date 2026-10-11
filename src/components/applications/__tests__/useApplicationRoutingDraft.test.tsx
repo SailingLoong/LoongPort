@@ -57,3 +57,21 @@ it("replays the frozen order and model intent after explicit confirmation", asyn
   });
   expect(apply).toHaveBeenLastCalledWith(changed, false);
 });
+
+it("rechecks reviewed facts before continuing the original native confirmation", async () => {
+  let current = true;
+  const apply = vi.fn().mockResolvedValue({
+    status: "confirmationRequired",
+    targetName: "Example",
+  });
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  await act(async () => {
+    await result.current.submit(changed, undefined, () => current);
+  });
+  current = false;
+  await act(async () => {
+    result.current.confirm(false);
+  });
+  expect(apply).toHaveBeenCalledTimes(1);
+  expect(result.current.confirmation).toBeNull();
+});

@@ -3,12 +3,68 @@
 
 use crate::error::AppError;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 #[path = "windows_private_file.rs"]
 mod windows_private_file;
+
+/// Read a caller-owned regular file without creating it or changing permissions.
+pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file is a symbolic link",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            // FILE_ATTRIBUTE_REPARSE_POINT
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file is a reparse point",
+            ));
+        }
+    }
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid regular file or read limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds read limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
 
 /// Create or tighten one application-owned directory without changing its parent.
 /// Callers create nested application directories one level at a time.
@@ -153,7 +209,61 @@ fn atomic_write_with_unix_mode(
     data: &[u8],
     unix_mode: Option<u32>,
 ) -> Result<(), AppError> {
-    #[cfg(windows)]
+    stage_write(path, data, unix_mode, false)?.commit()
+}
+
+/// A staged file owns its temporary path until publication or explicit abandonment.
+/// Dropping the handle does not remove it: a persisted operation may already own recovery.
+#[derive(Debug)]
+pub struct StagedWrite {
+    tmp: PathBuf,
+    path: PathBuf,
+    // LoongPort retains Windows protected-DACL publication, not ReplaceFileW ACL inheritance.
+    private: bool,
+}
+
+impl StagedWrite {
+    // Remove when the live/mode journal takes ownership of staged paths.
+    #[allow(dead_code)]
+    pub fn tmp_path(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// One-shot publication; on failure, abandon only this handle's temporary file.
+    pub fn commit(self) -> Result<(), AppError> {
+        commit_staged(&self.tmp, &self.path, self.private).inspect_err(|_| {
+            let _ = fs::remove_file(&self.tmp);
+        })
+    }
+}
+
+/// Recognize only the adjacent staging names emitted by `stage_write`.
+/// Callers still bind the returned target to their own admitted path/registry.
+pub(crate) fn staging_target_name(name: &str) -> Option<&str> {
+    let (target, suffix) = name.rsplit_once(".tmp.")?;
+    let mut parts = suffix.split('.');
+    if target.is_empty()
+        || !(0..3).all(|_| {
+            parts.next().is_some_and(|part| {
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        || parts.next().is_some()
+    {
+        return None;
+    }
+    Some(target)
+}
+
+/// Prepare bytes without replacing the destination. `durable` syncs the staged
+/// file after its permissions are set; directory/journal durability belongs to the caller.
+/// Adapted from cc-switch v4.0.2 `config::stage_write`, retaining LoongPort private I/O.
+pub(crate) fn stage_write(
+    path: &Path,
+    data: &[u8],
+    unix_mode: Option<u32>,
+    durable: bool,
+) -> Result<StagedWrite, AppError> {
     let private = unix_mode.is_some();
     #[cfg(not(any(unix, windows)))]
     let _ = unix_mode;
@@ -216,21 +326,42 @@ fn atomic_write_with_unix_mode(
         let _ = fs::remove_file(&tmp);
         return Err(AppError::io(&tmp, source));
     }
-    drop(file);
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Some(mode) = unix_mode {
-            if let Err(source) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+            if let Err(source) = file.set_permissions(fs::Permissions::from_mode(mode)) {
+                drop(file);
                 let _ = fs::remove_file(&tmp);
                 return Err(AppError::io(&tmp, source));
             }
         } else if let Ok(meta) = fs::metadata(path) {
             let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+            let _ = file.set_permissions(fs::Permissions::from_mode(perm));
         }
     }
+    if durable {
+        if let Err(source) = file.sync_all() {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::io(&tmp, source));
+        }
+    }
+    drop(file);
+
+    Ok(StagedWrite {
+        tmp,
+        path: path.to_path_buf(),
+        private,
+    })
+}
+
+/// Publish a previously staged file, preserving it on failure for recovery.
+/// Privacy must come from the operation's verified intent; unknown privacy is not public.
+pub(crate) fn commit_staged(tmp: &Path, path: &Path, private: bool) -> Result<(), AppError> {
+    #[cfg(not(windows))]
+    let _ = private;
 
     #[cfg(windows)]
     {
@@ -242,7 +373,7 @@ fn atomic_write_with_unix_mode(
         if private {
             let mut last_error = None;
             for _ in 0..3 {
-                match fs::rename(&tmp, path) {
+                match fs::rename(tmp, path) {
                     Ok(()) => return Ok(()),
                     Err(source)
                         if matches!(
@@ -260,7 +391,6 @@ fn atomic_write_with_unix_mode(
                 }
             }
             let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
-            let _ = fs::remove_file(&tmp);
             return Err(AppError::IoContext {
                 context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
                 source,
@@ -308,7 +438,7 @@ fn atomic_write_with_unix_mode(
                 break;
             }
 
-            match fs::rename(&tmp, path) {
+            match fs::rename(tmp, path) {
                 Ok(()) => {
                     completed = true;
                     break;
@@ -330,7 +460,6 @@ fn atomic_write_with_unix_mode(
 
         if !completed {
             let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
-            let _ = fs::remove_file(&tmp);
             return Err(AppError::IoContext {
                 context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
                 source,
@@ -340,8 +469,7 @@ fn atomic_write_with_unix_mode(
 
     #[cfg(not(windows))]
     {
-        if let Err(source) = fs::rename(&tmp, path) {
-            let _ = fs::remove_file(&tmp);
+        if let Err(source) = fs::rename(tmp, path) {
             return Err(AppError::IoContext {
                 context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
                 source,
@@ -367,9 +495,57 @@ pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Publish a durable private file only if its destination is still absent.
+/// A concurrent creator or symlink is preserved, never replaced.
+pub(crate) fn write_durable_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let staged = stage_write(path, bytes, Some(0o600), true)?;
+    let publication = fs::hard_link(&staged.tmp, path);
+    let cleanup = fs::remove_file(&staged.tmp);
+    publication.map_err(|e| AppError::io(path, e))?;
+    cleanup.map_err(|e| AppError::io(&staged.tmp, e))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| AppError::io(parent, e))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_file_read_is_bounded_and_never_creates_missing_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing/record");
+        assert_eq!(read_regular_file(&missing, 16).unwrap(), None);
+        assert!(!missing.parent().unwrap().exists());
+        let path = dir.path().join("record");
+        fs::write(&path, b"record").unwrap();
+        assert_eq!(read_regular_file(&path, 6).unwrap().unwrap(), b"record");
+        assert_eq!(
+            read_regular_file(&path, 5).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(read_regular_file(dir.path(), 16).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passive_file_read_refuses_leaf_alias_without_reading_or_tightening_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let alias = dir.path().join("alias");
+        fs::write(&target, b"outside record").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &alias).unwrap();
+        assert!(read_regular_file(&alias, 64).is_err());
+        assert_eq!(mode(&target), 0o644);
+        assert_eq!(fs::read(&target).unwrap(), b"outside record");
+    }
 
     fn names_in(directory: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = fs::read_dir(directory)
@@ -554,6 +730,127 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"next");
         assert_eq!(names_in(root.path()), ["fixture"]);
         #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn staged_writes_do_not_publish_until_committed() {
+        let root = tempfile::tempdir().unwrap();
+        for existing in [false, true] {
+            let path = root.path().join(if existing { "existing" } else { "new" });
+            if existing {
+                fs::write(&path, b"unchanged").unwrap();
+            }
+            let staged = stage_write(&path, b"replacement", None, false).unwrap();
+            let tmp = staged.tmp_path().to_path_buf();
+            assert_eq!(fs::read(&tmp).unwrap(), b"replacement");
+            assert_eq!(path.exists(), existing);
+            if existing {
+                assert_eq!(fs::read(&path).unwrap(), b"unchanged");
+            }
+            staged.commit().unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"replacement");
+            assert!(!tmp.exists());
+        }
+    }
+
+    #[test]
+    fn dropping_staged_handle_preserves_transferred_recovery_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture");
+        let staged = stage_write(&path, b"recovery bytes", Some(0o600), true).unwrap();
+        let tmp = staged.tmp_path().to_path_buf();
+        drop(staged);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&tmp).unwrap(), b"recovery bytes");
+        commit_staged(&tmp, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"recovery bytes");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn failed_raw_commit_keeps_staging_for_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("destination");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("contents"), b"untouched").unwrap();
+        for private in [false, true] {
+            let staged =
+                stage_write(&path, b"recovery bytes", private.then_some(0o600), true).unwrap();
+            let tmp = staged.tmp_path().to_path_buf();
+            drop(staged);
+            assert!(commit_staged(&tmp, &path, private).is_err());
+            assert_eq!(fs::read(&tmp).unwrap(), b"recovery bytes");
+            assert_eq!(fs::read(path.join("contents")).unwrap(), b"untouched");
+            // An explicit owner may abandon its own staging after deciding not to recover.
+            fs::remove_file(tmp).unwrap();
+        }
+        assert_eq!(names_in(root.path()), ["destination"]);
+    }
+
+    #[test]
+    fn consuming_commit_failure_removes_only_its_own_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("destination");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("contents"), b"untouched").unwrap();
+        let unowned = root.path().join("destination.tmp.unowned");
+        fs::write(&unowned, b"other operation").unwrap();
+        for private in [false, true] {
+            let staged =
+                stage_write(&path, b"replacement", private.then_some(0o600), false).unwrap();
+            let tmp = staged.tmp_path().to_path_buf();
+            assert!(staged.commit().is_err());
+            assert!(!tmp.exists());
+            assert_eq!(fs::read(&unowned).unwrap(), b"other operation");
+            assert_eq!(fs::read(path.join("contents")).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
+    fn missing_staging_never_changes_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture");
+        fs::write(&path, b"untouched").unwrap();
+        for private in [false, true] {
+            assert!(commit_staged(&root.path().join("missing"), &path, private).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
+    fn concurrent_staging_names_and_contents_are_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture");
+        let first = stage_write(&path, b"first", None, false).unwrap();
+        let second = stage_write(&path, b"second", None, false).unwrap();
+        assert_ne!(first.tmp_path(), second.tmp_path());
+        assert_eq!(fs::read(first.tmp_path()).unwrap(), b"first");
+        assert_eq!(fs::read(second.tmp_path()).unwrap(), b"second");
+        assert!(!path.exists());
+        fs::remove_file(first.tmp_path()).unwrap();
+        fs::remove_file(second.tmp_path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_preserves_ordinary_mode_and_secures_private_bytes_before_commit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture");
+        fs::write(&path, b"original").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let ordinary = stage_write(&path, b"ordinary", None, true).unwrap();
+        assert!(!ordinary.private);
+        assert_eq!(mode(ordinary.tmp_path()), 0o640);
+        ordinary.commit().unwrap();
+        assert_eq!(mode(&path), 0o640);
+        let private = stage_write(&path, b"secret fixture", Some(0o600), true).unwrap();
+        assert!(private.private);
+        assert_eq!(mode(private.tmp_path()), 0o600);
+        assert_eq!(mode(&path), 0o640);
+        private.commit().unwrap();
         assert_eq!(mode(&path), 0o600);
     }
 }

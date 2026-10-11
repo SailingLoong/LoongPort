@@ -79,7 +79,7 @@ impl ProviderRouter {
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
         use super::application_routing;
         let chain = application_routing::chain_providers(&self.db, app_type)?;
-        let current_id = application_routing::current_provider_id(&self.db, app_type);
+        let current_id = application_routing::current_provider_id_checked(&self.db, app_type)?;
         let current = current_id
             .as_deref()
             .and_then(|id| self.db.get_provider_by_id(id, app_type).ok().flatten());
@@ -88,7 +88,11 @@ impl ProviderRouter {
             .get_proxy_config_for_app(app_type)
             .await?
             .auto_failover_enabled;
-        let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
+        let blocked = if crate::mode::operation::uses_upstream4_schema(&self.db)? {
+            application_routing::blocked_tier_ids_checked(&self.db, app_type)?
+        } else {
+            application_routing::blocked_tier_ids(&self.db, app_type)
+        };
         let mut result = Vec::new();
         if let Some(current) = current
             .as_ref()

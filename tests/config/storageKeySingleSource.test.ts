@@ -67,23 +67,44 @@ describe("localStorage key 的单一来源", () => {
     }
   });
 
-  it("读写两端都引用同一个常量（不是各自的字面量）", () => {
+  it("App 读取与保存实际导航状态共用常量，每个 key 只有一个写入点", () => {
+    const app = files.find((f) => f.rel === "App.tsx");
     const appSwitcher = files.find(
       (f) => f.rel === "components/AppSwitcher.tsx",
     );
-    const app = files.find((f) => f.rel === "App.tsx");
-    expect(appSwitcher, "找不到 AppSwitcher.tsx").toBeDefined();
     expect(app, "找不到 App.tsx").toBeDefined();
-
-    // 写入端：setItem 必须用常量。
-    expect(appSwitcher!.text).toMatch(
-      /localStorage\.setItem\(\s*LAST_APP_STORAGE_KEY/,
-    );
-    expect(appSwitcher!.text).toMatch(/from\s+"@\/config\/constants"/);
-
-    // 读取端：getItem 必须用同一个常量。
-    expect(app!.text).toMatch(/localStorage\.getItem\(\s*LAST_APP_STORAGE_KEY/);
+    expect(appSwitcher, "找不到 AppSwitcher.tsx").toBeDefined();
     expect(app!.text).toMatch(/from\s+"@\/config\/constants"/);
+
+    for (const [key, state] of [
+      ["LAST_APP_STORAGE_KEY", "activeApp"],
+      ["LAST_VIEW_STORAGE_KEY", "currentView"],
+    ]) {
+      const writes = new RegExp(
+        String.raw`localStorage\s*\.\s*setItem\(\s*${key}\b`,
+        "g",
+      );
+      // 测试用例会预置恢复状态，不属于生产写点；其 key 字面量仍受上方全 src 扫描保护。
+      const owners = files
+        .filter(
+          (file) => !/(^|\/)__tests__\/|\.(test|spec)\.tsx?$/.test(file.rel),
+        )
+        .flatMap((file) =>
+          Array.from(file.text.matchAll(writes), () => file.rel),
+        );
+      // App 的实际状态 effect 是唯一写点；切换请求尚待草稿确认时不得提前写。
+      // 同文件第二次写也算重复，不能只对文件名去重。
+      expect(owners, `${key} 只能由 App 保存一次`).toEqual(["App.tsx"]);
+      expect(app!.text).toMatch(
+        new RegExp(String.raw`localStorage\s*\.\s*getItem\(\s*${key}\s*\)`),
+      );
+      expect(app!.text).toMatch(
+        new RegExp(
+          String.raw`localStorage\s*\.\s*setItem\(\s*${key}\s*,\s*${state}\s*,?\s*\)`,
+        ),
+      );
+      expect(appSwitcher!.text).not.toMatch(writes);
+    }
   });
 
   it("没有退回上游的 cc-switch 前缀", () => {

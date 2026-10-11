@@ -71,3 +71,53 @@ describe("SecretProtectionSettings", () => {
     expect(input).toHaveValue("new rotation password");
   });
 });
+
+it("reopens the original app review in settings without repeating runtime handoff", async () => {
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "get_secret_protection")
+      return { automaticUnlock: true, passwordConfigured: true };
+    if (command === "get_startup_upgrade_review")
+      return {
+        status: "database_verified",
+        checkpointPresent: true,
+        checkpointId: "synthetic-checkpoint",
+        reviewToken: "synthetic-review",
+        canAuthenticate: false,
+        canCheckAndBackup: false,
+        canStartUpgrade: false,
+      };
+    if (command === "review_startup_upgrade_app")
+      return {
+        appType: (args as { appType: string }).appType,
+        revision: "synthetic-revision",
+        savedMode: "proxy",
+        hasPendingOperation: false,
+        pointerConsistent: true,
+        liveStatus: "parsed",
+        storedFieldsMatch: true,
+        canRecoverOperation: false,
+        defaultAction: "keep_files",
+        defaultTakeover: false,
+        canCompleteApp: true,
+        canStartUpgrade: false,
+      };
+    throw new Error("synthetic unexpected command");
+  });
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "startupUpgrade.reviewApps" }),
+  );
+  await screen.findByRole("dialog");
+  await screen.findByRole("region", { name: "Claude Code" });
+  expect(
+    screen.queryByRole("button", { name: "startupUpgrade.continue" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "startupUpgrade.complete" }),
+  ).toBeDisabled();
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.some(([command]) => command === "continue_startup_upgrade"),
+  ).toBe(false);
+});

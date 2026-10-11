@@ -2,8 +2,20 @@
 //!
 //! Handles provider CRUD operations, switching, and configuration management.
 
+pub(crate) mod claude_direct;
+pub(crate) mod codex_direct;
+#[cfg(any(test, feature = "test-hooks"))]
+mod codex_direct_tests;
+mod codex_login;
+#[cfg(any(test, feature = "test-hooks"))]
+mod direct_writer_tests;
+pub(crate) mod edit;
 mod endpoints;
 mod gemini_auth;
+pub(crate) mod gemini_direct;
+#[cfg(any(test, feature = "test-hooks"))]
+mod gemini_direct_tests;
+pub(crate) mod grok_direct;
 mod live;
 mod native;
 pub(crate) use native::service_configuration_revision;
@@ -11,6 +23,129 @@ mod pi;
 mod transaction;
 mod usage;
 pub(crate) use transaction::with_provider_config_transaction;
+
+#[cfg(feature = "test-hooks")]
+impl ProviderService {
+    #[doc(hidden)]
+    pub fn verify_proxy_all_apps() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_all_apps()?;
+        codex_direct_tests::verify_proxy_mode()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_routing_read_model() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_read_model()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_legacy_snippet_freeze() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_legacy_snippet_freeze()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_manual_alias_admission() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_manual_alias_admission()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_constructor_admission() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_constructor_admission()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_reconfiguration() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_reconfiguration()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_http() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_http()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_lifecycle() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_lifecycle()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_routing_selection() -> Result<(), AppError> {
+        crate::database::order_profiles::verify_original_tests();
+        crate::services::application_selection::verify_original_selection();
+        crate::mode::controller_tests::verify_selection()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_pending_refresh() -> Result<(), AppError> {
+        codex_direct_tests::verify_pending_refresh()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_recovery() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_recovery()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_runtime() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify_runtime()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_proxy_controller_flow() -> Result<(), AppError> {
+        crate::mode::controller_tests::verify()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_review_cases() -> Result<(), AppError> {
+        codex_direct_tests::verify_review_cases()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_generation_proof() -> Result<(), AppError> {
+        codex_direct_tests::verify_generation_proof()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_upstream4_codex_flow() -> Result<(), AppError> {
+        codex_direct_tests::verify()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_device_reset_staging() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset_staging()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verify_codex_device_reset_review() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset_review()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_device_reset() -> Result<(), AppError> {
+        crate::secrets::reset::verify_device_reset()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_codex_pending_vault() -> Result<(), AppError> {
+        crate::secrets::transition::verify_codex_pending()
+    }
+
+    /// Synthetic headless verification only; omitted from ordinary builds.
+    #[doc(hidden)]
+    pub fn verify_settings_vault_guard() -> Result<(), AppError> {
+        crate::settings::verify_settings_vault_guard()
+    }
+
+    /// Calls the ordinary service with isolated synthetic files and credentials.
+    #[doc(hidden)]
+    pub fn verify_upstream4_gemini_flow() -> Result<(), AppError> {
+        gemini_direct_tests::verify()
+    }
+
+    #[doc(hidden)]
+    pub fn verify_upstream4_direct_flows() -> Result<(), AppError> {
+        direct_writer_tests::verify()
+    }
+}
 
 /// 给 `--add-site` CLI 用的落盘入口：不经过 DB/切换流程，直接把一份
 /// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档共用内部 app 分派）。
@@ -399,6 +534,10 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
 /// [`crate::codex_config::refresh_codex_catalog_projection`]）。无当前供应商、
 /// 投影不出 catalog、或内容与磁盘一致时为 no-op。
 pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
     // Native config remains authoritative. Its generated reasoning can refresh
     // independently, with provenance protecting explicit and legacy overrides.
@@ -536,7 +675,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
+            let dir = crate::secrets::testing::tempdir().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             #[cfg(windows)]
             let original_local_app_data = env::var("LOCALAPPDATA").ok();
@@ -637,7 +776,7 @@ mod tests {
 
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
         let _guard = test_guard();
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let old_home = std::env::var_os("HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
@@ -4781,7 +4920,27 @@ impl ProviderService {
     /// active Claude provider. UI callers must never infer this from raw config.
     pub fn sync_claude_plugin_integration(state: &AppState) -> Result<bool, AppError> {
         let settings = crate::settings::get_settings();
-        let current = crate::settings::get_effective_current_provider(&state.db, &AppType::Claude)?;
+        let current = if crate::mode::operation::uses_upstream4_schema(&state.db)? {
+            let mode = {
+                let write = crate::mode::operation::AppWrite::begin_mode(
+                    &state.proxy_service,
+                    &AppType::Claude,
+                )?;
+                crate::mode::current::validate_known_mode(
+                    &write.store,
+                    &write.vault,
+                    &AppType::Claude,
+                )?
+            };
+            let purpose = if mode.is_proxy() && mode.attached {
+                crate::mode::current::Purpose::InUse
+            } else {
+                crate::mode::current::Purpose::Direct
+            };
+            crate::mode::current::provider_for(&state.db, &AppType::Claude, purpose)?
+        } else {
+            crate::settings::get_effective_current_provider(&state.db, &AppType::Claude)?
+        };
         let uses_third_party_provider = match current.as_deref() {
             Some(id) => state
                 .db
@@ -5052,7 +5211,13 @@ impl ProviderService {
 
     fn normalize_usage_script_credential_overrides(app_type: &AppType, provider: &mut Provider) {
         let current_credentials = provider.resolve_usage_credentials(app_type);
+        Self::normalize_usage_script_with_credentials(provider, &current_credentials);
+    }
 
+    fn normalize_usage_script_with_credentials(
+        provider: &mut Provider,
+        current_credentials: &(String, String),
+    ) {
         let Some(usage_script) = provider
             .meta
             .as_mut()
@@ -5066,13 +5231,13 @@ impl ProviderService {
         }
 
         if usage_script.api_key.as_deref().is_some_and(|api_key| {
-            Self::should_clear_usage_api_key_override(api_key, &current_credentials)
+            Self::should_clear_usage_api_key_override(api_key, current_credentials)
         }) {
             usage_script.api_key = None;
         }
 
         if usage_script.base_url.as_deref().is_some_and(|base_url| {
-            Self::should_clear_usage_base_url_override(base_url, &current_credentials)
+            Self::should_clear_usage_base_url_override(base_url, current_credentials)
         }) {
             usage_script.base_url = None;
         }
@@ -5150,6 +5315,28 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
     ) -> Result<bool, AppError> {
+        let modern = app_type.supports_local_proxy()
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?;
+        let managed = matches!(app_type, AppType::Codex)
+            && Self::managed_codex_oauth_account_id(&provider).is_some();
+        let _guard = if modern || managed {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
+        crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
+        Self::add_locked(state, app_type, provider, add_to_live)
+    }
+
+    /// Caller has already admitted the write and owns the applicable app lock.
+    fn add_locked(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+    ) -> Result<bool, AppError> {
         if app_type == AppType::Pi {
             return pi::add(state, provider, add_to_live);
         }
@@ -5166,14 +5353,6 @@ impl ProviderService {
 
         let is_managed_codex_add = matches!(app_type, AppType::Codex)
             && Self::managed_codex_oauth_account_id(&provider).is_some();
-        let _managed_codex_add_guard = if is_managed_codex_add {
-            Some(futures::executor::block_on(
-                state.proxy_service.lock_switch_for_app(app_type.as_str()),
-            ))
-        } else {
-            None
-        };
-
         if is_managed_codex_add {
             let effective_current =
                 crate::settings::get_effective_current_provider(&state.db, &app_type)?;
@@ -5269,6 +5448,15 @@ impl ProviderService {
         app_type: AppType,
         source_id: &str,
     ) -> Result<Provider, AppError> {
+        // Independent apps retain their own owners (Pi's add acquires its lock).
+        let _guard = if app_type.supports_local_proxy() {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
+        crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
         let mut providers = state.db.get_all_providers(app_type.as_str())?;
         let source = providers.get(source_id).cloned().ok_or_else(|| {
             AppError::Message(format!(
@@ -5307,7 +5495,7 @@ impl ProviderService {
         }
 
         let add_to_live = !app_type.is_additive_mode();
-        Self::add(state, app_type, duplicate.clone(), add_to_live)?;
+        Self::add_locked(state, app_type, duplicate.clone(), add_to_live)?;
         Ok(duplicate)
     }
 
@@ -5354,6 +5542,23 @@ impl ProviderService {
             .db
             .get_provider_by_id(id, app_type.as_str())?
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        if crate::mode::operation::uses_upstream4_schema(&state.db)? {
+            let provider = Self::prepare_provider_update(state, &app_type, provider)?;
+            let changed =
+                crate::relay::provider_config::selected_model(&app_type, &existing.settings_config)
+                    != crate::relay::provider_config::selected_model(
+                        &app_type,
+                        &provider.settings_config,
+                    );
+            crate::mode::controller::save_row_locked(
+                &state.proxy_service,
+                &app_type,
+                &existing,
+                &provider,
+                changed,
+            )?;
+            return Ok(true);
+        }
         let current =
             crate::proxy::application_routing::current_provider_id(&state.db, app_type.as_str());
         if current.as_deref() != Some(existing.id.as_str()) {
@@ -5374,6 +5579,133 @@ impl ProviderService {
         })
     }
 
+    pub(crate) fn prepare_managed_update(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        mut provider: Provider,
+    ) -> Result<Provider, AppError> {
+        // ## 托管档位**可以**改内容，但**不许改 id**
+        //
+        // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
+        // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
+        // 改成了「已存在的档位只换 sk、保住用户的编辑」（`crate::relay::provider_config::patch_api_key`），
+        // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
+        //
+        // 中转站区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
+        // 那页支持全部字段，我们不重做）。用户点它之前会先看到一道警告：保存后这个档位
+        // 归他自己维护，出问题用「恢复默认配置」退回来。
+        //
+        // ## 但**不许凭空造出一个托管 id**
+        //
+        // id 是托管判据本身（`crate::relay::managed::provider_id_for` 生成的前缀），所以：
+        //
+        // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
+        //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
+        // - 普通 → 托管 id：**伪装成托管项** —— 它会出现在中转站区里，
+        //   而「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
+        //
+        // ⚠️ **判据不能是「id 变了没有」** —— review 抓出那样有个绕过口子：
+        // `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
+        // 自己当原 id（`services/provider/mod.rs:2608`），于是「不是改名」成立、
+        // 守卫不介入，而 `save_provider` 是 **upsert** ⇒ 一条自选的 `loongport-*`
+        // 记录被凭空写进库里。
+        //
+        // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
+        // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
+        // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
+        let existing_managed = if crate::relay::is_managed(&provider.id) {
+            match state
+                .db
+                .get_provider_by_id(&provider.id, app_type.as_str())?
+            {
+                Some(existing) => Some(existing),
+                None => {
+                    return Err(AppError::Message(
+                        "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成"
+                            .to_string(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
+        if let Some(old) = original_id.filter(|old| *old != provider.id) {
+            crate::relay::reject_if_managed(old)?;
+        }
+
+        // 托管档位的站点归属与 sk 由 LoongPort 管，不属于用户可编辑配置。
+        //
+        // 倍率查询会从 `website_url` 定位 `/v1/sub2api/billing`，再从
+        // `settings_config` 提取 sk。若直接保存编辑器提交的整份 Provider，用户只改模型
+        // 也可能因表单 round-trip 丢掉认证 section，结果是倍率/连通检测一起静默失效。
+        // 这里保留这两个 owner 字段，其余配置仍照用户提交的保存。
+        if let Some(existing) = existing_managed {
+            provider.website_url = existing.website_url;
+            if let Some(api_key) =
+                crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
+            {
+                if !crate::relay::provider_config::ensure_api_key(
+                    &mut provider.settings_config,
+                    &app_type,
+                    &api_key,
+                ) {
+                    return Err(AppError::Config(
+                        "托管档位的配置必须是对象，无法保留由 LoongPort 管理的密钥".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(provider)
+    }
+
+    pub(crate) fn prepare_provider_update(
+        state: &AppState,
+        app_type: &AppType,
+        mut provider: Provider,
+    ) -> Result<Provider, AppError> {
+        // Normalize Claude model keys
+        Self::normalize_provider_if_claude(app_type, &mut provider);
+        Self::validate_provider_settings(app_type, &provider)?;
+        let modern = app_type.supports_local_proxy()
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?;
+        // Adopted writers never re-merge legacy snippets. Stripping equal values
+        // here would erase explicitly selected owned fields from the native file.
+        if !modern {
+            normalize_provider_common_config_for_storage(
+                state.db.as_ref(),
+                app_type,
+                &mut provider,
+            )?;
+        }
+        if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {
+            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                &mut provider.settings_config,
+            )?;
+        }
+        if modern && *app_type == AppType::GrokBuild {
+            // The same preparation also serves the pure editor preview. An
+            // explicit env_key remains a reference; never read/adopt its value.
+            let text = provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str);
+            let credentials = (
+                text.and_then(crate::grok_config::extract_base_url)
+                    .unwrap_or_default(),
+                text.and_then(crate::grok_config::extract_inline_api_key)
+                    .unwrap_or_default(),
+            );
+            Self::normalize_usage_script_with_credentials(&mut provider, &credentials);
+        } else {
+            Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
+        }
+
+        Ok(provider)
+    }
+
     fn update_locked(
         state: &AppState,
         app_type: AppType,
@@ -5390,16 +5722,7 @@ impl ProviderService {
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
-        // Normalize Claude model keys
-        Self::normalize_provider_if_claude(&app_type, &mut provider);
-        Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
-        if matches!(app_type, AppType::Codex) && provider.category.as_deref() == Some("official") {
-            crate::codex_config::strip_codex_unified_session_bucket_from_settings(
-                &mut provider.settings_config,
-            )?;
-        }
-        Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        provider = Self::prepare_provider_update(state, &app_type, provider)?;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -5866,6 +6189,7 @@ impl ProviderService {
         } else {
             None
         };
+        crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
         // Check current and delete under the same lock as configuration selection.
         let local_current = crate::settings::get_current_provider(&app_type);
         let db_current = state.db.get_current_provider(app_type.as_str())?;
@@ -5971,6 +6295,66 @@ impl ProviderService {
             None
         };
 
+        // Schema20 direct writes use the upstream forward-recovery owner. Do not
+        // wrap them in the legacy snapshot rollback, which would undo published
+        // files behind a retained mode journal. Normal schema17 startup is unchanged.
+        if matches!(
+            app_type,
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+        ) && crate::mode::operation::uses_upstream4_schema(&state.db)?
+        {
+            let provider = state
+                .db
+                .get_provider_by_id(id, app_type.as_str())?
+                .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            validate_provider_selection(&state.db, &app_type, id)?;
+            let mode = {
+                let vault = state.db.secret_session().read()?;
+                crate::mode::current::validate_known_mode(
+                    &crate::live::engine::DeviceStore::for_device(),
+                    &vault,
+                    &app_type,
+                )?
+            };
+            if mode.is_proxy() {
+                crate::rt::block_on(
+                    state
+                        .proxy_service
+                        .hot_switch_provider_inner(app_type.as_str(), id),
+                )
+                .map_err(AppError::Message)?;
+                return Ok(SwitchResult::default());
+            }
+            let previous = match app_type {
+                AppType::Claude | AppType::Codex | AppType::GrokBuild => {
+                    crate::mode::current::direct_provider(&state.db, &app_type)?
+                }
+                _ => None,
+            };
+            let mut result = SwitchResult::default();
+            match app_type {
+                AppType::Codex => {
+                    if codex_direct::switch_to(state, previous.as_ref(), &provider)? {
+                        result
+                            .warnings
+                            .push(codex_direct::CATALOG_PRESERVED_WARNING.into());
+                    }
+                }
+                AppType::Claude => {
+                    claude_direct::switch_to(state, previous.as_ref(), &provider)?;
+                }
+                AppType::Gemini => {
+                    gemini_direct::switch_to(state, &provider)?;
+                }
+                AppType::GrokBuild => {
+                    grok_direct::switch_to(state, previous.as_ref(), &provider)?;
+                }
+                _ => unreachable!("admitted direct writer"),
+            }
+            Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);
+            return Ok(result);
+        }
+
         if app_type.supports_local_proxy() {
             let provider = state
                 .db
@@ -6068,7 +6452,7 @@ impl ProviderService {
         Ok(result)
     }
 
-    fn append_claude_plugin_sync_warning(
+    pub(crate) fn append_claude_plugin_sync_warning(
         state: &AppState,
         app_type: &AppType,
         result: &mut SwitchResult,
@@ -6495,6 +6879,38 @@ impl ProviderService {
                 .save_provider(app_type.as_str(), &updated_provider)?;
         }
 
+        Ok(())
+    }
+
+    /// Original manual-import compatibility side effects, separate from importing rows.
+    pub(crate) fn finish_import_common_config(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?
+        {
+            return Ok(());
+        }
+        // Extract common config snippet (mirrors old startup logic in lib.rs)
+        if state
+            .db
+            .should_auto_extract_config_snippet(app_type.as_str())?
+        {
+            match Self::extract_common_config_snippet(state, app_type.clone()) {
+                Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
+                    let _ = state
+                        .db
+                        .set_config_snippet(app_type.as_str(), Some(snippet));
+                    let _ = state
+                        .db
+                        .set_config_snippet_cleared(app_type.as_str(), false);
+                }
+                _ => {}
+            }
+        }
+
+        Self::migrate_legacy_common_config_usage_if_needed(state, app_type.clone())?;
         Ok(())
     }
 
@@ -7221,6 +7637,69 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<Value, AppError> {
+        let _switch = app_type.supports_local_proxy().then(|| {
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()))
+        });
+        let modern = app_type.supports_local_proxy()
+            && crate::mode::operation::uses_upstream4_schema(&state.db)?;
+        let (original, pending) = if modern {
+            let vault = state.db.secret_session().read()?;
+            let live = crate::mode::state::load_app(
+                &crate::live::engine::DeviceStore::for_device(),
+                &vault,
+                app_type.as_str(),
+            )?;
+            let entry = live.apps.get(app_type.as_str());
+            (
+                entry
+                    .map(|entry| {
+                        crate::mode::operation::original_save_view(
+                            app_type.as_str(),
+                            entry,
+                            provider_id,
+                        )
+                    })
+                    .transpose()?
+                    .flatten(),
+                entry.is_some_and(|entry| entry.pending.is_some()),
+            )
+        } else {
+            (None, false)
+        };
+        // A partial native image is not a new edit seed. The original request
+        // stays queryable before any write/checkpoint admission is attempted.
+        let settings = if pending {
+            state
+                .db
+                .get_provider_by_id(provider_id, app_type.as_str())?
+                .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?
+                .settings_config
+        } else {
+            Self::edit_settings_content(state, app_type.clone(), provider_id).map_err(|error| {
+                if modern {
+                    AppError::Config("provider.edit_source_unavailable".into())
+                } else {
+                    error
+                }
+            })?
+        };
+        let original = original.map(|view| {
+            serde_json::json!({
+                "app": app_type.as_str(), "request": view.request, "status": view.status,
+            })
+        });
+        Ok(serde_json::json!({
+            "settingsConfig": settings,
+            "modeState": crate::mode::current::read_view(&state.proxy_service, &app_type),
+            "originalSave": original,
+        }))
+    }
+
+    fn edit_settings_content(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<Value, AppError> {
         let provider = state
             .db
             .get_provider_by_id(provider_id, app_type.as_str())?
@@ -7311,6 +7790,9 @@ impl ProviderService {
         app_type: AppType,
         updates: Vec<ProviderSortUpdate>,
     ) -> Result<bool, AppError> {
+        let _guard =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+        crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
         let mut providers = state.db.get_all_providers(app_type.as_str())?;
 
         for update in updates {
