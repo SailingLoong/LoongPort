@@ -4682,7 +4682,8 @@
       "sourceChanged": "The source file changed. Read or preview again.",
       "ownerUnavailable": "The current configuration is unavailable. Shared settings cannot be saved yet.",
       "vaultLocked": "The credential vault is locked. Unlock it and read again.",
-      "pendingOperation": "An operation awaits verification. Check the original save result first."
+      "pendingOperation": "An operation awaits verification. Check the original save result first.",
+      "legacyDisabled": "The legacy snippet is disabled and cannot be imported."
     },
     "result": {
       "completed": "Shared settings saved and verified.",
@@ -4700,6 +4701,14 @@
     "after": "After",
     "added": "Added",
     "removed": "Removed",
-    "modified": "Modified"
+    "modified": "Modified",
+    "import": {
+      "open": "Choose missing fields from the legacy snippet",
+      "title": "Import missing shared fields",
+      "description": "Select fields to preview. Existing live values are kept. Saving the previewed changes requires the Save shared settings button.",
+      "empty": "There are no missing ordinary shared fields to import.",
+      "cancel": "Cancel selection",
+      "preview": "Preview selected import"
+    }
   }
 }

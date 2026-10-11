@@ -487,6 +487,7 @@ fn shared_code(error: &AppError) -> &'static str {
             "pendingOperation"
         }
         AppError::Conflict(_) => "sourceChanged",
+        AppError::Config(code) if code == "shared_settings.legacyDisabled" => "legacyDisabled",
         _ => "ownerUnavailable",
     }
 }
@@ -669,15 +670,35 @@ fn shared_plan(
     ),
     AppError,
 > {
+    use crate::live::engine;
+    let _admission =
+        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Codex)?;
+    let file = engine::LiveFile::private(crate::codex_config::get_codex_config_path());
+    let pre = engine::read_current(&file.path)?;
+    shared_plan_from_source(config, id, file, pre)
+}
+
+// Both editors plan from one observed file version; importing must not seed
+// against one snapshot and silently publish a diff against a newer one.
+fn shared_plan_from_source(
+    config: &str,
+    id: &str,
+    file: crate::live::engine::LiveFile,
+    pre: Option<Vec<u8>>,
+) -> Result<
+    (
+        crate::mode::state::SaveRequest,
+        crate::live::engine::LiveFile,
+        crate::live::patch::Guarded,
+        Vec<Value>,
+    ),
+    AppError,
+> {
     use crate::live::{
         engine,
         patch::{toml::TomlPatch, Guarded, KeyPath, LivePatch, WholeFile},
     };
     let mut request = shared_request(config, id)?;
-    let _admission =
-        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Codex)?;
-    let file = engine::LiveFile::private(crate::codex_config::get_codex_config_path());
-    let pre = engine::read_current(&file.path)?;
     let before_text = std::str::from_utf8(pre.as_deref().unwrap_or_default())
         .map_err(|_| shared_problem("invalidFormat"))?;
     let full = shared_parse(before_text)?;
@@ -743,7 +764,139 @@ fn shared_plan(
         changes.into_values().collect(),
     ))
 }
+fn shared_import_fields(
+    state: &crate::store::AppState,
+) -> Result<std::collections::BTreeMap<Vec<String>, toml_edit::Item>, AppError> {
+    if state.db.is_config_snippet_cleared("codex")? {
+        return Err(shared_problem("legacyDisabled"));
+    }
+    let Some(snippet) = state
+        .db
+        .get_config_snippet("codex")?
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(Default::default());
+    };
+    let current = ProviderService::current(state, AppType::Codex)?;
+    let provider = state.db.get_provider_by_id(&current, "codex")?;
+    if !provider.as_ref().is_some_and(|provider| {
+        crate::services::provider::provider_uses_common_config(
+            &AppType::Codex,
+            provider,
+            Some(&snippet),
+        )
+    }) {
+        return Err(shared_problem("legacyDisabled"));
+    }
+    let mut doc = shared_parse(&snippet)?;
+    shared_projection(doc.as_table_mut(), &[]);
+    let mut fields = std::collections::BTreeMap::new();
+    shared_fields(doc.as_table(), &[], &mut fields)?;
+    Ok(fields)
+}
+
+fn shared_path_missing(doc: &toml_edit::DocumentMut, path: &[String]) -> bool {
+    let mut item = doc.as_item();
+    for key in path {
+        let Some(table) = item.as_table_like() else {
+            return false;
+        };
+        let Some(next) = table.get(key) else {
+            return true;
+        };
+        item = next;
+    }
+    false
+}
+
+fn shared_config_text(mut doc: toml_edit::DocumentMut) -> Result<String, AppError> {
+    shared_projection(doc.as_table_mut(), &[]);
+    let values = toml::from_str::<toml::Table>(&doc.to_string())
+        .map_err(|_| shared_problem("invalidFormat"))?;
+    toml::to_string(&values).map_err(|_| shared_problem("invalidFormat"))
+}
+
 impl ConfigService {
+    pub(crate) fn read_codex_shared_settings_import(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+        let read = || -> Result<Vec<Value>, AppError> {
+            let _admission = crate::mode::operation::AppWrite::begin_mode(
+                &state.proxy_service,
+                &AppType::Codex,
+            )?;
+            let bytes =
+                crate::live::engine::read_current(&crate::codex_config::get_codex_config_path())?;
+            let doc = shared_parse(
+                std::str::from_utf8(bytes.as_deref().unwrap_or_default())
+                    .map_err(|_| shared_problem("invalidFormat"))?,
+            )?;
+            shared_import_fields(state)?.into_iter()
+                .filter(|(path, _)| shared_path_missing(&doc, path))
+                .map(|(path, value)| Ok(serde_json::json!({"field":path.join("."),"path":path,"value":shared_item_value(&value)?.to_string()})))
+                .collect()
+        };
+        Ok(match read() {
+            Ok(fields) => serde_json::json!({"app":"codex","status":"ready","fields":fields}),
+            Err(error) => {
+                serde_json::json!({"app":"codex","status":"blocked","fields":[],"code":shared_code(&error)})
+            }
+        })
+    }
+    pub(crate) fn preview_codex_shared_settings_import(
+        state: &crate::store::AppState,
+        fields: &[Vec<String>],
+        id: &str,
+    ) -> Result<Value, AppError> {
+        use crate::live::{
+            engine,
+            patch::{toml::TomlPatch, KeyPath, LivePatch},
+        };
+        let request = shared_request("", id)?;
+        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+        let plan = || -> Result<Value, AppError> {
+            let _admission = crate::mode::operation::AppWrite::begin_mode(
+                &state.proxy_service,
+                &AppType::Codex,
+            )?;
+            let file = engine::LiveFile::private(crate::codex_config::get_codex_config_path());
+            let pre = engine::read_current(&file.path)?;
+            let full = shared_parse(
+                std::str::from_utf8(pre.as_deref().unwrap_or_default())
+                    .map_err(|_| shared_problem("invalidFormat"))?,
+            )?;
+            let source = shared_import_fields(state)?;
+            let mut seed = TomlPatch::default();
+            for path in fields.iter().collect::<std::collections::BTreeSet<_>>() {
+                let item = source
+                    .get(path)
+                    .ok_or_else(|| shared_problem("readOnlyFields"))?;
+                if shared_path_missing(&full, path) {
+                    seed.seed.push((KeyPath(path.clone()), item.clone()));
+                }
+            }
+            let bytes = seed
+                .apply(&file.path, pre.as_deref())
+                .map_err(|_| shared_problem("invalidFormat"))?;
+            let config = shared_config_text(shared_parse(
+                std::str::from_utf8(&bytes).map_err(|_| shared_problem("invalidFormat"))?,
+            )?)?;
+            let (request, _, patch, changes) = shared_plan_from_source(&config, id, file, pre)?;
+            let crate::live::patch::WholeFile::Write(bytes) = patch.then else {
+                unreachable!()
+            };
+            Ok(
+                serde_json::json!({"app":"codex","request":request,"status":"ready","config":config,"changes":changes,"files":[{"role":"codexConfig","change":if engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]}),
+            )
+        };
+        Ok(match plan() {
+            Ok(value) => value,
+            Err(error) => {
+                serde_json::json!({"app":"codex","request":request,"status":"blocked","config":"","changes":[],"files":[],"code":shared_code(&error)})
+            }
+        })
+    }
     pub(crate) fn read_codex_shared_settings(
         state: &crate::store::AppState,
     ) -> Result<Value, AppError> {
@@ -761,13 +914,9 @@ impl ConfigService {
                 crate::live::engine::read_current(&crate::codex_config::get_codex_config_path())?;
             let text = std::str::from_utf8(bytes.as_deref().unwrap_or_default())
                 .map_err(|_| shared_problem("invalidFormat"))?;
-            let mut doc = shared_parse(text)?;
-            shared_projection(doc.as_table_mut(), &[]);
             // The editor receives only ordinary values, not comments carried
             // beside redacted auth fields. The live patch still keeps comments.
-            let values = toml::from_str::<toml::Table>(&doc.to_string())
-                .map_err(|_| shared_problem("invalidFormat"))?;
-            toml::to_string(&values).map_err(|_| shared_problem("invalidFormat"))
+            shared_config_text(shared_parse(text)?)
         };
         Ok(match read() {
             Ok(config) => {

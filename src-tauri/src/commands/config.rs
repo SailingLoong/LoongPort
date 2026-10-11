@@ -362,6 +362,26 @@ pub async fn extract_common_config_snippet(
 }
 
 #[tauri::command]
+pub fn get_codex_shared_settings_import(
+    state: tauri::State<'_, crate::store::AppState>,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::read_codex_shared_settings_import(state.inner())
+        .map_err(|_| "shared_settings.ownerUnavailable".into())
+}
+#[tauri::command]
+pub fn preview_codex_shared_settings_import(
+    state: tauri::State<'_, crate::store::AppState>,
+    fields: Vec<Vec<String>>,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
+    crate::services::config::ConfigService::preview_codex_shared_settings_import(
+        state.inner(),
+        &fields,
+        &request_id,
+    )
+    .map_err(|_| "shared_settings.invalidRequest".into())
+}
+#[tauri::command]
 pub fn get_codex_shared_settings(
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<serde_json::Value, String> {

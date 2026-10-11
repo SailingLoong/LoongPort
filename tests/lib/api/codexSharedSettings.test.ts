@@ -6,6 +6,24 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("Codex shared settings wire contract", () => {
+  it("uses explicit legacy import commands and preserves original key path arrays", async () => {
+    expect(configApi.getCodexSharedSettingsImport).toBeTypeOf("function");
+    expect(configApi.previewCodexSharedSettingsImport).toBeTypeOf("function");
+    await configApi.getCodexSharedSettingsImport();
+    expect(invoke).toHaveBeenLastCalledWith("get_codex_shared_settings_import");
+    const fields = [
+      ["history", "max.bytes"],
+      ["tools.web", "search"],
+    ];
+    await configApi.previewCodexSharedSettingsImport(fields, "import-1");
+    expect(invoke).toHaveBeenLastCalledWith(
+      "preview_codex_shared_settings_import",
+      {
+        fields,
+        requestId: "import-1",
+      },
+    );
+  });
   it("uses independent commands and the shared scope without provider identity", async () => {
     expect(configApi.getCodexSharedSettings).toBeTypeOf("function");
     const request = {

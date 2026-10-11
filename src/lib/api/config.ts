@@ -160,3 +160,24 @@ export function getCodexSharedSettingsSaveResult(
 ): Promise<CodexSharedSettingsResult> {
   return invoke("get_codex_shared_settings_save_result", { request });
 }
+
+export interface CodexSharedSettingsImport {
+  app: "codex";
+  status: "ready" | "blocked";
+  fields: { path: string[]; field: string; value: string }[];
+  code?: string;
+}
+
+export interface CodexSharedSettingsImportPreview extends CodexSharedSettingsPreview {
+  config: string;
+}
+
+export function getCodexSharedSettingsImport(): Promise<CodexSharedSettingsImport> {
+  return invoke("get_codex_shared_settings_import");
+}
+export function previewCodexSharedSettingsImport(
+  fields: string[][],
+  requestId: string,
+): Promise<CodexSharedSettingsImportPreview> {
+  return invoke("preview_codex_shared_settings_import", { fields, requestId });
+}

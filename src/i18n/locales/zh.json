@@ -4682,7 +4682,8 @@
       "sourceChanged": "源文件已变化，请重新读取或重新预览。",
       "ownerUnavailable": "当前配置不可用，暂时无法保存共享设置。",
       "vaultLocked": "凭据库已锁定，请解锁后重新读取。",
-      "pendingOperation": "已有操作待确认，请先查询原保存结果。"
+      "pendingOperation": "已有操作待确认，请先查询原保存结果。",
+      "legacyDisabled": "旧公共片段已禁用，不能导入。"
     },
     "result": {
       "completed": "共享设置已核验并保存。",
@@ -4700,6 +4701,14 @@
     "after": "变更后",
     "added": "新增",
     "removed": "删除",
-    "modified": "修改"
+    "modified": "修改",
+    "import": {
+      "open": "选择旧片段中缺失的字段",
+      "title": "导入缺失的共享字段",
+      "description": "选择字段后预览，已有 live 值保持不变。预览后仍需点击“保存共享设置”才会写入。",
+      "empty": "没有可导入的缺失普通共享字段。",
+      "cancel": "取消选择",
+      "preview": "预览所选导入"
+    }
   }
 }

@@ -4683,7 +4683,8 @@
       "sourceChanged": "來源檔案已變更，請重新讀取或重新預覽。",
       "ownerUnavailable": "目前設定無法使用，暫時無法儲存共用設定。",
       "vaultLocked": "憑據庫已鎖定，請解鎖後重新讀取。",
-      "pendingOperation": "已有操作待確認，請先查詢原儲存結果。"
+      "pendingOperation": "已有操作待確認，請先查詢原儲存結果。",
+      "legacyDisabled": "舊共用片段已停用，無法匯入。"
     },
     "result": {
       "completed": "共用設定已驗證並儲存。",
@@ -4701,6 +4702,14 @@
     "after": "變更後",
     "added": "新增",
     "removed": "刪除",
-    "modified": "修改"
+    "modified": "修改",
+    "import": {
+      "open": "選擇舊片段中缺少的欄位",
+      "title": "匯入缺少的共用欄位",
+      "description": "選擇欄位後預覽，已有 live 值保持不變。預覽後仍須按下「儲存共用設定」才會寫入。",
+      "empty": "沒有可匯入的缺少一般共用欄位。",
+      "cancel": "取消選擇",
+      "preview": "預覽所選匯入"
+    }
   }
 }

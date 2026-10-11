@@ -1841,6 +1841,8 @@ pub fn run() {
             commands::set_claude_common_config_snippet,
             commands::get_common_config_snippet,
             commands::get_codex_shared_settings,
+            commands::get_codex_shared_settings_import,
+            commands::preview_codex_shared_settings_import,
             commands::preview_codex_shared_settings,
             commands::save_codex_shared_settings,
             commands::get_codex_shared_settings_save_result,

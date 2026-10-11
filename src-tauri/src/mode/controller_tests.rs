@@ -5935,3 +5935,265 @@ fn codex_shared_settings_queries_pending_without_recovery_or_duplicate_effects()
         "discarded"
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn codex_legacy_shared_import_is_explicit_missing_only_and_uses_original_receipt() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::for_app(AppType::Codex);
+    let original = format!(
+        "{}\n# original live comment\n[tui]\nnotifications = false\n",
+        std::fs::read_to_string(&fx.path).unwrap()
+    );
+    std::fs::write(&fx.path, &original).unwrap();
+    let snippet = "model = 'excluded-model'\nexperimental_bearer_token = 'synthetic-import-secret'\n# synthetic-import-comment-secret\n[tui]\nnotifications = true\nhistory_limit = 9007199254740993\nreminder_at = 2026-10-11T00:00:00Z\n[mcp_servers.excluded]\ncommand = 'excluded-command'\n";
+    fx.state
+        .db
+        .set_config_snippet("codex", Some(snippet.into()))
+        .unwrap();
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    provider
+        .meta
+        .get_or_insert_with(Default::default)
+        .common_config_enabled = Some(true);
+    fx.state.db.save_provider("codex", &provider).unwrap();
+    let db_before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let mode = state::mode_state(
+        &store,
+        &fx.state.db.secret_session().read().unwrap(),
+        "codex",
+    )
+    .unwrap();
+    let other_files = crate::mode::controller::files(&AppType::Codex)
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.path != fx.path)
+        .map(|f| (f.path.clone(), read_current(&f.path).unwrap()))
+        .collect::<Vec<_>>();
+    let read = C::read_codex_shared_settings_import(&fx.state).unwrap();
+    assert_eq!(
+        read["status"], "ready",
+        "explicit import must expose only missing ordinary fields"
+    );
+    assert_eq!(
+        read["fields"],
+        json!([
+            {"path":["tui","history_limit"],"field":"tui.history_limit","value":"9007199254740993"},
+            {"path":["tui","reminder_at"],"field":"tui.reminder_at","value":"2026-10-11T00:00:00Z"}
+        ])
+    );
+    assert!(!read.to_string().contains("synthetic-import"));
+    assert!(!read.to_string().contains("excluded"));
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let fields = vec![vec!["tui".into(), "history_limit".into()]];
+    let preview = C::preview_codex_shared_settings_import(
+        &fx.state,
+        &fields,
+        "12121212-1212-4212-8212-121212121212",
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(
+        preview["changes"],
+        json!([{"field":"tui.history_limit","after":"9007199254740993"}])
+    );
+    let draft = preview["config"].as_str().unwrap();
+    assert!(!draft.contains("reminder_at"));
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(request.scope, state::SaveScope::CodexSharedSettings);
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, draft, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    let saved = std::fs::read_to_string(&fx.path).unwrap();
+    assert!(saved.contains("notifications = false"));
+    assert!(saved.contains("history_limit = 9007199254740993"));
+    assert!(saved.contains("# original live comment"));
+    assert!(!saved.contains("reminder_at"));
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db_before
+    );
+    assert_eq!(
+        state::mode_state(
+            &store,
+            &fx.state.db.secret_session().read().unwrap(),
+            "codex"
+        )
+        .unwrap(),
+        mode
+    );
+    for (path, bytes) in other_files {
+        assert!(read_current(&path).unwrap() == bytes);
+    }
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, draft, request).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), saved);
+    // A later explicit choice is allowed; there is no permanent import flag.
+    std::fs::write(&fx.path, &original).unwrap();
+    let repeated = C::preview_codex_shared_settings_import(
+        &fx.state,
+        &fields,
+        "12121212-1212-4212-8212-121212121213",
+    )
+    .unwrap();
+    assert_eq!(repeated["status"], "ready");
+    assert_eq!(repeated["changes"], preview["changes"]);
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+    let repeated_request: state::SaveRequest =
+        serde_json::from_value(repeated["request"].clone()).unwrap();
+    let repeated_config = repeated["config"].as_str().unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert_eq!(
+            C::save_codex_shared_settings(&fx.state, repeated_config, repeated_request.clone())
+                .unwrap()["status"],
+            "pending"
+        );
+    }
+    let pending = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_codex_shared_settings_save(&fx.state, repeated_request.clone()).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, repeated_config, repeated_request).unwrap()
+            ["status"],
+        "pending"
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), pending);
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_legacy_shared_import_preserves_disabled_protected_and_external_values() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::for_app(AppType::Codex);
+    let original = format!(
+        "{}\n[tui]\nnotifications = false\n",
+        std::fs::read_to_string(&fx.path).unwrap()
+    );
+    std::fs::write(&fx.path, &original).unwrap();
+    fx.state.db.set_config_snippet("codex", Some("[tui]\nnotifications = true\nhistory_limit = 4\n[tools]\napi_key = 'synthetic-secret'\n".into())).unwrap();
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    provider
+        .meta
+        .get_or_insert_with(Default::default)
+        .common_config_enabled = Some(false);
+    fx.state.db.save_provider("codex", &provider).unwrap();
+    let before = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    assert_eq!(
+        C::read_codex_shared_settings_import(&fx.state).unwrap()["code"],
+        "legacyDisabled"
+    );
+    provider.meta.as_mut().unwrap().common_config_enabled = Some(true);
+    fx.state.db.save_provider("codex", &provider).unwrap();
+    fx.state
+        .db
+        .set_config_snippet_cleared("codex", true)
+        .unwrap();
+    assert_eq!(
+        C::read_codex_shared_settings_import(&fx.state).unwrap()["code"],
+        "legacyDisabled"
+    );
+    fx.state
+        .db
+        .set_config_snippet_cleared("codex", false)
+        .unwrap();
+    let id = "34343434-3434-4434-8434-343434343434";
+    for fields in [
+        vec![vec!["tools".into(), "api_key".into()]],
+        vec![vec!["unknown".into()]],
+    ] {
+        let result = C::preview_codex_shared_settings_import(&fx.state, &fields, id).unwrap();
+        assert_eq!(result["status"], "blocked");
+        assert!(!result.to_string().contains("synthetic-secret"));
+    }
+    let fields = vec![vec!["tui".into(), "history_limit".into()]];
+    assert_eq!(
+        C::read_codex_shared_settings_import(&fx.state).unwrap()["fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A write between selection and preview wins, including unrelated ordinary fields.
+    let external = format!("{original}history_limit = 9\ntheme = 'light'\n");
+    std::fs::write(&fx.path, &external).unwrap();
+    let preview = C::preview_codex_shared_settings_import(&fx.state, &fields, id).unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(preview["changes"], json!([]));
+    assert!(preview["config"]
+        .as_str()
+        .unwrap()
+        .contains("history_limit = 9"));
+    assert!(preview["config"].as_str().unwrap().contains("light"));
+    std::fs::write(&fx.path, &original).unwrap();
+    let preview = C::preview_codex_shared_settings_import(&fx.state, &fields, id).unwrap();
+    assert_eq!(preview["status"], "ready");
+    let request = serde_json::from_value(preview["request"].clone()).unwrap();
+    std::fs::write(&fx.path, &external).unwrap();
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, preview["config"].as_str().unwrap(), request)
+            .unwrap()["status"],
+        "stale"
+    );
+    assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), external);
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        before
+    );
+    for parent in ["tui = 'external'", "tui = []", "tui = [{ keep = true }]"] {
+        let external = format!("{parent}\n{}", original.split("\n[tui]").next().unwrap());
+        std::fs::write(&fx.path, &external).unwrap();
+        assert_eq!(
+            C::read_codex_shared_settings_import(&fx.state).unwrap()["fields"],
+            json!([])
+        );
+        let result = C::preview_codex_shared_settings_import(&fx.state, &fields, id).unwrap();
+        if parent == "tui = [{ keep = true }]" {
+            // The existing shared editor does not support array-of-tables.
+            // Retain that precise refusal instead of widening this importer.
+            assert_eq!(result["status"], "blocked");
+            assert_eq!(result["code"], "invalidFormat");
+        } else {
+            assert_eq!(result["status"], "ready", "{parent}");
+        }
+        assert_eq!(result["changes"], json!([]));
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), external);
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            before
+        );
+    }
+    fx.state
+        .db
+        .set_config_snippet("codex", Some("api_key = 'synthetic-parse-secret".into()))
+        .unwrap();
+    let malformed = C::read_codex_shared_settings_import(&fx.state).unwrap();
+    assert_eq!(malformed["code"], "invalidFormat");
+    assert!(!malformed.to_string().contains("synthetic-parse-secret"));
+}

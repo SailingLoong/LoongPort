@@ -8,6 +8,7 @@ import {
 import { useTranslation } from "react-i18next";
 import JsonEditor from "@/components/JsonEditor";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Notice, NoticeSlot } from "@/components/ui/notice";
 import {
   Sheet,
@@ -20,10 +21,13 @@ import {
 } from "@/components/ui/sheet";
 import {
   getCodexSharedSettings,
+  getCodexSharedSettingsImport,
   getCodexSharedSettingsSaveResult,
   previewCodexSharedSettings,
+  previewCodexSharedSettingsImport,
   saveCodexSharedSettings,
   type CodexSharedSettingsPreview,
+  type CodexSharedSettingsImport,
   type CodexSharedSettingsRequest,
   type CodexSharedSettingsResult,
 } from "@/lib/api/config";
@@ -46,6 +50,7 @@ const errorCodes = [
   "ownerUnavailable",
   "vaultLocked",
   "pendingOperation",
+  "legacyDisabled",
 ];
 const resultStatuses = [
   "completed",
@@ -80,6 +85,9 @@ export function CodexSharedSettings({
   );
   const [result, setResult] = useState<CodexSharedSettingsResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [importOptions, setImportOptions] =
+    useState<CodexSharedSettingsImport | null>(null);
+  const [selectedFields, setSelectedFields] = useState<number[]>([]);
   const submittedDraft = useRef<string | null>(null);
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark"),
@@ -98,6 +106,8 @@ export function CodexSharedSettings({
     dirtyRef.current = false;
     setDraft(baseline);
     setPreview(null);
+    setImportOptions(null);
+    setSelectedFields([]);
   }
   useImperativeHandle(ref, () => ({
     get hasPendingChanges() {
@@ -114,6 +124,8 @@ export function CodexSharedSettings({
     setOperation(true);
     setReady(false);
     setPreview(null);
+    setImportOptions(null);
+    setSelectedFields([]);
     setError(null);
     setResult(null);
     submittedDraft.current = null;
@@ -171,6 +183,47 @@ export function CodexSharedSettings({
     setError(null);
     await lookup(result.request);
     setOperation(false);
+  }
+  async function loadImportOptions() {
+    if (busyRef.current || !ready || unresolved) return;
+    setOperation(true);
+    setPreview(null);
+    setImportOptions(null);
+    setSelectedFields([]);
+    setError(null);
+    try {
+      const value = await getCodexSharedSettingsImport();
+      if (value.status === "ready") setImportOptions(value);
+      else showError(value.code);
+    } catch {
+      showError();
+    } finally {
+      setOperation(false);
+    }
+  }
+  async function previewImport(fields: string[][]) {
+    if (busyRef.current || !ready || unresolved || fields.length === 0) return;
+    setOperation(true);
+    setPreview(null);
+    setResult(null);
+    setError(null);
+    try {
+      const value = await previewCodexSharedSettingsImport(
+        fields,
+        crypto.randomUUID(),
+      );
+      if (value.status === "ready") {
+        // The backend seeds selected missing fields into the latest live projection.
+        setDraft(value.config);
+        setPreview(value);
+        setImportOptions(null);
+        setSelectedFields([]);
+      } else showError(value.code);
+    } catch {
+      showError();
+    } finally {
+      setOperation(false);
+    }
   }
   async function previewChanges() {
     if (busyRef.current || !ready || unresolved || !dirtyRef.current) return;
@@ -241,6 +294,75 @@ export function CodexSharedSettings({
               }
             >
               {t("codexSharedSettings.manageMcp")}
+            </Button>
+          )}
+          {importOptions ? (
+            <Notice title={t("codexSharedSettings.import.title")}>
+              <p>{t("codexSharedSettings.import.description")}</p>
+              {importOptions.fields.length === 0 ? (
+                <p className="mt-2">{t("codexSharedSettings.import.empty")}</p>
+              ) : (
+                <ul className="mt-3 space-y-3">
+                  {importOptions.fields.map((field, index) => (
+                    <li key={JSON.stringify(field.path)}>
+                      <label className="flex items-start gap-2">
+                        <Checkbox
+                          aria-label={field.field}
+                          checked={selectedFields.includes(index)}
+                          disabled={busy || unresolved}
+                          onCheckedChange={(checked) =>
+                            setSelectedFields((selected) =>
+                              checked
+                                ? [...selected, index]
+                                : selected.filter((value) => value !== index),
+                            )
+                          }
+                        />
+                        <span className="min-w-0">
+                          <span className="block break-all font-medium">
+                            {field.field}
+                          </span>
+                          <span className="block whitespace-pre-wrap break-all font-mono select-text">
+                            {field.value}
+                          </span>
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-3 flex gap-2">
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    setImportOptions(null);
+                    setSelectedFields([]);
+                  }}
+                >
+                  {t("codexSharedSettings.import.cancel")}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy || unresolved || selectedFields.length === 0}
+                  onClick={() => {
+                    const fields = selectedFields.map(
+                      (index) => importOptions.fields[index].path,
+                    );
+                    beforeLeave(() => void previewImport(fields));
+                  }}
+                >
+                  {t("codexSharedSettings.import.preview")}
+                </Button>
+              </div>
+            </Notice>
+          ) : (
+            <Button
+              variant="outline"
+              disabled={!ready || busy || unresolved}
+              onClick={() => void loadImportOptions()}
+            >
+              {t("codexSharedSettings.import.open")}
             </Button>
           )}
           <JsonEditor
