@@ -140,6 +140,9 @@ pub(crate) struct StartupUpgradeView {
     pub(crate) can_authenticate: bool,
     pub(crate) can_check_and_backup: bool,
     pub(crate) can_start_upgrade: bool,
+    pub(crate) can_complete_upgrade: bool,
+    pub(crate) archive_retained: bool,
+    pub(crate) sync_paused: bool,
 }
 
 /// Older-binary recovery deliberately has no runtime coordinator. Keep that
@@ -168,6 +171,9 @@ impl StartupUpgradeView {
             can_authenticate: false,
             can_check_and_backup: false,
             can_start_upgrade: false,
+            can_complete_upgrade: false,
+            archive_retained: false,
+            sync_paused: false,
         }
     }
 }
@@ -235,7 +241,19 @@ impl UpgradeInspection {
 
     pub(crate) fn ensure_runtime_admitted(&self) -> Result<(), AppError> {
         let device = match self {
-            Self::Stable(stable) => &stable.device,
+            Self::Stable(stable) => {
+                if let Some(versions) = stable.source_versions {
+                    if versions.upstream == database::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+                        return Err(AppError::Config("upgrade.checkpoint_pending".into()));
+                    }
+                    if versions.upstream > database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+                        && versions.upstream < database::UPSTREAM4_SCHEMA_VERSION
+                    {
+                        return Err(AppError::Config("upgrade.unsupported_source".into()));
+                    }
+                }
+                &stable.device
+            }
             Self::RecoveryRequired(evidence) => &evidence.device,
         };
         checkpoint::ensure_sync_admitted(device)

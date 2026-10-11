@@ -19,8 +19,31 @@ pub(crate) fn preflight(path: &Path) -> Result<(), AppError> {
     result
 }
 
+/// Existing source17 must take the explicit reviewed migration path before
+/// opening a session or changing the original database. Fresh databases still
+/// use ordinary initialization; intermediate upgrade schemas are not admitted.
+pub(crate) fn preflight_runtime(path: &Path) -> Result<(), AppError> {
+    let Some(inspected) = super::inspection::capture(path)? else {
+        return Ok(());
+    };
+    preflight_connection(&inspected.image)?;
+    let version = Database::get_user_version(&inspected.image)?;
+    let result = if version == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+        Err(AppError::Config("upgrade.checkpoint_pending".into()))
+    } else if version > super::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        && version < super::UPSTREAM4_SCHEMA_VERSION
+    {
+        Err(AppError::Config("upgrade.unsupported_source".into()))
+    } else {
+        Ok(())
+    };
+    super::inspection::verify_unchanged(path, &inspected.revision)?;
+    result
+}
+
 pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
     if Database::get_user_version(conn)? > super::SCHEMA_VERSION
+        || is_prefork_relic(conn)?
         || super::loongport_schema::read_stored_version(conn)?
             > super::loongport_schema::LOONGPORT_SCHEMA_VERSION
     {
@@ -84,6 +107,7 @@ pub(crate) fn copy(source: &Connection, destination: &mut Connection) -> Result<
 
 pub(crate) fn upgrade_staging(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
     if Database::get_user_version(conn)? > super::SCHEMA_VERSION
+        || is_prefork_relic(conn)?
         || super::loongport_schema::read_stored_version(conn)?
             > super::loongport_schema::LOONGPORT_SCHEMA_VERSION
     {
@@ -119,6 +143,12 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
             return Err(AppError::Config(code));
         }
         Err(error) => return Err(error),
+    }
+    preflight_runtime(path)?;
+    let device = crate::live::engine::DeviceStore::for_device();
+    if crate::secrets::upgrade::checkpoint::resume_candidate_bytes(&device)?.is_some() {
+        return reopen_verified_upgrade(path, vault)?
+            .ok_or_else(|| AppError::Config("upgrade.checkpoint_pending".into()));
     }
     let root = path
         .parent()
@@ -251,7 +281,7 @@ fn sync_directory(path: &Path) -> Result<(), AppError> {
 /// 一份历史备份劫持启动或密钥轮换。
 pub(crate) fn is_prefork_relic(conn: &Connection) -> Result<bool, AppError> {
     Ok(super::loongport_schema::read_stored_version(conn)? == 0
-        && Database::get_user_version(conn)? > super::SCHEMA_VERSION)
+        && Database::get_user_version(conn)? > super::UPSTREAM4_SOURCE_SCHEMA_VERSION)
 }
 
 pub(crate) fn migrate_backups(
@@ -360,13 +390,32 @@ mod tests {
             conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;")
                 .unwrap();
             Database::create_tables_on_conn(&conn).unwrap();
-            Database::apply_schema_migrations_on_conn(&conn).unwrap();
+            Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
             super::super::loongport_schema::apply(&conn).unwrap();
             let bytes: Vec<u8> = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
             std::fs::write(&modern_path, bytes).unwrap();
         }
 
         let vault = VaultContext::generate().unwrap();
+        for version in [18, 19, 20] {
+            let relic = Connection::open_with_flags(
+                &relic_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut staging = Connection::open_in_memory().unwrap();
+            copy(&relic, &mut staging).unwrap();
+            staging
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            let before = staging.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+            assert!(
+                matches!(upgrade_staging(&staging, &vault), Err(AppError::Config(code)) if code == "secret.database_version_too_new"),
+                "raising normal schema support must not admit an unrelated upstream relic"
+            );
+            assert!(staging.serialize(rusqlite::MAIN_DB).unwrap().to_vec() == before);
+        }
+
         migrate_backups(dir.path(), &vault, true).unwrap();
 
         assert_eq!(
@@ -377,6 +426,10 @@ mod tests {
         let modern =
             Connection::open_with_flags(&modern_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .unwrap();
+        assert_eq!(
+            Database::get_user_version(&modern).unwrap(),
+            super::super::SCHEMA_VERSION
+        );
         assert!(
             stored_metadata(&modern).unwrap().is_some(),
             "正常备份应已被迁移为带 vault 元数据的加密形态"

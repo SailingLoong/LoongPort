@@ -81,7 +81,7 @@ fn path(device: &DeviceStore) -> PathBuf {
     device.root().join(FILE)
 }
 /// A passive candidate only; content and completed DB identity require authentication.
-pub(super) fn resume_candidate_bytes(device: &DeviceStore) -> Result<Option<Vec<u8>>, AppError> {
+pub(crate) fn resume_candidate_bytes(device: &DeviceStore) -> Result<Option<Vec<u8>>, AppError> {
     if !super::super::files::device_directory_exists(device.root())? {
         return Ok(None);
     }
@@ -641,4 +641,330 @@ pub(crate) fn verified_database_id(
         return Err(AppError::Config("secret.recovery_required".into()));
     }
     Ok(Some(manifest.id.clone()))
+}
+
+/// Completed recovery material uses the existing device-file/key lifecycle.
+/// Its source DB uses the existing encrypted database backup lifecycle. Neither
+/// container retains the old key or nests an old encrypted checkpoint.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletionArchive {
+    format: u32,
+    id: String,
+    root: PathBuf,
+    device: PathBuf,
+    database_backup: String,
+    database_digest: String,
+    files: Vec<ArchivedFile>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchivedKind {
+    Native,
+    Device,
+    Settings,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchivedFile {
+    path: PathBuf,
+    kind: ArchivedKind,
+    bytes: Option<Vec<u8>>,
+}
+impl Drop for ArchivedFile {
+    fn drop(&mut self) {
+        if let Some(bytes) = &mut self.bytes {
+            bytes.zeroize();
+        }
+    }
+}
+fn archive_descriptor() -> Result<DeviceFile, AppError> {
+    DeviceFile::registered(crate::secrets::owned_file::UPGRADE_ARCHIVE_FILE)
+}
+fn archive_path(device: &DeviceStore) -> PathBuf {
+    device
+        .root()
+        .join(crate::secrets::owned_file::UPGRADE_ARCHIVE_FILE)
+}
+fn read_archive(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+) -> Result<CompletionArchive, AppError> {
+    if pending_generation(root)? {
+        return Err(AppError::Config("secret.recovery_required".into()));
+    }
+    let path = archive_path(device);
+    let revision = inspection::file_revision(&path)?;
+    let bytes = config_file_io::read_regular_file(&path, MAX_BYTES)
+        .map_err(|e| AppError::io(&path, e))?
+        .ok_or_else(invalid)?;
+    let plain = archive_descriptor()?.decode(vault, &bytes)?;
+    let archive: CompletionArchive = serde_json::from_slice(&plain).map_err(|_| invalid())?;
+    if archive.format != 1
+        || archive.root != root
+        || archive.device != device.root()
+        || archive.id != id
+        || uuid::Uuid::parse_str(id)
+            .map(|v| v.to_string())
+            .ok()
+            .as_deref()
+            != Some(id)
+        || archive.database_backup != format!("upgrade_{id}.db")
+    {
+        return Err(invalid());
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for file in &archive.files {
+        if !file.path.is_absolute()
+            || !paths.insert(&file.path)
+            || file.path == archive_path(device)
+            || file.path == self::path(device)
+        {
+            return Err(invalid());
+        }
+        match file.kind {
+            ArchivedKind::Device => {
+                DeviceFile::registered(
+                    file.path
+                        .strip_prefix(device.root())
+                        .map_err(|_| invalid())?,
+                )?;
+            }
+            ArchivedKind::Settings if file.path != crate::settings::settings_path() => {
+                return Err(invalid())
+            }
+            _ => {}
+        }
+    }
+    inspection::verify_unchanged(&path, &revision)?;
+    Ok(archive)
+}
+
+/// Authenticates the retained source DB under the current key, including after
+/// the original rotation owner has rewrapped its metadata and protected fields.
+pub(crate) fn archived_database(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+) -> Result<Connection, AppError> {
+    let archive = read_archive(root, device, vault, id)?;
+    let path = root.join("backups").join(&archive.database_backup);
+    let captured = inspection::capture(&path)?.ok_or_else(invalid)?;
+    // Password rewrap changes the current wrapper, not the archive's data key.
+    // Authenticate the backup's own wrapper with that same current key.
+    let metadata = database::vault::stored_metadata(&captured.image)?.ok_or_else(invalid)?;
+    Database::validate_sync_source(vault, &metadata)?;
+    let source = VaultContext::from_key(metadata, vault.export_key())
+        .map_err(crate::secrets::inventory::secret_error)?;
+    database::vault::check_identity(&captured.image, &source)?;
+    crate::secrets::inventory::validate_database(&captured.image, &source)?;
+    if Database::get_user_version(&captured.image)? != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        || database::loongport_schema::read_stored_version(&captured.image)?
+            != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    {
+        return Err(invalid());
+    }
+    if crate::secrets::inventory::upgrade_archive_content_digest(&captured.image, &source)?
+        != archive.database_digest
+    {
+        return Err(changed());
+    }
+    inspection::verify_unchanged(&path, &captured.revision)?;
+    Ok(captured.image)
+}
+
+type RestoredArchiveFiles = Vec<(PathBuf, Option<Zeroizing<Vec<u8>>>)>;
+
+/// Reconstruct source files for selective recovery using their original owners.
+/// This is a read, not an automatic rollback of current configuration.
+pub(crate) fn restored_archive_files(
+    root: &Path,
+    device: &DeviceStore,
+    vault: &VaultContext,
+    id: &str,
+) -> Result<RestoredArchiveFiles, AppError> {
+    let archive = read_archive(root, device, vault, id)?;
+    archived_database(root, device, vault, id)?;
+    archive
+        .files
+        .iter()
+        .map(|file| {
+            let bytes = file
+                .bytes
+                .as_ref()
+                .map(|bytes| match file.kind {
+                    ArchivedKind::Native => Ok(Zeroizing::new(bytes.clone())),
+                    ArchivedKind::Device => DeviceFile::registered(
+                        file.path
+                            .strip_prefix(device.root())
+                            .map_err(|_| invalid())?,
+                    )?
+                    .encode(vault, bytes)
+                    .map(Zeroizing::new),
+                    ArchivedKind::Settings => {
+                        crate::settings::restore_settings_archive_with_vault(bytes, vault)
+                            .map(Zeroizing::new)
+                    }
+                })
+                .transpose()?;
+            Ok((file.path.clone(), bytes))
+        })
+        .collect()
+}
+
+/// Query an existing completed result without repeating archive publication.
+/// A pause record can precede active-checkpoint release after an interruption.
+pub(crate) fn read_completed_result(
+    db: &Database,
+    device: &DeviceStore,
+    vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+) -> Result<Option<crate::settings::UpgradeCompletion>, AppError> {
+    let active = path(device);
+    let revision = inspection::file_revision(&active)?;
+    if config_file_io::read_regular_file(&active, MAX_BYTES)
+        .map_err(|e| AppError::io(&active, e))?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let record = crate::settings::read_upgrade_completion_with_vault(db.secret_session(), vault)?;
+    if let Some(record) = &record {
+        restored_archive_files(
+            db.secret_session().root(),
+            device,
+            vault,
+            &record.checkpoint_id,
+        )?;
+    }
+    inspection::verify_unchanged(&active, &revision)?;
+    Ok(record)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionBoundary {
+    DatabaseArchived,
+    ArchiveVerified,
+    PausePersisted,
+    BeforeRelease,
+}
+
+/// Caller holds the existing sync/app/lifecycle owners and freshly proves all
+/// relevant applications. Hooks keep the original fault-injection convention.
+pub(crate) fn archive_and_release(
+    db: &Database,
+    device: &DeviceStore,
+    vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+    id: &str,
+    hook: &mut dyn FnMut(CompletionBoundary) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let root = db.secret_session().root();
+    let active_path = path(device);
+    let revision = inspection::file_revision(&active_path)?;
+    let active = config_file_io::read_regular_file(&active_path, MAX_BYTES)
+        .map_err(|e| AppError::io(&active_path, e))?;
+    let Some(active) = active else {
+        let record = read_completed_result(db, device, vault)?.ok_or_else(changed)?;
+        if record.checkpoint_id != id {
+            return Err(changed());
+        }
+        inspection::verify_unchanged(&active_path, &revision)?;
+        return Ok(());
+    };
+    if verified_database_id(root, device, vault)?.as_deref() != Some(id) {
+        return Err(changed());
+    }
+    let plain = descriptor()?.decode(vault, &active)?;
+    let manifest: Manifest = serde_json::from_slice(&plain).map_err(|_| invalid())?;
+    let source = manifest.database(vault)?;
+    let backup = db.archive_upgrade_database(&source, id, vault)?;
+    hook(CompletionBoundary::DatabaseArchived)?;
+    let archived = archive_path(device);
+    {
+        let files = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let kind = if file.path == crate::settings::settings_path() {
+                    ArchivedKind::Settings
+                } else if manifest.device_paths.contains(&file.path) {
+                    ArchivedKind::Device
+                } else {
+                    ArchivedKind::Native
+                };
+                let bytes = file
+                    .bytes
+                    .as_ref()
+                    .map(|bytes| match kind {
+                        ArchivedKind::Settings => {
+                            crate::settings::export_settings_archive_with_vault(bytes, vault)
+                                .map(|v| v.to_vec())
+                        }
+                        ArchivedKind::Device => DeviceFile::registered(
+                            file.path
+                                .strip_prefix(device.root())
+                                .map_err(|_| invalid())?,
+                        )?
+                        .decode(vault, bytes)
+                        .map(|v| v.to_vec()),
+                        ArchivedKind::Native => Ok(bytes.clone()),
+                    })
+                    .transpose()?;
+                Ok(ArchivedFile {
+                    path: file.path.clone(),
+                    kind,
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let archive = CompletionArchive {
+            format: 1,
+            id: id.into(),
+            root: root.into(),
+            device: device.root().into(),
+            database_backup: backup
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(invalid)?
+                .into(),
+            database_digest: crate::secrets::inventory::upgrade_archive_content_digest(
+                &source, vault,
+            )?,
+            files,
+        };
+        let plain = Zeroizing::new(serde_json::to_vec(&archive).map_err(|_| invalid())?);
+        if plain.len() as u64 > MAX_BYTES / 2 {
+            return Err(AppError::Config("upgrade.checkpoint_too_large".into()));
+        }
+        let bytes = archive_descriptor()?.encode(vault, &plain)?;
+        match config_file_io::read_regular_file(&archived, MAX_BYTES)
+            .map_err(|e| AppError::io(&archived, e))?
+        {
+            Some(existing) => {
+                if *archive_descriptor()?.decode(vault, &existing)? != *plain {
+                    return Err(changed());
+                }
+            }
+            None => config_file_io::write_durable_new(&archived, &bytes)?,
+        }
+    }
+    restored_archive_files(root, device, vault, id)?;
+    hook(CompletionBoundary::ArchiveVerified)?;
+    crate::settings::set_upgrade_completion_with_vault(id, db.secret_session(), vault)?;
+    hook(CompletionBoundary::PausePersisted)?;
+    hook(CompletionBoundary::BeforeRelease)?;
+    crate::settings::set_upgrade_completion_with_vault(id, db.secret_session(), vault)?;
+    if verified_database_id(root, device, vault)?.as_deref() != Some(id) {
+        return Err(changed());
+    }
+    inspection::verify_unchanged(&active_path, &revision)?;
+    std::fs::remove_file(&active_path).map_err(|e| AppError::io(&active_path, e))?;
+    crate::live::engine::sync_parent(&active_path)?;
+    if resume_candidate_bytes(device)?.is_some() {
+        return Err(changed());
+    }
+    restored_archive_files(root, device, vault, id)?;
+    Ok(())
 }

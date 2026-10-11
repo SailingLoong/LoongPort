@@ -4632,6 +4632,19 @@
     }
   },
   "startupUpgrade": {
+    "completed": "本機升級已完成。",
+    "archiveRetained": "可恢復封存與完成記錄仍保留，活動升級檢查點已釋放。",
+    "completedSyncPaused": "同步仍獨立暫停。恢復前，請在同步設定中確認獨立同步設定或相容裝置。",
+    "notUsed": "已核驗此應用在本機未使用，無需進行原生設定比對。",
+    "syncResumeReview": "核對恢復同步",
+    "syncResumeSavedConfig": "本次確認針對目前已儲存的同步設定，不包含尚未儲存的修改。請選擇並確認下列一項。此操作僅解除本機升級同步暫停，不會上傳、下載或恢復資料。",
+    "syncResumeChoice": {
+      "independentConfig": "我確認已儲存的同步設定與不相容裝置相互獨立。",
+      "compatibleDevices": "我確認共用已儲存同步設定的所有裝置均相容。"
+    },
+    "syncResumeConfirm": "確認並解除同步暫停",
+    "syncResumeConfirmed": "本機升級同步暫停已解除，仍依現有同步設定運作。",
+    "syncResumeUnavailable": "無法核驗恢復同步的條件。請完成本機升級後，重新核對已儲存的同步設定。",
     "syncPausedTitle": "升級期間同步已暫停",
     "syncPausedReason": "升級檢查點仍保留。為避免未經核對的裝置覆寫升級資料，上傳與下載保持暫停；恢復同步前仍須確認獨立同步設定或相容裝置。",
     "syncReviewHint": "可前往「{{settings}} → {{auth}} → {{protection}}」；資料庫已核驗時，使用「{{review}}」查看目前狀態。核對不會自動恢復同步。",

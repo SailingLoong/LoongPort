@@ -58,7 +58,8 @@ fn upgrade_review_is_read_only_and_secret_free() {
 fn upgrade_review_preserves_future_and_recovery_precedence() {
     let f = Fixture::new();
     let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-    conn.pragma_update(None, "user_version", 20).unwrap();
+    conn.pragma_update(None, "user_version", crate::database::SCHEMA_VERSION + 1)
+        .unwrap();
     drop(conn);
     std::fs::write(f.root.join("vault.json"), b"unreadable-future-vault").unwrap();
     let before = snapshot(f._temporary.path());

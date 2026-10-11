@@ -31,6 +31,7 @@ pub(crate) struct UpgradeAppReview {
     pub(crate) default_action: &'static str,
     pub(crate) default_takeover: bool,
     pub(crate) can_complete_app: bool,
+    pub(crate) not_used: bool,
     pub(crate) can_start_upgrade: bool,
     pub(crate) direct_provider_resolution: &'static str,
     pub(crate) retained_provider_id: Option<String>,
@@ -377,6 +378,259 @@ impl AuthenticatedUpgrade {
         Ok(result)
     }
 
+    /// The existing row planner is read-only here: a current attached row must
+    /// already have its planned native image, mode contract and live listener.
+    fn review_completion_app_locked(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        app: &AppType,
+        state: &crate::store::AppState,
+        generation: Option<&CodexLiveAuthGuard<'_>>,
+    ) -> Result<AppCapture, AppError> {
+        self.verify_app_session(inspected, token, app)?;
+        let capture = || {
+            let vault = self.session.read()?;
+            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            capture_app_with_state(
+                &self.device,
+                &self.session,
+                &self.token,
+                app,
+                &vault,
+                None,
+                self.app_settings(app, &vault)?,
+                false,
+                generation,
+            )
+        };
+        let first = capture()?;
+        let mut complete = first.view.can_complete_app;
+        if let Some(entry) = first
+            .recovery_facts
+            .live
+            .as_ref()
+            .and_then(|live| live.apps.get(app.as_str()))
+        {
+            let mode = entry.mode_state();
+            if mode.attached
+                && mode.is_proxy()
+                && first.view.has_pending_operation == Some(false)
+                && (first.view.pointer_consistent == Some(true)
+                    || (first.recovery_facts.local.is_none()
+                        && first.recovery_facts.currents.is_empty()))
+            {
+                complete = (|| -> Result<bool, AppError> {
+                    Self::verify_completion_listener(&first, state)?;
+                    let id = mode.proxy_route.as_deref().ok_or_else(source_changed)?;
+                    let row = state
+                        .db
+                        .get_provider_by_id(id, app.as_str())?
+                        .ok_or_else(source_changed)?;
+                    let plan = crate::mode::controller::plan_row_save_with_generation(
+                        &state.proxy_service,
+                        app,
+                        &row,
+                        &row,
+                        token,
+                        None,
+                        generation,
+                    )?;
+                    if plan.files.is_empty()
+                        || plan.target.state.as_ref() != Some(&mode)
+                        || plan
+                            .target
+                            .written
+                            .as_ref()
+                            .is_some_and(|written| entry.written.as_ref() != Some(written))
+                    {
+                        return Ok(false);
+                    }
+                    let vault = self.session.read()?;
+                    if *app == AppType::Codex {
+                        return crate::services::provider::codex_direct::planned_files_match(
+                            &plan.files,
+                            &vault,
+                        );
+                    }
+                    for (file, patch) in &plan.files {
+                        let pre = crate::live::engine::read_current(&file.path)?;
+                        if crate::live::engine::digest(pre.as_deref()) != patch.expected_pre {
+                            return Err(source_changed());
+                        }
+                        let after = match &patch.then {
+                            crate::live::patch::WholeFile::Write(bytes) => Some(bytes.as_slice()),
+                            crate::live::patch::WholeFile::Delete => None,
+                        };
+                        if pre.as_deref() != after {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })()
+                .unwrap_or(false);
+            }
+        }
+        let mut second = capture()?;
+        if first.view.revision != second.view.revision {
+            return Err(source_changed());
+        }
+        self.verify(inspected)?;
+        second.view.can_complete_app =
+            complete && Self::verify_completion_listener(&second, state).is_ok();
+        Ok(second)
+    }
+
+    fn verify_completion_listener(
+        capture: &AppCapture,
+        state: &crate::store::AppState,
+    ) -> Result<(), AppError> {
+        let attached = capture
+            .recovery_facts
+            .live
+            .as_ref()
+            .and_then(|live| live.apps.get(&capture.view.app_type))
+            .map(|entry| entry.mode_state())
+            .is_some_and(|mode| mode.attached);
+        if attached {
+            let (address, port) = capture
+                .recovery_facts
+                .listener
+                .as_ref()
+                .and_then(listener_endpoint)
+                .ok_or_else(source_changed)?;
+            futures::executor::block_on(
+                state.proxy_service.verify_recovery_listener(address, port),
+            )
+            .map_err(AppError::Message)?;
+        }
+        Ok(())
+    }
+
+    fn verify_completion_apps_locked(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        generation: &CodexLiveAuthGuard<'_>,
+        state: &crate::store::AppState,
+    ) -> Result<Vec<AppCapture>, AppError> {
+        let mut captures = Vec::new();
+        for app in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::GrokBuild,
+        ] {
+            let capture = self.review_completion_app_locked(
+                inspected,
+                token,
+                &app,
+                state,
+                (app == AppType::Codex).then_some(generation),
+            )?;
+            if !(capture.view.can_complete_app || capture.view.not_used) {
+                return Err(AppError::Config("upgrade.app_verification_required".into()));
+            }
+            captures.push(capture);
+        }
+        Ok(captures)
+    }
+
+    pub(crate) fn can_complete_upgrade(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        state: &crate::store::AppState,
+    ) -> Result<bool, AppError> {
+        if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session) {
+            return Err(source_changed());
+        }
+        let _switches =
+            futures::executor::block_on(state.proxy_service.lock_configuration_import());
+        crate::rt::block_on(
+            state
+                .codex_oauth_manager
+                .with_live_auth_guard(&[], |generation| {
+                    let _apps = ["claude", "codex", "gemini", "grokbuild"]
+                        .map(crate::live::engine::lock_app);
+                    match self.verify_completion_apps_locked(inspected, token, generation, state) {
+                        Ok(_) => Ok(true),
+                        Err(AppError::Config(code))
+                            if code == "upgrade.app_verification_required" =>
+                        {
+                            Ok(false)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }),
+        )
+    }
+
+    pub(crate) fn complete_checkpoint(
+        &self,
+        inspected: &UpgradeInspection,
+        token: &str,
+        id: &str,
+        state: &crate::store::AppState,
+    ) -> Result<(), AppError> {
+        if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session)
+            || self.database_checkpoint.as_deref() != Some(id)
+        {
+            return Err(source_changed());
+        }
+        let _switches =
+            futures::executor::block_on(state.proxy_service.lock_configuration_import());
+        crate::rt::block_on(
+            state
+                .codex_oauth_manager
+                .with_live_auth_guard(&[], |generation| {
+                    let _apps = ["claude", "codex", "gemini", "grokbuild"]
+                        .map(crate::live::engine::lock_app);
+                    let verified =
+                        self.verify_completion_apps_locked(inspected, token, generation, state)?;
+                    let vault = self.session.read()?;
+                    checkpoint::archive_and_release(
+                        &state.db,
+                        &self.device,
+                        &vault,
+                        id,
+                        &mut |boundary| {
+                            if boundary == checkpoint::CompletionBoundary::BeforeRelease {
+                                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                                for (app, before) in [
+                                    AppType::Claude,
+                                    AppType::Codex,
+                                    AppType::Gemini,
+                                    AppType::GrokBuild,
+                                ]
+                                .iter()
+                                .zip(&verified)
+                                {
+                                    let capture = capture_app_with_state(
+                                        &self.device,
+                                        &self.session,
+                                        &self.token,
+                                        app,
+                                        &vault,
+                                        None,
+                                        self.app_settings(app, &vault)?,
+                                        false,
+                                        (*app == AppType::Codex).then_some(generation),
+                                    )?;
+                                    if capture.view.revision != before.view.revision {
+                                        return Err(source_changed());
+                                    }
+                                    Self::verify_completion_listener(&capture, state)?;
+                                }
+                                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                            }
+                            Ok(())
+                        },
+                    )
+                }),
+        )
+    }
+
     pub(crate) fn review_app(
         &self,
         inspected: &UpgradeInspection,
@@ -399,12 +653,30 @@ impl AuthenticatedUpgrade {
         if !std::sync::Arc::ptr_eq(&state.db.secrets, &self.session) {
             return Err(source_changed());
         }
-        if *app != AppType::Codex {
-            return self.review_app(inspected, token, app);
-        }
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
-        self.review_codex_with_switch(inspected, token, app, state)
+        if *app != AppType::Codex {
+            let _app = crate::live::engine::lock_app(app.as_str());
+            return Ok(self
+                .review_completion_app_locked(inspected, token, app, state, None)?
+                .view);
+        }
+        crate::rt::block_on(
+            state
+                .codex_oauth_manager
+                .with_live_auth_guard(&[], |generation| {
+                    let _app = crate::live::engine::lock_app(app.as_str());
+                    Ok(self
+                        .review_completion_app_locked(
+                            inspected,
+                            token,
+                            app,
+                            state,
+                            (*app == AppType::Codex).then_some(generation),
+                        )?
+                        .view)
+                }),
+        )
     }
 
     /// Caller already holds the original switch (and, during recovery,
@@ -1126,7 +1398,10 @@ fn capture_app_with_state(
                 .as_ref()
                 .is_some_and(|mode| mode.attached)
     });
-    let listener = if attached_pending || include_listener {
+    let listener = if attached_pending
+        || include_listener
+        || mode.as_ref().is_some_and(|mode| mode.attached)
+    {
         let conn = db.conn.lock()?;
         let mut statement = conn.prepare("SELECT app_type, listen_address, listen_port, proxy_enabled, enable_logging FROM proxy_config ORDER BY app_type")?;
         let rows = statement
@@ -1424,6 +1699,28 @@ fn capture_app_with_state(
         })
         && (currents.len() <= 1 || forward_pointer_proven)
         || native_pending.is_some();
+    // Missing applications need no invented native setup. All original owners
+    // must independently be empty; unknown app envelopes never qualify.
+    let not_used = rows.is_empty()
+        && currents.is_empty()
+        && local.is_none()
+        && live
+            .as_ref()
+            .is_some_and(|live| !live.apps.contains_key(app.as_str()))
+        && pending == Some(None)
+        && flags == (false, false)
+        && preference.is_none()
+        && order.profiles.is_none()
+        && order.current.is_none()
+        && order.priority.is_none()
+        && (client.status == "missing"
+            || (client.status == "parsed" && client.marker == Some(false)))
+        && client.catalog_ownership != Some("managed")
+        && (*app != AppType::Codex
+            || crate::services::provider::codex_direct::files()
+                .iter()
+                .skip(2)
+                .all(|file| bound.get(&file.path).is_some_and(Option::is_none)));
     let can_complete_app = candidate.is_some()
         && client.status == "parsed"
         && client.marker == Some(false)
@@ -1638,6 +1935,7 @@ fn capture_app_with_state(
             default_action: "keep_files",
             default_takeover: false,
             can_complete_app,
+            not_used,
             can_start_upgrade: false,
             direct_provider_resolution,
             retained_provider_id,

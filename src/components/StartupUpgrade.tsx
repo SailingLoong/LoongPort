@@ -169,120 +169,129 @@ function UpgradeAppCard({
       aria-busy={busy}
     >
       <h2 className="font-semibold">{app.name}</h2>
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
-        <dt>{t("startupUpgrade.modeLabel")}</dt>
-        <dd>
-          {t(
-            view?.savedMode === "direct"
-              ? "startupUpgrade.mode.direct"
-              : view?.savedMode === "proxy"
-                ? "startupUpgrade.mode.proxy"
-                : "startupUpgrade.unknown",
-          )}
-        </dd>
-        <dt>{t("startupUpgrade.journalLabel")}</dt>
-        <dd>{fact(view?.hasPendingOperation)}</dd>
-        <dt>{t("startupUpgrade.pointerLabel")}</dt>
-        <dd>{fact(view?.pointerConsistent)}</dd>
-        <dt>{t("startupUpgrade.fieldsLabel")}</dt>
-        <dd>{fact(view?.storedFieldsMatch)}</dd>
-      </dl>
-      <p className="text-sm text-muted-foreground">
-        {t("startupUpgrade.keepFiles")}
-      </p>
-      <p className="text-sm text-muted-foreground">
-        {t("startupUpgrade.noTakeover")}
-      </p>
-      {(view?.canChooseProvider === true || view?.canChooseMode === true) && (
-        <div className="space-y-2">
-          <p className="text-sm font-medium">
-            {t("startupUpgrade.nativeProvider")}
+      {view?.notUsed === true ? (
+        <p className="text-sm text-muted-foreground">
+          {t("startupUpgrade.notUsed")}
+        </p>
+      ) : (
+        <>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+            <dt>{t("startupUpgrade.modeLabel")}</dt>
+            <dd>
+              {t(
+                view?.savedMode === "direct"
+                  ? "startupUpgrade.mode.direct"
+                  : view?.savedMode === "proxy"
+                    ? "startupUpgrade.mode.proxy"
+                    : "startupUpgrade.unknown",
+              )}
+            </dd>
+            <dt>{t("startupUpgrade.journalLabel")}</dt>
+            <dd>{fact(view?.hasPendingOperation)}</dd>
+            <dt>{t("startupUpgrade.pointerLabel")}</dt>
+            <dd>{fact(view?.pointerConsistent)}</dd>
+            <dt>{t("startupUpgrade.fieldsLabel")}</dt>
+            <dd>{fact(view?.storedFieldsMatch)}</dd>
+          </dl>
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.keepFiles")}
           </p>
-          {view.retainedProviderId ? (
-            <p className="text-sm">
-              {
-                view.keepFilesProviders.find(
-                  (provider) => provider.id === view.retainedProviderId,
-                )?.name
-              }
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {view.keepFilesProviders.map((provider) => (
-                <Button
-                  key={provider.id}
-                  variant={
-                    providerDraft === provider.id ? "default" : "outline"
-                  }
-                  disabled={busy || !fresh}
-                  aria-pressed={providerDraft === provider.id}
-                  onClick={() => setProviderDraft(provider.id)}
-                >
-                  {provider.name}
-                </Button>
-              ))}
-            </div>
-          )}
-          {view.canChooseMode === true && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.noTakeover")}
+          </p>
+          {(view?.canChooseProvider === true ||
+            view?.canChooseMode === true) && (
             <div className="space-y-2">
               <p className="text-sm font-medium">
-                {t("startupUpgrade.chooseModeLabel")}
+                {t("startupUpgrade.nativeProvider")}
               </p>
-              <div className="flex flex-wrap gap-2">
-                {(["direct", "proxy"] as const).map((mode) => (
-                  <Button
-                    key={mode}
-                    variant={modeDraft === mode ? "default" : "outline"}
-                    disabled={busy || !fresh}
-                    aria-pressed={modeDraft === mode}
-                    onClick={() => {
-                      setModeDraft(mode);
-                      setRouteDraft(null);
-                    }}
-                  >
-                    {t(`startupUpgrade.chooseMode.${mode}`)}
-                  </Button>
-                ))}
-              </div>
-              {modeDraft === "proxy" && (
+              {view.retainedProviderId ? (
+                <p className="text-sm">
+                  {
+                    view.keepFilesProviders.find(
+                      (provider) => provider.id === view.retainedProviderId,
+                    )?.name
+                  }
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {view.keepFilesProviders.map((provider) => (
+                    <Button
+                      key={provider.id}
+                      variant={
+                        providerDraft === provider.id ? "default" : "outline"
+                      }
+                      disabled={busy || !fresh}
+                      aria-pressed={providerDraft === provider.id}
+                      onClick={() => setProviderDraft(provider.id)}
+                    >
+                      {provider.name}
+                    </Button>
+                  ))}
+                </div>
+              )}
+              {view.canChooseMode === true && (
                 <div className="space-y-2">
                   <p className="text-sm font-medium">
-                    {t("startupUpgrade.chooseProxyRouteLabel")}
+                    {t("startupUpgrade.chooseModeLabel")}
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {view.modeRouteProviders.map((provider) => (
+                    {(["direct", "proxy"] as const).map((mode) => (
                       <Button
-                        key={provider.id}
-                        variant={
-                          routeDraft === provider.id ? "default" : "outline"
-                        }
+                        key={mode}
+                        variant={modeDraft === mode ? "default" : "outline"}
                         disabled={busy || !fresh}
-                        aria-pressed={routeDraft === provider.id}
-                        onClick={() => setRouteDraft(provider.id)}
+                        aria-pressed={modeDraft === mode}
+                        onClick={() => {
+                          setModeDraft(mode);
+                          setRouteDraft(null);
+                        }}
                       >
-                        {provider.name}
+                        {t(`startupUpgrade.chooseMode.${mode}`)}
                       </Button>
                     ))}
                   </div>
+                  {modeDraft === "proxy" && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">
+                        {t("startupUpgrade.chooseProxyRouteLabel")}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {view.modeRouteProviders.map((provider) => (
+                          <Button
+                            key={provider.id}
+                            variant={
+                              routeDraft === provider.id ? "default" : "outline"
+                            }
+                            disabled={busy || !fresh}
+                            aria-pressed={routeDraft === provider.id}
+                            onClick={() => setRouteDraft(provider.id)}
+                          >
+                            {provider.name}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
+              <Button
+                disabled={
+                  busy ||
+                  !fresh ||
+                  !(view.retainedProviderId ?? providerDraft) ||
+                  (view.canChooseMode === true &&
+                    (!modeDraft || (modeDraft === "proxy" && !routeDraft)))
+                }
+                onClick={() =>
+                  void act(view.canChooseMode === true ? "mode" : "provider")
+                }
+              >
+                {t("startupUpgrade.keepFiles")}
+              </Button>
             </div>
           )}
-          <Button
-            disabled={
-              busy ||
-              !fresh ||
-              !(view.retainedProviderId ?? providerDraft) ||
-              (view.canChooseMode === true &&
-                (!modeDraft || (modeDraft === "proxy" && !routeDraft)))
-            }
-            onClick={() =>
-              void act(view.canChooseMode === true ? "mode" : "provider")
-            }
-          >
-            {t("startupUpgrade.keepFiles")}
-          </Button>
-        </div>
+        </>
       )}
       {error && (
         <p role="alert" className="text-sm text-destructive">
@@ -297,12 +306,14 @@ function UpgradeAppCard({
         >
           {t("startupUpgrade.recheck")}
         </Button>
-        <Button
-          disabled={busy || !fresh || view?.canRecoverOperation !== true}
-          onClick={() => void act("recover")}
-        >
-          {t("startupUpgrade.recover")}
-        </Button>
+        {view?.notUsed !== true && (
+          <Button
+            disabled={busy || !fresh || view?.canRecoverOperation !== true}
+            onClick={() => void act("recover")}
+          >
+            {t("startupUpgrade.recover")}
+          </Button>
+        )}
       </div>
     </section>
   );
@@ -373,7 +384,10 @@ export function StartupUpgrade({
     setView(null);
     try {
       const next = await startupUpgradeApi.query();
-      if (sequence === request.current) setView(next);
+      if (sequence === request.current) {
+        setView(next);
+        if (next.status === "completed") setError(false);
+      }
     } catch {
       if (sequence === request.current) setError(true);
     }
@@ -393,7 +407,8 @@ export function StartupUpgrade({
       | "publish"
       | "cancel"
       | "exit"
-      | "continue",
+      | "continue"
+      | "complete",
   ) {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -410,12 +425,29 @@ export function StartupUpgrade({
         await exit(0);
         return;
       }
+      if (action === "continue" && completed) {
+        onReady();
+        return;
+      }
       if (action === "continue" && published && view?.reviewToken) {
         await startupUpgradeApi.continueRuntime(view.reviewToken);
         if (sequence === request.current) onReady();
         return;
       }
-      if (action === "authenticate" && view?.canAuthenticate === true) {
+      if (
+        action === "complete" &&
+        canComplete &&
+        view?.reviewToken &&
+        view.checkpointId
+      ) {
+        next = await startupUpgradeApi.complete(
+          view.reviewToken,
+          view.checkpointId,
+        );
+        if (next?.status !== "completed") {
+          throw new Error("upgrade.completion_verification_required");
+        }
+      } else if (action === "authenticate" && view?.canAuthenticate === true) {
         next = await startupUpgradeApi.authenticate(password || null);
       } else if (
         action === "prepare" &&
@@ -457,6 +489,11 @@ export function StartupUpgrade({
     }
   }
   const published = view?.status === "database_verified";
+  const completed = view?.status === "completed";
+  const canComplete =
+    view?.canCompleteUpgrade === true &&
+    !!view.reviewToken &&
+    !!view.checkpointId;
   const canPublish =
     view?.status === "checkpoint_ready" &&
     view.canStartUpgrade === true &&
@@ -472,8 +509,9 @@ export function StartupUpgrade({
     !!view.checkpointId &&
     (view.status === "checkpoint_ready" ||
       view.status === "cancellation_requires_verification");
-  const statusKey =
-    view?.status === "cancelled"
+  const statusKey = completed
+    ? "startupUpgrade.completed"
+    : view?.status === "cancelled"
       ? "startupUpgrade.cancelled"
       : published
         ? "startupUpgrade.databaseOnly"
@@ -502,6 +540,16 @@ export function StartupUpgrade({
         <p role="status" className="text-sm text-muted-foreground">
           {t(statusKey)}
         </p>
+        {completed && view?.archiveRetained === true && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.archiveRetained")}
+          </p>
+        )}
+        {completed && view?.syncPaused === true && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.completedSyncPaused")}
+          </p>
+        )}
         {view?.checkpointPresent && (
           <p className="text-sm text-muted-foreground">
             {t("startupUpgrade.syncPausedReason")}
@@ -658,17 +706,24 @@ export function StartupUpgrade({
             ))}
           </div>
         )}
-        <p className="text-sm text-muted-foreground">
-          {t("startupUpgrade.notComplete")}
-        </p>
+        {!completed && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.notComplete")}
+          </p>
+        )}
         <div className="flex flex-wrap justify-between gap-2 border-t pt-4">
           {/* Runtime handoff retains the checkpoint, sync pause, and per-app restrictions. */}
-          {published && view?.reviewToken && !embedded && (
+          {(completed || (published && view?.reviewToken)) && !embedded && (
             <Button disabled={busy} onClick={() => void act("continue")}>
               {t("startupUpgrade.continue")}
             </Button>
           )}
-          <Button disabled>{t("startupUpgrade.complete")}</Button>
+          <Button
+            disabled={busy || !canComplete}
+            onClick={() => void act("complete")}
+          >
+            {t("startupUpgrade.complete")}
+          </Button>
           <Button
             variant="outline"
             disabled={busy}

@@ -4631,6 +4631,19 @@
     }
   },
   "startupUpgrade": {
+    "completed": "本机升级已完成。",
+    "archiveRetained": "可恢复归档与完成记录仍保留，活动升级检查点已释放。",
+    "completedSyncPaused": "同步仍独立暂停。恢复前，请在同步设置中确认独立同步配置或兼容设备。",
+    "notUsed": "已核验此应用在本机未使用，无需进行原生配置匹配。",
+    "syncResumeReview": "核对恢复同步",
+    "syncResumeSavedConfig": "本次确认针对当前已保存的同步设置，不包含未保存的修改。请选择并确认下列一项。此操作仅解除本机升级同步暂停，不会上传、下载或恢复数据。",
+    "syncResumeChoice": {
+      "independentConfig": "我确认已保存的同步配置与不兼容设备相互独立。",
+      "compatibleDevices": "我确认共用已保存同步配置的所有设备均兼容。"
+    },
+    "syncResumeConfirm": "确认并解除同步暂停",
+    "syncResumeConfirmed": "本机升级同步暂停已解除，仍按现有同步设置运行。",
+    "syncResumeUnavailable": "无法核验恢复同步的条件。请完成本机升级后，重新核对已保存的同步设置。",
     "syncPausedTitle": "升级期间同步已暂停",
     "syncPausedReason": "升级检查点仍保留。为避免未经核对的设备覆盖升级数据，上传和下载保持暂停；恢复同步前还需确认独立同步配置或兼容设备。",
     "syncReviewHint": "可前往“{{settings}} → {{auth}} → {{protection}}”；数据库已核验时，使用“{{review}}”查看当前状态。核对不会自动恢复同步。",

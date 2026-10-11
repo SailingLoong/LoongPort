@@ -66,7 +66,7 @@ use std::sync::Mutex;
 /// [`loongport_schema`](self::loongport_schema)，各记各的版本。
 ///
 /// 合并上游时这个值跟着上游走（v17 = 上游的 Pi 会话用量统计迁移）。
-pub(crate) const SCHEMA_VERSION: i32 = 17;
+pub(crate) const SCHEMA_VERSION: i32 = 20;
 /// Fixed source of the approved upgrade, independent of the runtime ceiling.
 pub(crate) const UPSTREAM4_SOURCE_SCHEMA_VERSION: i32 = 17;
 /// Fixed destination for the approved, explicitly staged upstream upgrade.
@@ -173,7 +173,7 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        vault::preflight(&get_app_config_dir().join(crate::config::DB_FILE_NAME))?;
+        vault::preflight_runtime(&get_app_config_dir().join(crate::config::DB_FILE_NAME))?;
         let secrets = crate::secrets::session::SecretSession::open(
             &get_app_config_dir(),
             &crate::secrets::key_store::SystemKeyStore,

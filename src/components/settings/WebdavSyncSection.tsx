@@ -33,6 +33,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { settingsApi } from "@/lib/api";
+import {
+  startupUpgradeApi,
+  type UpgradeSyncResumeChoice,
+  type UpgradeSyncResumeReview,
+} from "@/lib/api/startupUpgrade";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { SyncRestoreDialog, isSyncRestoreRequired } from "./SyncRestoreDialog";
 import { LegacySyncCleanup } from "./LegacySyncCleanup";
@@ -332,6 +337,115 @@ export function WebdavSyncSection({
     setS3RemoteInfo(null);
   }, []);
 
+  const [resumeReview, setResumeReview] =
+    useState<UpgradeSyncResumeReview | null>(null);
+  const [resumeDialog, setResumeDialog] = useState(false);
+  const [resumeChoice, setResumeChoice] =
+    useState<UpgradeSyncResumeChoice | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeUnavailable, setResumeUnavailable] = useState(false);
+  const resumeBusyRef = useRef(false);
+  const resumeRequest = useRef(0);
+
+  // A changed form or saved target invalidates the reviewed confirmation.
+  useEffect(() => {
+    ++resumeRequest.current;
+    setResumeDialog(false);
+    setResumeChoice(null);
+    // A discarded in-flight read must leave a way to review the new target.
+    if (resumeBusyRef.current) setResumeUnavailable(true);
+  }, [config, s3Config, dirty, s3Dirty, syncType]);
+
+  async function loadSyncResume(
+    openDialog = false,
+    showUnavailable = openDialog,
+  ) {
+    const sequence = ++resumeRequest.current;
+    resumeBusyRef.current = true;
+    setResumeBusy(true);
+    setResumeDialog(false);
+    setResumeChoice(null);
+    setResumeReview(null);
+    setResumeUnavailable(false);
+    try {
+      const next = await startupUpgradeApi.querySyncResume();
+      if (sequence !== resumeRequest.current) return;
+      if (
+        !next?.checkpointId ||
+        !next.revision ||
+        typeof next.paused !== "boolean"
+      ) {
+        setResumeUnavailable(showUnavailable);
+        return;
+      }
+      setResumeReview(next);
+      setResumeDialog(openDialog && next.paused === true);
+    } catch {
+      if (sequence === resumeRequest.current) setResumeUnavailable(true);
+    } finally {
+      resumeBusyRef.current = false;
+      setResumeBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadSyncResume();
+    return () => {
+      ++resumeRequest.current;
+    };
+  }, []);
+
+  function closeSyncResume() {
+    ++resumeRequest.current;
+    setResumeDialog(false);
+    setResumeChoice(null);
+  }
+
+  async function confirmSyncResume() {
+    if (
+      resumeBusyRef.current ||
+      !resumeDialog ||
+      !resumeChoice ||
+      resumeReview?.paused !== true ||
+      dirty ||
+      s3Dirty ||
+      actionState !== "idle" ||
+      s3ActionState !== "idle"
+    )
+      return;
+    resumeBusyRef.current = true;
+    setResumeBusy(true);
+    const sequence = ++resumeRequest.current;
+    const reviewed = resumeReview;
+    const choice = resumeChoice;
+    setResumeChoice(null);
+    setResumeDialog(false);
+    try {
+      const next = await startupUpgradeApi.confirmSyncResume(
+        reviewed.checkpointId,
+        reviewed.revision,
+        choice,
+      );
+      if (sequence !== resumeRequest.current) return;
+      if (
+        next?.checkpointId !== reviewed.checkpointId ||
+        !next.revision ||
+        next.paused !== false
+      ) {
+        throw new Error("upgrade.sync_resume_verification_required");
+      }
+      setResumeReview(next);
+      await queryClient.invalidateQueries();
+    } catch {
+      if (sequence !== resumeRequest.current) return;
+      // A rejected/lost response is read back, never replayed.
+      await loadSyncResume(false, true);
+    } finally {
+      resumeBusyRef.current = false;
+      setResumeBusy(false);
+    }
+  }
+
   // Cleanup justSaved timer on unmount
   useEffect(() => {
     return () => {
@@ -557,15 +671,18 @@ export function WebdavSyncSection({
         message === "配置错误: upgrade.sync_paused"
       ) {
         toast.error(t("startupUpgrade.syncPausedTitle"), {
-          description: `${t("startupUpgrade.syncPausedReason")} ${t(
-            "startupUpgrade.syncReviewHint",
-            {
-              settings: t("common.settings"),
-              auth: t("settings.tabAuth"),
-              protection: t("secrets.protectionTitle"),
-              review: t("startupUpgrade.reviewApps"),
-            },
-          )}`,
+          description:
+            resumeReview?.paused === true
+              ? t("startupUpgrade.completedSyncPaused")
+              : `${t("startupUpgrade.syncPausedReason")} ${t(
+                  "startupUpgrade.syncReviewHint",
+                  {
+                    settings: t("common.settings"),
+                    auth: t("settings.tabAuth"),
+                    protection: t("secrets.protectionTitle"),
+                    review: t("startupUpgrade.reviewApps"),
+                  },
+                )}`,
           duration: 10000,
         });
         return;
@@ -576,7 +693,7 @@ export function WebdavSyncSection({
         }),
       );
     },
-    [t],
+    [resumeReview, t],
   );
 
   /** Fetch remote info, then open upload confirmation dialog. */
@@ -1011,6 +1128,91 @@ export function WebdavSyncSection({
           {t("settings.webdavSync.description")}
         </p>
       </header>
+
+      {(resumeReview || resumeUnavailable) && (
+        <div className="space-y-3 rounded-lg border p-4">
+          <p className="text-sm text-muted-foreground">
+            {t(
+              resumeUnavailable
+                ? "startupUpgrade.syncResumeUnavailable"
+                : resumeReview?.paused === true
+                  ? "startupUpgrade.completedSyncPaused"
+                  : "startupUpgrade.syncResumeConfirmed",
+            )}
+          </p>
+          {(resumeReview?.paused === true || resumeUnavailable) && (
+            <Button
+              variant="outline"
+              disabled={
+                resumeBusy || dirty || s3Dirty || isLoading || isS3Loading
+              }
+              onClick={() => {
+                if (
+                  !resumeBusyRef.current &&
+                  !dirty &&
+                  !s3Dirty &&
+                  !isLoading &&
+                  !isS3Loading
+                )
+                  void loadSyncResume(true);
+              }}
+            >
+              {t("startupUpgrade.syncResumeReview")}
+            </Button>
+          )}
+        </div>
+      )}
+      <Dialog
+        open={resumeDialog}
+        onOpenChange={(open) => {
+          if (!open) closeSyncResume();
+        }}
+      >
+        <DialogContent className="max-w-sm" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle>{t("startupUpgrade.syncResumeReview")}</DialogTitle>
+            <DialogDescription>
+              {t("startupUpgrade.syncResumeSavedConfig")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {(["independentConfig", "compatibleDevices"] as const).map(
+              (choice) => (
+                <Button
+                  key={choice}
+                  variant={resumeChoice === choice ? "default" : "outline"}
+                  aria-pressed={resumeChoice === choice}
+                  className="h-auto whitespace-normal text-left"
+                  disabled={
+                    resumeBusy || dirty || s3Dirty || isLoading || isS3Loading
+                  }
+                  onClick={() => setResumeChoice(choice)}
+                >
+                  {t(`startupUpgrade.syncResumeChoice.${choice}`)}
+                </Button>
+              ),
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeSyncResume}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={
+                resumeBusy ||
+                !resumeChoice ||
+                dirty ||
+                s3Dirty ||
+                isLoading ||
+                isS3Loading
+              }
+              onClick={() => void confirmSyncResume()}
+            >
+              {t("startupUpgrade.syncResumeConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ─── Sync type selector ───────────────────────────── */}
       <div className="flex items-center gap-4">

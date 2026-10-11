@@ -415,6 +415,14 @@ pub struct CodexOfficialHistoryUnifyMigration {
     pub codex_config_dir: Option<String>,
 }
 
+/// Device-local completion fact; only the upgrade owner may change it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpgradeCompletion {
+    pub checkpoint_id: String,
+    pub sync_paused: bool,
+}
+
 /// 应用设置结构
 ///
 /// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
@@ -681,6 +689,10 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_backup: Option<serde_json::Value>,
 
+    /// Authenticated upgrade completion and independent sync pause, never a frontend input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_completion: Option<UpgradeCompletion>,
+
     // ===== 备份策略设置 =====
     /// Auto-backup interval in hours (default 24, 0 = disabled)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -779,6 +791,7 @@ impl Default for AppSettings {
             webdav_sync: None,
             s3_sync: None,
             webdav_backup: None,
+            upgrade_completion: None,
             backup_interval_hours: None,
             backup_retain_count: None,
             preferred_terminal: None,
@@ -868,7 +881,8 @@ impl AppSettings {
     }
 }
 
-const PROTECTED_SETTINGS_FIELDS: [&str; 3] = ["webdavSync", "s3Sync", "webdavBackup"];
+const PROTECTED_SETTINGS_FIELDS: [&str; 4] =
+    ["webdavSync", "s3Sync", "webdavBackup", "upgradeCompletion"];
 
 pub(crate) fn settings_path() -> PathBuf {
     crate::config::get_home_dir()
@@ -906,8 +920,9 @@ pub(crate) fn encode_settings_with_vault(
         if protected.is_null() {
             continue;
         }
-        let plaintext =
-            serde_json::to_vec(protected).map_err(|source| AppError::JsonSerialize { source })?;
+        let plaintext = zeroize::Zeroizing::new(
+            serde_json::to_vec(protected).map_err(|source| AppError::JsonSerialize { source })?,
+        );
         let ciphertext = vault
             .seal(&protected_field_identity(field), &plaintext)
             .map_err(crate::secrets::inventory::secret_error)?;
@@ -918,6 +933,74 @@ pub(crate) fn encode_settings_with_vault(
 
 /// Normal runtime decoding is ciphertext-only for every registered protected field.
 type UnownedSettings = std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>;
+
+/// Export only registered protected fields as plaintext for the independently
+/// encrypted archive. Unknown values remain exact RawValue slices, including
+/// future app pointers that cannot be projected through AppSettings.
+pub(crate) fn export_settings_archive_with_vault(
+    bytes: &[u8],
+    vault: &VaultContext,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+    serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(bytes)
+        .map_err(|source| AppError::json("settings.json", source))?;
+    let mut fields: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let mut plaintext = Vec::new();
+    for field in PROTECTED_SETTINGS_FIELDS {
+        let Some(raw) = fields.get(field).filter(|raw| raw.get() != "null") else {
+            continue;
+        };
+        let ciphertext: String = serde_json::from_str(raw.get())
+            .map_err(|_| AppError::Config("secret.plaintext_settings".into()))?;
+        let decoded = vault
+            .open(&protected_field_identity(field), &ciphertext)
+            .map_err(crate::secrets::inventory::secret_error)?;
+        plaintext.push((field, decoded));
+    }
+    // Borrow the decrypted buffers until serialization; they zeroize on all exits.
+    for (field, decoded) in &plaintext {
+        let raw: &serde_json::value::RawValue = serde_json::from_slice(decoded)
+            .map_err(|_| AppError::Config("secret.invalid_settings_payload".into()))?;
+        if !raw.get().starts_with('{') && raw.get() != "null" {
+            return Err(AppError::Config("secret.invalid_settings_payload".into()));
+        }
+        fields.insert((*field).into(), raw);
+    }
+    serde_json::to_vec(&fields)
+        .map(zeroize::Zeroizing::new)
+        .map_err(|source| AppError::JsonSerialize { source })
+}
+
+/// Re-protect an authenticated archive's registered fields with the current
+/// vault. This byte-only seam never needs the vault that made the original file.
+pub(crate) fn restore_settings_archive_with_vault(
+    bytes: &[u8],
+    vault: &VaultContext,
+) -> Result<Vec<u8>, AppError> {
+    serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(bytes)
+        .map_err(|source| AppError::json("settings.json", source))?;
+    let mut fields: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let mut encrypted = Vec::new();
+    for field in PROTECTED_SETTINGS_FIELDS {
+        let Some(raw) = fields.get(field).filter(|raw| raw.get() != "null") else {
+            continue;
+        };
+        if !raw.get().starts_with('{') {
+            return Err(AppError::Config("secret.invalid_settings_payload".into()));
+        }
+        let ciphertext = vault
+            .seal(&protected_field_identity(field), raw.get().as_bytes())
+            .map_err(crate::secrets::inventory::secret_error)?;
+        let raw = serde_json::value::to_raw_value(&ciphertext)
+            .map_err(|source| AppError::JsonSerialize { source })?;
+        encrypted.push((field, raw));
+    }
+    for (field, raw) in &encrypted {
+        fields.insert((*field).into(), raw);
+    }
+    serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })
+}
 
 const UPGRADE_APP_POINTER_FIELDS: [&str; 4] = [
     "currentProviderClaude",
@@ -1084,6 +1167,7 @@ fn clear_protected_settings(settings: &mut AppSettings) {
     settings.webdav_sync = None;
     settings.s3_sync = None;
     settings.webdav_backup = None;
+    settings.upgrade_completion = None;
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1267,7 +1351,7 @@ impl SettingsStore {
     {
         // The session read guard pins one key generation through encryption and publication.
         let vault = self.session.read()?;
-        self.mutate_pinned(&vault, mutator, |_, _, _| Ok(()))
+        self.mutate_pinned(&vault, |settings| Ok(mutator(settings)), |_, _, _| Ok(()))
     }
 
     /// The caller must supply a guard borrowed from `session`, held for the
@@ -1288,7 +1372,7 @@ impl SettingsStore {
             return Err(AppError::Config("settings.session_mismatch".into()));
         }
         session.ensure_available()?;
-        self.mutate_pinned(vault, mutator, verify)
+        self.mutate_pinned(vault, |settings| Ok(mutator(settings)), verify)
     }
 
     fn mutate_pinned<F, T, V>(
@@ -1298,7 +1382,7 @@ impl SettingsStore {
         verify: V,
     ) -> Result<T, AppError>
     where
-        F: FnOnce(&mut AppSettings) -> T,
+        F: FnOnce(&mut AppSettings) -> Result<T, AppError>,
         V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
     {
         let mut state = self.state.write()?;
@@ -1308,12 +1392,21 @@ impl SettingsStore {
         // Read foreign fields freshly under the original settings write lock and
         // caller's existing vault guard. They never enter the frontend projection.
         let unowned = match fs::read(&self.path) {
-            Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())?.1,
+            Ok(bytes) => {
+                let (persisted, unowned) =
+                    decode_runtime_settings_document(&bytes, vault, self.session.root())?;
+                if persisted.upgrade_completion != state.settings.upgrade_completion {
+                    return Err(AppError::Config(
+                        "settings.upgrade_completion_readback_mismatch".into(),
+                    ));
+                }
+                unowned
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => UnownedSettings::new(),
             Err(error) => return Err(AppError::io(&self.path, error)),
         };
         let mut next = state.settings.clone();
-        let result = mutator(&mut next);
+        let result = mutator(&mut next)?;
         next.normalize_paths();
         let encoded = encode_settings_with_vault(&next, vault)?;
         let mut fields: UnownedSettings = serde_json::from_slice(&encoded)
@@ -1359,6 +1452,42 @@ impl SettingsStore {
             |path, vault, expected| verify_current_provider_at(path, vault, app_type, expected),
         )?;
         Ok(())
+    }
+
+    fn upgrade_completion_snapshot_with_vault(
+        &self,
+        session: &SecretSession,
+        vault: &RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<Option<(UpgradeCompletion, String)>, AppError> {
+        if !std::ptr::eq(session, self.session.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
+        let state = self.state.read()?;
+        if let Some(error) = &state.failure {
+            return Err(AppError::Config(error.clone()));
+        }
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::io(&self.path, error)),
+        };
+        let actual = bytes
+            .as_deref()
+            .map(|bytes| decode_upgrade_completion(bytes, vault))
+            .transpose()?
+            .flatten();
+        if actual != state.settings.upgrade_completion {
+            return Err(AppError::Config(
+                "settings.upgrade_completion_readback_mismatch".into(),
+            ));
+        }
+        Ok(actual.map(|completion| {
+            (
+                completion,
+                crate::live::engine::sha256_hex(bytes.as_deref().unwrap_or_default()),
+            )
+        }))
     }
 
     fn reload(&self) -> Result<(), AppError> {
@@ -1557,6 +1686,7 @@ fn prepare_settings_for_frontend(mut settings: AppSettings) -> AppSettings {
         s3.secret_access_key.clear();
     }
     settings.webdav_backup = None;
+    settings.upgrade_completion = None;
     settings
 }
 
@@ -1569,8 +1699,206 @@ pub fn get_settings_for_frontend() -> Result<AppSettings, AppError> {
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
     let store = unlocked_settings_store()?;
-    store.mutate(|settings| *settings = new_settings)?;
+    store.mutate(|settings| {
+        new_settings.upgrade_completion = settings.upgrade_completion.clone();
+        *settings = new_settings;
+    })?;
     refresh_bootstrap_from(&store)?;
+    Ok(())
+}
+
+fn decode_upgrade_completion(
+    bytes: &[u8],
+    vault: &VaultContext,
+) -> Result<Option<UpgradeCompletion>, AppError> {
+    serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(bytes)
+        .map_err(|source| AppError::json("settings.json", source))?;
+    let fields: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let Some(raw) = fields
+        .get("upgradeCompletion")
+        .filter(|raw| raw.get() != "null")
+    else {
+        return Ok(None);
+    };
+    let ciphertext: String = serde_json::from_str(raw.get())
+        .map_err(|_| AppError::Config("secret.plaintext_settings".into()))?;
+    let plaintext = vault
+        .open(&protected_field_identity("upgradeCompletion"), &ciphertext)
+        .map_err(crate::secrets::inventory::secret_error)?;
+    let completion: UpgradeCompletion = serde_json::from_slice(&plaintext)
+        .map_err(|_| AppError::Config("upgrade.invalid_completion".into()))?;
+    if completion.checkpoint_id.trim().is_empty() {
+        return Err(AppError::Config("upgrade.invalid_completion".into()));
+    }
+    Ok(Some(completion))
+}
+
+fn read_upgrade_completion_at(
+    path: &Path,
+    vault: &VaultContext,
+) -> Result<Option<UpgradeCompletion>, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => decode_upgrade_completion(&bytes, vault),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+/// Caller supplies its already-held guard from this exact session.
+pub(crate) fn read_upgrade_completion_with_vault(
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<Option<UpgradeCompletion>, AppError> {
+    Ok(unlocked_settings_store()?
+        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .map(|(completion, _)| completion))
+}
+
+/// Establish pause only after the independent archive has been durably verified.
+/// Retrying the same checkpoint never reverses a later explicit sync confirmation.
+pub(crate) fn set_upgrade_completion_with_vault(
+    checkpoint_id: &str,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<(), AppError> {
+    if checkpoint_id.trim().is_empty() {
+        return Err(AppError::Config("upgrade.invalid_completion".into()));
+    }
+    let store = unlocked_settings_store()?;
+    if let Some((existing, _)) = store.upgrade_completion_snapshot_with_vault(session, vault)? {
+        return if existing.checkpoint_id == checkpoint_id {
+            finalize_upgrade_completion_at(&store.path, vault, &Some(existing))
+        } else {
+            Err(AppError::Config("upgrade.completion_conflict".into()))
+        };
+    }
+    let completion = store.mutate_pinned(
+        vault,
+        |settings| {
+            if let Some(existing) = &settings.upgrade_completion {
+                if existing.checkpoint_id != checkpoint_id {
+                    return Err(AppError::Config("upgrade.completion_conflict".into()));
+                }
+            } else {
+                settings.upgrade_completion = Some(UpgradeCompletion {
+                    checkpoint_id: checkpoint_id.into(),
+                    sync_paused: true,
+                });
+            }
+            Ok(settings.upgrade_completion.clone())
+        },
+        verify_upgrade_completion_at,
+    )?;
+    // Commit the in-memory state before durability checks, so a sync failure
+    // can retry the same persisted record without rewriting or repausing it.
+    finalize_upgrade_completion_at(&store.path, vault, &completion)
+}
+
+fn finalize_upgrade_completion_at(
+    path: &Path,
+    vault: &VaultContext,
+    expected: &Option<UpgradeCompletion>,
+) -> Result<(), AppError> {
+    verify_upgrade_completion_at(path, vault, expected)?;
+    crate::config_file_io::sync_private_file(path)?;
+    crate::live::engine::sync_parent(path)?;
+    verify_upgrade_completion_at(path, vault, expected)
+}
+
+fn verify_upgrade_completion_at(
+    path: &Path,
+    vault: &VaultContext,
+    expected: &Option<UpgradeCompletion>,
+) -> Result<(), AppError> {
+    if read_upgrade_completion_at(path, vault)? != *expected {
+        return Err(AppError::Config(
+            "settings.upgrade_completion_readback_mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Opaque ciphertext revision only: never expose a credential-derived digest.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpgradeSyncReview {
+    pub checkpoint_id: String,
+    pub revision: String,
+    pub paused: bool,
+}
+
+pub(crate) fn review_upgrade_sync_with_vault(
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<Option<UpgradeSyncReview>, AppError> {
+    Ok(unlocked_settings_store()?
+        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .map(|(completion, revision)| UpgradeSyncReview {
+            checkpoint_id: completion.checkpoint_id,
+            revision,
+            paused: completion.sync_paused,
+        }))
+}
+
+/// The startup command owns the user's explicit confirmation choice. Commit
+/// only if this exact checkpoint and authenticated saved document are unchanged.
+pub(crate) fn confirm_upgrade_sync_with_vault(
+    expected_id: &str,
+    expected_revision: &str,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, VaultContext>,
+) -> Result<(), AppError> {
+    let store = unlocked_settings_store()?;
+    let (completion, revision) = store
+        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .ok_or_else(|| AppError::Config("upgrade.completion_required".into()))?;
+    if completion.checkpoint_id != expected_id || revision != expected_revision {
+        return Err(AppError::Config("upgrade.sync_review_changed".into()));
+    }
+    if !completion.sync_paused {
+        return Ok(());
+    }
+    store
+        .mutate_pinned(
+            vault,
+            |settings| {
+                // This closure runs under the original settings write lock. Use the
+                // same bytes for authentication, revision comparison and next values
+                // so confirming cannot overwrite newly reviewed saved preferences.
+                let bytes =
+                    fs::read(&store.path).map_err(|error| AppError::io(&store.path, error))?;
+                let (mut current, _) =
+                    decode_runtime_settings_document(&bytes, vault, session.root())?;
+                let completion = current
+                    .upgrade_completion
+                    .as_mut()
+                    .ok_or_else(|| AppError::Config("upgrade.completion_required".into()))?;
+                if completion.checkpoint_id != expected_id
+                    || crate::live::engine::sha256_hex(&bytes) != expected_revision
+                {
+                    return Err(AppError::Config("upgrade.sync_review_changed".into()));
+                }
+                completion.sync_paused = false;
+                *settings = current;
+                Ok(settings.upgrade_completion.clone())
+            },
+            verify_upgrade_completion_at,
+        )
+        .map(|_| ())
+}
+
+/// Original sync admission reads the original settings owner. A locked or
+/// damaged completion record cannot silently resume either transport.
+pub(crate) fn ensure_upgrade_sync_resumed() -> Result<(), AppError> {
+    let store = unlocked_settings_store()?;
+    let vault = store.session.read()?;
+    if store
+        .upgrade_completion_snapshot_with_vault(&store.session, &vault)?
+        .is_some_and(|(completion, _)| completion.sync_paused)
+    {
+        return Err(AppError::Config("upgrade.sync_paused".into()));
+    }
     Ok(())
 }
 
@@ -2857,5 +3185,417 @@ mod u03_foreign_settings_tests {
         let fields: BTreeMap<String, Box<serde_json::value::RawValue>> =
             serde_json::from_slice(&fs::read(settings_path()).unwrap()).unwrap();
         assert!(!fields.contains_key("currentProviderClaude"));
+    }
+}
+
+#[cfg(test)]
+mod u03_completion_settings_tests {
+    use super::*;
+
+    const CHECKPOINT: &str = "synthetic-checkpoint-one";
+    const FOREIGN: &str =
+        r#"{"future":900719925474099312345, "keep" : [true, {"value": "opaque"}]}"#;
+    const PROTECTED: &str = r#"{"password":"archive-canary", "future" : 900719925474099312345}"#;
+
+    fn archive_fixture(vault: &VaultContext) -> Vec<u8> {
+        let ciphertext = vault
+            .seal(
+                &protected_field_identity("webdavBackup"),
+                PROTECTED.as_bytes(),
+            )
+            .unwrap();
+        format!(
+            r#"{{"futureSettings":{FOREIGN},"webdavBackup":{},"webdavSync":null,"currentProviderCodex":{{"future":true}}}}"#,
+            serde_json::to_string(&ciphertext).unwrap()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn u03_settings_archive_rekeys_only_registered_fields_without_projecting_unknowns() {
+        let old_vault = VaultContext::generate().unwrap();
+        let original = archive_fixture(&old_vault);
+        let archive = export_settings_archive_with_vault(&original, &old_vault).unwrap();
+        let exported: UnownedSettings = serde_json::from_slice(&archive).unwrap();
+        assert_eq!(exported["futureSettings"].get(), FOREIGN);
+        assert_eq!(exported["webdavBackup"].get(), PROTECTED);
+        assert_eq!(exported["webdavSync"].get(), "null");
+        assert_eq!(exported["currentProviderCodex"].get(), r#"{"future":true}"#);
+        assert!(!exported.contains_key("showInTray"));
+        drop(old_vault);
+
+        let current_vault = VaultContext::generate().unwrap();
+        let restored = restore_settings_archive_with_vault(&archive, &current_vault).unwrap();
+        assert!(!String::from_utf8_lossy(&restored).contains("archive-canary"));
+        let restored_fields: UnownedSettings = serde_json::from_slice(&restored).unwrap();
+        assert_eq!(restored_fields["futureSettings"].get(), FOREIGN);
+        assert_eq!(restored_fields["webdavSync"].get(), "null");
+        assert_eq!(
+            restored_fields["currentProviderCodex"].get(),
+            r#"{"future":true}"#
+        );
+        assert_eq!(
+            export_settings_archive_with_vault(&restored, &current_vault)
+                .unwrap()
+                .as_slice(),
+            archive.as_slice()
+        );
+    }
+
+    #[test]
+    fn u03_settings_archive_rejects_unverified_ciphertext_and_duplicate_fields() {
+        let vault = VaultContext::generate().unwrap();
+        let other_vault = VaultContext::generate().unwrap();
+        assert!(
+            export_settings_archive_with_vault(&archive_fixture(&vault), &other_vault).is_err()
+        );
+        assert!(export_settings_archive_with_vault(
+            br#"{"webdavSync":{"password":"plain"}}"#,
+            &vault
+        )
+        .is_err());
+        assert!(export_settings_archive_with_vault(
+            br#"{"webdavSync":null,"webdavSync":null}"#,
+            &vault
+        )
+        .is_err());
+        assert!(restore_settings_archive_with_vault(
+            br#"{"webdavSync":null,"webdavSync":null}"#,
+            &vault
+        )
+        .is_err());
+        assert!(
+            restore_settings_archive_with_vault(&archive_fixture(&vault), &other_vault).is_err()
+        );
+    }
+
+    fn fixture() -> (crate::secrets::testing::TestHome, Arc<SecretSession>) {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            VaultContext::generate().unwrap(),
+        );
+        unlock_settings(session.clone()).unwrap();
+        (home, session)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_completion_is_protected_idempotent_and_owned_by_original_settings_store() {
+        let (_home, session) = fixture();
+        let vault = session.read().unwrap();
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            None
+        );
+        assert!(set_upgrade_completion_with_vault("", &session, &vault).is_err());
+        assert!(!settings_path().exists());
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        let expected = Some(UpgradeCompletion {
+            checkpoint_id: CHECKPOINT.into(),
+            sync_paused: true,
+        });
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            expected
+        );
+        let bytes = fs::read(settings_path()).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(CHECKPOINT));
+        let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(raw["upgradeCompletion"].is_string());
+        assert_eq!(
+            decode_settings_with_vault(&bytes, &vault)
+                .unwrap()
+                .upgrade_completion,
+            expected
+        );
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            expected
+        );
+        let before = fs::read(settings_path()).unwrap();
+        assert!(set_upgrade_completion_with_vault(
+            "synthetic-different-checkpoint",
+            &session,
+            &vault
+        )
+        .is_err());
+        assert_eq!(fs::read(settings_path()).unwrap(), before);
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            expected
+        );
+        unlocked_settings_store()
+            .unwrap()
+            .reload_pinned(&vault)
+            .unwrap();
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_frontend_settings_cannot_create_replace_or_clear_completion() {
+        let (_home, session) = fixture();
+        let forged = AppSettings {
+            upgrade_completion: Some(UpgradeCompletion {
+                checkpoint_id: "synthetic-forged-checkpoint".into(),
+                sync_paused: false,
+            }),
+            ..AppSettings::default()
+        };
+        update_settings(forged.clone()).unwrap();
+        assert!(unlocked_settings_store()
+            .unwrap()
+            .ready_snapshot()
+            .unwrap()
+            .upgrade_completion
+            .is_none());
+        {
+            let vault = session.read().unwrap();
+            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        }
+        assert!(get_settings().upgrade_completion.is_none());
+        assert!(get_settings_for_frontend()
+            .unwrap()
+            .upgrade_completion
+            .is_none());
+        update_settings(forged).unwrap();
+        update_settings(AppSettings::default()).unwrap();
+        let vault = session.read().unwrap();
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            Some(UpgradeCompletion {
+                checkpoint_id: CHECKPOINT.into(),
+                sync_paused: true,
+            })
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_completion_guard_rejects_foreign_session_and_tampered_disk() {
+        let (_home, session) = fixture();
+        let vault = session.read().unwrap();
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        let before = fs::read(settings_path()).unwrap();
+        let foreign_session = SecretSession::from_context(
+            session.root().to_path_buf(),
+            VaultContext::generate().unwrap(),
+        );
+        let foreign_vault = foreign_session.read().unwrap();
+        assert!(
+            set_upgrade_completion_with_vault(CHECKPOINT, &foreign_session, &foreign_vault)
+                .is_err()
+        );
+        assert!(read_upgrade_completion_with_vault(&foreign_session, &foreign_vault).is_err());
+        assert_eq!(fs::read(settings_path()).unwrap(), before);
+        let mut fields: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        fields["upgradeCompletion"] =
+            serde_json::json!({"checkpointId":CHECKPOINT,"syncPaused":false});
+        fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
+        let tampered = fs::read(settings_path()).unwrap();
+        assert!(read_upgrade_completion_with_vault(&session, &vault).is_err());
+        assert!(set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).is_err());
+        assert_eq!(fs::read(settings_path()).unwrap(), tampered);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_retried_completion_does_not_repause_confirmed_checkpoint() {
+        let (_home, session) = fixture();
+        let completed = UpgradeCompletion {
+            checkpoint_id: CHECKPOINT.into(),
+            sync_paused: false,
+        };
+        unlocked_settings_store()
+            .unwrap()
+            .mutate(|settings| settings.upgrade_completion = Some(completed.clone()))
+            .unwrap();
+        let vault = session.read().unwrap();
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        assert_eq!(
+            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            Some(completed)
+        );
+    }
+
+    #[test]
+    fn u03_explicit_key_loss_reset_clears_completion_without_old_key() {
+        let old_vault = VaultContext::generate().unwrap();
+        let current_vault = VaultContext::generate().unwrap();
+        let settings = AppSettings {
+            upgrade_completion: Some(UpgradeCompletion {
+                checkpoint_id: CHECKPOINT.into(),
+                sync_paused: true,
+            }),
+            language: Some("zh".into()),
+            ..AppSettings::default()
+        };
+        let encoded = encode_settings_with_vault(&settings, &old_vault).unwrap();
+        let reset = reset_protected_settings(&encoded, &current_vault).unwrap();
+        let decoded = decode_settings_with_vault(&reset, &current_vault).unwrap();
+        assert_eq!(decoded.language.as_deref(), Some("zh"));
+        assert!(decoded.upgrade_completion.is_none());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn u03_sync_review_is_authenticated_read_only_and_confirmation_is_revision_bound() {
+        let (_home, session) = fixture();
+        let vault = session.read().unwrap();
+        assert!(review_upgrade_sync_with_vault(&session, &vault)
+            .unwrap()
+            .is_none());
+        assert!(confirm_upgrade_sync_with_vault(CHECKPOINT, "missing", &session, &vault).is_err());
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        let before = fs::read(settings_path()).unwrap();
+        let review = review_upgrade_sync_with_vault(&session, &vault)
+            .unwrap()
+            .unwrap();
+        assert_eq!(review.checkpoint_id, CHECKPOINT);
+        assert!(review.paused);
+        assert_eq!(review.revision.len(), 64);
+        assert_eq!(fs::read(settings_path()).unwrap(), before);
+        assert!(confirm_upgrade_sync_with_vault(
+            "synthetic-other",
+            &review.revision,
+            &session,
+            &vault
+        )
+        .is_err());
+        assert_eq!(fs::read(settings_path()).unwrap(), before);
+        confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault).unwrap();
+        let after = fs::read(settings_path()).unwrap();
+        assert_ne!(after, before);
+        assert!(
+            !read_upgrade_completion_with_vault(&session, &vault)
+                .unwrap()
+                .unwrap()
+                .sync_paused
+        );
+        assert!(
+            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+                .is_err()
+        );
+        assert_eq!(fs::read(settings_path()).unwrap(), after);
+        let resumed = review_upgrade_sync_with_vault(&session, &vault)
+            .unwrap()
+            .unwrap();
+        assert!(!resumed.paused);
+        confirm_upgrade_sync_with_vault(CHECKPOINT, &resumed.revision, &session, &vault).unwrap();
+        assert_eq!(fs::read(settings_path()).unwrap(), after);
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        assert!(
+            !read_upgrade_completion_with_vault(&session, &vault)
+                .unwrap()
+                .unwrap()
+                .sync_paused
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_sync_confirmation_rejects_configuration_and_ciphertext_drift() {
+        let (_home, session) = fixture();
+        {
+            let vault = session.read().unwrap();
+            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        }
+        let review = {
+            let vault = session.read().unwrap();
+            review_upgrade_sync_with_vault(&session, &vault)
+                .unwrap()
+                .unwrap()
+        };
+        mutate_settings(|settings| settings.language = Some("zh".into())).unwrap();
+        let vault = session.read().unwrap();
+        let changed = fs::read(settings_path()).unwrap();
+        assert!(
+            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+                .is_err()
+        );
+        assert_eq!(fs::read(settings_path()).unwrap(), changed);
+        let review = review_upgrade_sync_with_vault(&session, &vault)
+            .unwrap()
+            .unwrap();
+        let settings = decode_settings_with_vault(&changed, &vault).unwrap();
+        let reencrypted = encode_settings_with_vault(&settings, &vault).unwrap();
+        assert_ne!(changed, reencrypted);
+        fs::write(settings_path(), &reencrypted).unwrap();
+        assert!(
+            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+                .is_err()
+        );
+        assert_eq!(fs::read(settings_path()).unwrap(), reencrypted);
+        assert!(
+            read_upgrade_completion_with_vault(&session, &vault)
+                .unwrap()
+                .unwrap()
+                .sync_paused
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_sync_review_rejects_empty_or_unknown_completion_record() {
+        let (_home, session) = fixture();
+        let vault = session.read().unwrap();
+        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        let original = fs::read(settings_path()).unwrap();
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"checkpointId":"","syncPaused":false}),
+            serde_json::json!({"checkpointId":CHECKPOINT,"syncPaused":false,"future":true}),
+        ] {
+            let mut fields: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            fields["upgradeCompletion"] = serde_json::Value::String(
+                vault
+                    .seal(
+                        &protected_field_identity("upgradeCompletion"),
+                        &serde_json::to_vec(&invalid).unwrap(),
+                    )
+                    .unwrap(),
+            );
+            fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
+            let before = fs::read(settings_path()).unwrap();
+            assert!(read_upgrade_completion_with_vault(&session, &vault).is_err());
+            assert!(review_upgrade_sync_with_vault(&session, &vault).is_err());
+            assert!(
+                confirm_upgrade_sync_with_vault(CHECKPOINT, "invalid", &session, &vault).is_err()
+            );
+            assert_eq!(fs::read(settings_path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_sync_admission_uses_authenticated_completion_and_fails_closed_when_locked() {
+        {
+            let _home = crate::secrets::testing::TestHome::new().unwrap();
+            assert!(ensure_upgrade_sync_resumed().is_err());
+        }
+        let (_home, session) = fixture();
+        ensure_upgrade_sync_resumed().unwrap();
+        {
+            let vault = session.read().unwrap();
+            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        }
+        assert!(
+            matches!(ensure_upgrade_sync_resumed(), Err(AppError::Config(code)) if code == "upgrade.sync_paused")
+        );
+        {
+            let vault = session.read().unwrap();
+            let review = review_upgrade_sync_with_vault(&session, &vault)
+                .unwrap()
+                .unwrap();
+            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+                .unwrap();
+        }
+        ensure_upgrade_sync_resumed().unwrap();
+        fs::write(settings_path(), b"{broken").unwrap();
+        assert!(ensure_upgrade_sync_resumed().is_err());
     }
 }

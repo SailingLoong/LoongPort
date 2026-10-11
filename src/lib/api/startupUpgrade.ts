@@ -9,8 +9,12 @@ export interface StartupUpgradeReview {
   canAuthenticate: boolean;
   canCheckAndBackup: boolean;
   canStartUpgrade: boolean;
+  canCompleteUpgrade: boolean;
+  archiveRetained: boolean;
+  syncPaused: boolean;
 }
 export interface UpgradeAppReview {
+  notUsed: boolean;
   appType: UpgradeApp;
   revision: string;
   savedMode: "direct" | "proxy" | null;
@@ -47,7 +51,31 @@ export interface UpgradeSourceReview {
   apps: UpgradeSourceAppFacts[];
 }
 
+export interface UpgradeSyncResumeReview {
+  checkpointId: string;
+  revision: string;
+  paused: boolean;
+}
+export type UpgradeSyncResumeChoice = "independentConfig" | "compatibleDevices";
+
 export const startupUpgradeApi = {
+  complete: (expectedReviewToken: string, expectedCheckpointId: string) =>
+    invoke<StartupUpgradeReview>("complete_startup_upgrade", {
+      expectedReviewToken,
+      expectedCheckpointId,
+    }),
+  querySyncResume: () =>
+    invoke<UpgradeSyncResumeReview | null>("get_upgrade_sync_resume_review"),
+  confirmSyncResume: (
+    expectedCheckpointId: string,
+    expectedRevision: string,
+    choice: UpgradeSyncResumeChoice,
+  ) =>
+    invoke<UpgradeSyncResumeReview>("confirm_upgrade_sync_resume", {
+      expectedCheckpointId,
+      expectedRevision,
+      choice,
+    }),
   continueRuntime: (expectedReviewToken: string) =>
     invoke<void>("continue_startup_upgrade", { expectedReviewToken }),
   query: () => invoke<StartupUpgradeReview>("get_startup_upgrade_review"),

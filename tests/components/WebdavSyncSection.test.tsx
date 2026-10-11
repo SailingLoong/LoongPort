@@ -1,10 +1,19 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
+import { invoke } from "@tauri-apps/api/core";
 import type { WebDavSyncSettings, S3SyncSettings } from "@/types";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -121,6 +130,7 @@ function renderSection(config?: WebDavSyncSettings, s3Config?: S3SyncSettings) {
 
 describe("WebdavSyncSection", () => {
   beforeEach(() => {
+    vi.mocked(invoke).mockReset().mockResolvedValue(null);
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     toastWarningMock.mockReset();
@@ -381,7 +391,7 @@ describe("WebdavSyncSection", () => {
     expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
   });
 
-  it("shows auto sync error callout when last auto sync failed", () => {
+  it("shows auto sync error callout when last auto sync failed", async () => {
     renderSection({
       ...baseConfig,
       status: {
@@ -394,9 +404,10 @@ describe("WebdavSyncSection", () => {
       screen.getByText("settings.webdavSync.autoSyncLastErrorTitle"),
     ).toBeInTheDocument();
     expect(screen.getByText("network timeout")).toBeInTheDocument();
+    await act(async () => {});
   });
 
-  it("does not show auto sync error callout for manual sync errors", () => {
+  it("does not show auto sync error callout for manual sync errors", async () => {
     renderSection({
       ...baseConfig,
       status: {
@@ -408,9 +419,10 @@ describe("WebdavSyncSection", () => {
     expect(
       screen.queryByText("settings.webdavSync.autoSyncLastErrorTitle"),
     ).not.toBeInTheDocument();
+    await act(async () => {});
   });
 
-  it("does not show auto sync error callout when source is missing", () => {
+  it("does not show auto sync error callout when source is missing", async () => {
     renderSection({
       ...baseConfig,
       autoSync: true,
@@ -422,6 +434,7 @@ describe("WebdavSyncSection", () => {
     expect(
       screen.queryByText("settings.webdavSync.autoSyncLastErrorTitle"),
     ).not.toBeInTheDocument();
+    await act(async () => {});
   });
 
   it("shows validation error when saving without base url", async () => {
@@ -435,6 +448,7 @@ describe("WebdavSyncSection", () => {
       "settings.webdavSync.missingUrl",
     );
     expect(settingsApiMock.webdavSyncSaveSettings).not.toHaveBeenCalled();
+    await act(async () => {});
   });
 
   it("saves settings and auto tests connection", async () => {
@@ -625,9 +639,10 @@ describe("WebdavSyncSection", () => {
       "settings.webdavSync.unsavedChanges",
     );
     expect(settingsApiMock.webdavSyncFetchRemoteInfo).not.toHaveBeenCalled();
+    await act(async () => {});
   });
 
-  it("disables sync buttons until config is saved", () => {
+  it("disables sync buttons until config is saved", async () => {
     renderSection(undefined);
 
     const uploadButton = screen.getByRole("button", {
@@ -640,6 +655,7 @@ describe("WebdavSyncSection", () => {
     expect(uploadButton).toBeDisabled();
     expect(downloadButton).toBeDisabled();
     expect(settingsApiMock.webdavSyncFetchRemoteInfo).not.toHaveBeenCalled();
+    await act(async () => {});
   });
 
   it("fetches remote info and uploads after confirmation", async () => {
@@ -824,5 +840,351 @@ describe("WebdavSyncSection", () => {
         "settings.webdavSync.downloadFailed",
       );
     });
+  });
+});
+
+describe("independent upgrade sync confirmation", () => {
+  const paused = {
+    checkpointId: "synthetic-checkpoint",
+    revision: "saved-revision",
+    paused: true,
+  };
+  beforeEach(() => {
+    vi.mocked(invoke)
+      .mockReset()
+      .mockImplementation(async (command) => {
+        if (command === "get_upgrade_sync_resume_review") return paused;
+        if (command === "confirm_upgrade_sync_resume")
+          return { ...paused, paused: false };
+        throw new Error("unexpected synthetic command");
+      });
+    for (const method of Object.values(settingsApiMock)) method.mockReset();
+    settingsApiMock.webdavSyncSaveSettings.mockResolvedValue({ success: true });
+    settingsApiMock.webdavTestConnection.mockResolvedValue({ success: true });
+  });
+  const confirmations = () =>
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "confirm_upgrade_sync_resume",
+      );
+  async function openReview() {
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "startupUpgrade.syncResumeReview",
+      }),
+    );
+    return screen.findByRole("button", {
+      name: "startupUpgrade.syncResumeConfirm",
+    });
+  }
+  it.each(["independentConfig", "compatibleDevices"])(
+    "requires a fresh saved review and explicit %s choice",
+    async (choice) => {
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(paused)
+        .mockResolvedValueOnce({ ...paused, revision: "fresh-saved-revision" });
+      renderSection(baseConfig);
+      const confirm = await openReview();
+      expect(confirm).toBeDisabled();
+      expect(
+        screen.getByText("startupUpgrade.syncResumeSavedConfig"),
+      ).toBeVisible();
+      expect(confirmations()).toHaveLength(0);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: `startupUpgrade.syncResumeChoice.${choice}`,
+        }),
+      );
+      expect(confirmations()).toHaveLength(0);
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+      await screen.findByText("startupUpgrade.syncResumeConfirmed");
+      expect(confirmations()).toEqual([
+        [
+          "confirm_upgrade_sync_resume",
+          {
+            expectedCheckpointId: paused.checkpointId,
+            expectedRevision: "fresh-saved-revision",
+            choice,
+          },
+        ],
+      ]);
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(
+            ([command]) => command === "get_upgrade_sync_resume_review",
+          ),
+      ).toHaveLength(2);
+      expect(settingsApiMock.webdavSyncUpload).not.toHaveBeenCalled();
+      expect(settingsApiMock.webdavSyncDownload).not.toHaveBeenCalled();
+      expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["cancel", "edit", "unmount"])(
+    "does not confirm after %s",
+    async (action) => {
+      const view = renderSection(baseConfig);
+      const confirm = await openReview();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "startupUpgrade.syncResumeChoice.independentConfig",
+        }),
+      );
+      if (action === "cancel")
+        fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      if (action === "edit")
+        fireEvent.change(
+          screen.getByPlaceholderText(
+            "settings.webdavSync.usernamePlaceholder",
+          ),
+          { target: { value: "new-user" } },
+        );
+      if (action === "unmount") view.unmount();
+      fireEvent.click(confirm);
+      expect(confirmations()).toHaveLength(0);
+    },
+  );
+  it("blocks a dirty form and never substitutes saving or connection testing for confirmation", async () => {
+    renderSection(baseConfig);
+    const reviewButton = await screen.findByRole("button", {
+      name: "startupUpgrade.syncResumeReview",
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.webdavSync.usernamePlaceholder"),
+      { target: { value: "new-user" } },
+    );
+    expect(reviewButton).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.test" }),
+    );
+    await waitFor(() =>
+      expect(settingsApiMock.webdavTestConnection).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "settings.webdavSync.save" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.save" }),
+    );
+    await waitFor(() =>
+      expect(settingsApiMock.webdavSyncSaveSettings).toHaveBeenCalledTimes(1),
+    );
+    expect(confirmations()).toHaveLength(0);
+  });
+  it.each([null, { ...paused, paused: undefined }])(
+    "does not offer confirmation for unavailable or unknown review %j",
+    async (next) => {
+      renderSection(baseConfig);
+      await screen.findByRole("button", {
+        name: "startupUpgrade.syncResumeReview",
+      });
+      vi.mocked(invoke).mockResolvedValueOnce(next);
+      fireEvent.click(
+        screen.getByRole("button", { name: "startupUpgrade.syncResumeReview" }),
+      );
+      await screen.findByText("startupUpgrade.syncResumeUnavailable");
+      expect(
+        screen.queryByRole("button", {
+          name: "startupUpgrade.syncResumeConfirm",
+        }),
+      ).not.toBeInTheDocument();
+      expect(confirmations()).toHaveLength(0);
+    },
+  );
+  it("queries a lost confirmation response and never replays the choice", async () => {
+    let confirmed = false;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "confirm_upgrade_sync_resume") {
+        confirmed = true;
+        throw new Error("synthetic lost response");
+      }
+      if (command === "get_upgrade_sync_resume_review")
+        return { ...paused, paused: !confirmed };
+      throw new Error("unexpected synthetic command");
+    });
+    renderSection(baseConfig);
+    const confirm = await openReview();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "startupUpgrade.syncResumeChoice.compatibleDevices",
+      }),
+    );
+    fireEvent.click(confirm);
+    await screen.findByText("startupUpgrade.syncResumeConfirmed");
+    expect(confirmations()).toHaveLength(1);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "get_upgrade_sync_resume_review",
+        ),
+    ).toHaveLength(3);
+  });
+  it("keeps an unknown confirmation readback unavailable and allows read-only recheck", async () => {
+    renderSection(baseConfig);
+    const confirm = await openReview();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "startupUpgrade.syncResumeChoice.independentConfig",
+      }),
+    );
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(null);
+    fireEvent.click(confirm);
+    await screen.findByText("startupUpgrade.syncResumeUnavailable");
+    expect(
+      screen.queryByText("startupUpgrade.syncResumeConfirmed"),
+    ).not.toBeInTheDocument();
+    vi.mocked(invoke).mockResolvedValueOnce(paused);
+    await openReview();
+    expect(confirmations()).toHaveLength(1);
+  });
+
+  it("invalidates the confirmation when externally saved settings change", async () => {
+    const view = renderSection(baseConfig);
+    await openReview();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "startupUpgrade.syncResumeChoice.compatibleDevices",
+      }),
+    );
+    view.rerender(
+      <QueryClientProvider client={view.client}>
+        <WebdavSyncSection
+          config={{ ...baseConfig, profile: "another-saved-profile" }}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "startupUpgrade.syncResumeConfirm",
+      }),
+    ).not.toBeInTheDocument();
+    expect(confirmations()).toHaveLength(0);
+  });
+
+  it("blocks confirmation for unsaved S3 edits", async () => {
+    renderSection(undefined, {
+      enabled: true,
+      bucket: "synthetic-bucket",
+      region: "test",
+      accessKeyId: "synthetic",
+      secretAccessKey: "synthetic",
+      status: {},
+    });
+    await openReview();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "startupUpgrade.syncResumeChoice.independentConfig",
+      }),
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.s3Sync.bucketPlaceholder"),
+      { target: { value: "changed-bucket" } },
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "startupUpgrade.syncResumeConfirm",
+      }),
+    ).not.toBeInTheDocument();
+    expect(confirmations()).toHaveLength(0);
+  });
+  it("describes independent sync pause after completion without claiming an active checkpoint", async () => {
+    settingsApiMock.webdavSyncFetchRemoteInfo.mockResolvedValue({
+      empty: true,
+    });
+    settingsApiMock.webdavSyncUpload.mockRejectedValue("upgrade.sync_paused");
+    toastErrorMock.mockReset();
+    renderSection(baseConfig);
+    await screen.findByRole("button", {
+      name: "startupUpgrade.syncResumeReview",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.upload" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.webdavSync.confirmUpload.confirm",
+      }),
+    );
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "startupUpgrade.syncPausedTitle",
+        expect.objectContaining({
+          description: expect.stringContaining(
+            "startupUpgrade.completedSyncPaused",
+          ),
+        }),
+      ),
+    );
+    expect(toastErrorMock.mock.lastCall?.[1].description).not.toContain(
+      "startupUpgrade.syncPausedReason",
+    );
+    expect(confirmations()).toHaveLength(0);
+  });
+  it("keeps a read-only recheck after saved settings invalidate the pending initial review", async () => {
+    let finish!: (value: typeof paused) => void;
+    const pending = new Promise<typeof paused>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(invoke).mockReturnValueOnce(pending);
+    const view = renderSection(baseConfig);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("get_upgrade_sync_resume_review"),
+    );
+    view.rerender(
+      <QueryClientProvider client={view.client}>
+        <WebdavSyncSection
+          config={{ ...baseConfig, profile: "new-saved-profile" }}
+        />
+      </QueryClientProvider>,
+    );
+    await act(async () => {
+      finish(paused);
+      await pending;
+    });
+    expect(
+      screen.queryByText("startupUpgrade.syncResumeConfirmed"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("startupUpgrade.completedSyncPaused"),
+    ).not.toBeInTheDocument();
+    expect(confirmations()).toHaveLength(0);
+    const recheck = await screen.findByRole("button", {
+      name: "startupUpgrade.syncResumeReview",
+    });
+    expect(recheck).toBeEnabled();
+    vi.mocked(invoke).mockResolvedValueOnce({
+      ...paused,
+      revision: "new-saved-revision",
+    });
+    fireEvent.click(recheck);
+    const confirm = await screen.findByRole("button", {
+      name: "startupUpgrade.syncResumeConfirm",
+    });
+    expect(confirm).toBeDisabled();
+    expect(confirmations()).toHaveLength(0);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "startupUpgrade.syncResumeChoice.compatibleDevices",
+      }),
+    );
+    fireEvent.click(confirm);
+    await screen.findByText("startupUpgrade.syncResumeConfirmed");
+    expect(confirmations()).toEqual([
+      [
+        "confirm_upgrade_sync_resume",
+        {
+          expectedCheckpointId: paused.checkpointId,
+          expectedRevision: "new-saved-revision",
+          choice: "compatibleDevices",
+        },
+      ],
+    ]);
   });
 });

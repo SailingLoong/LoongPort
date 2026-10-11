@@ -13,6 +13,7 @@ use crate::live::project::{
     gemini::GeminiProjection,
     grok::GrokProjection,
 };
+use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard;
 use crate::services::provider::{claude_direct, codex_direct, gemini_direct, grok_direct};
 use crate::{
     app_config::AppType, database::Database, error::AppError, provider::Provider,
@@ -986,6 +987,28 @@ pub(crate) fn plan_row_save(
     request_id: &str,
     catalog_decision: Option<&codex_direct::CatalogDecision>,
 ) -> Result<SaveRowPlan, AppError> {
+    plan_row_save_with_generation(
+        service,
+        app,
+        previous,
+        provider,
+        request_id,
+        catalog_decision,
+        None,
+    )
+}
+
+/// Pure row planning may borrow a generation already pinned by the caller.
+/// The caller still owns lifecycle/app serialization and completion checks.
+pub(crate) fn plan_row_save_with_generation(
+    service: &ProxyService,
+    app: &AppType,
+    previous: &Provider,
+    provider: &Provider,
+    request_id: &str,
+    catalog_decision: Option<&codex_direct::CatalogDecision>,
+    auth_generation: Option<&CodexLiveAuthGuard<'_>>,
+) -> Result<SaveRowPlan, AppError> {
     let changed = crate::relay::provider_config::selected_model(app, &previous.settings_config)
         != crate::relay::provider_config::selected_model(app, &provider.settings_config);
     let (before, in_use, mut target) = save_row_target(service, app, previous, provider, changed)?;
@@ -1081,14 +1104,25 @@ pub(crate) fn plan_row_save(
                     },
                     None => codex_direct::Target::Direct(Some(provider)),
                 };
-                let output = codex_direct::plan_editor_save(
-                    service,
-                    &live.codex_owner(),
-                    desired,
-                    target,
-                    request_id,
-                    catalog_decision,
-                )?;
+                let output = match auth_generation {
+                    Some(generation) => codex_direct::plan_editor_save_with_generation(
+                        service,
+                        &live.codex_owner(),
+                        desired,
+                        target,
+                        request_id,
+                        catalog_decision,
+                        Some(generation),
+                    ),
+                    None => codex_direct::plan_editor_save(
+                        service,
+                        &live.codex_owner(),
+                        desired,
+                        target,
+                        request_id,
+                        catalog_decision,
+                    ),
+                }?;
                 files = output.0;
                 target = output.1;
                 preserved_catalog = output.2;

@@ -57,18 +57,25 @@ fn assert_no_recovery_writes(
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn retained_checkpoint_recovers_enter_listener_after_restart() {
-    check_enter_listener_after_restart("127.0.0.1");
+    check_enter_listener_after_restart("127.0.0.1", AppType::Claude);
 }
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn retained_checkpoint_recovers_ipv6_enter_listener_after_restart() {
-    check_enter_listener_after_restart("::1");
+    check_enter_listener_after_restart("::1", AppType::Claude);
 }
 
-fn check_enter_listener_after_restart(address: &str) {
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn u03_original_attached_native_owners_support_completion() {
+    for app in [AppType::Codex, AppType::Gemini, AppType::GrokBuild] {
+        check_enter_listener_after_restart("127.0.0.1", app);
+    }
+}
+
+fn check_enter_listener_after_restart(address: &str, app: AppType) {
     let f = Fixture::new();
-    let app = AppType::Claude;
     let reactor = tokio::runtime::Runtime::new().unwrap();
     let (inspected, review, token, runtime) =
         super::native_recovery_tests::native_runtime(&f, &app);
@@ -81,13 +88,17 @@ fn check_enter_listener_after_restart(address: &str) {
         .block_on(runtime.db.update_global_proxy_config(global))
         .unwrap();
     operation::failpoint::crash_at(Some("marked"));
-    let result = reactor.block_on(runtime.proxy_service.set_takeover_for_app("claude", true));
+    let result = reactor.block_on(
+        runtime
+            .proxy_service
+            .set_takeover_for_app(app.as_str(), true),
+    );
     operation::failpoint::crash_at(None);
     assert!(result.is_err());
     let pending = crate::mode::state::pending(
         &f.device,
         &runtime.db.secret_session().read().unwrap(),
-        "claude",
+        app.as_str(),
     )
     .unwrap()
     .expect("original ENTER intent");
@@ -111,7 +122,56 @@ fn check_enter_listener_after_restart(address: &str) {
     let running = reactor.block_on(restarted.proxy_service.is_running());
     if running {
         health_at(address, port);
+        let context = reactor.enter();
+        let completion = review
+            .review_app_with_state(&inspected, &token, &app, &restarted)
+            .unwrap();
+        drop(context);
+        assert!(completion.can_complete_app, "the original recovered attached owner must support completion without requiring detach");
+        runtime.db.set_current_provider(app.as_str(), "b").unwrap();
+        let before = snapshot(f.home.path());
+        let context = reactor.enter();
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &app, &restarted)
+                .unwrap()
+                .can_complete_app,
+            "native and listener equality cannot hide a divergent DB/settings pointer"
+        );
+        drop(context);
+        assert_no_recovery_writes(&before, &snapshot(f.home.path()), "pointer drift query");
+        runtime.db.set_current_provider(app.as_str(), "a").unwrap();
+        runtime
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET is_current=0 WHERE app_type=?1",
+                [app.as_str()],
+            )
+            .unwrap();
+        crate::settings::set_current_provider(&app, None).unwrap();
+        let before = snapshot(f.home.path());
+        let context = reactor.enter();
+        assert!(review.review_app_with_state(&inspected, &token, &app, &restarted).unwrap().can_complete_app,
+            "an attached route may have no independent direct pointer under the original controller");
+        drop(context);
+        assert_no_recovery_writes(&before, &snapshot(f.home.path()), "no direct pointer query");
+        runtime.db.set_current_provider(app.as_str(), "a").unwrap();
+        crate::settings::set_current_provider(&app, Some("a")).unwrap();
         reactor.block_on(restarted.proxy_service.stop()).unwrap();
+        let before = snapshot(f.home.path());
+        let context = reactor.enter();
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &app, &restarted)
+                .unwrap()
+                .can_complete_app,
+            "an attached mode without its running listener remains incomplete"
+        );
+        drop(context);
+        assert_no_recovery_writes(&before, &snapshot(f.home.path()), "completion query");
     }
     assert!(
         view.can_recover_operation,
@@ -124,7 +184,7 @@ fn check_enter_listener_after_restart(address: &str) {
     let mode = crate::mode::state::mode_state(
         &f.device,
         &runtime.db.secret_session().read().unwrap(),
-        "claude",
+        app.as_str(),
     )
     .unwrap();
     assert!(mode.attached);

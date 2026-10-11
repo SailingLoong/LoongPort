@@ -5,7 +5,7 @@ use crate::secrets::{session::SecretSession, testing::TestHome};
 fn database(vault: &VaultContext, root: &Path, version: i32) -> Database {
     let conn = Connection::open_in_memory().unwrap();
     Database::create_tables_on_conn(&conn).unwrap();
-    Database::apply_schema_migrations_on_conn(&conn).unwrap();
+    Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
     crate::database::loongport_schema::apply(&conn).unwrap();
     if version == 20 {
         Database::apply_upstream4_migrations_on_conn(&conn).unwrap();
@@ -28,7 +28,7 @@ fn join_preserves_local_facts(version: i32) {
         .with_password("synthetic-next-password")
         .unwrap();
     let local = database(&current, &home.path().join("current"), version);
-    let incoming = database(&next, &home.path().join("incoming"), 17);
+    let incoming = database(&next, &home.path().join("incoming"), version);
     {
         let conn = local.conn.lock().unwrap();
         conn.execute("INSERT INTO session_log_sync(file_path,last_modified,last_line_offset,last_synced_at) VALUES('synthetic-session',11,22,33)", []).unwrap();
@@ -45,12 +45,6 @@ fn join_preserves_local_facts(version: i32) {
         .unwrap();
     let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
     let staged = Database::validate_sync_snapshot(&sql, &metadata, &next).unwrap();
-    // The ordinary snapshot admission remains source17-only. Explicitly stage
-    // the admitted private test copy through the real upgrade owner; do not
-    // weaken normal startup/import version guards to exercise this join seam.
-    if version == 20 {
-        Database::apply_upstream4_migrations_on_conn(&staged.connection).unwrap();
-    }
     let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
     let joined = Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &current, &next)
         .unwrap_or_else(|error| panic!("source{version} encrypted sync join: {error}"));
@@ -119,8 +113,29 @@ fn join_preserves_local_facts(version: i32) {
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn source17_sync_join_preserves_local_facts() {
-    join_preserves_local_facts(17);
+fn source17_sync_join_requires_explicit_upgrade() {
+    let home = TestHome::new().unwrap();
+    let vault = VaultContext::generate()
+        .unwrap()
+        .with_password("synthetic-source17-password")
+        .unwrap();
+    let local = database(&vault, &home.path().join("current"), 17);
+    let incoming = database(&vault, &home.path().join("incoming"), 17);
+    let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
+    let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
+    let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
+    assert!(matches!(
+        Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &vault, &vault),
+        Err(AppError::Config(code)) if code == "sync.database_version_incompatible"
+    ));
+    assert_eq!(
+        Database::content_digest(&local.conn.lock().unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        Database::get_user_version(&local.conn.lock().unwrap()).unwrap(),
+        17
+    );
 }
 
 #[cfg_attr(test, test)]
@@ -132,8 +147,8 @@ fn source20_sync_join_preserves_local_facts() {
 #[cfg(feature = "test-hooks")]
 pub(super) fn verify() {
     sync_join_cannot_change_the_current_schema_version();
-    sync_join_rejects_unknown_schema_and_normal_import_still_refuses20();
-    source17_sync_join_preserves_local_facts();
+    sync_join_rejects_unknown_schema_and_normal_import_accepts20();
+    source17_sync_join_requires_explicit_upgrade();
     source20_sync_join_preserves_local_facts();
 }
 
@@ -150,9 +165,10 @@ fn sync_join_cannot_change_the_current_schema_version() {
         let incoming = database(&vault, &home.path().join("incoming"), 17);
         let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
         let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
-        if incoming_version == 20 {
-            Database::apply_upstream4_migrations_on_conn(&staged.connection).unwrap();
-        }
+        staged
+            .connection
+            .pragma_update(None, "user_version", incoming_version)
+            .unwrap();
         let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
         let result =
             Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &vault, &vault);
@@ -169,15 +185,15 @@ fn sync_join_cannot_change_the_current_schema_version() {
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn sync_join_rejects_unknown_schema_and_normal_import_still_refuses20() {
+fn sync_join_rejects_unknown_schema_and_normal_import_accepts20() {
     for future in ["upstream", "loongport"] {
         let home = TestHome::new().unwrap();
         let vault = VaultContext::generate()
             .unwrap()
             .with_password("synthetic-future-password")
             .unwrap();
-        let local = database(&vault, &home.path().join("current"), 17);
-        let incoming = database(&vault, &home.path().join("incoming"), 17);
+        let local = database(&vault, &home.path().join("current"), 20);
+        let incoming = database(&vault, &home.path().join("incoming"), 20);
         let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
         let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
         if future == "upstream" {
@@ -220,7 +236,6 @@ fn sync_join_rejects_unknown_schema_and_normal_import_still_refuses20() {
         .unwrap();
     let staged20 = database(&vault, &home.path().join("staged20"), 20);
     let (sql, metadata) = staged20.export_sync_snapshot().unwrap();
-    assert!(
-        matches!(Database::validate_sync_snapshot(&sql, &metadata, &vault), Err(AppError::Config(code)) if code == "secret.database_version_too_new")
-    );
+    let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
+    assert_eq!(Database::get_user_version(&staged.connection).unwrap(), 20);
 }

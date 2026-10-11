@@ -988,3 +988,210 @@ it.each([
     );
   },
 );
+
+describe("local upgrade completion", () => {
+  const completed = () =>
+    review({
+      status: "completed",
+      checkpointPresent: false,
+      checkpointId: null,
+      reviewToken: null,
+      canCompleteUpgrade: false,
+      archiveRetained: true,
+      syncPaused: true,
+    });
+
+  it("completes only the reviewed checkpoint and keeps recovery and sync facts distinct", async () => {
+    serve(review({ canCompleteUpgrade: true }));
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) =>
+      command === "complete_startup_upgrade"
+        ? completed()
+        : original(command, args),
+    );
+    render(<StartupUpgrade embedded />);
+    const button = await screen.findByRole("button", {
+      name: "startupUpgrade.complete",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(invoke).not.toHaveBeenCalledWith(
+      "complete_startup_upgrade",
+      expect.anything(),
+    );
+    fireEvent.click(button);
+    await screen.findByText("startupUpgrade.completed");
+    expect(invoke).toHaveBeenCalledWith("complete_startup_upgrade", {
+      expectedReviewToken: "synthetic-review",
+      expectedCheckpointId: "synthetic-checkpoint",
+    });
+    expect(screen.getByText("startupUpgrade.archiveRetained")).toBeVisible();
+    expect(
+      screen.getByText("startupUpgrade.completedSyncPaused"),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("startupUpgrade.notComplete"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("startupUpgrade.syncPausedReason"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "confirm_upgrade_sync_resume",
+      expect.anything(),
+    );
+  });
+
+  it("queries a lost completion response without replaying completion", async () => {
+    let finished = false;
+    serve(review({ canCompleteUpgrade: true }));
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "complete_startup_upgrade") {
+        finished = true;
+        throw new Error("synthetic lost completion response");
+      }
+      if (command === "get_startup_upgrade_review" && finished)
+        return completed();
+      return original(command, args);
+    });
+    const onReady = vi.fn();
+    render(<StartupUpgrade onReady={onReady} />);
+    const button = await screen.findByRole("button", {
+      name: "startupUpgrade.complete",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await screen.findByText("startupUpgrade.completed");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "complete_startup_upgrade",
+        ),
+    ).toHaveLength(1);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "get_startup_upgrade_review",
+        ),
+    ).toHaveLength(2);
+    fireEvent.click(
+      screen.getByRole("button", { name: "startupUpgrade.continue" }),
+    );
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(invoke).not.toHaveBeenCalledWith(
+      "continue_startup_upgrade",
+      expect.anything(),
+    );
+  });
+
+  it("shows backend-proven unused apps without matched native facts", async () => {
+    serve(review(), {
+      gemini: {
+        notUsed: true,
+        savedMode: null,
+        pointerConsistent: null,
+        storedFieldsMatch: null,
+      },
+    });
+    render(<StartupUpgrade />);
+    const card = await screen.findByRole("region", { name: "Gemini CLI" });
+    expect(
+      await within(card).findByText("startupUpgrade.notUsed"),
+    ).toBeVisible();
+    expect(
+      within(card).queryByText("startupUpgrade.fieldsLabel"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByText("startupUpgrade.nativeProvider"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "startupUpgrade.recover" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not infer retained recovery or paused sync when completed fields are missing", async () => {
+    serve(review({ status: "completed", checkpointPresent: false }));
+    render(<StartupUpgrade />);
+    await screen.findByText("startupUpgrade.completed");
+    expect(
+      screen.queryByText("startupUpgrade.archiveRetained"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("startupUpgrade.completedSyncPaused"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+  });
+});
+
+it("queries an unknown completion response and blocks the stale complete action if readback fails", async () => {
+  let attempted = false;
+  serve(review({ canCompleteUpgrade: true }));
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "complete_startup_upgrade") {
+      attempted = true;
+      return undefined;
+    }
+    if (command === "get_startup_upgrade_review" && attempted)
+      throw new Error("synthetic unreadable response");
+    return original(command, args);
+  });
+  render(<StartupUpgrade />);
+  const button = await screen.findByRole("button", {
+    name: "startupUpgrade.complete",
+  });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  await screen.findByRole("alert");
+  expect(
+    screen.getByRole("button", { name: "startupUpgrade.complete" }),
+  ).toBeDisabled();
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "get_startup_upgrade_review",
+      ),
+  ).toHaveLength(2);
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "complete_startup_upgrade"),
+  ).toHaveLength(1);
+});
+
+it.each([zh, en, zhTW, ja])(
+  "localizes completion and independent saved sync confirmation",
+  (translation) => {
+    for (const key of [
+      "completed",
+      "archiveRetained",
+      "completedSyncPaused",
+      "notUsed",
+      "syncResumeReview",
+      "syncResumeSavedConfig",
+      "syncResumeConfirm",
+      "syncResumeConfirmed",
+      "syncResumeUnavailable",
+    ] as const) {
+      expect(translation.startupUpgrade[key]).toBeTruthy();
+      expect(translation.startupUpgrade[key]).not.toMatch(
+        /startupUpgrade\.|4\.x/,
+      );
+    }
+    expect(
+      translation.startupUpgrade.syncResumeChoice.independentConfig,
+    ).toBeTruthy();
+    expect(
+      translation.startupUpgrade.syncResumeChoice.compatibleDevices,
+    ).toBeTruthy();
+  },
+);

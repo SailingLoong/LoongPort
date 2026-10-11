@@ -28,7 +28,7 @@ impl Fixture {
         let vault = session.read().unwrap().clone();
         let conn = rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
-        Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         database::loongport_schema::apply(&conn).unwrap();
         database::vault::stamp(&conn, &vault).unwrap();
         drop(conn);
@@ -5789,3 +5789,352 @@ mod native_recovery_tests;
 
 #[path = "upgrade_attached_recovery_tests.rs"]
 mod attached_recovery_tests;
+
+#[test]
+#[serial_test::serial]
+fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
+    let f = Fixture::new();
+    let settings_path = crate::settings::settings_path();
+    f.write_settings(&crate::settings::AppSettings {
+        webdav_sync: Some(crate::settings::WebDavSyncSettings {
+            base_url: "https://synthetic.invalid".into(),
+            password: "synthetic-archive-settings".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let native = crate::config::get_claude_settings_path();
+    crate::config_file_io::ensure_private_directory(native.parent().unwrap()).unwrap();
+    std::fs::write(&native, br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-native-archive"},"opaque":900719925474099312345}"#).unwrap();
+    let live = br#"{"version":1,"apps":{}}"#;
+    f.write_raw_mode(live);
+    let source = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        session::SecretSession::from_context(f.root.clone(), f.vault.clone()),
+    );
+    source
+        .save_provider(
+            "claude",
+            &crate::provider::Provider::with_id(
+                "archive-canary".into(),
+                "Synthetic archive".into(),
+                serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-db-archive"}}),
+                None,
+            ),
+        )
+        .unwrap();
+    drop(source);
+    let id = publish_resume_fixture(&f);
+    let inspected = inspect(&f.root, &f.device).unwrap();
+    let review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let session = review.session_for_test();
+    crate::settings::unlock_settings(session.clone()).unwrap();
+    let db = Database::init_with_secrets(session.clone()).unwrap();
+    let expected_native = std::fs::read(&native).unwrap();
+    checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+        Ok(())
+    })
+    .unwrap();
+    assert!(!f.device.root().join(checkpoint::FILE).exists());
+    let disk = std::fs::read(f.device.root().join("upgrade-completed.json")).unwrap();
+    assert!(!String::from_utf8_lossy(&disk).contains("synthetic-native-archive"));
+    assert!(!String::from_utf8_lossy(&disk).contains("synthetic-archive-settings"));
+    let before = snapshot(f.home.path());
+    checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        snapshot(f.home.path()) == before,
+        "lost response retry must not write again"
+    );
+    assert!(
+        crate::settings::read_upgrade_completion_with_vault(&session, &session.read().unwrap())
+            .unwrap()
+            .unwrap()
+            .sync_paused
+    );
+    crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-rewrapped-password", true)
+        .unwrap();
+    checkpoint::restored_archive_files(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    crate::secrets::transition::rotate(&db, &f.store, "synthetic-new-archive-password", true)
+        .unwrap();
+    let current = session.read().unwrap();
+    assert!(current.metadata().key_id != f.vault.metadata().key_id);
+    let restored = checkpoint::restored_archive_files(&f.root, &f.device, &current, &id).unwrap();
+    assert!(
+        restored
+            .iter()
+            .find(|(path, _)| path == &native)
+            .unwrap()
+            .1
+            .as_ref()
+            .map(|v| v.as_slice())
+            == Some(expected_native.as_slice())
+    );
+    let settings = restored
+        .iter()
+        .find(|(path, _)| path == &settings_path)
+        .unwrap()
+        .1
+        .as_ref()
+        .unwrap();
+    assert!(
+        crate::settings::decode_settings_with_vault(settings, &current)
+            .unwrap()
+            .webdav_sync
+            .unwrap()
+            .password
+            == "synthetic-archive-settings"
+    );
+    let device_bytes = restored
+        .iter()
+        .find(|(path, _)| path == &f.device.state_path())
+        .unwrap()
+        .1
+        .as_ref()
+        .unwrap();
+    let descriptor = crate::secrets::owned_file::DeviceFile::registered(
+        crate::secrets::owned_file::DEVICE_STATE_FILE,
+    )
+    .unwrap();
+    assert!(
+        descriptor
+            .decode(&current, device_bytes)
+            .unwrap()
+            .as_slice()
+            == live
+    );
+    let source = checkpoint::archived_database(&f.root, &f.device, &current, &id).unwrap();
+    assert_eq!(Database::get_user_version(&source).unwrap(), 17);
+    database::vault::check_identity(&source, &current).unwrap();
+    let rows = Database::get_all_providers_on_connection(&source, &current, "claude").unwrap();
+    assert!(
+        rows["archive-canary"]
+            .settings_config
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(serde_json::Value::as_str)
+            == Some("synthetic-db-archive")
+    );
+    assert!(checkpoint::restored_archive_files(&f.root, &f.device, &f.vault, &id).is_err());
+    assert!(
+        crate::settings::read_upgrade_completion_with_vault(&session, &current)
+            .unwrap()
+            .unwrap()
+            .sync_paused
+    );
+
+    let backup_path = f.root.join("backups").join(format!("upgrade_{id}.db"));
+    let original_backup = std::fs::read(&backup_path).unwrap();
+    for protected in [false, true] {
+        let different = checkpoint::archived_database(&f.root, &f.device, &current, &id).unwrap();
+        if protected {
+            let replacement = crate::secrets::inventory::seal_db(
+                &current,
+                "providers",
+                "settings_config",
+                &["archive-canary", "claude"],
+                r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-other-valid-snapshot"}}"#,
+            )
+            .unwrap();
+            different.execute(
+                "UPDATE providers SET settings_config=?1 WHERE id='archive-canary' AND app_type='claude'",
+                [replacement],
+            ).unwrap();
+        } else {
+            different.execute(
+                "INSERT INTO settings(key,value) VALUES('synthetic-other-snapshot','different')",
+                [],
+            ).unwrap();
+        }
+        crate::secrets::inventory::validate_database(&different, &current).unwrap();
+        let bytes = different.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+        drop(different);
+        crate::config_file_io::write_durable(&backup_path, &bytes).unwrap();
+        let before = snapshot(f.home.path());
+        assert!(
+            checkpoint::restored_archive_files(&f.root, &f.device, &current, &id).is_err(),
+            "same-vault same-version replacement must not become the original recovery snapshot"
+        );
+        assert!(checkpoint::read_completed_result(&db, &f.device, &current).is_err());
+        assert!(snapshot(f.home.path()) == before);
+        crate::config_file_io::write_durable(&backup_path, &original_backup).unwrap();
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_completion_archive_failures_keep_active_checkpoint_and_original_files() {
+    for boundary in [
+        checkpoint::CompletionBoundary::DatabaseArchived,
+        checkpoint::CompletionBoundary::ArchiveVerified,
+        checkpoint::CompletionBoundary::PausePersisted,
+    ] {
+        let f = Fixture::new();
+        let id = publish_resume_fixture(&f);
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let session = review.session_for_test();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = Database::init_with_secrets(session.clone()).unwrap();
+        let checkpoint_before = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        assert!(checkpoint::archive_and_release(
+            &db,
+            &f.device,
+            &session.read().unwrap(),
+            &id,
+            &mut |at| {
+                if at == boundary {
+                    return Err(AppError::Config("synthetic interruption".into()));
+                }
+                Ok(())
+            }
+        )
+        .is_err());
+        assert!(
+            std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap() == checkpoint_before
+        );
+        assert!(
+            checkpoint::read_completed_result(&db, &f.device, &session.read().unwrap())
+                .unwrap()
+                .is_none(),
+            "an interrupted pause record cannot advertise a completed archive or sync confirmation"
+        );
+        checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(!f.device.root().join(checkpoint::FILE).exists());
+        let before = snapshot(f.home.path());
+        assert!(checkpoint::archive_and_release(
+            &db,
+            &f.device,
+            &session.read().unwrap(),
+            &uuid::Uuid::new_v4().to_string(),
+            &mut |_| Ok(())
+        )
+        .is_err());
+        assert!(snapshot(f.home.path()) == before);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_unused_apps_preserve_unclaimed_files_and_reject_unknown_mode() {
+    for (raw, expected, external) in [
+        (br#"{"version":1,"apps":{}}"#.as_slice(), true, false),
+        (
+            br#"{"version":1,"apps":{"codex":{"mode":"future-mode"}}}"#.as_slice(),
+            false,
+            false,
+        ),
+        (br#"{"version":1,"apps":{}}"#.as_slice(), true, true),
+    ] {
+        let f = Fixture::new();
+        f.write_raw_mode(raw);
+        if external {
+            let path = crate::codex_config::get_codex_config_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "model_provider = \"external\"\n[model_providers.external]\nbase_url = \"https://synthetic.invalid/v1\"\n").unwrap();
+        }
+        publish_resume_fixture(&f);
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let token = review.view(&inspected).unwrap().review_token.unwrap();
+        let before = snapshot(f.home.path());
+        let view = review
+            .review_app(&inspected, &token, &crate::app_config::AppType::Codex)
+            .unwrap();
+        let public = serde_json::to_value(view).unwrap();
+        assert_eq!(
+            public.get("notUsed").and_then(serde_json::Value::as_bool),
+            Some(expected),
+            "empty application is not an unverified application"
+        );
+        assert!(snapshot(f.home.path()) == before);
+        if external {
+            let marker = crate::codex_config::get_codex_managed_oauth_live_auth_marker_path();
+            std::fs::write(marker, b"{}").unwrap();
+            let before = snapshot(f.home.path());
+            assert!(
+                !review
+                    .review_app(&inspected, &token, &crate::app_config::AppType::Codex)
+                    .unwrap()
+                    .not_used,
+                "an existing LoongPort-owned marker cannot be called unclaimed native input"
+            );
+            assert!(snapshot(f.home.path()) == before);
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
+    for corrupt in [false, true] {
+        let f = Fixture::new();
+        let id = publish_resume_fixture(&f);
+        let inspected = inspect(&f.root, &f.device).unwrap();
+        let review =
+            AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None)
+                .unwrap();
+        let session = review.session_for_test();
+        crate::settings::unlock_settings(session.clone()).unwrap();
+        let db = Database::init_with_secrets(session.clone()).unwrap();
+        let checkpoint_path = f.device.root().join(checkpoint::FILE);
+        let checkpoint_before = std::fs::read(&checkpoint_path).unwrap();
+        let settings_path = crate::settings::settings_path();
+        let mut original_settings = None;
+        let result = checkpoint::archive_and_release(
+            &db,
+            &f.device,
+            &session.read().unwrap(),
+            &id,
+            &mut |at| {
+                if at == checkpoint::CompletionBoundary::BeforeRelease {
+                    original_settings = Some(std::fs::read(&settings_path).unwrap());
+                    if corrupt {
+                        crate::config_file_io::write_durable(
+                            &settings_path,
+                            b"invalid synthetic settings",
+                        )
+                        .unwrap();
+                    } else {
+                        std::fs::remove_file(&settings_path).unwrap();
+                    }
+                }
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "pause must be authenticated and durable before active release"
+        );
+        assert!(std::fs::read(&checkpoint_path).unwrap() == checkpoint_before);
+        if corrupt {
+            assert!(std::fs::read(&settings_path).unwrap() == b"invalid synthetic settings");
+        } else {
+            assert!(
+                !settings_path.exists(),
+                "query/retry must not recreate missing settings"
+            );
+        }
+        crate::config_file_io::write_durable(&settings_path, &original_settings.unwrap()).unwrap();
+        checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(!checkpoint_path.exists());
+        assert!(
+            checkpoint::read_completed_result(&db, &f.device, &session.read().unwrap())
+                .unwrap()
+                .unwrap()
+                .sync_paused
+        );
+    }
+}

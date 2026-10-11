@@ -249,6 +249,107 @@ impl StartupCoordinator {
         Ok(view)
     }
 
+    /// A missing active checkpoint is not completion authority. Only the
+    /// authenticated retained archive and original protected settings record are.
+    pub(crate) fn upgrade_view_with_state(
+        &self,
+        state: Option<&crate::store::AppState>,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        if let Some(state) = state {
+            let device = crate::live::engine::DeviceStore::for_device();
+            let vault = state.db.secrets.read().map_err(super::error::public_code)?;
+            if let Some(record) =
+                super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
+                    .map_err(super::error::public_code)?
+            {
+                let mut view = super::upgrade::StartupUpgradeView::blocked("completed");
+                view.checkpoint_id = Some(record.checkpoint_id);
+                view.archive_retained = true;
+                view.sync_paused = record.sync_paused;
+                return Ok(view);
+            }
+        }
+        let mut view = self.upgrade_view()?;
+        view.sync_paused = view.checkpoint_present;
+        if let (Some(state), Some(token)) = (state, view.review_token.as_deref()) {
+            if view.status == "database_verified" {
+                let inspection = self
+                    .inspection
+                    .lock()
+                    .map_err(|_| "secret.startup_unavailable")?;
+                let review = self
+                    .upgrade_review
+                    .lock()
+                    .map_err(|_| "secret.startup_unavailable")?;
+                view.can_complete_upgrade = review
+                    .as_ref()
+                    .ok_or("secret.locked")?
+                    .can_complete_upgrade(&inspection, token, state)
+                    .map_err(super::error::public_code)?;
+            }
+        }
+        Ok(view)
+    }
+
+    pub(crate) fn complete_upgrade_checkpoint(
+        &self,
+        token: &str,
+        id: &str,
+        state: &crate::store::AppState,
+    ) -> Result<super::upgrade::StartupUpgradeView, String> {
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        if *phase != Phase::Ready {
+            return Err("secret.initializing".into());
+        }
+        let mut inspection = self
+            .inspection
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let mut review = self
+            .upgrade_review
+            .lock()
+            .map_err(|_| "secret.startup_unavailable")?;
+        let device = crate::live::engine::DeviceStore::for_device();
+        if let Some(active) = review.as_ref() {
+            // If response was lost after release, authenticate the existing result
+            // before returning it; never recreate or repeat an archive operation.
+            if super::upgrade::checkpoint::resume_candidate_bytes(&device)
+                .map_err(super::error::public_code)?
+                .is_some()
+            {
+                active
+                    .complete_checkpoint(&inspection, token, id, state)
+                    .map_err(super::error::public_code)?;
+            } else {
+                let vault = state.db.secrets.read().map_err(super::error::public_code)?;
+                let record =
+                    super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
+                        .map_err(super::error::public_code)?;
+                if record.is_none_or(|record| record.checkpoint_id != id) {
+                    return Err("upgrade.source_changed".into());
+                }
+            }
+        } else {
+            let vault = state.db.secrets.read().map_err(super::error::public_code)?;
+            let record =
+                super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
+                    .map_err(super::error::public_code)?;
+            if record.is_none_or(|record| record.checkpoint_id != id) {
+                return Err("upgrade.source_changed".into());
+            }
+        }
+        *inspection =
+            super::upgrade::inspect(&self.root, &device).map_err(super::error::public_code)?;
+        *review = None;
+        drop(review);
+        drop(inspection);
+        drop(phase);
+        self.upgrade_view_with_state(Some(state))
+    }
+
     pub(super) fn authenticate_upgrade(
         &self,
         password: Option<&str>,
@@ -684,7 +785,8 @@ pub(crate) async fn get_startup_upgrade_review(
 ) -> Result<super::upgrade::StartupUpgradeView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(coordinator) = app.try_state::<StartupCoordinator>() {
-            coordinator.upgrade_view()
+            let state = app.try_state::<crate::store::AppState>();
+            coordinator.upgrade_view_with_state(state.as_deref())
         } else {
             let initialization = crate::init_status::get_init_error();
             Err(super::upgrade::startup_upgrade_unavailable(
@@ -794,6 +896,115 @@ pub(crate) async fn continue_startup_upgrade(
         crate::init_status::clear_init_error();
         let _ = app.emit("runtime-ready", ());
         Ok(())
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn complete_startup_upgrade(
+    app: tauri::AppHandle,
+    expected_review_token: String,
+    expected_checkpoint_id: String,
+) -> Result<super::upgrade::StartupUpgradeView, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app
+            .try_state::<StartupCoordinator>()
+            .ok_or("secret.startup_unavailable")?;
+        if app.try_state::<crate::store::AppState>().is_none() {
+            coordinator.run_upgrade_attempt(&expected_review_token, |session| {
+                crate::initialize_runtime(&app, session).map_err(|e| e.to_string())
+            })?;
+        }
+        let state = app
+            .try_state::<crate::store::AppState>()
+            .ok_or("secret.startup_unavailable")?;
+        let view = coordinator.complete_upgrade_checkpoint(
+            &expected_review_token,
+            &expected_checkpoint_id,
+            &state,
+        )?;
+        crate::init_status::clear_init_error();
+        let _ = app.emit("runtime-ready", ());
+        Ok(view)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum UpgradeSyncChoice {
+    IndependentConfig,
+    CompatibleDevices,
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn get_upgrade_sync_resume_review(
+    app: tauri::AppHandle,
+) -> Result<Option<crate::settings::UpgradeSyncReview>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app
+            .try_state::<crate::store::AppState>()
+            .ok_or("secret.locked")?;
+        let vault = state.db.secrets.read().map_err(super::error::public_code)?;
+        let device = crate::live::engine::DeviceStore::for_device();
+        let Some(record) =
+            super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
+                .map_err(super::error::public_code)?
+        else {
+            return Ok(None);
+        };
+        let review = crate::settings::review_upgrade_sync_with_vault(&state.db.secrets, &vault)
+            .map_err(super::error::public_code)?;
+        if review
+            .as_ref()
+            .is_none_or(|view| view.checkpoint_id != record.checkpoint_id)
+        {
+            return Err("upgrade.source_changed".into());
+        }
+        Ok(review)
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) async fn confirm_upgrade_sync_resume(
+    app: tauri::AppHandle,
+    expected_checkpoint_id: String,
+    expected_revision: String,
+    choice: UpgradeSyncChoice,
+) -> Result<crate::settings::UpgradeSyncReview, String> {
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app
+            .try_state::<crate::store::AppState>()
+            .ok_or("secret.locked")?;
+        let vault = state.db.secrets.read().map_err(super::error::public_code)?;
+        let device = crate::live::engine::DeviceStore::for_device();
+        let record = super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
+            .map_err(super::error::public_code)?;
+        if record.is_none_or(|record| record.checkpoint_id != expected_checkpoint_id) {
+            return Err("upgrade.source_changed".into());
+        }
+        match choice {
+            UpgradeSyncChoice::IndependentConfig | UpgradeSyncChoice::CompatibleDevices => {}
+        }
+        crate::settings::confirm_upgrade_sync_with_vault(
+            &expected_checkpoint_id,
+            &expected_revision,
+            &state.db.secrets,
+            &vault,
+        )
+        .map_err(super::error::public_code)?;
+        crate::settings::review_upgrade_sync_with_vault(&state.db.secrets, &vault)
+            .map_err(super::error::public_code)?
+            .ok_or_else(|| "upgrade.source_changed".into())
     })
     .await
     .map_err(|_| "secret.operation_failed".to_owned())?
@@ -1419,6 +1630,9 @@ mod upgrade_handoff_tests {
             Self::with_password(None)
         }
         fn with_password(password: Option<&str>) -> Self {
+            Self::with_peer(password, true)
+        }
+        fn with_peer(password: Option<&str>, unknown_peer: bool) -> Self {
             let home = TestHome::new().unwrap();
             crate::settings::reload_settings().unwrap();
             let root = crate::config::get_app_config_dir();
@@ -1426,7 +1640,7 @@ mod upgrade_handoff_tests {
             let session = SecretSession::open(&root, &store, password).unwrap();
             let conn = rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
             Database::create_tables_on_conn(&conn).unwrap();
-            Database::apply_schema_migrations_on_conn(&conn).unwrap();
+            Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
             database::loongport_schema::apply(&conn).unwrap();
             database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
             session.complete_migration().unwrap();
@@ -1464,7 +1678,14 @@ mod upgrade_handoff_tests {
                 crate::secrets::owned_file::DEVICE_STATE_FILE,
             )
             .unwrap();
-            device.write_device(&session.read().unwrap(),&file,br#"{"version":1,"apps":{"claude":{"mode":"proxy","attached":false,"proxy_route":"a"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#).unwrap();
+            let bytes = if unknown_peer {
+                br#"{"version":1,"apps":{"claude":{"mode":"proxy","attached":false,"proxy_route":"a"},"codex":{"mode":"future-mode","opaque":900719925474099312345}}}"#.as_slice()
+            } else {
+                br#"{"version":1,"apps":{"claude":{"mode":"proxy","attached":false,"proxy_route":"a"}}}"#.as_slice()
+            };
+            device
+                .write_device(&session.read().unwrap(), &file, bytes)
+                .unwrap();
             let inspected = crate::secrets::upgrade::inspect(&root, &device).unwrap();
             let coordinator = StartupCoordinator::new(root, inspected);
             let token = coordinator
@@ -1501,6 +1722,106 @@ mod upgrade_handoff_tests {
                 .runtime_session(&self.coordinator.inspection.lock().unwrap(), &self.token)
                 .unwrap()
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn u03_complete_upgrade_releases_only_after_authenticated_archive_and_restarts_normally() {
+        let f = Fixture::with_peer(None, false);
+        let id = f.coordinator.upgrade_view().unwrap().checkpoint_id.unwrap();
+        let mut runtime = None;
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                crate::secrets::migration::prepare_files(&session, false)
+                    .map_err(|e| e.to_string())?;
+                crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+                let db = Arc::new(
+                    Database::init_with_secrets(session.clone()).map_err(|e| e.to_string())?,
+                );
+                let copilot = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let xai = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let state = crate::store::AppState::new(db).map_err(|e| e.to_string())?;
+                state
+                    .proxy_service
+                    .set_managed_auth(copilot, xai)
+                    .map_err(|e| e.to_string())?;
+                session.complete_migration().map_err(|e| e.to_string())?;
+                runtime = Some(state);
+                Ok(())
+            })
+            .unwrap();
+        let runtime = runtime.unwrap();
+        let native = std::fs::read(&f.native).unwrap();
+        assert!(
+            f.coordinator
+                .upgrade_view_with_state(Some(&runtime))
+                .unwrap()
+                .can_complete_upgrade
+        );
+        let active_bytes = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+        let view = f
+            .coordinator
+            .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+            .unwrap();
+        assert_eq!(view.status, "completed");
+        assert!(!view.checkpoint_present && view.archive_retained && view.sync_paused);
+        assert!(view.review_token.is_none());
+        assert!(!f.device.root().join(checkpoint::FILE).exists());
+        assert!(std::fs::read(&f.native).unwrap() == native);
+        assert!(crate::services::sync_protocol::ensure_upgrade_sync_admitted().is_err());
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert!(snapshot(f.home.path()) == before);
+        assert_eq!(
+            f.coordinator
+                .upgrade_view_with_state(Some(&runtime))
+                .unwrap()
+                .status,
+            "completed"
+        );
+        std::fs::write(f.device.root().join(checkpoint::FILE), &active_bytes).unwrap();
+        let restored_checkpoint = snapshot(f.home.path());
+        assert!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .is_err(),
+            "a result-query retry must not release a newly restored active checkpoint"
+        );
+        assert!(snapshot(f.home.path()) == restored_checkpoint);
+        std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap();
+        // A real process restart begins with a locked settings owner.
+        let _restart_settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let restarted = StartupCoordinator::new(
+            f.coordinator.root.clone(),
+            crate::secrets::upgrade::inspect(&f.coordinator.root, &f.device).unwrap(),
+        );
+        let calls = Cell::new(0);
+        restarted
+            .initialize_with(None, &f.store, |session| {
+                calls.set(calls.get() + 1);
+                crate::secrets::migration::prepare_files(&session, false)
+                    .map_err(|e| e.to_string())?;
+                crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+                let _db =
+                    Database::init_with_secrets(session.clone()).map_err(|e| e.to_string())?;
+                session.complete_migration().map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert!(crate::services::sync_protocol::ensure_upgrade_sync_admitted().is_err());
     }
 
     #[test]

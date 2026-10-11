@@ -4631,6 +4631,19 @@
     }
   },
   "startupUpgrade": {
+    "completed": "Local upgrade completed.",
+    "archiveRetained": "The recovery archive and completion record are retained. The active upgrade checkpoint has been released.",
+    "completedSyncPaused": "Sync remains paused independently. In sync settings, confirm separate sync configuration or compatible devices before resuming.",
+    "notUsed": "Verified as unused on this device; native configuration matching is not required.",
+    "syncResumeReview": "Review sync resumption",
+    "syncResumeSavedConfig": "This confirmation applies to the currently saved sync settings, not unsaved edits. Confirm one of the following. This only removes the local upgrade pause; it does not upload, download or restore data.",
+    "syncResumeChoice": {
+      "independentConfig": "I confirm the saved sync configuration is separate from incompatible devices.",
+      "compatibleDevices": "I confirm all devices sharing the saved sync configuration are compatible."
+    },
+    "syncResumeConfirm": "Confirm and remove sync pause",
+    "syncResumeConfirmed": "The local upgrade sync pause is removed. Existing sync settings still apply.",
+    "syncResumeUnavailable": "Sync resumption could not be verified. Complete the local upgrade and review the saved sync settings again.",
     "syncPausedTitle": "Sync is paused during the upgrade",
     "syncPausedReason": "The upgrade checkpoint is retained. Uploads and downloads remain paused to prevent unverified devices from overwriting upgraded data. Resuming sync still requires confirmation of separate sync settings or compatible devices.",
     "syncReviewHint": "Go to {{settings}} → {{auth}} → {{protection}}. Once the database is verified, use “{{review}}” to check the current state. Reviewing does not resume sync automatically.",

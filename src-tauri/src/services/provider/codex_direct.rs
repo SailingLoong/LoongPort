@@ -1474,6 +1474,57 @@ pub(crate) fn native_completion_match_with_generation(
 
 type GuardedFiles = Vec<(LiveFile, Guarded)>;
 
+/// Compare the original plan with all five current files without applying it.
+/// The encrypted stash is compared through its registered codec and login
+/// shape; fresh ciphertext never serves as a semantic mismatch or a match.
+pub(crate) fn planned_files_match(
+    planned: &[(LiveFile, Guarded)],
+    vault: &crate::secrets::VaultContext,
+) -> Result<bool, AppError> {
+    let expected = files();
+    if planned.len() != expected.len()
+        || planned
+            .iter()
+            .zip(&expected)
+            .any(|((file, _), expected)| file != expected)
+    {
+        return Err(invalid());
+    }
+    let stash_file = DeviceFile::registered(STASH_FILENAME)?;
+    for (index, (file, patch)) in planned.iter().enumerate() {
+        let pre = read_current(&file.path)?;
+        if digest(pre.as_deref()) != patch.expected_pre {
+            return Ok(false);
+        }
+        let matches = match (&patch.then, pre.as_deref()) {
+            (WholeFile::Delete, None) => true,
+            (WholeFile::Write(after), Some(before)) => match index {
+                1 => {
+                    let before = std::str::from_utf8(before)
+                        .map_err(|_| invalid())?
+                        .parse::<toml::Table>()
+                        .map_err(|_| invalid())?;
+                    let after = std::str::from_utf8(after)
+                        .map_err(|_| invalid())?
+                        .parse::<toml::Table>()
+                        .map_err(|_| invalid())?;
+                    before == after
+                }
+                4 => {
+                    parse_json::<LoginStash>(&stash_file.decode(vault, before)?)?
+                        == parse_json::<LoginStash>(&stash_file.decode(vault, after)?)?
+                }
+                _ => parse_json::<Value>(before)? == parse_json::<Value>(after)?,
+            },
+            _ => false,
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble_pinned(
     store: &DeviceStore,
@@ -1678,9 +1729,35 @@ pub(crate) fn plan_editor_save(
     service: &ProxyService,
     owner: &Owner<'_>,
     desired: Target<'_>,
+    target: PendingTarget,
+    request_id: &str,
+    decision: Option<&CatalogDecision>,
+) -> Result<
+    (
+        GuardedFiles,
+        PendingTarget,
+        bool,
+        String,
+        String,
+        CatalogPreview,
+        NativeCatalogInputs,
+    ),
+    AppError,
+> {
+    plan_editor_save_with_generation(service, owner, desired, target, request_id, decision, None)
+}
+
+/// Reuses the original read-only plan when the caller already holds the live
+/// auth generation. Without one, retain the editor's nonblocking guard attempt.
+#[allow(clippy::type_complexity)]
+pub(crate) fn plan_editor_save_with_generation(
+    service: &ProxyService,
+    owner: &Owner<'_>,
+    desired: Target<'_>,
     mut target: PendingTarget,
     request_id: &str,
     decision: Option<&CatalogDecision>,
+    auth_generation: Option<&CodexLiveAuthGuard<'_>>,
 ) -> Result<
     (
         GuardedFiles,
@@ -1735,142 +1812,146 @@ pub(crate) fn plan_editor_save(
     if let Target::Proxy { base_url, .. } = desired {
         apply_proxy_projection(&mut planned, base_url, settings.unify_codex_session_history);
     }
-    service
-        .codex_manager()
-        .try_with_live_auth_guard(|generation| {
-            let vault = service.database().secret_session().read()?;
-            let store = DeviceStore::for_device();
-            let pre = files()
-                .iter()
-                .map(|file| read_current(&file.path))
-                .collect::<Result<Vec<_>, _>>()?;
-            let text = std::str::from_utf8(pre[1].as_deref().unwrap_or_default())
-                .map_err(|_| invalid())?;
-            if codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+    let assemble = |generation: &CodexLiveAuthGuard<'_>| {
+        let vault = service.database().secret_session().read()?;
+        let store = DeviceStore::for_device();
+        let pre = files()
+            .iter()
+            .map(|file| read_current(&file.path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let text =
+            std::str::from_utf8(pre[1].as_deref().unwrap_or_default()).map_err(|_| invalid())?;
+        if codex_config_auth_store_mode(text) != CodexAuthStoreMode::File {
+            return Err(invalid());
+        }
+        let (mut catalog_preview, catalog) =
+            catalog_choice_preview(provider, &planned, pre[1].as_deref(), decision)?;
+        let owner_catalog = owner
+            .provider()
+            .map(|row| NativeCatalogInputs::capture_references(row, text).ok_or_else(invalid))
+            .transpose()?;
+        let inputs = parse_inputs(files(), pre, &vault, &planned.facts.official_logins)?;
+        let revision = (choice == CatalogChoice::Manage).then(|| CatalogRevision {
+            app: app().into(),
+            provider_id: provider.id.clone(),
+            config_digest: digest(inputs.pre[1].as_deref()),
+        });
+        let mut prepared = Prepared {
+            auth_pre: digest(inputs.pre[0].as_deref()),
+            ..Default::default()
+        };
+        let managed = managed_account(provider).filter(|_| is_official(provider));
+        let outgoing = owner
+            .provider()
+            .and_then(managed_account)
+            .filter(|account| Some(account) != managed.as_ref());
+        let mut store_digest = None;
+        if managed.is_some() || outgoing.is_some() {
+            let path = crate::secrets::files::CredentialFile::Codex
+                .path(service.database().secret_session());
+            let bytes = crate::config_file_io::read_regular_file(&path, 32 * 1024 * 1024)
+                .map_err(|error| AppError::io(&path, error))?;
+            if generation.native_store_matches(&vault, bytes.as_deref()) != Some(true) {
                 return Err(invalid());
             }
-            let (mut catalog_preview, catalog) =
-                catalog_choice_preview(provider, &planned, pre[1].as_deref(), decision)?;
-            let owner_catalog = owner
-                .provider()
-                .map(|row| NativeCatalogInputs::capture_references(row, text).ok_or_else(invalid))
-                .transpose()?;
-            let inputs = parse_inputs(files(), pre, &vault, &planned.facts.official_logins)?;
-            let revision = (choice == CatalogChoice::Manage).then(|| CatalogRevision {
-                app: app().into(),
-                provider_id: provider.id.clone(),
-                config_digest: digest(inputs.pre[1].as_deref()),
+            store_digest = digest(bytes.as_deref());
+        }
+        if let Some(account) = &managed {
+            let auth = inputs.live_auth.as_ref().ok_or_else(invalid)?;
+            if !inputs.live_managed || !generation.matches_live_generation(account, auth) {
+                return Err(invalid());
+            }
+            prepared.target_login = Some((account.clone(), auth.clone()));
+        }
+        if let Some(account) = outgoing {
+            let refresh = if let Some(auth) = inputs
+                .live_auth
+                .as_ref()
+                .filter(|auth| codex_live_auth_is_managed_chatgpt_login(auth, &account))
+            {
+                if !generation.matches_live_generation(&account, auth) {
+                    return Err(invalid());
+                }
+                Some(
+                    auth.pointer("/tokens/refresh_token")
+                        .and_then(Value::as_str)
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
+            prepared.outgoing = Some((account, refresh));
+        }
+        if matches!(desired, Target::Proxy { .. }) {
+            target.state.as_mut().ok_or_else(invalid)?.contract =
+                Some(contract_for_plan(&desired, &planned, managed.as_deref()));
+        }
+        let (files, target, preserved, stash) = assemble_pinned(
+            &store,
+            &vault,
+            inputs,
+            planned,
+            &prepared,
+            Some(provider),
+            revision.as_ref(),
+            target,
+            settings.preserve_codex_official_auth_on_switch,
+        )?;
+        // Display the pointer in the actual already-assembled plan, including
+        // a configuration-owned external pointer or a generated catalog.
+        catalog_preview.after_pointer = match &files[1].1.then {
+            WholeFile::Write(bytes) => std::str::from_utf8(bytes)
+                .map_err(|_| invalid())?
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?
+                .get(MODEL_CATALOG_JSON)
+                .and_then(Item::as_str)
+                .map(str::to_owned),
+            WholeFile::Delete => None,
+        };
+        catalog_preview.can_restore = state::written(&store, &vault, app())?
+            .and_then(|written| written.codex)
+            .and_then(|codex| codex.catalog)
+            .is_some_and(|record| {
+                catalog_preview.before_pointer.as_deref() == Some(record.managed_pointer.as_str())
             });
-            let mut prepared = Prepared {
-                auth_pre: digest(inputs.pre[0].as_deref()),
-                ..Default::default()
-            };
-            let managed = managed_account(provider).filter(|_| is_official(provider));
-            let outgoing = owner
-                .provider()
-                .and_then(managed_account)
-                .filter(|account| Some(account) != managed.as_ref());
-            let mut store_digest = None;
-            if managed.is_some() || outgoing.is_some() {
-                let path = crate::secrets::files::CredentialFile::Codex
-                    .path(service.database().secret_session());
-                let bytes = crate::config_file_io::read_regular_file(&path, 32 * 1024 * 1024)
-                    .map_err(|error| AppError::io(&path, error))?;
-                if generation.native_store_matches(&vault, bytes.as_deref()) != Some(true) {
-                    return Err(invalid());
-                }
-                store_digest = digest(bytes.as_deref());
-            }
-            if let Some(account) = &managed {
-                let auth = inputs.live_auth.as_ref().ok_or_else(invalid)?;
-                if !inputs.live_managed || !generation.matches_live_generation(account, auth) {
-                    return Err(invalid());
-                }
-                prepared.target_login = Some((account.clone(), auth.clone()));
-            }
-            if let Some(account) = outgoing {
-                let refresh = if let Some(auth) = inputs
-                    .live_auth
-                    .as_ref()
-                    .filter(|auth| codex_live_auth_is_managed_chatgpt_login(auth, &account))
-                {
-                    if !generation.matches_live_generation(&account, auth) {
-                        return Err(invalid());
-                    }
-                    Some(
-                        auth.pointer("/tokens/refresh_token")
-                            .and_then(Value::as_str)
-                            .ok_or_else(invalid)?
-                            .to_owned(),
-                    )
-                } else {
-                    None
-                };
-                prepared.outgoing = Some((account, refresh));
-            }
-            if matches!(desired, Target::Proxy { .. }) {
-                target.state.as_mut().ok_or_else(invalid)?.contract =
-                    Some(contract_for_plan(&desired, &planned, managed.as_deref()));
-            }
-            let (files, target, preserved, stash) = assemble_pinned(
-                &store,
-                &vault,
-                inputs,
-                planned,
-                &prepared,
-                Some(provider),
-                revision.as_ref(),
-                target,
-                settings.preserve_codex_official_auth_on_switch,
-            )?;
-            // Display the pointer in the actual already-assembled plan, including
-            // a configuration-owned external pointer or a generated catalog.
-            catalog_preview.after_pointer = match &files[1].1.then {
-                WholeFile::Write(bytes) => std::str::from_utf8(bytes)
-                    .map_err(|_| invalid())?
-                    .parse::<toml_edit::DocumentMut>()
-                    .map_err(|_| invalid())?
-                    .get(MODEL_CATALOG_JSON)
-                    .and_then(Item::as_str)
-                    .map(str::to_owned),
-                WholeFile::Delete => None,
-            };
-            catalog_preview.can_restore = state::written(&store, &vault, app())?
-                .and_then(|written| written.codex)
-                .and_then(|codex| codex.catalog)
-                .is_some_and(|record| {
-                    catalog_preview.before_pointer.as_deref()
-                        == Some(record.managed_pointer.as_str())
-                });
-            let generation_revision = generation.native_revision(request_id)?;
-            let row_versions = rows
-                .values()
-                .map(Database::provider_update_digest)
-                .collect::<Result<Vec<_>, _>>()?;
-            let source = sorted_json_bytes(&serde_json::json!([
-                row_versions,
-                settings.unify_codex_session_history,
-                settings.preserve_codex_official_auth_on_switch,
-                endpoint,
-                catalog.references(),
-                owner_catalog.as_ref().map(NativeCatalogInputs::references),
-                store_digest,
-                generation_revision,
-                stash,
-                target.written,
-                generated_digest,
-                choice
-            ]))?;
-            Ok((
-                files,
-                target,
-                preserved,
-                digest(Some(&source)).ok_or_else(invalid)?,
-                generation_revision,
-                catalog_preview,
-                catalog,
-            ))
-        })
+        let generation_revision = generation.native_revision(request_id)?;
+        let row_versions = rows
+            .values()
+            .map(Database::provider_update_digest)
+            .collect::<Result<Vec<_>, _>>()?;
+        let source = sorted_json_bytes(&serde_json::json!([
+            row_versions,
+            settings.unify_codex_session_history,
+            settings.preserve_codex_official_auth_on_switch,
+            endpoint,
+            catalog.references(),
+            owner_catalog.as_ref().map(NativeCatalogInputs::references),
+            store_digest,
+            generation_revision,
+            stash,
+            target.written,
+            generated_digest,
+            choice
+        ]))?;
+        Ok((
+            files,
+            target,
+            preserved,
+            digest(Some(&source)).ok_or_else(invalid)?,
+            generation_revision,
+            catalog_preview,
+            catalog,
+        ))
+    };
+    match auth_generation {
+        Some(generation) if generation.belongs_to(service.database().secret_session()) => {
+            assemble(generation)
+        }
+        Some(_) => Err(invalid()),
+        None => service.codex_manager().try_with_live_auth_guard(assemble),
+    }
 }
 
 pub(crate) fn switch_to(

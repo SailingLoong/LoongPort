@@ -16,7 +16,7 @@ impl Fixture {
         let vault = session.read().unwrap().clone();
         let conn = rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
-        Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         database::loongport_schema::apply(&conn).unwrap();
         database::vault::stamp(&conn, &vault).unwrap();
         conn.execute(
@@ -446,4 +446,42 @@ fn checkpoint_source_review_failure_and_stale_source_never_publish_stage() {
         std::fs::read(f.root.join("vault.json")).unwrap(),
         b"changed source"
     );
+}
+
+#[cfg_attr(test, test)]
+fn completed_schema20_is_a_normal_supported_database() {
+    let f = Fixture::new();
+    let id = checkpoint::create(&f.root, &f.device, &f.vault, &[]).unwrap();
+    let stage = checkpoint::stage(&f.root, &f.device, &f.vault, &id).unwrap();
+    assert_eq!(Database::get_user_version(&stage).unwrap(), 20);
+    assert!(
+        database::vault::preflight_connection(&stage).is_ok(),
+        "verified schema20 must have normal runtime support after completion"
+    );
+}
+
+#[cfg_attr(test, test)]
+fn source17_runtime_requires_explicit_upgrade_before_writes() {
+    let f = Fixture::new();
+    let before = super::review_tests::snapshot(f._temporary.path());
+    let inspected = inspect(&f.root, &f.device).unwrap();
+    assert!(
+        matches!(inspected.ensure_runtime_admitted(),
+        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending"),
+        "source17 must enter readonly review before normal initialization can migrate it"
+    );
+    assert!(super::review_tests::snapshot(f._temporary.path()) == before);
+}
+
+#[test]
+fn source17_database_prepare_refuses_before_ordinary_runtime_changes() {
+    let f = Fixture::new();
+    let path = f.root.join(crate::config::DB_FILE_NAME);
+    let before = super::review_tests::snapshot(f._temporary.path());
+    assert!(
+        matches!(database::vault::prepare(&path, &f.vault),
+        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending"),
+        "DB/CLI callers must not bypass the explicit source17 upgrade"
+    );
+    assert!(super::review_tests::snapshot(f._temporary.path()) == before);
 }

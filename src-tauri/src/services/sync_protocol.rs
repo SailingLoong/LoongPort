@@ -1593,7 +1593,7 @@ mod adoption_tests {
     #[test]
     #[serial_test::serial]
     fn explicit_restore_adopts_source_and_retains_local_credentials_and_automatic_unlock() {
-        restore_preserves_local_facts(17);
+        restore_preserves_local_facts(crate::database::SCHEMA_VERSION);
     }
 
     #[test]
@@ -1993,5 +1993,6 @@ mod adoption_tests {
 pub(crate) fn ensure_upgrade_sync_admitted() -> Result<(), AppError> {
     crate::secrets::upgrade::checkpoint::ensure_sync_admitted(
         &crate::live::engine::DeviceStore::for_device(),
-    )
+    )?;
+    crate::settings::ensure_upgrade_sync_resumed()
 }
