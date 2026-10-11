@@ -8,9 +8,9 @@
     "check": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260924.1",
+    "@cloudflare/workers-types": "^5.20261008.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1",
-    "wrangler": "^4.137.0"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.148.0"
   }
 }
