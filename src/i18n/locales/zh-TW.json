@@ -4632,6 +4632,10 @@
     }
   },
   "startupUpgrade": {
+    "syncPausedTitle": "升級期間同步已暫停",
+    "syncPausedReason": "升級檢查點仍保留。為避免未經核對的裝置覆寫升級資料，上傳與下載保持暫停；恢復同步前仍須確認獨立同步設定或相容裝置。",
+    "syncReviewHint": "可前往「{{settings}} → {{auth}} → {{protection}}」；資料庫已核驗時，使用「{{review}}」查看目前狀態。核對不會自動恢復同步。",
+    "localContinueHint": "可嘗試「{{continue}}」，最終由原流程核驗是否允許進入。逐應用限制仍保留；進入工作台不會恢復同步或刪除升級檢查點。",
     "chooseModeLabel": "選擇缺失的模式",
     "chooseMode": {
       "direct": "選擇直連",

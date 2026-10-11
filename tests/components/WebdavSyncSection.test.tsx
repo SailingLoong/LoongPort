@@ -84,6 +84,7 @@ const { settingsApiMock } = vi.hoisted(() => ({
     webdavSyncRestore: vi.fn(),
     s3SyncFetchRemoteInfo: vi.fn(),
     s3SyncDownload: vi.fn(),
+    s3SyncUpload: vi.fn(),
     s3SyncRestore: vi.fn(),
   },
 }));
@@ -132,6 +133,7 @@ describe("WebdavSyncSection", () => {
     settingsApiMock.webdavSyncRestore.mockReset();
     settingsApiMock.s3SyncFetchRemoteInfo.mockReset();
     settingsApiMock.s3SyncDownload.mockReset();
+    settingsApiMock.s3SyncUpload.mockReset();
     settingsApiMock.s3SyncRestore.mockReset();
 
     settingsApiMock.webdavSyncSaveSettings.mockResolvedValue({ success: true });
@@ -152,6 +154,122 @@ describe("WebdavSyncSection", () => {
       status: "downloaded",
     });
   });
+
+  it.each([
+    ["webdav", "upload"],
+    ["webdav", "download"],
+    ["s3", "upload"],
+    ["s3", "download"],
+  ] as const)(
+    "explains the real upgrade pause for %s %s without retry or restore",
+    async (transport, action) => {
+      const operation =
+        transport === "webdav"
+          ? action === "upload"
+            ? settingsApiMock.webdavSyncUpload
+            : settingsApiMock.webdavSyncDownload
+          : action === "upload"
+            ? settingsApiMock.s3SyncUpload
+            : settingsApiMock.s3SyncDownload;
+      operation.mockRejectedValue("配置错误: upgrade.sync_paused");
+      settingsApiMock.s3SyncFetchRemoteInfo.mockResolvedValue({
+        compatible: true,
+        snapshotId: "synthetic-snapshot",
+        version: 2,
+        createdAt: "2026-02-01T10:00:00Z",
+        artifacts: ["db.sql"],
+      });
+      const view = renderSection(
+        transport === "webdav" ? baseConfig : undefined,
+        transport === "s3"
+          ? {
+              enabled: true,
+              bucket: "synthetic-bucket",
+              region: "test",
+              accessKeyId: "synthetic",
+              secretAccessKey: "synthetic",
+              status: {},
+            }
+          : undefined,
+      );
+      const prefix = `settings.${transport}Sync`;
+      fireEvent.click(
+        screen.getByRole("button", { name: `${prefix}.${action}` }),
+      );
+      const confirm = await screen.findByRole("button", {
+        name: `${prefix}.confirm${action === "upload" ? "Upload" : "Download"}.confirm`,
+      });
+      fireEvent.click(confirm);
+      await waitFor(() =>
+        expect(toastErrorMock).toHaveBeenCalledWith(
+          "startupUpgrade.syncPausedTitle",
+          expect.objectContaining({
+            description: expect.stringContaining(
+              "startupUpgrade.syncPausedReason",
+            ),
+          }),
+        ),
+      );
+      expect(toastErrorMock.mock.lastCall?.[1].description).toContain(
+        "startupUpgrade.syncReviewHint",
+      );
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
+      expect(settingsApiMock.s3SyncRestore).not.toHaveBeenCalled();
+      expect(settingsApiMock.webdavSyncSaveSettings).not.toHaveBeenCalled();
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+      // Reopening then cancelling a fresh confirmation must not repeat the write.
+      view.unmount();
+      renderSection(
+        transport === "webdav" ? baseConfig : undefined,
+        transport === "s3"
+          ? {
+              enabled: true,
+              bucket: "synthetic-bucket",
+              region: "test",
+              accessKeyId: "synthetic",
+              secretAccessKey: "synthetic",
+              status: {},
+            }
+          : undefined,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: `${prefix}.${action}` }),
+      );
+      await screen.findByRole("button", {
+        name: `${prefix}.confirm${action === "upload" ? "Upload" : "Download"}.confirm`,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      expect(operation).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["network timeout", "配置错误: upgrade.sync_paused_extra"])(
+    "keeps ordinary upload errors on the original path: %s",
+    async (message) => {
+      settingsApiMock.webdavSyncUpload.mockRejectedValue(new Error(message));
+      renderSection(baseConfig);
+      fireEvent.click(
+        screen.getByRole("button", { name: "settings.webdavSync.upload" }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "settings.webdavSync.confirmUpload.confirm",
+        }),
+      );
+      await waitFor(() =>
+        expect(toastErrorMock).toHaveBeenCalledWith(
+          "settings.webdavSync.uploadFailed",
+        ),
+      );
+      expect(toastErrorMock).not.toHaveBeenCalledWith(
+        "startupUpgrade.syncPausedTitle",
+        expect.anything(),
+      );
+    },
+  );
 
   it("requires an explicit password restore after foreign vault admission and binds the reviewed snapshot", async () => {
     settingsApiMock.webdavSyncDownload.mockRejectedValue(

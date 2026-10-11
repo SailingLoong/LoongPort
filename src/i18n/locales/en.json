@@ -4631,6 +4631,10 @@
     }
   },
   "startupUpgrade": {
+    "syncPausedTitle": "Sync is paused during the upgrade",
+    "syncPausedReason": "The upgrade checkpoint is retained. Uploads and downloads remain paused to prevent unverified devices from overwriting upgraded data. Resuming sync still requires confirmation of separate sync settings or compatible devices.",
+    "syncReviewHint": "Go to {{settings}} → {{auth}} → {{protection}}. Once the database is verified, use “{{review}}” to check the current state. Reviewing does not resume sync automatically.",
+    "localContinueHint": "You can try “{{continue}}”; the existing flow checks whether entry is allowed. Per-app restrictions remain. Entering the workspace does not resume sync or remove the upgrade checkpoint.",
     "chooseModeLabel": "Choose the missing mode",
     "chooseMode": {
       "direct": "Choose Direct",

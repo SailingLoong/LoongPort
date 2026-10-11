@@ -1,3 +1,8 @@
+import { createInstance } from "i18next";
+import zh from "@/i18n/locales/zh.json";
+import en from "@/i18n/locales/en.json";
+import zhTW from "@/i18n/locales/zh-TW.json";
+import ja from "@/i18n/locales/ja.json";
 import {
   fireEvent,
   render,
@@ -865,3 +870,121 @@ it("uses the original explicit restart form after failed runtime preparation", a
       .mock.calls.some(([command]) => command === "continue_startup_upgrade"),
   ).toBe(false);
 });
+
+describe("retained checkpoint sync explanation", () => {
+  it.each([
+    ["checkpoint_ready", "synthetic-review"],
+    ["database_verified", null],
+  ])(
+    "explains retained checkpoint without promising a workbench for %s/%s",
+    async (status, reviewToken) => {
+      serve(review({ status, reviewToken }));
+      render(<StartupUpgrade />);
+      expect(
+        await screen.findByText("startupUpgrade.syncPausedReason"),
+      ).toBeVisible();
+      expect(
+        screen.queryByText("startupUpgrade.localContinueHint"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "startupUpgrade.continue" }),
+      ).not.toBeInTheDocument();
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.every(([command]) =>
+            [
+              "get_startup_upgrade_review",
+              "review_startup_upgrade_ownership",
+              "review_startup_upgrade_app",
+            ].includes(command),
+          ),
+      ).toBe(true);
+    },
+  );
+
+  it("explains authenticated local continuation and keeps repeated rechecks read-only", async () => {
+    serve();
+    render(<StartupUpgrade />);
+    expect(
+      await screen.findByText("startupUpgrade.localContinueHint"),
+    ).toBeVisible();
+    expect(screen.getByText("startupUpgrade.syncPausedReason")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.continue" }),
+    ).toBeEnabled();
+    for (let i = 0; i < 2; i++) {
+      fireEvent.click(
+        screen.getAllByRole("button", { name: "startupUpgrade.recheck" })[0],
+      );
+      await screen.findByText("startupUpgrade.localContinueHint");
+    }
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.every(([command]) =>
+          [
+            "get_startup_upgrade_review",
+            "review_startup_upgrade_ownership",
+            "review_startup_upgrade_app",
+          ].includes(command),
+        ),
+    ).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "startupUpgrade.complete" }),
+    ).toBeDisabled();
+  });
+
+  it("does not infer paused sync or local availability without a checkpoint", async () => {
+    serve(
+      review({
+        status: "preflight",
+        checkpointPresent: false,
+        checkpointId: null,
+        reviewToken: null,
+      }),
+    );
+    render(<StartupUpgrade />);
+    await screen.findByText("startupUpgrade.verificationRequired");
+    expect(
+      screen.queryByText("startupUpgrade.syncPausedReason"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("startupUpgrade.localContinueHint"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+it.each([
+  ["zh", zh],
+  ["en", en],
+  ["zh-TW", zhTW],
+  ["ja", ja],
+] as const)(
+  "uses existing labels in the %s sync pause explanation",
+  async (lng, translation) => {
+    const i18n = createInstance();
+    await i18n.init({
+      lng,
+      resources: { [lng]: { translation } },
+      interpolation: { escapeValue: false },
+    });
+    const labels = {
+      settings: i18n.t("common.settings"),
+      auth: i18n.t("settings.tabAuth"),
+      protection: i18n.t("secrets.protectionTitle"),
+      review: i18n.t("startupUpgrade.reviewApps"),
+    };
+    const hint = i18n.t("startupUpgrade.syncReviewHint", labels);
+    for (const label of Object.values(labels)) expect(hint).toContain(label);
+    expect(hint).not.toMatch(/{{|startupUpgrade\./);
+    const continuation = i18n.t("startupUpgrade.localContinueHint", {
+      continue: i18n.t("startupUpgrade.continue"),
+    });
+    expect(continuation).toContain(translation.startupUpgrade.continue);
+    expect(continuation).not.toMatch(/{{|startupUpgrade\./);
+    expect(i18n.t("startupUpgrade.syncPausedReason")).toBe(
+      translation.startupUpgrade.syncPausedReason,
+    );
+  },
+);

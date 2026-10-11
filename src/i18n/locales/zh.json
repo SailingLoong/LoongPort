@@ -4631,6 +4631,10 @@
     }
   },
   "startupUpgrade": {
+    "syncPausedTitle": "升级期间同步已暂停",
+    "syncPausedReason": "升级检查点仍保留。为避免未经核对的设备覆盖升级数据，上传和下载保持暂停；恢复同步前还需确认独立同步配置或兼容设备。",
+    "syncReviewHint": "可前往“{{settings}} → {{auth}} → {{protection}}”；数据库已核验时，使用“{{review}}”查看当前状态。核对不会自动恢复同步。",
+    "localContinueHint": "可尝试“{{continue}}”，最终由原流程核验是否允许进入。逐应用限制仍保留；进入工作台不会恢复同步或删除升级检查点。",
     "chooseModeLabel": "选择缺失的模式",
     "chooseMode": {
       "direct": "选择直连",

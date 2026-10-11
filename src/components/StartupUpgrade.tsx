@@ -502,6 +502,18 @@ export function StartupUpgrade({
         <p role="status" className="text-sm text-muted-foreground">
           {t(statusKey)}
         </p>
+        {view?.checkpointPresent && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.syncPausedReason")}
+          </p>
+        )}
+        {published && view?.reviewToken && !embedded && (
+          <p className="text-sm text-muted-foreground">
+            {t("startupUpgrade.localContinueHint", {
+              continue: t("startupUpgrade.continue"),
+            })}
+          </p>
+        )}
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {t("startupUpgrade.queryFailed")}
@@ -650,7 +662,7 @@ export function StartupUpgrade({
           {t("startupUpgrade.notComplete")}
         </p>
         <div className="flex flex-wrap justify-between gap-2 border-t pt-4">
-          {/* Runtime handoff retains the checkpoint; completion still requires all app and sync proofs. */}
+          {/* Runtime handoff retains the checkpoint, sync pause, and per-app restrictions. */}
           {published && view?.reviewToken && !embedded && (
             <Button disabled={busy} onClick={() => void act("continue")}>
               {t("startupUpgrade.continue")}

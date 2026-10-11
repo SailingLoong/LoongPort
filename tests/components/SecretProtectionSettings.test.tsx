@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -86,6 +92,19 @@ it("reopens the original app review in settings without repeating runtime handof
         canCheckAndBackup: false,
         canStartUpgrade: false,
       };
+    if (command === "review_startup_upgrade_ownership")
+      return {
+        checkpointId: "synthetic-checkpoint",
+        apps: ["claude", "codex", "gemini", "grokbuild"].map((appType) => ({
+          appType,
+          savedMode: "proxy",
+          providerResolution: "preserved",
+          hasPendingOperation: false,
+          storedFieldsMatch: true,
+          requiresModeChoice: false,
+          requiresProviderChoice: false,
+        })),
+      };
     if (command === "review_startup_upgrade_app")
       return {
         appType: (args as { appType: string }).appType,
@@ -109,6 +128,30 @@ it("reopens the original app review in settings without repeating runtime handof
   );
   await screen.findByRole("dialog");
   await screen.findByRole("region", { name: "Claude Code" });
+  expect(screen.getByText("startupUpgrade.syncPausedReason")).toBeVisible();
+  const firstDialog = screen.getByRole("dialog");
+  fireEvent.click(
+    within(firstDialog).getByRole("button", { name: "common.close" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "startupUpgrade.reviewApps" }),
+  );
+  await screen.findByRole("region", { name: "Claude Code" });
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.every(([command]) =>
+        [
+          "get_secret_protection",
+          "get_startup_upgrade_review",
+          "review_startup_upgrade_ownership",
+          "review_startup_upgrade_app",
+        ].includes(command),
+      ),
+  ).toBe(true);
   expect(
     screen.queryByRole("button", { name: "startupUpgrade.continue" }),
   ).not.toBeInTheDocument();

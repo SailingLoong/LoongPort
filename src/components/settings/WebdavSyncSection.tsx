@@ -33,6 +33,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { settingsApi } from "@/lib/api";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { SyncRestoreDialog, isSyncRestoreRequired } from "./SyncRestoreDialog";
 import { LegacySyncCleanup } from "./LegacySyncCleanup";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -548,6 +549,36 @@ export function WebdavSyncSection({
     }
   }, [buildSettings, form.password, passwordTouched, queryClient, t]);
 
+  const reportSyncError = useCallback(
+    (error: unknown, fallbackKey: string) => {
+      const message = extractErrorMessage(error).trim();
+      if (
+        message === "upgrade.sync_paused" ||
+        message === "配置错误: upgrade.sync_paused"
+      ) {
+        toast.error(t("startupUpgrade.syncPausedTitle"), {
+          description: `${t("startupUpgrade.syncPausedReason")} ${t(
+            "startupUpgrade.syncReviewHint",
+            {
+              settings: t("common.settings"),
+              auth: t("settings.tabAuth"),
+              protection: t("secrets.protectionTitle"),
+              review: t("startupUpgrade.reviewApps"),
+            },
+          )}`,
+          duration: 10000,
+        });
+        return;
+      }
+      toast.error(
+        t(fallbackKey, {
+          error: (error as Error)?.message ?? String(error),
+        }),
+      );
+    },
+    [t],
+  );
+
   /** Fetch remote info, then open upload confirmation dialog. */
   const handleUploadClick = useCallback(async () => {
     if (dirty) {
@@ -585,15 +616,11 @@ export function WebdavSyncSection({
       toast.success(t("settings.webdavSync.uploadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
-      toast.error(
-        t("settings.webdavSync.uploadFailed", {
-          error: (error as Error)?.message ?? String(error),
-        }),
-      );
+      reportSyncError(error, "settings.webdavSync.uploadFailed");
     } finally {
       setActionState("idle");
     }
-  }, [closeDialog, dirty, queryClient, t]);
+  }, [closeDialog, dirty, queryClient, reportSyncError, t]);
 
   /** Fetch remote info, then open download confirmation dialog. */
   const handleDownloadClick = useCallback(async () => {
@@ -649,15 +676,11 @@ export function WebdavSyncSection({
         setRestoreRequest({ transport: "webdav", snapshot: remoteInfo });
         return;
       }
-      toast.error(
-        t("settings.webdavSync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
-        }),
-      );
+      reportSyncError(error, "settings.webdavSync.downloadFailed");
     } finally {
       setActionState("idle");
     }
-  }, [closeDialog, dirty, queryClient, remoteInfo, t]);
+  }, [closeDialog, dirty, queryClient, remoteInfo, reportSyncError, t]);
 
   // ─── S3 helpers ────────────────────────────────────────────
 
@@ -805,15 +828,11 @@ export function WebdavSyncSection({
       toast.success(t("settings.s3Sync.uploadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
-      toast.error(
-        t("settings.s3Sync.uploadFailed", {
-          error: (error as Error)?.message ?? String(error),
-        }),
-      );
+      reportSyncError(error, "settings.s3Sync.uploadFailed");
     } finally {
       setS3ActionState("idle");
     }
-  }, [closeS3Dialog, s3Dirty, queryClient, t]);
+  }, [closeS3Dialog, s3Dirty, queryClient, reportSyncError, t]);
 
   const handleS3DownloadClick = useCallback(async () => {
     if (s3Dirty) {
@@ -864,15 +883,11 @@ export function WebdavSyncSection({
         setRestoreRequest({ transport: "s3", snapshot: s3RemoteInfo });
         return;
       }
-      toast.error(
-        t("settings.s3Sync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
-        }),
-      );
+      reportSyncError(error, "settings.s3Sync.downloadFailed");
     } finally {
       setS3ActionState("idle");
     }
-  }, [closeS3Dialog, s3Dirty, queryClient, s3RemoteInfo, t]);
+  }, [closeS3Dialog, s3Dirty, queryClient, s3RemoteInfo, reportSyncError, t]);
 
   // ─── Sync type switching with mutual exclusion ─────────────
 
