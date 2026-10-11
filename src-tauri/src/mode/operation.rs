@@ -105,7 +105,7 @@ pub(crate) fn original_save_view(
     saved_request_view(app, entry, state::SaveScope::Provider, Some(provider_id))
 }
 
-/// The provider editor and Codex shared page select their own original receipt.
+/// The provider editor and shared pages select their own original receipt.
 pub(crate) fn saved_request_view(
     app: &str,
     entry: &state::AppLiveState,
@@ -1032,10 +1032,15 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
                     return Err(invalid_pending());
                 }
             }
-            state::SaveScope::CodexSharedSettings => {
+            state::SaveScope::CodexSharedSettings | state::SaveScope::ClaudeSharedSettings => {
                 let mut effects = target.clone();
                 effects.save_request = None;
-                if app != "codex" || !effects.is_empty() {
+                let expected_app = match request.scope {
+                    state::SaveScope::CodexSharedSettings => "codex",
+                    state::SaveScope::ClaudeSharedSettings => "claude",
+                    state::SaveScope::Provider => unreachable!(),
+                };
+                if app != expected_app || !effects.is_empty() {
                     return Err(invalid_pending());
                 }
             }

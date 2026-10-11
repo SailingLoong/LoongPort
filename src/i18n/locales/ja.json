@@ -4710,5 +4710,12 @@
       "cancel": "選択をキャンセル",
       "preview": "選択した項目のインポートをプレビュー"
     }
+  },
+  "claudeSharedSettings": {
+    "title": "Claude Code 共有設定",
+    "description": "現在の設定を切り替えずに共有フィールドを編集します。",
+    "manageMcp": "拡張リソースで Claude Code MCP を管理",
+    "editor": "共有内容（JSON）",
+    "invalidFormat": "JSON が無効です。内容を修正して再度プレビューしてください。"
   }
 }

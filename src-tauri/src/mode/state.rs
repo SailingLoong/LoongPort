@@ -388,13 +388,14 @@ pub struct PendingFile {
     pub extra: Map<String, Value>,
 }
 
-/// The two existing consumers of the same app-local save receipt.
+/// Existing consumers of the same app-local save receipt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SaveScope {
     #[default]
     Provider,
     CodexSharedSettings,
+    ClaudeSharedSettings,
 }
 impl SaveScope {
     fn is_provider(&self) -> bool {
@@ -432,7 +433,9 @@ impl SaveRequest {
                     .provider_id
                     .as_ref()
                     .is_none_or(|id| id.trim().is_empty()),
-                SaveScope::CodexSharedSettings => self.provider_id.is_some(),
+                SaveScope::CodexSharedSettings | SaveScope::ClaudeSharedSettings => {
+                    self.provider_id.is_some()
+                }
             }
             || !digest(&self.draft_digest)
             || !digest(&self.revision)

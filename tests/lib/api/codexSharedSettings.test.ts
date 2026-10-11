@@ -57,3 +57,43 @@ describe("Codex shared settings wire contract", () => {
     );
   });
 });
+
+describe("Claude shared settings wire contract", () => {
+  it("uses all six Claude commands and echoes exact JSON text and receipt", async () => {
+    const request = {
+      id: "claude-shared-1",
+      scope: "claudeSharedSettings" as const,
+      draftDigest: "digest",
+      revision: "revision",
+    };
+    const config =
+      '{"limits":{"count":9007199254740993},"ui":{"literal.key":true}}';
+    await configApi.getClaudeSharedSettings();
+    expect(invoke).toHaveBeenLastCalledWith("get_claude_shared_settings");
+    await configApi.previewClaudeSharedSettings(config, request.id);
+    expect(invoke).toHaveBeenLastCalledWith("preview_claude_shared_settings", {
+      config,
+      requestId: request.id,
+    });
+    await configApi.saveClaudeSharedSettings(config, request);
+    expect(invoke).toHaveBeenLastCalledWith("save_claude_shared_settings", {
+      config,
+      request,
+    });
+    await configApi.getClaudeSharedSettingsSaveResult(request);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "get_claude_shared_settings_save_result",
+      { request },
+    );
+    await configApi.getClaudeSharedSettingsImport();
+    expect(invoke).toHaveBeenLastCalledWith(
+      "get_claude_shared_settings_import",
+    );
+    const fields = [["ui", "literal.key"]];
+    await configApi.previewClaudeSharedSettingsImport(fields, request.id);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "preview_claude_shared_settings_import",
+      { fields, requestId: request.id },
+    );
+  });
+});

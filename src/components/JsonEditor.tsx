@@ -20,6 +20,8 @@ interface JsonEditorProps {
   darkMode?: boolean;
   rows?: number;
   showValidation?: boolean;
+  /** Disable value-normalizing formatting for backend-owned configuration text. */
+  showFormat?: boolean;
   /** Omit source fragments from diagnostics for controlled configuration edits. */
   redactErrors?: boolean;
   language?: "json" | "javascript";
@@ -93,6 +95,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
   darkMode = false,
   rows = 3,
   showValidation = true,
+  showFormat = true,
   redactErrors = false,
   language = "json",
   height,
@@ -376,7 +379,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
         }}
         className={isFullHeight ? "flex-1 min-h-0" : ""}
       />
-      {language === "json" && !readOnly && (
+      {language === "json" && showFormat && !readOnly && (
         <button
           type="button"
           onClick={handleFormat}

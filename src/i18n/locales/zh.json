@@ -4710,5 +4710,12 @@
       "cancel": "取消选择",
       "preview": "预览所选导入"
     }
+  },
+  "claudeSharedSettings": {
+    "title": "Claude Code 共享设置",
+    "description": "编辑共享字段，不切换当前配置。",
+    "manageMcp": "前往扩展资源管理 Claude Code MCP",
+    "editor": "共享内容（JSON）",
+    "invalidFormat": "JSON 格式无效，请修改内容后重新预览。"
   }
 }

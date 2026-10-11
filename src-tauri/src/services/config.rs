@@ -587,22 +587,79 @@ fn shared_item_value(item: &toml_edit::Item) -> Result<toml::Value, AppError> {
         .map(|value| value["value"].clone())
         .map_err(|_| shared_problem("invalidFormat"))
 }
+// The two existing shared editors reuse the transaction and receipt, while
+// each native format retains its own field projection and patch implementation.
+#[derive(Clone, Copy)]
+enum SharedApp {
+    Codex,
+    Claude,
+}
+impl SharedApp {
+    fn kind(self) -> AppType {
+        match self {
+            Self::Codex => AppType::Codex,
+            Self::Claude => AppType::Claude,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+    fn scope(self) -> crate::mode::state::SaveScope {
+        match self {
+            Self::Codex => crate::mode::state::SaveScope::CodexSharedSettings,
+            Self::Claude => crate::mode::state::SaveScope::ClaudeSharedSettings,
+        }
+    }
+    fn file(self) -> crate::live::engine::LiveFile {
+        crate::live::engine::LiveFile::private(match self {
+            Self::Codex => crate::codex_config::get_codex_config_path(),
+            Self::Claude => crate::config::get_claude_settings_path(),
+        })
+    }
+    fn role(self) -> &'static str {
+        match self {
+            Self::Codex => "codexConfig",
+            Self::Claude => "claudeSettings",
+        }
+    }
+    fn config_text(self, bytes: Option<&[u8]>) -> Result<String, AppError> {
+        match self {
+            Self::Codex => shared_config_text(shared_parse(
+                std::str::from_utf8(bytes.unwrap_or_default())
+                    .map_err(|_| shared_problem("invalidFormat"))?,
+            )?),
+            Self::Claude => {
+                let mut value = claude_shared_parse(&self.file().path, bytes)?;
+                claude_shared_projection(&mut value, &[]);
+                serde_json::to_string_pretty(&value).map_err(|_| shared_problem("invalidFormat"))
+            }
+        }
+    }
+}
 fn shared_result(
+    app: SharedApp,
     request: &crate::mode::state::SaveRequest,
     status: &str,
     code: Option<&str>,
 ) -> Value {
-    let mut value = serde_json::json!({"app":"codex","request":request,"status":status});
+    let mut value = serde_json::json!({"app":app.name(),"request":request,"status":status});
     if let Some(code) = code {
         value["code"] = serde_json::json!(code);
     }
     value
 }
-fn shared_request(config: &str, id: &str) -> Result<crate::mode::state::SaveRequest, AppError> {
+fn shared_request(
+    app: SharedApp,
+    config: &str,
+    id: &str,
+) -> Result<crate::mode::state::SaveRequest, AppError> {
     let digest = crate::live::engine::sha256_hex(config.as_bytes());
     let request = crate::mode::state::SaveRequest {
         id: id.into(),
-        scope: crate::mode::state::SaveScope::CodexSharedSettings,
+        scope: app.scope(),
         provider_id: None,
         draft_digest: digest.clone(),
         revision: digest,
@@ -611,6 +668,7 @@ fn shared_request(config: &str, id: &str) -> Result<crate::mode::state::SaveRequ
     Ok(request)
 }
 fn shared_original(
+    app: SharedApp,
     state: &crate::store::AppState,
 ) -> Result<Option<(crate::mode::state::SaveRequest, &'static str)>, AppError> {
     use crate::mode::{operation, state as mode};
@@ -618,46 +676,43 @@ fn shared_original(
     let live = mode::load_app(
         &crate::live::engine::DeviceStore::for_device(),
         &vault,
-        "codex",
+        app.name(),
     )?;
     live.apps
-        .get("codex")
+        .get(app.name())
         .map(|entry| {
-            operation::saved_request_view(
-                "codex",
-                entry,
-                mode::SaveScope::CodexSharedSettings,
-                None,
-            )
-            .map(|view| view.map(|v| (v.request, v.status)))
+            operation::saved_request_view(app.name(), entry, app.scope(), None)
+                .map(|view| view.map(|v| (v.request, v.status)))
         })
         .transpose()
         .map(Option::flatten)
 }
 fn shared_query(
+    app: SharedApp,
     state: &crate::store::AppState,
     request: &crate::mode::state::SaveRequest,
 ) -> Result<Value, AppError> {
     request.validate()?;
-    if request.scope != crate::mode::state::SaveScope::CodexSharedSettings {
+    if request.scope != app.scope() {
         return Err(shared_problem("readOnlyFields"));
     }
     let vault = state.db.secret_session().read()?;
     let live = crate::mode::state::load_app(
         &crate::live::engine::DeviceStore::for_device(),
         &vault,
-        "codex",
+        app.name(),
     )?;
     let status = live
         .apps
-        .get("codex")
-        .map(|entry| crate::mode::operation::saved_request_status("codex", entry, request))
+        .get(app.name())
+        .map(|entry| crate::mode::operation::saved_request_status(app.name(), entry, request))
         .transpose()?
         .unwrap_or("notRecorded");
-    Ok(shared_result(request, status, None))
+    Ok(shared_result(app, request, status, None))
 }
 
 fn shared_plan(
+    app: SharedApp,
     state: &crate::store::AppState,
     config: &str,
     id: &str,
@@ -672,10 +727,10 @@ fn shared_plan(
 > {
     use crate::live::engine;
     let _admission =
-        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Codex)?;
-    let file = engine::LiveFile::private(crate::codex_config::get_codex_config_path());
+        crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
+    let file = app.file();
     let pre = engine::read_current(&file.path)?;
-    shared_plan_from_source(config, id, file, pre)
+    plan_shared_source(app, config, id, file, pre)
 }
 
 // Both editors plan from one observed file version; importing must not seed
@@ -698,7 +753,7 @@ fn shared_plan_from_source(
         engine,
         patch::{toml::TomlPatch, Guarded, KeyPath, LivePatch, WholeFile},
     };
-    let mut request = shared_request(config, id)?;
+    let mut request = shared_request(SharedApp::Codex, config, id)?;
     let before_text = std::str::from_utf8(pre.as_deref().unwrap_or_default())
         .map_err(|_| shared_problem("invalidFormat"))?;
     let full = shared_parse(before_text)?;
@@ -764,30 +819,39 @@ fn shared_plan_from_source(
         changes.into_values().collect(),
     ))
 }
-fn shared_import_fields(
+fn shared_import_snippet(
+    app: SharedApp,
     state: &crate::store::AppState,
-) -> Result<std::collections::BTreeMap<Vec<String>, toml_edit::Item>, AppError> {
-    if state.db.is_config_snippet_cleared("codex")? {
+) -> Result<Option<String>, AppError> {
+    if state.db.is_config_snippet_cleared(app.name())? {
         return Err(shared_problem("legacyDisabled"));
     }
     let Some(snippet) = state
         .db
-        .get_config_snippet("codex")?
+        .get_config_snippet(app.name())?
         .filter(|s| !s.trim().is_empty())
     else {
-        return Ok(Default::default());
+        return Ok(None);
     };
-    let current = ProviderService::current(state, AppType::Codex)?;
-    let provider = state.db.get_provider_by_id(&current, "codex")?;
+    let current = ProviderService::current(state, app.kind())?;
+    let provider = state.db.get_provider_by_id(&current, app.name())?;
     if !provider.as_ref().is_some_and(|provider| {
         crate::services::provider::provider_uses_common_config(
-            &AppType::Codex,
+            &app.kind(),
             provider,
             Some(&snippet),
         )
     }) {
         return Err(shared_problem("legacyDisabled"));
     }
+    Ok(Some(snippet))
+}
+fn shared_import_fields(
+    state: &crate::store::AppState,
+) -> Result<std::collections::BTreeMap<Vec<String>, toml_edit::Item>, AppError> {
+    let Some(snippet) = shared_import_snippet(SharedApp::Codex, state)? else {
+        return Ok(Default::default());
+    };
     let mut doc = shared_parse(&snippet)?;
     shared_projection(doc.as_table_mut(), &[]);
     let mut fields = std::collections::BTreeMap::new();
@@ -816,35 +880,247 @@ fn shared_config_text(mut doc: toml_edit::DocumentMut) -> Result<String, AppErro
     toml::to_string(&values).map_err(|_| shared_problem("invalidFormat"))
 }
 
+// Claude fields retain their native owner rules. JSON is never converted to TOML.
+fn claude_shared_key_allowed(path: &[String]) -> bool {
+    use crate::live::floor;
+    if path.iter().any(|key| {
+        ProviderService::is_sensitive_config_key(key)
+            || matches!(
+                key.to_ascii_lowercase().as_str(),
+                "authorization"
+                    | "headers"
+                    | "http_headers"
+                    | "httpheaders"
+                    | "env_http_headers"
+                    | "envhttpheaders"
+            )
+    }) {
+        return false;
+    }
+    match path {
+        [key] => {
+            !floor::claude_floor_top(key)
+                && !matches!(
+                    key.as_str(),
+                    "mcpServers"
+                        | "mcp_servers"
+                        | "mcp"
+                        | "enabledMcpjsonServers"
+                        | "disabledMcpjsonServers"
+                        | "enableAllProjectMcpServers"
+                        | "allowedMcpServers"
+                        | "deniedMcpServers"
+                )
+        }
+        [parent, key, ..] if parent == "env" => {
+            !floor::claude_floor_env(key) && !floor::claude_exclusive_env(key)
+        }
+        _ => true,
+    }
+}
+fn claude_shared_value_allowed(value: &Value, path: &[String]) -> bool {
+    if !claude_shared_key_allowed(path) || (path == ["env"] && !value.is_object()) {
+        return false;
+    }
+    match value {
+        Value::Object(map) => map.iter().all(|(key, value)| {
+            let mut child = path.to_vec();
+            child.push(key.clone());
+            claude_shared_value_allowed(value, &child)
+        }),
+        Value::Array(array) => array
+            .iter()
+            .all(|value| claude_shared_value_allowed(value, path)),
+        _ => true,
+    }
+}
+fn claude_shared_projection(value: &mut Value, path: &[String]) {
+    if let Some(map) = value.as_object_mut() {
+        for key in map.keys().cloned().collect::<Vec<_>>() {
+            let mut child = path.to_vec();
+            child.push(key.clone());
+            let item = map.get_mut(&key).unwrap();
+            if !claude_shared_key_allowed(&child) || (child == ["env"] && !item.is_object()) {
+                map.shift_remove(&key);
+                continue;
+            }
+            if item.is_object() {
+                let was_empty = item.as_object().unwrap().is_empty();
+                claude_shared_projection(item, &child);
+                // An object emptied by redaction is not an editable empty object:
+                // removing it from a draft must not remove its protected children.
+                if !was_empty && item.as_object().unwrap().is_empty() {
+                    map.shift_remove(&key);
+                }
+            } else if !claude_shared_value_allowed(item, &child) {
+                map.shift_remove(&key);
+            }
+        }
+    }
+}
+fn claude_shared_fields(
+    value: &Value,
+    path: &[String],
+    fields: &mut std::collections::BTreeMap<Vec<String>, Value>,
+) -> Result<(), AppError> {
+    if !claude_shared_value_allowed(value, path) {
+        return Err(shared_problem("readOnlyFields"));
+    }
+    if let Some(map) = value
+        .as_object()
+        .filter(|map| !map.is_empty() || path.is_empty())
+    {
+        for (key, value) in map {
+            let mut child = path.to_vec();
+            child.push(key.clone());
+            claude_shared_fields(value, &child, fields)?;
+        }
+    } else {
+        fields.insert(path.to_vec(), value.clone());
+    }
+    Ok(())
+}
+fn claude_shared_parse(path: &Path, bytes: Option<&[u8]>) -> Result<Value, AppError> {
+    crate::live::patch::json::parse(path, bytes)
+        .map(|(value, _)| value)
+        .map_err(|_| shared_problem("invalidFormat"))
+}
+fn claude_import_fields(
+    state: &crate::store::AppState,
+) -> Result<std::collections::BTreeMap<Vec<String>, Value>, AppError> {
+    let Some(text) = shared_import_snippet(SharedApp::Claude, state)? else {
+        return Ok(Default::default());
+    };
+    let mut value = claude_shared_parse(&SharedApp::Claude.file().path, Some(text.as_bytes()))?;
+    claude_shared_projection(&mut value, &[]);
+    let mut fields = Default::default();
+    claude_shared_fields(&value, &[], &mut fields)?;
+    Ok(fields)
+}
+fn claude_path_missing(value: &Value, path: &[String]) -> bool {
+    let mut current = value;
+    for key in path {
+        let Some(map) = current.as_object() else {
+            return false;
+        };
+        let Some(next) = map.get(key) else {
+            return true;
+        };
+        current = next;
+    }
+    false
+}
+fn plan_shared_source(
+    app: SharedApp,
+    config: &str,
+    id: &str,
+    file: crate::live::engine::LiveFile,
+    pre: Option<Vec<u8>>,
+) -> Result<
+    (
+        crate::mode::state::SaveRequest,
+        crate::live::engine::LiveFile,
+        crate::live::patch::Guarded,
+        Vec<Value>,
+    ),
+    AppError,
+> {
+    if matches!(app, SharedApp::Codex) {
+        return shared_plan_from_source(config, id, file, pre);
+    }
+    use crate::live::{
+        engine,
+        patch::{
+            json::{value_at, JsonPatch},
+            Guarded, KeyPath, LivePatch, WholeFile,
+        },
+    };
+    let mut request = shared_request(app, config, id)?;
+    let full = claude_shared_parse(&file.path, pre.as_deref())?;
+    let mut before = full.clone();
+    claude_shared_projection(&mut before, &[]);
+    let after = claude_shared_parse(&file.path, Some(config.as_bytes()))?;
+    let mut old = std::collections::BTreeMap::new();
+    let mut new = std::collections::BTreeMap::new();
+    claude_shared_fields(&before, &[], &mut old)?;
+    claude_shared_fields(&after, &[], &mut new)?;
+    let mut patch = JsonPatch::default();
+    let mut changes = std::collections::BTreeMap::new();
+    for (path, value) in &new {
+        if old.get(path) != Some(value) {
+            if value_at(&full, &KeyPath(path.clone()))
+                .is_some_and(|value| !claude_shared_value_allowed(value, path))
+            {
+                return Err(shared_problem("readOnlyFields"));
+            }
+            patch.set.push((KeyPath(path.clone()), value.clone()));
+            let mut change = serde_json::json!({"field":path.join("."),"after":value.to_string()});
+            if let Some(value) = old.get(path) {
+                change["before"] = serde_json::json!(value.to_string());
+            }
+            changes.insert(path.clone(), change);
+        }
+    }
+    for (path, value) in old.iter().filter(|(path, _)| !new.contains_key(*path)) {
+        patch.remove.push(KeyPath(path.clone()));
+        changes.insert(
+            path.clone(),
+            serde_json::json!({"field":path.join("."),"before":value.to_string()}),
+        );
+    }
+    let bytes = patch
+        .apply(&file.path, pre.as_deref())
+        .map_err(|_| shared_problem("invalidFormat"))?;
+    let source = serde_json::to_vec(&(app.scope(), &file.path, engine::digest(pre.as_deref())))
+        .map_err(|_| shared_problem("invalidFormat"))?;
+    request.revision = engine::sha256_hex(&source);
+    Ok((
+        request,
+        file,
+        Guarded {
+            expected_pre: engine::digest(pre.as_deref()),
+            then: WholeFile::Write(bytes),
+        },
+        changes.into_values().collect(),
+    ))
+}
+
 impl ConfigService {
-    pub(crate) fn read_codex_shared_settings_import(
+    fn read_shared_settings_import(
+        app: SharedApp,
         state: &crate::store::AppState,
     ) -> Result<Value, AppError> {
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
         let read = || -> Result<Vec<Value>, AppError> {
-            let _admission = crate::mode::operation::AppWrite::begin_mode(
-                &state.proxy_service,
-                &AppType::Codex,
-            )?;
-            let bytes =
-                crate::live::engine::read_current(&crate::codex_config::get_codex_config_path())?;
-            let doc = shared_parse(
-                std::str::from_utf8(bytes.as_deref().unwrap_or_default())
-                    .map_err(|_| shared_problem("invalidFormat"))?,
-            )?;
-            shared_import_fields(state)?.into_iter()
-                .filter(|(path, _)| shared_path_missing(&doc, path))
-                .map(|(path, value)| Ok(serde_json::json!({"field":path.join("."),"path":path,"value":shared_item_value(&value)?.to_string()})))
-                .collect()
+            let _admission =
+                crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
+            let bytes = crate::live::engine::read_current(&app.file().path)?;
+            match app {
+                SharedApp::Codex => {
+                    let doc = shared_parse(
+                        std::str::from_utf8(bytes.as_deref().unwrap_or_default())
+                            .map_err(|_| shared_problem("invalidFormat"))?,
+                    )?;
+                    shared_import_fields(state)?.into_iter().filter(|(path,_)|shared_path_missing(&doc,path))
+                      .map(|(path,value)|Ok(serde_json::json!({"field":path.join("."),"path":path,"value":shared_item_value(&value)?.to_string()}))).collect()
+                }
+                SharedApp::Claude => {
+                    let doc = claude_shared_parse(&app.file().path, bytes.as_deref())?;
+                    Ok(claude_import_fields(state)?.into_iter().filter(|(path,_)|claude_path_missing(&doc,path))
+                      .map(|(path,value)|serde_json::json!({"field":path.join("."),"path":path,"value":value.to_string()})).collect())
+                }
+            }
         };
         Ok(match read() {
-            Ok(fields) => serde_json::json!({"app":"codex","status":"ready","fields":fields}),
+            Ok(fields) => serde_json::json!({"app":app.name(),"status":"ready","fields":fields}),
             Err(error) => {
-                serde_json::json!({"app":"codex","status":"blocked","fields":[],"code":shared_code(&error)})
+                serde_json::json!({"app":app.name(),"status":"blocked","fields":[],"code":shared_code(&error)})
             }
         })
     }
-    pub(crate) fn preview_codex_shared_settings_import(
+    fn preview_shared_settings_import(
+        app: SharedApp,
         state: &crate::store::AppState,
         fields: &[Vec<String>],
         id: &str,
@@ -853,100 +1129,116 @@ impl ConfigService {
             engine,
             patch::{toml::TomlPatch, KeyPath, LivePatch},
         };
-        let request = shared_request("", id)?;
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+        let request = shared_request(app, "", id)?;
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
         let plan = || -> Result<Value, AppError> {
-            let _admission = crate::mode::operation::AppWrite::begin_mode(
-                &state.proxy_service,
-                &AppType::Codex,
-            )?;
-            let file = engine::LiveFile::private(crate::codex_config::get_codex_config_path());
+            let _admission =
+                crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
+            let file = app.file();
             let pre = engine::read_current(&file.path)?;
-            let full = shared_parse(
-                std::str::from_utf8(pre.as_deref().unwrap_or_default())
-                    .map_err(|_| shared_problem("invalidFormat"))?,
-            )?;
-            let source = shared_import_fields(state)?;
-            let mut seed = TomlPatch::default();
-            for path in fields.iter().collect::<std::collections::BTreeSet<_>>() {
-                let item = source
-                    .get(path)
-                    .ok_or_else(|| shared_problem("readOnlyFields"))?;
-                if shared_path_missing(&full, path) {
-                    seed.seed.push((KeyPath(path.clone()), item.clone()));
+            let config = match app {
+                SharedApp::Codex => {
+                    let full = shared_parse(
+                        std::str::from_utf8(pre.as_deref().unwrap_or_default())
+                            .map_err(|_| shared_problem("invalidFormat"))?,
+                    )?;
+                    let source = shared_import_fields(state)?;
+                    let mut seed = TomlPatch::default();
+                    for path in fields.iter().collect::<std::collections::BTreeSet<_>>() {
+                        let item = source
+                            .get(path)
+                            .ok_or_else(|| shared_problem("readOnlyFields"))?;
+                        if shared_path_missing(&full, path) {
+                            seed.seed.push((KeyPath(path.clone()), item.clone()));
+                        }
+                    }
+                    let bytes = seed
+                        .apply(&file.path, pre.as_deref())
+                        .map_err(|_| shared_problem("invalidFormat"))?;
+                    app.config_text(Some(&bytes))?
                 }
-            }
-            let bytes = seed
-                .apply(&file.path, pre.as_deref())
-                .map_err(|_| shared_problem("invalidFormat"))?;
-            let config = shared_config_text(shared_parse(
-                std::str::from_utf8(&bytes).map_err(|_| shared_problem("invalidFormat"))?,
-            )?)?;
-            let (request, _, patch, changes) = shared_plan_from_source(&config, id, file, pre)?;
+                SharedApp::Claude => {
+                    let full = claude_shared_parse(&file.path, pre.as_deref())?;
+                    let source = claude_import_fields(state)?;
+                    let mut seed = crate::live::patch::json::JsonPatch::default();
+                    for path in fields.iter().collect::<std::collections::BTreeSet<_>>() {
+                        let item = source
+                            .get(path)
+                            .ok_or_else(|| shared_problem("readOnlyFields"))?;
+                        if claude_path_missing(&full, path) {
+                            seed.seed.push((KeyPath(path.clone()), item.clone()));
+                        }
+                    }
+                    let bytes = seed
+                        .apply(&file.path, pre.as_deref())
+                        .map_err(|_| shared_problem("invalidFormat"))?;
+                    app.config_text(Some(&bytes))?
+                }
+            };
+            let (request, _, patch, changes) = plan_shared_source(app, &config, id, file, pre)?;
             let crate::live::patch::WholeFile::Write(bytes) = patch.then else {
                 unreachable!()
             };
             Ok(
-                serde_json::json!({"app":"codex","request":request,"status":"ready","config":config,"changes":changes,"files":[{"role":"codexConfig","change":if engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]}),
+                serde_json::json!({"app":app.name(),"request":request,"status":"ready","config":config,"changes":changes,"files":[{"role":app.role(),"change":if engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]}),
             )
         };
         Ok(match plan() {
             Ok(value) => value,
             Err(error) => {
-                serde_json::json!({"app":"codex","request":request,"status":"blocked","config":"","changes":[],"files":[],"code":shared_code(&error)})
+                serde_json::json!({"app":app.name(),"request":request,"status":"blocked","config":"","changes":[],"files":[],"code":shared_code(&error)})
             }
         })
     }
-    pub(crate) fn read_codex_shared_settings(
+    fn read_shared_settings(
+        app: SharedApp,
         state: &crate::store::AppState,
     ) -> Result<Value, AppError> {
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
-        let original = shared_original(state)
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
+        let original = shared_original(app, state)
             .ok()
             .flatten()
-            .map(|(request, status)| shared_result(&request, status, None));
+            .map(|(request, status)| shared_result(app, &request, status, None));
         let read = || -> Result<String, AppError> {
-            let _admission = crate::mode::operation::AppWrite::begin_mode(
-                &state.proxy_service,
-                &AppType::Codex,
-            )?;
-            let bytes =
-                crate::live::engine::read_current(&crate::codex_config::get_codex_config_path())?;
-            let text = std::str::from_utf8(bytes.as_deref().unwrap_or_default())
-                .map_err(|_| shared_problem("invalidFormat"))?;
-            // The editor receives only ordinary values, not comments carried
-            // beside redacted auth fields. The live patch still keeps comments.
-            shared_config_text(shared_parse(text)?)
+            let _admission =
+                crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
+            let bytes = crate::live::engine::read_current(&app.file().path)?;
+            app.config_text(bytes.as_deref())
         };
         Ok(match read() {
             Ok(config) => {
-                serde_json::json!({"app":"codex","status":"ready","config":config,"originalSave":original})
+                serde_json::json!({"app":app.name(),"status":"ready","config":config,"originalSave":original})
             }
             Err(error) => {
-                serde_json::json!({"app":"codex","status":"blocked","config":"","originalSave":original,"code":shared_code(&error)})
+                serde_json::json!({"app":app.name(),"status":"blocked","config":"","originalSave":original,"code":shared_code(&error)})
             }
         })
     }
-    pub(crate) fn preview_codex_shared_settings(
+    fn preview_shared_settings(
+        app: SharedApp,
         state: &crate::store::AppState,
         config: &str,
         id: &str,
     ) -> Result<Value, AppError> {
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
-        let request = shared_request(config, id)?;
-        Ok(match shared_plan(state, config, id) {
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
+        let request = shared_request(app, config, id)?;
+        Ok(match shared_plan(app, state, config, id) {
             Ok((request, _, patch, changes)) => {
                 let crate::live::patch::WholeFile::Write(bytes) = patch.then else {
                     unreachable!()
                 };
-                serde_json::json!({"app":"codex","request":request,"status":"ready","changes":changes,"files":[{"role":"codexConfig","change":if crate::live::engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]})
+                serde_json::json!({"app":app.name(),"request":request,"status":"ready","changes":changes,"files":[{"role":app.role(),"change":if crate::live::engine::digest(Some(&bytes))==patch.expected_pre {"unchanged"}else{"write"}}]})
             }
             Err(error) => {
-                serde_json::json!({"app":"codex","request":request,"status":"blocked","changes":[],"files":[],"code":shared_code(&error)})
+                serde_json::json!({"app":app.name(),"request":request,"status":"blocked","changes":[],"files":[],"code":shared_code(&error)})
             }
         })
     }
-    pub(crate) fn save_codex_shared_settings(
+    fn save_shared_settings(
+        app: SharedApp,
         state: &crate::store::AppState,
         config: &str,
         request: crate::mode::state::SaveRequest,
@@ -956,16 +1248,18 @@ impl ConfigService {
             state::{op, PendingTarget},
         };
         request.validate()?;
-        if request.scope != crate::mode::state::SaveScope::CodexSharedSettings
+        if request.scope != app.scope()
             || request.draft_digest != crate::live::engine::sha256_hex(config.as_bytes())
         {
-            return Ok(shared_result(&request, "conflict", None));
+            return Ok(shared_result(app, &request, "conflict", None));
         }
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
-        let previous = match shared_query(state, &request) {
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
+        let previous = match shared_query(app, state, &request) {
             Ok(value) => value,
             Err(error) => {
                 return Ok(shared_result(
+                    app,
                     &request,
                     "blocked",
                     Some(shared_code(&error)),
@@ -975,10 +1269,11 @@ impl ConfigService {
         if !matches!(previous["status"].as_str(), Some("notRecorded" | "unknown")) {
             return Ok(previous);
         }
-        let (planned, file, patch, _) = match shared_plan(state, config, &request.id) {
+        let (planned, file, patch, _) = match shared_plan(app, state, config, &request.id) {
             Ok(plan) => plan,
             Err(error) => {
                 return Ok(shared_result(
+                    app,
                     &request,
                     "blocked",
                     Some(shared_code(&error)),
@@ -986,10 +1281,10 @@ impl ConfigService {
             }
         };
         if planned.revision != request.revision {
-            return Ok(shared_result(&request, "stale", Some("sourceChanged")));
+            return Ok(shared_result(app, &request, "stale", Some("sourceChanged")));
         }
         let saved = (|| {
-            let write = AppWrite::begin_mode(&state.proxy_service, &AppType::Codex)?;
+            let write = AppWrite::begin_mode(&state.proxy_service, &app.kind())?;
             write.run(
                 op::APPLY,
                 &[FileChange {
@@ -1002,23 +1297,103 @@ impl ConfigService {
                 },
             )
         })();
-        let queried = shared_query(state, &request)
-            .unwrap_or_else(|_| shared_result(&request, "unknown", None));
+        let queried = shared_query(app, state, &request)
+            .unwrap_or_else(|_| shared_result(app, &request, "unknown", None));
         Ok(match saved {
             Ok(_) => queried,
             Err(error) if matches!(queried["status"].as_str(), Some("notRecorded" | "unknown")) => {
-                shared_result(&request, "blocked", Some(shared_code(&error)))
+                shared_result(app, &request, "blocked", Some(shared_code(&error)))
             }
             Err(_) => queried,
         })
+    }
+    fn query_shared_settings_save(
+        app: SharedApp,
+        state: &crate::store::AppState,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.name()));
+        Ok(shared_query(app, state, &request).unwrap_or_else(|error| {
+            shared_result(app, &request, "unknown", Some(shared_code(&error)))
+        }))
+    }
+}
+
+impl ConfigService {
+    pub(crate) fn read_codex_shared_settings(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings(SharedApp::Codex, state)
+    }
+    pub(crate) fn preview_codex_shared_settings(
+        state: &crate::store::AppState,
+        config: &str,
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings(SharedApp::Codex, state, config, id)
+    }
+    pub(crate) fn save_codex_shared_settings(
+        state: &crate::store::AppState,
+        config: &str,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        Self::save_shared_settings(SharedApp::Codex, state, config, request)
     }
     pub(crate) fn query_codex_shared_settings_save(
         state: &crate::store::AppState,
         request: crate::mode::state::SaveRequest,
     ) -> Result<Value, AppError> {
-        let _switch = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
-        Ok(shared_query(state, &request)
-            .unwrap_or_else(|error| shared_result(&request, "unknown", Some(shared_code(&error)))))
+        Self::query_shared_settings_save(SharedApp::Codex, state, request)
+    }
+    pub(crate) fn read_codex_shared_settings_import(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings_import(SharedApp::Codex, state)
+    }
+    pub(crate) fn preview_codex_shared_settings_import(
+        state: &crate::store::AppState,
+        fields: &[Vec<String>],
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings_import(SharedApp::Codex, state, fields, id)
+    }
+    pub(crate) fn read_claude_shared_settings(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings(SharedApp::Claude, state)
+    }
+    pub(crate) fn preview_claude_shared_settings(
+        state: &crate::store::AppState,
+        config: &str,
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings(SharedApp::Claude, state, config, id)
+    }
+    pub(crate) fn save_claude_shared_settings(
+        state: &crate::store::AppState,
+        config: &str,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        Self::save_shared_settings(SharedApp::Claude, state, config, request)
+    }
+    pub(crate) fn query_claude_shared_settings_save(
+        state: &crate::store::AppState,
+        request: crate::mode::state::SaveRequest,
+    ) -> Result<Value, AppError> {
+        Self::query_shared_settings_save(SharedApp::Claude, state, request)
+    }
+    pub(crate) fn read_claude_shared_settings_import(
+        state: &crate::store::AppState,
+    ) -> Result<Value, AppError> {
+        Self::read_shared_settings_import(SharedApp::Claude, state)
+    }
+    pub(crate) fn preview_claude_shared_settings_import(
+        state: &crate::store::AppState,
+        fields: &[Vec<String>],
+        id: &str,
+    ) -> Result<Value, AppError> {
+        Self::preview_shared_settings_import(SharedApp::Claude, state, fields, id)
     }
 }
 

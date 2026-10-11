@@ -29,7 +29,23 @@ const shared = vi.hoisted(() => ({
   getImport: vi.fn(),
   previewImport: vi.fn(),
 }));
+const claudeShared = vi.hoisted(() => ({
+  get: vi.fn(),
+  preview: vi.fn(),
+  save: vi.fn(),
+  result: vi.fn(),
+  getImport: vi.fn(),
+  previewImport: vi.fn(),
+}));
 vi.mock("@/lib/api/config", () => ({
+  getSharedSettingsApi: (app: string) =>
+    app === "claude" ? claudeShared : shared,
+  getClaudeSharedSettings: claudeShared.get,
+  previewClaudeSharedSettings: claudeShared.preview,
+  saveClaudeSharedSettings: claudeShared.save,
+  getClaudeSharedSettingsSaveResult: claudeShared.result,
+  getClaudeSharedSettingsImport: claudeShared.getImport,
+  previewClaudeSharedSettingsImport: claudeShared.previewImport,
   getCodexSharedSettings: shared.get,
   previewCodexSharedSettings: shared.preview,
   saveCodexSharedSettings: shared.save,
@@ -38,9 +54,18 @@ vi.mock("@/lib/api/config", () => ({
   previewCodexSharedSettingsImport: shared.previewImport,
 }));
 vi.mock("@/components/JsonEditor", () => ({
-  default: ({ value, onChange, readOnly, ariaLabel }: any) => (
+  default: ({
+    value,
+    onChange,
+    readOnly,
+    ariaLabel,
+    language,
+    showFormat,
+  }: any) => (
     <textarea
       aria-label={ariaLabel}
+      data-language={language}
+      data-show-format={String(showFormat)}
       value={value}
       readOnly={readOnly}
       onChange={(event) => onChange(event.target.value)}
@@ -987,6 +1012,267 @@ describe("SettingsPage Component", () => {
       screen.getByRole("button", { name: "applications.discardAndLeave" }),
     );
     expect(onManageCodexMcp).toHaveBeenCalledOnce();
+  });
+
+  describe("Claude shared settings", () => {
+    const request = {
+      id: "claude-shared-1",
+      scope: "claudeSharedSettings",
+      draftDigest: "claude-digest",
+      revision: "claude-revision",
+    };
+    const initial = '{"permissions":{"defaultMode":"default"}}';
+    const edited =
+      '{"permissions":{"defaultMode":"plan"},"large":9007199254740993}';
+    const imported =
+      '{"permissions":{"defaultMode":"default"},"ui":{"literal.key":9007199254740993}}';
+    beforeEach(() => {
+      claudeShared.get.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        config: initial,
+        originalSave: null,
+      });
+      claudeShared.preview.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        request,
+        changes: [{ field: "large", after: "9007199254740993" }],
+        files: [{ role: "claudeSettings", change: "write" }],
+      });
+      claudeShared.save
+        .mockReset()
+        .mockResolvedValue({ app: "claude", request, status: "completed" });
+      claudeShared.result
+        .mockReset()
+        .mockResolvedValue({ app: "claude", request, status: "pending" });
+      claudeShared.getImport.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        fields: [
+          {
+            path: ["ui", "literal.key"],
+            field: 'ui."literal.key"',
+            value: "9007199254740993",
+          },
+        ],
+      });
+      claudeShared.previewImport.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        request,
+        config: imported,
+        changes: [{ field: 'ui."literal.key"', after: "9007199254740993" }],
+        files: [{ role: "claudeSettings", change: "write" }],
+      });
+    });
+    async function openClaude() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "claudeSharedSettings.title" }),
+      );
+      const editor = await screen.findByRole("textbox", {
+        name: "claudeSharedSettings.editor",
+      });
+      await waitFor(() => expect(editor).toHaveValue(initial));
+      return editor;
+    }
+    async function selectImport() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: 'ui."literal.key"',
+      });
+      expect(option).not.toBeChecked();
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+    }
+    async function previewClaude() {
+      const editor = await openClaude();
+      fireEvent.change(editor, { target: { value: edited } });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      );
+      return editor;
+    }
+    it("opens the real Claude settings entry and submits exact JSON only through Claude commands", async () => {
+      renderSettingsPage();
+      const editor = await previewClaude();
+      expect(editor).toHaveAttribute("data-language", "json");
+      expect(editor).toHaveAttribute("data-show-format", "false");
+      await screen.findByText("9007199254740993");
+      expect(claudeShared.preview).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        expect.any(String),
+      );
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.save).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        request,
+      );
+      expect(editor).toHaveValue(edited);
+      expect(shared.get).not.toHaveBeenCalled();
+      expect(shared.save).not.toHaveBeenCalled();
+      expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+      expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+    });
+    it("imports selected exact missing paths only explicitly and allows another manual import after saving", async () => {
+      renderSettingsPage();
+      const editor = await openClaude();
+      expect(claudeShared.getImport).not.toHaveBeenCalled();
+      await selectImport();
+      await waitFor(() => expect(editor).toHaveValue(imported));
+      expect(claudeShared.previewImport).toHaveBeenCalledExactlyOnceWith(
+        [["ui", "literal.key"]],
+        expect.any(String),
+      );
+      expect(claudeShared.preview).not.toHaveBeenCalled();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.save).toHaveBeenCalledExactlyOnceWith(
+        imported,
+        request,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      await screen.findByRole("checkbox", { name: 'ui."literal.key"' });
+      expect(claudeShared.getImport).toHaveBeenCalledTimes(2);
+      expect(claudeShared.save).toHaveBeenCalledOnce();
+    });
+    it("keeps the Claude draft and selected import on guard cancellation before explicit replacement", async () => {
+      renderSettingsPage();
+      const editor = await openClaude();
+      fireEvent.change(editor, { target: { value: edited } });
+      await selectImport();
+      await screen.findByText("applications.leaveDraftTitle");
+      expect(editor).toHaveValue(edited);
+      expect(claudeShared.previewImport).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(editor).toHaveValue(edited);
+      expect(
+        screen.getByRole("checkbox", { name: 'ui."literal.key"' }),
+      ).toBeChecked();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() => expect(editor).toHaveValue(imported));
+      expect(claudeShared.previewImport).toHaveBeenCalledOnce();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+    });
+    it.each(["invalidFormat", "sourceChanged", "secret-parser-source"])(
+      "shows a safe Claude %s preview failure and keeps its draft",
+      async (code) => {
+        claudeShared.preview.mockResolvedValue({
+          app: "claude",
+          status: "blocked",
+          request,
+          changes: [],
+          files: [],
+          code,
+        });
+        renderSettingsPage();
+        const editor = await previewClaude();
+        const key =
+          code === "invalidFormat"
+            ? "claudeSharedSettings.invalidFormat"
+            : `codexSharedSettings.error.${code === "sourceChanged" ? code : "generic"}`;
+        await screen.findByText(key);
+        expect(editor).toHaveValue(edited);
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        expect(document.body).not.toHaveTextContent("secret-parser-source");
+        expect(claudeShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("queries the exact unknown Claude save and blocks repeated writes and imports", async () => {
+      claudeShared.save.mockRejectedValue(new Error("secret-save-source"));
+      claudeShared.result.mockRejectedValue(new Error("secret-result-source"));
+      renderSettingsPage();
+      await previewClaude();
+      await screen.findByText("9007199254740993");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.unknown");
+      expect(claudeShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      ).toBeDisabled();
+      claudeShared.result.mockResolvedValue({
+        app: "claude",
+        request,
+        status: "completed",
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.result).toHaveBeenLastCalledWith(request);
+      expect(claudeShared.save).toHaveBeenCalledOnce();
+      expect(shared.result).not.toHaveBeenCalled();
+      expect(document.body).not.toHaveTextContent("secret-save-source");
+      expect(document.body).not.toHaveTextContent("secret-result-source");
+    });
+    it("requires a fresh Claude read after resolving an original save from a previous session", async () => {
+      claudeShared.get.mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        config: initial,
+        originalSave: {
+          app: "claude",
+          request,
+          status: "verificationRequired",
+        },
+      });
+      claudeShared.result.mockResolvedValue({
+        app: "claude",
+        request,
+        status: "completed",
+      });
+      renderSettingsPage();
+      const editor = await openClaude();
+      expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(editor).toHaveAttribute("readonly");
+      expect(claudeShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(claudeShared.preview).not.toHaveBeenCalled();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.reload" }),
+      );
+      await waitFor(() => expect(claudeShared.get).toHaveBeenCalledTimes(2));
+    });
   });
 
   it("should not render form content when loading", () => {

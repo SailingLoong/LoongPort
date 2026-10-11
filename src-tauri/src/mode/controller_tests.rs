@@ -6197,3 +6197,292 @@ fn codex_legacy_shared_import_preserves_disabled_protected_and_external_values()
     assert_eq!(malformed["code"], "invalidFormat");
     assert!(!malformed.to_string().contains("synthetic-parse-secret"));
 }
+
+#[test]
+#[serial_test::serial]
+fn claude_shared_settings_preserves_owned_fields_and_uses_original_receipt() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::claude();
+    let original = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-private","ANTHROPIC_MODEL":"synthetic-model","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"12345","EDITOR":"old"},"model":"synthetic-model","mcpServers":{"synthetic":{"command":"synthetic-private"}},"enabledMcpjsonServers":["synthetic"],"language":"en","hooks":{"Stop":[]},"historyLimit":9007199254740993u64});
+    let raw = serde_json::to_vec_pretty(&original).unwrap();
+    std::fs::write(&fx.path, &raw).unwrap();
+    let db = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let mode = state::mode_state(
+        &store,
+        &fx.state.db.secret_session().read().unwrap(),
+        "claude",
+    )
+    .unwrap();
+    let read = C::read_claude_shared_settings(&fx.state).unwrap();
+    assert_eq!(
+        read["status"], "ready",
+        "Claude needs its independent JSON shared editor"
+    );
+    let text = read["config"].as_str().unwrap();
+    assert!(text.contains("9007199254740993"));
+    assert!(!text.contains("synthetic"));
+    assert!(!text.contains("CONTEXT_TOKENS"));
+    let mut draft: serde_json::Value = serde_json::from_str(text).unwrap();
+    draft["language"] = json!("zh");
+    draft["env"]["EDITOR"] = json!("new");
+    draft.as_object_mut().unwrap().shift_remove("hooks");
+    let text = serde_json::to_string(&draft).unwrap();
+    let id = "41414141-4141-4141-8141-414141414141";
+    let preview = C::preview_claude_shared_settings(&fx.state, &text, id).unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(preview["request"]["scope"], "claudeSharedSettings");
+    assert_eq!(
+        preview["changes"],
+        json!([{"field":"env.EDITOR","before":"\"old\"","after":"\"new\""},{"field":"hooks.Stop","before":"[]"},{"field":"language","before":"\"en\"","after":"\"zh\""}])
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), raw);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_codex_shared_settings(&fx.state, &text, request.clone()).unwrap()["status"],
+        "conflict",
+        "the other app cannot consume this request"
+    );
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, &text, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.path).unwrap()).unwrap();
+    assert_eq!(saved["language"], "zh");
+    assert_eq!(saved["env"]["EDITOR"], "new");
+    for key in [
+        "model",
+        "mcpServers",
+        "enabledMcpjsonServers",
+        "historyLimit",
+    ] {
+        assert_eq!(saved[key], original[key]);
+    }
+    for key in [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_MODEL",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    ] {
+        assert_eq!(saved["env"][key], original["env"][key]);
+    }
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db
+    );
+    assert_eq!(
+        state::mode_state(
+            &store,
+            &fx.state.db.secret_session().read().unwrap(),
+            "claude"
+        )
+        .unwrap(),
+        mode
+    );
+    let bytes = std::fs::read(&fx.path).unwrap();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_claude_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, &text, request).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let preview =
+        C::preview_claude_shared_settings(&fx.state, &text, "41414141-4141-4141-8141-414141414142")
+            .unwrap();
+    let request = serde_json::from_value(preview["request"].clone()).unwrap();
+    let mut external = saved;
+    external["theme"] = json!("external");
+    let bytes = serde_json::to_vec(&external).unwrap();
+    std::fs::write(&fx.path, &bytes).unwrap();
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, &text, request).unwrap()["status"],
+        "stale"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+}
+
+#[test]
+#[serial_test::serial]
+fn claude_shared_settings_rejects_protected_subtrees_and_preserves_pending() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::claude();
+    let original = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-private","EDITOR":"keep"},"custom":{"api_key":"synthetic-hidden","ordinary":true},"items":[{"token":"synthetic-array"}],"language":"en"});
+    let bytes = serde_json::to_vec(&original).unwrap();
+    std::fs::write(&fx.path, &bytes).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let read = C::read_claude_shared_settings(&fx.state).unwrap();
+    assert_eq!(read["status"], "ready");
+    assert!(!read.to_string().contains("synthetic"));
+    let base: serde_json::Value = serde_json::from_str(read["config"].as_str().unwrap()).unwrap();
+    for (key, value) in [
+        ("env", json!("replace")),
+        ("env", json!([])),
+        ("custom", json!(1)),
+        ("items", json!([])),
+        ("model", json!("replacement")),
+        ("disabledMcpjsonServers", json!([])),
+        ("payload", json!([{"token":"synthetic-new"}])),
+    ] {
+        let mut draft = base.clone();
+        draft[key] = value;
+        let result = C::preview_claude_shared_settings(
+            &fx.state,
+            &draft.to_string(),
+            "42424242-4242-4242-8242-424242424242",
+        )
+        .unwrap();
+        assert_eq!(result["status"], "blocked", "protected {key}");
+        assert_eq!(result["code"], "readOnlyFields");
+        assert!(!result.to_string().contains("synthetic"));
+    }
+    assert_eq!(
+        C::preview_claude_shared_settings(
+            &fx.state,
+            "{\"synthetic-private\":",
+            "42424242-4242-4242-8242-424242424242"
+        )
+        .unwrap()["code"],
+        "invalidFormat"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let mut draft = base;
+    draft["language"] = json!("zh");
+    let text = draft.to_string();
+    let preview =
+        C::preview_claude_shared_settings(&fx.state, &text, "42424242-4242-4242-8242-424242424243")
+            .unwrap();
+    assert_eq!(preview["status"], "ready");
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    {
+        let _fault = Fault::at("pending");
+        assert_eq!(
+            C::save_claude_shared_settings(&fx.state, &text, request.clone()).unwrap()["status"],
+            "pending"
+        );
+    }
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        C::query_claude_shared_settings_save(&fx.state, request.clone()).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, &text, request).unwrap()["status"],
+        "pending"
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
+}
+
+#[test]
+#[serial_test::serial]
+fn claude_legacy_shared_import_seeds_selected_missing_json_fields() {
+    use crate::services::config::ConfigService as C;
+    let fx = Fixture::claude();
+    let original = json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-private","EDITOR":"live"},"language":"live","shape":"keep","array":[1]});
+    std::fs::write(&fx.path, original.to_string()).unwrap();
+    let snippet = json!({"language":"legacy","env":{"EDITOR":"legacy","MY_NEW_OPTION":"yes","ANTHROPIC_AUTH_TOKEN":"synthetic-secret","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"2"},"hooks":{"Stop":[]},"shape":{"child":true},"array":{"child":true},"model":"synthetic-model","enabledMcpjsonServers":["private"],"nested":[{"api_key":"synthetic-hidden"}]});
+    fx.state
+        .db
+        .set_config_snippet("claude", Some(snippet.to_string()))
+        .unwrap();
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("a", "claude")
+        .unwrap()
+        .unwrap();
+    provider
+        .meta
+        .get_or_insert_with(Default::default)
+        .common_config_enabled = Some(false);
+    fx.state.db.save_provider("claude", &provider).unwrap();
+    let read = C::read_claude_shared_settings_import(&fx.state).unwrap();
+    assert_eq!(
+        read["code"], "legacyDisabled",
+        "disabled legacy source stays disabled"
+    );
+    provider.meta.as_mut().unwrap().common_config_enabled = Some(true);
+    fx.state.db.save_provider("claude", &provider).unwrap();
+    let db = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let read = C::read_claude_shared_settings_import(&fx.state).unwrap();
+    assert_eq!(read["status"], "ready");
+    assert_eq!(
+        read["fields"],
+        json!([{"path":["env","MY_NEW_OPTION"],"field":"env.MY_NEW_OPTION","value":"\"yes\""},{"path":["hooks","Stop"],"field":"hooks.Stop","value":"[]"}])
+    );
+    assert!(!read.to_string().contains("synthetic"));
+    let fields = vec![vec!["env".into(), "MY_NEW_OPTION".into()]];
+    let id = "43434343-4343-4343-8343-434343434343";
+    let forbidden =
+        C::preview_claude_shared_settings_import(&fx.state, &[vec!["model".into()]], id).unwrap();
+    assert_eq!(forbidden["code"], "readOnlyFields");
+    let preview = C::preview_claude_shared_settings_import(&fx.state, &fields, id).unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(
+        preview["changes"],
+        json!([{"field":"env.MY_NEW_OPTION","after":"\"yes\""}])
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    let text = preview["config"].as_str().unwrap();
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, text, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.path).unwrap()).unwrap();
+    let mut expected = original.clone();
+    expected["env"]["MY_NEW_OPTION"] = json!("yes");
+    assert_eq!(saved, expected);
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db
+    );
+    assert_eq!(
+        C::query_claude_shared_settings_save(&fx.state, request).unwrap()["status"],
+        "completed"
+    );
+    // A later explicit import is a new operation; selection is checked against fresh live.
+    std::fs::write(&fx.path, original.to_string()).unwrap();
+    let preview = C::preview_claude_shared_settings_import(
+        &fx.state,
+        &fields,
+        "43434343-4343-4343-8343-434343434344",
+    )
+    .unwrap();
+    assert_eq!(preview["changes"].as_array().unwrap().len(), 1);
+    let mut external = original;
+    external["env"]["MY_NEW_OPTION"] = json!("external");
+    std::fs::write(&fx.path, external.to_string()).unwrap();
+    let refreshed = C::preview_claude_shared_settings_import(
+        &fx.state,
+        &fields,
+        "43434343-4343-4343-8343-434343434345",
+    )
+    .unwrap();
+    assert_eq!(refreshed["status"], "ready");
+    assert_eq!(refreshed["changes"], json!([]));
+    assert!(refreshed["config"].as_str().unwrap().contains("external"));
+    let bytes = std::fs::read(&fx.path).unwrap();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let request = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        C::save_claude_shared_settings(&fx.state, preview["config"].as_str().unwrap(), request)
+            .unwrap()["status"],
+        "stale"
+    );
+    assert_eq!(std::fs::read(&fx.path).unwrap(), bytes);
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+}

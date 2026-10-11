@@ -99,16 +99,22 @@ export async function extractCommonConfigSnippet(
   return invoke<string>("extract_common_config_snippet", args);
 }
 
-export interface CodexSharedSettingsRequest {
+export type SharedSettingsApp = "codex" | "claude";
+
+export interface SharedSettingsRequest<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
   id: string;
-  scope: "codexSharedSettings";
+  scope: `${App}SharedSettings`;
   draftDigest: string;
   revision: string;
 }
 
-export interface CodexSharedSettingsResult {
-  app: "codex";
-  request: CodexSharedSettingsRequest;
+export interface SharedSettingsResult<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  request: SharedSettingsRequest<App>;
   status:
     | "completed"
     | "pending"
@@ -123,61 +129,103 @@ export interface CodexSharedSettingsResult {
   code?: string;
 }
 
-export interface CodexSharedSettingsSnapshot {
-  app: "codex";
+export interface SharedSettingsSnapshot<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
   status: "ready" | "blocked";
   config: string;
-  originalSave: CodexSharedSettingsResult | null;
+  originalSave: SharedSettingsResult<App> | null;
   code?: string;
 }
 
-export interface CodexSharedSettingsPreview {
-  app: "codex";
-  request: CodexSharedSettingsRequest;
+export interface SharedSettingsPreview<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  request: SharedSettingsRequest<App>;
   status: "ready" | "blocked";
   changes: { field: string; before?: string; after?: string }[];
-  files: { role: "codexConfig"; change: "write" | "unchanged" }[];
+  files: {
+    role: App extends "codex" ? "codexConfig" : "claudeSettings";
+    change: "write" | "unchanged";
+  }[];
   code?: string;
 }
 
-export function getCodexSharedSettings(): Promise<CodexSharedSettingsSnapshot> {
-  return invoke("get_codex_shared_settings");
-}
-export function previewCodexSharedSettings(
-  config: string,
-  requestId: string,
-): Promise<CodexSharedSettingsPreview> {
-  return invoke("preview_codex_shared_settings", { config, requestId });
-}
-export function saveCodexSharedSettings(
-  config: string,
-  request: CodexSharedSettingsRequest,
-): Promise<CodexSharedSettingsResult> {
-  return invoke("save_codex_shared_settings", { config, request });
-}
-export function getCodexSharedSettingsSaveResult(
-  request: CodexSharedSettingsRequest,
-): Promise<CodexSharedSettingsResult> {
-  return invoke("get_codex_shared_settings_save_result", { request });
-}
-
-export interface CodexSharedSettingsImport {
-  app: "codex";
+export interface SharedSettingsImport<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
   status: "ready" | "blocked";
   fields: { path: string[]; field: string; value: string }[];
   code?: string;
 }
 
-export interface CodexSharedSettingsImportPreview extends CodexSharedSettingsPreview {
+export interface SharedSettingsImportPreview<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> extends SharedSettingsPreview<App> {
   config: string;
 }
 
-export function getCodexSharedSettingsImport(): Promise<CodexSharedSettingsImport> {
-  return invoke("get_codex_shared_settings_import");
+/** Both editors echo backend text and receipts; neither parses business values. */
+export function getSharedSettingsApi<App extends SharedSettingsApp>(app: App) {
+  return {
+    get: () =>
+      invoke<SharedSettingsSnapshot<App>>(`get_${app}_shared_settings`),
+    preview: (config: string, requestId: string) =>
+      invoke<SharedSettingsPreview<App>>(`preview_${app}_shared_settings`, {
+        config,
+        requestId,
+      }),
+    save: (config: string, request: SharedSettingsRequest<App>) =>
+      invoke<SharedSettingsResult<App>>(`save_${app}_shared_settings`, {
+        config,
+        request,
+      }),
+    result: (request: SharedSettingsRequest<App>) =>
+      invoke<SharedSettingsResult<App>>(
+        `get_${app}_shared_settings_save_result`,
+        { request },
+      ),
+    getImport: () =>
+      invoke<SharedSettingsImport<App>>(`get_${app}_shared_settings_import`),
+    previewImport: (fields: string[][], requestId: string) =>
+      invoke<SharedSettingsImportPreview<App>>(
+        `preview_${app}_shared_settings_import`,
+        { fields, requestId },
+      ),
+  };
 }
-export function previewCodexSharedSettingsImport(
-  fields: string[][],
-  requestId: string,
-): Promise<CodexSharedSettingsImportPreview> {
-  return invoke("preview_codex_shared_settings_import", { fields, requestId });
-}
+
+export type CodexSharedSettingsRequest = SharedSettingsRequest<"codex">;
+export type CodexSharedSettingsResult = SharedSettingsResult<"codex">;
+export type CodexSharedSettingsSnapshot = SharedSettingsSnapshot<"codex">;
+export type CodexSharedSettingsPreview = SharedSettingsPreview<"codex">;
+export type CodexSharedSettingsImport = SharedSettingsImport<"codex">;
+export type CodexSharedSettingsImportPreview =
+  SharedSettingsImportPreview<"codex">;
+export const {
+  get: getCodexSharedSettings,
+  preview: previewCodexSharedSettings,
+  save: saveCodexSharedSettings,
+  result: getCodexSharedSettingsSaveResult,
+  getImport: getCodexSharedSettingsImport,
+  previewImport: previewCodexSharedSettingsImport,
+} = getSharedSettingsApi("codex");
+
+export type ClaudeSharedSettingsRequest = SharedSettingsRequest<"claude">;
+export type ClaudeSharedSettingsResult = SharedSettingsResult<"claude">;
+export type ClaudeSharedSettingsSnapshot = SharedSettingsSnapshot<"claude">;
+export type ClaudeSharedSettingsPreview = SharedSettingsPreview<"claude">;
+export type ClaudeSharedSettingsImport = SharedSettingsImport<"claude">;
+export type ClaudeSharedSettingsImportPreview =
+  SharedSettingsImportPreview<"claude">;
+export const {
+  get: getClaudeSharedSettings,
+  preview: previewClaudeSharedSettings,
+  save: saveClaudeSharedSettings,
+  result: getClaudeSharedSettingsSaveResult,
+  getImport: getClaudeSharedSettingsImport,
+  previewImport: previewClaudeSharedSettingsImport,
+} = getSharedSettingsApi("claude");

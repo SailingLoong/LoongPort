@@ -69,6 +69,7 @@ interface SettingsDialogProps {
   beforeLeave: (proceed: () => void) => void;
   ref?: Ref<CodexSharedSettingsHandle>;
   onManageCodexMcp?: () => void;
+  onManageClaudeMcp?: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImportSuccess?: () => void | Promise<void>;
@@ -79,6 +80,7 @@ export function SettingsPage({
   beforeLeave,
   ref,
   onManageCodexMcp,
+  onManageClaudeMcp,
   open,
   onOpenChange,
   onImportSuccess,
@@ -118,7 +120,9 @@ export function SettingsPage({
     resetStatus,
   } = useImportExport({ onImportSuccess });
 
-  const [sharedSettingsOpen, setSharedSettingsOpen] = useState(false);
+  const [sharedSettingsApp, setSharedSettingsApp] = useState<
+    "codex" | "claude" | null
+  >(null);
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -271,17 +275,19 @@ export function SettingsPage({
                     />
                     {/* skill 存储位置 / 同步方式两块已挪去 skills 管理页就近
                         （改它们的场景是「在管 skills 的时候」）。 */}
-                    <div className="space-y-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => setSharedSettingsOpen(true)}
-                      >
-                        {t("codexSharedSettings.title")}
-                      </Button>
-                      <p className="text-sm text-muted-foreground">
-                        {t("codexSharedSettings.description")}
-                      </p>
-                    </div>
+                    {(["codex", "claude"] as const).map((app) => (
+                      <div key={app} className="space-y-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => setSharedSettingsApp(app)}
+                        >
+                          {t(`${app}SharedSettings.title`)}
+                        </Button>
+                        <p className="text-sm text-muted-foreground">
+                          {t(`${app}SharedSettings.description`)}
+                        </p>
+                      </div>
+                    ))}
                     <CodexAuthSettings
                       settings={settings}
                       onChange={handleAutoSave}
@@ -562,12 +568,18 @@ export function SettingsPage({
         </Tabs>
       )}
 
-      {sharedSettingsOpen && (
+      {sharedSettingsApp && (
         <CodexSharedSettings
+          key={sharedSettingsApp}
+          app={sharedSettingsApp}
           beforeLeave={beforeLeave}
           ref={ref}
-          onClose={() => setSharedSettingsOpen(false)}
-          onManageMcp={onManageCodexMcp}
+          onClose={() => setSharedSettingsApp(null)}
+          onManageMcp={
+            sharedSettingsApp === "claude"
+              ? onManageClaudeMcp
+              : onManageCodexMcp
+          }
         />
       )}
 

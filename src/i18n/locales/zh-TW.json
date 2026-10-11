@@ -4711,5 +4711,12 @@
       "cancel": "取消選擇",
       "preview": "預覽所選匯入"
     }
+  },
+  "claudeSharedSettings": {
+    "title": "Claude Code 共用設定",
+    "description": "編輯共用欄位，不切換目前設定。",
+    "manageMcp": "前往擴充資源管理 Claude Code MCP",
+    "editor": "共用內容（JSON）",
+    "invalidFormat": "JSON 格式無效，請修改內容後重新預覽。"
   }
 }

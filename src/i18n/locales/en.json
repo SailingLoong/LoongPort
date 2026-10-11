@@ -4710,5 +4710,12 @@
       "cancel": "Cancel selection",
       "preview": "Preview selected import"
     }
+  },
+  "claudeSharedSettings": {
+    "title": "Claude Code shared settings",
+    "description": "Edit shared fields without switching the current configuration.",
+    "manageMcp": "Manage Claude Code MCP in extension resources",
+    "editor": "Shared content (JSON)",
+    "invalidFormat": "Invalid JSON. Edit the content and preview again."
   }
 }

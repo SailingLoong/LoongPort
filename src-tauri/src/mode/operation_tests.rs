@@ -2078,3 +2078,44 @@ fn shared_scope_is_explicit_and_cannot_carry_provider_or_mode_effects() {
     changed.model_preference = Some(state::ModelPreferenceAction::Clear {});
     assert!(validate_operation("codex", state::op::APPLY, &changed).is_err());
 }
+
+#[test]
+fn claude_shared_scope_is_explicit_and_cannot_cross_app_or_add_effects() {
+    let base = json!({"id":"66666666-6666-4666-8666-666666666666","draftDigest":"a".repeat(64),"revision":"b".repeat(64)});
+    let missing_id = serde_json::from_value::<state::SaveRequest>(base.clone());
+    assert!(
+        missing_id.is_err() || missing_id.unwrap().validate().is_err(),
+        "old provider requests still require an ID"
+    );
+    let mut shared = base;
+    shared["scope"] = json!("claudeSharedSettings");
+    let request: state::SaveRequest = serde_json::from_value(shared.clone()).unwrap();
+    request.validate().unwrap();
+    shared["providerId"] = json!("synthetic-provider");
+    assert!(serde_json::from_value::<state::SaveRequest>(shared)
+        .unwrap()
+        .validate()
+        .is_err());
+    let target = PendingTarget {
+        save_request: Some(request),
+        ..Default::default()
+    };
+    validate_operation("claude", state::op::APPLY, &target).unwrap();
+    assert!(validate_operation("codex", state::op::APPLY, &target).is_err());
+    assert!(validate_operation("claude", state::op::SWITCH, &target).is_err());
+    let mut with_row = bound_editor_target();
+    with_row.save_request = target.save_request.clone();
+    assert!(validate_operation("claude", state::op::APPLY, &with_row).is_err());
+    let mut changed = target.clone();
+    changed.pointer = Some("synthetic-provider".into());
+    assert!(validate_operation("claude", state::op::APPLY, &changed).is_err());
+    let mut changed = target.clone();
+    changed.state = Some(state::ModeState::default());
+    assert!(validate_operation("claude", state::op::APPLY, &changed).is_err());
+    let mut changed = target.clone();
+    changed.written = Some(state::Written::default());
+    assert!(validate_operation("claude", state::op::APPLY, &changed).is_err());
+    let mut changed = target;
+    changed.model_preference = Some(state::ModelPreferenceAction::Clear {});
+    assert!(validate_operation("claude", state::op::APPLY, &changed).is_err());
+}

@@ -20,16 +20,12 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  getCodexSharedSettings,
-  getCodexSharedSettingsImport,
-  getCodexSharedSettingsSaveResult,
-  previewCodexSharedSettings,
-  previewCodexSharedSettingsImport,
-  saveCodexSharedSettings,
-  type CodexSharedSettingsPreview,
-  type CodexSharedSettingsImport,
-  type CodexSharedSettingsRequest,
-  type CodexSharedSettingsResult,
+  getSharedSettingsApi,
+  type SharedSettingsApp,
+  type SharedSettingsPreview,
+  type SharedSettingsImport,
+  type SharedSettingsRequest,
+  type SharedSettingsResult,
 } from "@/lib/api/config";
 
 export interface CodexSharedSettingsHandle {
@@ -38,6 +34,7 @@ export interface CodexSharedSettingsHandle {
   discard: () => void;
 }
 interface Props {
+  app?: SharedSettingsApp;
   ref?: Ref<CodexSharedSettingsHandle>;
   onClose: () => void;
   beforeLeave: (proceed: () => void) => void;
@@ -68,25 +65,26 @@ const unresolvedStatuses = ["pending", "verificationRequired", "unknown"];
 
 /** Independent live-config projection; never sends the provider or settings form. */
 export function CodexSharedSettings({
+  app = "codex",
   ref,
   onClose,
   onManageMcp,
   beforeLeave,
 }: Props) {
   const { t } = useTranslation();
+  const api = getSharedSettingsApi(app);
+  const appText = `${app}SharedSettings`;
   const [draft, setDraft] = useState("");
   const [baseline, setBaseline] = useState("");
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const dirtyRef = useRef(false);
-  const [preview, setPreview] = useState<CodexSharedSettingsPreview | null>(
-    null,
-  );
-  const [result, setResult] = useState<CodexSharedSettingsResult | null>(null);
+  const [preview, setPreview] = useState<SharedSettingsPreview | null>(null);
+  const [result, setResult] = useState<SharedSettingsResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importOptions, setImportOptions] =
-    useState<CodexSharedSettingsImport | null>(null);
+    useState<SharedSettingsImport | null>(null);
   const [selectedFields, setSelectedFields] = useState<number[]>([]);
   const submittedDraft = useRef<string | null>(null);
   const [darkMode, setDarkMode] = useState(() =>
@@ -130,7 +128,7 @@ export function CodexSharedSettings({
     setResult(null);
     submittedDraft.current = null;
     try {
-      const value = await getCodexSharedSettings();
+      const value = await api.get();
       setResult(value.originalSave);
       if (value.status !== "ready") {
         showError(value.code);
@@ -159,7 +157,7 @@ export function CodexSharedSettings({
     return () => observer.disconnect();
   }, []);
 
-  function acceptResult(value: CodexSharedSettingsResult) {
+  function acceptResult(value: SharedSettingsResult) {
     setResult(value);
     if (value.status === "completed" && submittedDraft.current !== null) {
       setBaseline(submittedDraft.current);
@@ -169,11 +167,11 @@ export function CodexSharedSettings({
       setReady(false);
     if (value.code) showError(value.code);
   }
-  async function lookup(request: CodexSharedSettingsRequest) {
+  async function lookup(request: SharedSettingsRequest) {
     try {
-      acceptResult(await getCodexSharedSettingsSaveResult(request));
+      acceptResult(await api.result(request));
     } catch {
-      setResult({ app: "codex", request, status: "unknown" });
+      setResult({ app, request, status: "unknown" });
       showError();
     }
   }
@@ -192,7 +190,7 @@ export function CodexSharedSettings({
     setSelectedFields([]);
     setError(null);
     try {
-      const value = await getCodexSharedSettingsImport();
+      const value = await api.getImport();
       if (value.status === "ready") setImportOptions(value);
       else showError(value.code);
     } catch {
@@ -208,10 +206,7 @@ export function CodexSharedSettings({
     setResult(null);
     setError(null);
     try {
-      const value = await previewCodexSharedSettingsImport(
-        fields,
-        crypto.randomUUID(),
-      );
+      const value = await api.previewImport(fields, crypto.randomUUID());
       if (value.status === "ready") {
         // The backend seeds selected missing fields into the latest live projection.
         setDraft(value.config);
@@ -232,10 +227,7 @@ export function CodexSharedSettings({
     setResult(null);
     setError(null);
     try {
-      const value = await previewCodexSharedSettings(
-        draft,
-        crypto.randomUUID(),
-      );
+      const value = await api.preview(draft, crypto.randomUUID());
       if (value.status === "ready") setPreview(value);
       else showError(value.code);
     } catch {
@@ -252,7 +244,7 @@ export function CodexSharedSettings({
     setPreview(null);
     setError(null);
     try {
-      const value = await saveCodexSharedSettings(draft, request);
+      const value = await api.save(draft, request);
       acceptResult(value);
       if (value.status === "unknown") await lookup(request);
     } catch {
@@ -272,10 +264,8 @@ export function CodexSharedSettings({
     >
       <SheetContent width={720} closeLabel={t("common.close")}>
         <SheetHeader>
-          <SheetTitle>{t("codexSharedSettings.title")}</SheetTitle>
-          <SheetDescription>
-            {t("codexSharedSettings.description")}
-          </SheetDescription>
+          <SheetTitle>{t(`${appText}.title`)}</SheetTitle>
+          <SheetDescription>{t(`${appText}.description`)}</SheetDescription>
         </SheetHeader>
         <SheetBody className="space-y-4">
           <Notice title={t("codexSharedSettings.readOnlyFields")}>
@@ -293,7 +283,7 @@ export function CodexSharedSettings({
                 })
               }
             >
-              {t("codexSharedSettings.manageMcp")}
+              {t(`${appText}.manageMcp`)}
             </Button>
           )}
           {importOptions ? (
@@ -366,7 +356,7 @@ export function CodexSharedSettings({
             </Button>
           )}
           <JsonEditor
-            ariaLabel={t("codexSharedSettings.editor")}
+            ariaLabel={t(`${appText}.editor`)}
             value={draft}
             onChange={(value) => {
               if (busyRef.current || !ready || unresolved) return;
@@ -375,7 +365,8 @@ export function CodexSharedSettings({
               setResult(null);
               setError(null);
             }}
-            language="javascript"
+            language={app === "claude" ? "json" : "javascript"}
+            showFormat={false}
             showValidation={false}
             redactErrors
             darkMode={darkMode}
@@ -387,7 +378,11 @@ export function CodexSharedSettings({
             {error && (
               <Notice
                 tone="warning"
-                title={t(`codexSharedSettings.error.${error}`)}
+                title={t(
+                  app === "claude" && error === "invalidFormat"
+                    ? "claudeSharedSettings.invalidFormat"
+                    : `codexSharedSettings.error.${error}`,
+                )}
               />
             )}
             {result && (

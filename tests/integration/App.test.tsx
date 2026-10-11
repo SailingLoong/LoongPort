@@ -378,18 +378,25 @@ describe("App integration with MSW", () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
 
-  async function openSharedDraft() {
+  async function openSharedDraft(app: "codex" | "claude" = "codex") {
     workspaceHarness.real = true;
+    localStorage.setItem(
+      LAST_APP_STORAGE_KEY,
+      app === "claude" ? "codex" : "claude",
+    );
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "settings");
     server.use(
       http.post("http://tauri.local/get_mcp_servers", () =>
         HttpResponse.json({}),
       ),
-      http.post("http://tauri.local/get_codex_shared_settings", () =>
+      http.post(`http://tauri.local/get_${app}_shared_settings`, () =>
         HttpResponse.json({
-          app: "codex",
+          app,
           status: "ready",
-          config: 'approval_policy = "on-request"',
+          config:
+            app === "codex"
+              ? 'approval_policy = "on-request"'
+              : '{"permissions":{"defaultMode":"default"}}',
           originalSave: null,
         }),
       ),
@@ -399,16 +406,25 @@ describe("App integration with MSW", () => {
       name: "client.resources",
     });
     await userEvent.click(
-      await screen.findByRole("button", { name: "codexSharedSettings.title" }),
+      await screen.findByRole("button", { name: `${app}SharedSettings.title` }),
     );
     const editor = await screen.findByRole("textbox", {
-      name: "codexSharedSettings.editor",
+      name: `${app}SharedSettings.editor`,
     });
     await waitFor(() =>
-      expect(editor).toHaveValue('approval_policy = "on-request"'),
+      expect(editor).toHaveValue(
+        app === "codex"
+          ? 'approval_policy = "on-request"'
+          : '{"permissions":{"defaultMode":"default"}}',
+      ),
     );
     fireEvent.change(editor, {
-      target: { value: 'approval_policy = "never"' },
+      target: {
+        value:
+          app === "codex"
+            ? 'approval_policy = "never"'
+            : '{"permissions":{"defaultMode":"plan"}}',
+      },
     });
     return { resources, editor };
   }
@@ -436,24 +452,29 @@ describe("App integration with MSW", () => {
     );
   });
 
-  it("opens existing MCP resources for Codex after shared draft confirmation", async () => {
-    await openSharedDraft();
-    fireEvent.click(
-      screen.getByRole("button", { name: "codexSharedSettings.manageMcp" }),
-    );
-    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
-    fireEvent.click(
-      screen.getByRole("button", { name: "applications.discardAndLeave" }),
-    );
-    await screen.findByRole("textbox", {
-      name: "mcp.unifiedPanel.searchAriaLabel",
-    });
-    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex");
-    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("mcp");
-    expect(
-      screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
-    ).not.toBeInTheDocument();
-  });
+  it.each(["codex", "claude"] as const)(
+    "opens existing MCP resources for %s after shared draft confirmation",
+    async (app) => {
+      await openSharedDraft(app);
+      fireEvent.click(
+        screen.getByRole("button", { name: `${app}SharedSettings.manageMcp` }),
+      );
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe(
+        app === "claude" ? "codex" : "claude",
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await screen.findByRole("textbox", {
+        name: "mcp.unifiedPanel.searchAriaLabel",
+      });
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe(app);
+      expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("mcp");
+      expect(
+        screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("asks before leaving a real routing draft through the sidebar", async () => {
     const apply = await renderRoutingDraft();
