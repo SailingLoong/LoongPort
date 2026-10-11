@@ -8,6 +8,7 @@ import {
   completedProviderEdit,
   matchesProviderEditResult,
   type ProviderUpdateInput,
+  type ProviderCatalogDecision,
   type ProviderUpdateResult,
   type SwitchResult,
 } from "@/lib/api/providers";
@@ -327,11 +328,15 @@ export const useSwitchProviderMutation = (appId: AppId) => {
        * `~/.codex`），后端会再判一次 app_type。省略 = 不碰 ChatGPT。
        */
       quitChatgpt?: boolean;
+      catalogDecision?: ProviderCatalogDecision;
+      catalogPreviewOnly?: boolean;
     }): Promise<SwitchResult> => {
       return await providersApi.switch(
         input.providerId,
         appId,
         input.quitChatgpt,
+        input.catalogDecision,
+        input.catalogPreviewOnly,
       );
     },
     onSuccess: async (result) => {

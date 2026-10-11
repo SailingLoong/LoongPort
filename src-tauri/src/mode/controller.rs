@@ -190,13 +190,27 @@ fn write_proxy(
     operation: &str,
     route: &Provider,
     live: &LiveNow,
+    target: PendingTarget,
+    url: &str,
+) -> Result<bool, AppError> {
+    write_proxy_with_catalog(service, app, operation, route, live, target, url, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_proxy_with_catalog(
+    service: &ProxyService,
+    app: &AppType,
+    operation: &str,
+    route: &Provider,
+    live: &LiveNow,
     mut target: PendingTarget,
     url: &str,
+    catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<bool, AppError> {
     let mut next = target.state.clone().ok_or_else(invalid)?;
     match app {
         AppType::Codex => {
-            return codex_direct::apply_mode(
+            return codex_direct::apply_mode_with_catalog(
                 service,
                 &live.codex_owner(),
                 codex_direct::Target::Proxy {
@@ -205,6 +219,7 @@ fn write_proxy(
                 },
                 operation,
                 target,
+                catalog,
             );
         }
         AppType::Claude => {
@@ -249,13 +264,35 @@ fn write_direct(
     live: &LiveNow,
     target: PendingTarget,
 ) -> Result<bool, AppError> {
+    write_direct_with_catalog(service, app, operation, direct, live, target, None)
+}
+
+fn write_direct_with_catalog(
+    service: &ProxyService,
+    app: &AppType,
+    operation: &str,
+    direct: Option<&Provider>,
+    live: &LiveNow,
+    target: PendingTarget,
+    catalog: Option<&codex_direct::CatalogDecision>,
+) -> Result<bool, AppError> {
     if *app == AppType::Codex {
-        return codex_direct::apply_mode(
+        if catalog.is_none() {
+            return codex_direct::apply_mode(
+                service,
+                &live.codex_owner(),
+                codex_direct::Target::Direct(direct),
+                operation,
+                target,
+            );
+        }
+        return codex_direct::apply_mode_with_catalog(
             service,
             &live.codex_owner(),
             codex_direct::Target::Direct(direct),
             operation,
             target,
+            catalog,
         );
     }
     let write = AppWrite::begin_mode(service, app)?;
@@ -390,6 +427,18 @@ pub(crate) async fn switch_route_locked(
     app: &AppType,
     route: Provider,
 ) -> Result<(), String> {
+    switch_route_locked_with_catalog(service, app, route, None).await
+}
+
+pub(crate) async fn switch_route_locked_with_catalog(
+    service: &ProxyService,
+    app: &AppType,
+    route: Provider,
+    catalog: Option<codex_direct::CatalogDecision>,
+) -> Result<(), String> {
+    if catalog.is_some() && *app != AppType::Codex {
+        return Err(err(invalid()));
+    }
     let before = mode(service, app).map_err(err)?;
     if !before.is_proxy() {
         return Err(err(invalid()));
@@ -399,6 +448,9 @@ pub(crate) async fn switch_route_locked(
     let mut next = before.clone();
     next.proxy_route = Some(route.id.clone());
     if !before.attached {
+        if catalog.is_some() {
+            return Err(err(invalid()));
+        }
         let service = service.owner()?;
         let app = app.clone();
         let crash = operation::failpoint::current_crash();
@@ -417,7 +469,7 @@ pub(crate) async fn switch_route_locked(
     let crash = operation::failpoint::current_crash();
     tokio::task::spawn_blocking(move || {
         operation::failpoint::in_worker(crash, || {
-            write_proxy(
+            write_proxy_with_catalog(
                 &service,
                 &app,
                 op::ROUTE,
@@ -425,6 +477,7 @@ pub(crate) async fn switch_route_locked(
                 &live,
                 PendingTarget::mode(next),
                 &url,
+                catalog.as_ref(),
             )
         })
     })
@@ -476,8 +529,22 @@ pub(crate) fn select_locked(
     service: &ProxyService,
     app: &AppType,
     provider: &Provider,
-    mut target: PendingTarget,
+    target: PendingTarget,
 ) -> Result<bool, AppError> {
+    select_locked_with_catalog(service, app, provider, target, None)
+}
+
+/// The caller holds the app switch lock; this is the original selection writer.
+pub(crate) fn select_locked_with_catalog(
+    service: &ProxyService,
+    app: &AppType,
+    provider: &Provider,
+    mut target: PendingTarget,
+    catalog: Option<&codex_direct::CatalogDecision>,
+) -> Result<bool, AppError> {
+    if catalog.is_some() && *app != AppType::Codex {
+        return Err(invalid());
+    }
     let before = mode(service, app)?;
     if crate::proxy::application_routing::blocked_tier_ids_checked(
         service.database(),
@@ -496,16 +563,62 @@ pub(crate) fn select_locked(
         next.proxy_route = Some(provider.id.clone());
         target.state = Some(next);
         if !attached {
+            if catalog.is_some() {
+                return Err(invalid());
+            }
             write_target_only(service, app, op::APPLY, target)?;
             return Ok(false);
         }
         let (url, _) =
             futures::executor::block_on(service.build_proxy_urls()).map_err(AppError::Message)?;
-        write_proxy(service, app, op::APPLY, provider, &live, target, &url)
+        write_proxy_with_catalog(
+            service,
+            app,
+            op::APPLY,
+            provider,
+            &live,
+            target,
+            &url,
+            catalog,
+        )
     } else {
         target.pointer = Some(provider.id.clone());
-        write_direct(service, app, op::APPLY, Some(provider), &live, target)
+        write_direct_with_catalog(
+            service,
+            app,
+            op::APPLY,
+            Some(provider),
+            &live,
+            target,
+            catalog,
+        )
     }
+}
+
+/// Read-only directory sub-plan for the current application selection. No auth
+/// preparation or CLI discovery occurs here. Caller holds the app switch lock.
+pub(crate) fn preview_catalog_selection(
+    service: &ProxyService,
+    provider: &Provider,
+    catalog: Option<&codex_direct::CatalogDecision>,
+) -> Result<Option<codex_direct::CatalogPreview>, AppError> {
+    let result = (|| {
+        let before = mode(service, &AppType::Codex)?;
+        if before.is_proxy() && !before.attached {
+            return Ok(None);
+        }
+        let live = LiveNow::of(service, &AppType::Codex, &before)?;
+        codex_direct::preview_catalog_choice(
+            service.database(),
+            &live.codex_owner(),
+            provider,
+            catalog,
+        )
+    })();
+    result.map_err(|error| match error {
+        AppError::Conflict(_) => AppError::Conflict("codex.catalog_source_changed".into()),
+        _ => AppError::Config("codex.catalog_preview_unavailable".into()),
+    })
 }
 
 pub(crate) fn apply_order_locked(
@@ -842,6 +955,8 @@ pub(crate) struct SaveRowPlan {
     pub(crate) revision: String,
     pub(crate) preserved_catalog: bool,
     pub(crate) generation: Option<String>,
+    pub(crate) catalog: Option<codex_direct::CatalogPreview>,
+    catalog_inputs: Option<codex_direct::NativeCatalogInputs>,
 }
 
 fn planned_patch(
@@ -869,6 +984,7 @@ pub(crate) fn plan_row_save(
     previous: &Provider,
     provider: &Provider,
     request_id: &str,
+    catalog_decision: Option<&codex_direct::CatalogDecision>,
 ) -> Result<SaveRowPlan, AppError> {
     let changed = crate::relay::provider_config::selected_model(app, &previous.settings_config)
         != crate::relay::provider_config::selected_model(app, &provider.settings_config);
@@ -884,6 +1000,8 @@ pub(crate) fn plan_row_save(
     let mut preserved_catalog = false;
     let mut generation = None;
     let mut codex_revision = None;
+    let mut catalog = None;
+    let mut catalog_inputs = None;
     let mut endpoint = None;
     if in_use.as_deref() == Some(provider.id.as_str()) && (!before.is_proxy() || before.attached) {
         let live = LiveNow::of(service, app, &before)?;
@@ -969,15 +1087,21 @@ pub(crate) fn plan_row_save(
                     desired,
                     target,
                     request_id,
+                    catalog_decision,
                 )?;
                 files = output.0;
                 target = output.1;
                 preserved_catalog = output.2;
                 codex_revision = Some(output.3);
                 generation = Some(output.4);
+                catalog = Some(output.5);
+                catalog_inputs = Some(output.6);
             }
             _ => return Err(invalid()),
         }
+    }
+    if catalog_decision.is_some() && catalog.is_none() {
+        return Err(invalid());
     }
     // Hash only the original inputs actually used by this plan. No durable
     // before-image framework; confirmed files use the existing Guarded patch.
@@ -1006,6 +1130,8 @@ pub(crate) fn plan_row_save(
         revision: crate::live::engine::sha256_hex(&source),
         preserved_catalog,
         generation,
+        catalog,
+        catalog_inputs,
     })
 }
 
@@ -1015,6 +1141,9 @@ pub(crate) fn consume_row_save(
     plan: SaveRowPlan,
     request: state::SaveRequest,
 ) -> Result<(), AppError> {
+    if let Some(inputs) = &plan.catalog_inputs {
+        inputs.verify_references()?;
+    }
     let mut target = plan.target;
     target.save_request = Some(request.clone());
     if plan.files.is_empty() {

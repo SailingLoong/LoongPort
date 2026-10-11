@@ -74,9 +74,6 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
     useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   };
 });
-vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
-  SwitchTierConfirmDialog: () => null,
-}));
 // 验真 Provider 在工作台内拉 summaries；空结果即可（入口按钮只看资格字段）。
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
@@ -841,5 +838,79 @@ it("dates a failed overview from its retained read rather than the fresh routing
   render(<ApplicationWorkspace {...props} />);
   expect(screen.getByRole("alert")).toHaveTextContent(
     `applications.lastSuccessfulRead ${new Date(123456000).toLocaleString()}`,
+  );
+});
+
+it("wires the real catalog confirmation through preview-only and final routing apply", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "/external/models.json",
+    afterPointer: "/external/models.json",
+  };
+  state.routing.autoFailoverEnabled = true;
+  state.apply
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Premium",
+      catalog,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Premium",
+      catalog: {
+        ...catalog,
+        choice: "manage",
+        afterPointer: "/managed/models.json",
+      },
+      quitRequired: false,
+    });
+  render(<ApplicationWorkspace {...props} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "applications.use Premium" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  await userEvent.click(
+    within(dialog).getByRole("radio", {
+      name: "provider.preview.catalog.manage",
+    }),
+  );
+  expect(
+    within(dialog).getByRole("button", { name: "applications.apply" }),
+  ).toBeDisabled();
+  await userEvent.click(
+    within(dialog).getByRole("button", {
+      name: "provider.preview.catalog.confirmChoice",
+    }),
+  );
+  const decision = { choice: "manage", revision: "catalog-v1" };
+  expect(state.apply).toHaveBeenNthCalledWith(
+    2,
+    {
+      selection: { providerId: "b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: true,
+    },
+    undefined,
+  );
+  const updated = screen.getByRole("dialog");
+  expect(within(updated).getByText("/managed/models.json")).toBeVisible();
+  await userEvent.click(
+    within(updated).getByRole("button", { name: "applications.apply" }),
+  );
+  expect(state.apply).toHaveBeenNthCalledWith(
+    3,
+    {
+      selection: { providerId: "b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: false,
+    },
+    false,
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
 });

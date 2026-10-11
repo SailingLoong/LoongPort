@@ -6,6 +6,7 @@ import { piApi, providersApi, openclawApi, type AppId } from "@/lib/api";
 import {
   completedProviderEdit,
   type ProviderUpdateInput,
+  type ProviderCatalogDecision,
 } from "@/lib/api/providers";
 import type {
   Provider,
@@ -147,11 +148,18 @@ export function useProviderActions(activeApp: AppId) {
    * 就关掉他正开着的 app 是不能接受的。
    */
   const switchProvider = useCallback(
-    async (provider: Provider, quitChatgpt?: boolean) => {
+    async (
+      provider: Provider,
+      quitChatgpt?: boolean,
+      catalogDecision?: ProviderCatalogDecision,
+      catalogPreviewOnly?: boolean,
+    ) => {
       try {
         const result = await switchProviderMutation.mutateAsync({
           providerId: provider.id,
           quitChatgpt,
+          ...(catalogDecision ? { catalogDecision } : {}),
+          ...(catalogPreviewOnly !== undefined ? { catalogPreviewOnly } : {}),
         });
         if (result.status === "confirmationRequired") {
           return result;

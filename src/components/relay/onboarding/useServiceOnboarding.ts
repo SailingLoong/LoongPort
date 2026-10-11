@@ -16,6 +16,7 @@ export interface ConnectedService {
 export interface ServiceConfigurationChoice {
   app: AppId;
   id: string;
+  providerId: string;
   name: string;
 }
 export function useServiceConfigurationChoices(account: ConnectedService) {
@@ -35,6 +36,7 @@ export function useServiceConfigurationChoices(account: ConnectedService) {
                     .map((plan) => ({
                       app,
                       id: plan.planId,
+                      providerId: plan.providerId,
                       name: plan.planName,
                     })) ?? []
                 );
@@ -46,6 +48,7 @@ export function useServiceConfigurationChoices(account: ConnectedService) {
                   ?.tiers.map((tier) => ({
                     app,
                     id: tier.providerId,
+                    providerId: tier.providerId,
                     name: tier.displayName,
                   })) ?? []
               );

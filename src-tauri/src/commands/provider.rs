@@ -355,6 +355,15 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
+    switch_provider_internal_with_catalog(state, app_type, id, None)
+}
+
+fn switch_provider_internal_with_catalog(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+    catalog: Option<&crate::services::provider::codex_direct::CatalogDecision>,
+) -> Result<SwitchResult, AppError> {
     // 切托管档位必须走 `relay_switch_tier` —— 只有它编排「退出 ChatGPT → 切换 → 重开」。
     // 从这条通用命令切进去的结果是配置改了、ChatGPT 还拿着旧分组的 sk 在跑，界面上却显示
     // 切换成功，用户无从察觉。
@@ -362,7 +371,12 @@ fn switch_provider_internal(
     // 守卫落在这一层而不是 `ProviderService::switch`：那是上游代码，且 `relay_switch_tier`
     // 正当地要调它。
     crate::relay::reject_if_managed(id)?;
-    let result = ProviderService::switch(state, app_type.clone(), id)?;
+    let result = match catalog {
+        Some(catalog) => {
+            ProviderService::switch_with_catalog(state, app_type.clone(), id, Some(catalog))?
+        }
+        None => ProviderService::switch(state, app_type.clone(), id)?,
+    };
     crate::services::application_overview::record_successful_selection(&state.db, &app_type, id);
     Ok(result)
 }
@@ -407,6 +421,9 @@ pub fn switch_provider_test_hook(
 pub enum ProviderSwitchCommandResult {
     ConfirmationRequired {
         target_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        catalog: Option<crate::services::provider::codex_direct::CatalogPreview>,
+        quit_required: bool,
     },
     Switched {
         warnings: Vec<String>,
@@ -428,6 +445,8 @@ pub async fn switch_provider(
     app: String,
     id: String,
     quit_chatgpt: Option<bool>,
+    catalog_decision: Option<crate::services::provider::codex_direct::CatalogDecision>,
+    catalog_preview_only: Option<bool>,
 ) -> Result<ProviderSwitchCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     let state = app_handle
@@ -439,14 +458,45 @@ pub async fn switch_provider(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("供应商 {id} 不存在"))?;
 
-    if should_request_chatgpt_confirmation(
+    let catalog_intent = catalog_decision.is_some() || catalog_preview_only.unwrap_or(false);
+    let catalog = if app_type == AppType::Codex
+        && crate::mode::operation::uses_upstream4_schema(&state.db)
+            .map_err(|_| "codex.catalog_preview_unavailable")?
+    {
+        let _switch = state.proxy_service.lock_switch_for_app("codex").await;
+        crate::relay::reject_if_managed(&id).map_err(|error| error.to_string())?;
+        let effective = if crate::services::provider::is_app_taken_over(&state, &app_type) {
+            ProviderService::provider_for_native_projection(&state.db, &app_type, &provider)
+                .map_err(|_| "codex.catalog_preview_unavailable")?
+        } else {
+            provider.clone()
+        };
+        crate::mode::controller::preview_catalog_selection(
+            &state.proxy_service,
+            &effective,
+            catalog_decision.as_ref(),
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    if catalog_intent && catalog.is_none() {
+        return Err("codex.catalog_takeover_unavailable".into());
+    }
+    let quit_required = should_request_chatgpt_confirmation(
         &app_type,
         quit_chatgpt,
         crate::relay::chatgpt_app::needs_user_attention()
             && !crate::services::provider::is_app_taken_over(&state, &app_type),
-    ) {
+    );
+    if quit_required
+        || (catalog.is_some() && catalog_decision.is_none())
+        || catalog_preview_only.unwrap_or(false)
+    {
         return Ok(ProviderSwitchCommandResult::ConfirmationRequired {
             target_name: provider.name,
+            catalog,
+            quit_required,
         });
     }
 
@@ -469,7 +519,14 @@ pub async fn switch_provider(
             .try_state::<AppState>()
             .ok_or_else(|| "应用状态不可用".to_string())?;
 
-        let switch_once = || switch_provider_internal(state.inner(), app_type.clone(), &id);
+        let switch_once = || {
+            switch_provider_internal_with_catalog(
+                state.inner(),
+                app_type.clone(),
+                &id,
+                catalog_decision.as_ref(),
+            )
+        };
 
         if !quit_chatgpt {
             return switch_once().map_err(|e| e.to_string());
@@ -1700,19 +1757,34 @@ pub async fn preview_provider_edit(
     #[allow(non_snake_case)] originalId: String,
     #[allow(non_snake_case)] requestId: String,
     #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] catalogDecision: Option<
+        crate::services::provider::codex_direct::CatalogDecision,
+    >,
 ) -> Result<serde_json::Value, String> {
     let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
             .ok_or("provider.edit_unavailable")?;
-        crate::services::provider::edit::preview(
+        if catalogDecision.is_none() {
+            return crate::services::provider::edit::preview(
+                state.inner(),
+                &app,
+                provider,
+                &originalId,
+                &requestId,
+                deleteCredential,
+            )
+            .map_err(|_| "provider.edit_unavailable");
+        }
+        crate::services::provider::edit::preview_with_catalog(
             state.inner(),
             &app,
             provider,
             &originalId,
             &requestId,
             deleteCredential,
+            catalogDecision.as_ref(),
         )
         .map_err(|_| "provider.edit_unavailable")
     })
@@ -1729,6 +1801,9 @@ pub async fn confirm_provider_edit(
     #[allow(non_snake_case)] originalId: Option<String>,
     request: crate::mode::state::SaveRequest,
     #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] catalogDecision: Option<
+        crate::services::provider::codex_direct::CatalogDecision,
+    >,
 ) -> Result<serde_json::Value, String> {
     let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -1736,13 +1811,25 @@ pub async fn confirm_provider_edit(
             .try_state::<AppState>()
             .ok_or("provider.edit_unavailable")?;
         let original = originalId.as_deref().unwrap_or(&provider.id).to_owned();
-        crate::services::provider::edit::confirm(
+        if catalogDecision.is_none() {
+            return crate::services::provider::edit::confirm(
+                state.inner(),
+                &app,
+                provider,
+                &original,
+                request,
+                deleteCredential,
+            )
+            .map_err(|_| "provider.edit_unavailable");
+        }
+        crate::services::provider::edit::confirm_with_catalog(
             state.inner(),
             &app,
             provider,
             &original,
             request,
             deleteCredential,
+            catalogDecision.as_ref(),
         )
         .map_err(|_| "provider.edit_unavailable")
     })
@@ -1767,6 +1854,57 @@ pub async fn query_provider_edit(
     })
     .await
     .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn preview_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    #[allow(non_snake_case)] requestId: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::preview_catalog_restore(state.inner(), &requestId)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn confirm_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::confirm_catalog_restore(state.inner(), request)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn query_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::query_catalog_restore(state.inner(), request)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
     .map_err(str::to_owned)
 }
 
@@ -2246,6 +2384,8 @@ mod switch_command_result_wire_tests {
         let confirmation =
             serde_json::to_value(ProviderSwitchCommandResult::ConfirmationRequired {
                 target_name: "供应商".into(),
+                catalog: None,
+                quit_required: true,
             })
             .unwrap();
         assert_eq!(confirmation["status"], "confirmationRequired");

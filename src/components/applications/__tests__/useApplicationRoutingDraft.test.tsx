@@ -75,3 +75,146 @@ it("rechecks reviewed facts before continuing the original native confirmation",
   expect(apply).toHaveBeenCalledTimes(1);
   expect(result.current.confirmation).toBeNull();
 });
+
+const catalog = {
+  ownership: "unclaimedExternal" as const,
+  choice: "keep" as const,
+  canManage: true,
+  revision: "catalog-v1",
+  beforePointer: "/external/models.json",
+  afterPointer: "/external/models.json",
+};
+
+it("previews catalog ownership without committing frozen order/model and uses that preview on apply", async () => {
+  const decision = { choice: "manage" as const, revision: "catalog-v1" };
+  const managed = {
+    ...catalog,
+    choice: "manage",
+    afterPointer: "/managed/models.json",
+  };
+  const apply = vi
+    .fn()
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog: managed,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "switched",
+      warnings: [],
+      providerName: "Example",
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  act(() => {
+    result.current.load("Travel", ["b"]);
+  });
+  await act(async () => {
+    await result.current.submit(changed);
+  });
+  expect(result.current.confirmation?.catalog).toEqual(catalog);
+  await act(async () => {
+    await result.current.previewCatalog(decision);
+  });
+  expect(apply).toHaveBeenNthCalledWith(
+    2,
+    { ...changed, catalogDecision: decision, catalogPreviewOnly: true },
+    undefined,
+  );
+  expect(result.current.stagedIds).toEqual(["b"]);
+  expect(toastMocks.success).not.toHaveBeenCalled();
+  expect(result.current.confirmation?.catalog).toEqual(managed);
+  await act(async () => {
+    await result.current.confirm(false, decision);
+  });
+  expect(apply).toHaveBeenNthCalledWith(
+    3,
+    { ...changed, catalogDecision: decision, catalogPreviewOnly: false },
+    false,
+  );
+  expect(toastMocks.success).toHaveBeenCalledOnce();
+  expect(result.current.stagedIds).toBeNull();
+});
+
+it("invalidates a catalog preview on cancellation while its request is pending", async () => {
+  let finish!: (value: SwitchTierCommandResult) => void;
+  const apply = vi
+    .fn()
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog,
+    })
+    .mockImplementationOnce(
+      () =>
+        new Promise<SwitchTierCommandResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  await act(async () => {
+    await result.current.submit(changed);
+  });
+  let request!: Promise<void>;
+  act(() => {
+    request = result.current.previewCatalog({
+      choice: "manage",
+      revision: "catalog-v1",
+    });
+  });
+  act(() => {
+    result.current.cancel();
+  });
+  await act(async () => {
+    finish({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog: { ...catalog, choice: "manage" },
+    });
+    await request;
+  });
+  expect(result.current.confirmation).toBeNull();
+  expect(toastMocks.success).not.toHaveBeenCalled();
+});
+
+it("drops catalog approval on sourceChanged and preserves local order for a fresh review", async () => {
+  const apply = vi
+    .fn()
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog,
+    })
+    .mockRejectedValueOnce(new Error("sourceChanged"));
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  act(() => {
+    result.current.load("Travel", ["b"]);
+  });
+  await act(async () => {
+    await result.current.submit(changed);
+  });
+  await act(async () => {
+    await result.current.confirm(false, {
+      choice: "keep",
+      revision: "catalog-v1",
+    });
+  });
+  expect(result.current.confirmation).toBeNull();
+  expect(result.current.stagedIds).toEqual(["b"]);
+  await act(async () => {
+    await result.current.confirm(false, {
+      choice: "keep",
+      revision: "catalog-v1",
+    });
+  });
+  expect(apply).toHaveBeenCalledTimes(2);
+  expect(toastMocks.success).not.toHaveBeenCalled();
+});

@@ -3539,6 +3539,16 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
+        self.hot_switch_provider_inner_with_catalog(app_type, provider_id, None)
+            .await
+    }
+
+    pub(crate) async fn hot_switch_provider_inner_with_catalog(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        catalog: Option<crate::services::provider::codex_direct::CatalogDecision>,
+    ) -> Result<HotSwitchOutcome, String> {
         let app = AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
         if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
             let previous = crate::mode::current::provider_for(
@@ -3556,10 +3566,24 @@ impl ProxyService {
                 &self.db, &app, &provider,
             )
             .map_err(|e| e.to_string())?;
-            crate::mode::controller::switch_route_locked(self, &app, provider).await?;
+            match catalog {
+                Some(catalog) => {
+                    crate::mode::controller::switch_route_locked_with_catalog(
+                        self,
+                        &app,
+                        provider,
+                        Some(catalog),
+                    )
+                    .await?
+                }
+                None => crate::mode::controller::switch_route_locked(self, &app, provider).await?,
+            }
             return Ok(HotSwitchOutcome {
                 logical_target_changed: previous.as_deref() != Some(provider_id),
             });
+        }
+        if catalog.is_some() {
+            return Err("codex.catalog_takeover_unavailable".into());
         }
         let previous_id = crate::settings::get_effective_current_provider(&self.db, &app)
             .map_err(|error| error.to_string())?;

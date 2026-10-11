@@ -1,4 +1,5 @@
 //! U02 form adapter. Private plans, writes and outcomes stay with their original owners.
+use super::codex_direct::CatalogDecision;
 use super::ProviderService;
 use crate::{
     app_config::AppType,
@@ -17,7 +18,7 @@ use serde_json::{json, Value};
 fn problem(code: &str) -> AppError {
     AppError::InvalidInput(format!("provider.edit.{code}"))
 }
-fn code(error: &AppError) -> &'static str {
+pub(crate) fn code(error: &AppError) -> &'static str {
     match error {
         AppError::InvalidInput(value) if value == "provider.edit.credentialConflict" => {
             "credentialConflict"
@@ -35,7 +36,9 @@ fn code(error: &AppError) -> &'static str {
         AppError::Config(value)
             if value == "mode.verification_required"
                 || value.starts_with("upgrade.")
-                || value == "codex.auth_store_unavailable" =>
+                || value.starts_with("live.")
+                || value == "codex.auth_store_unavailable"
+                || value == "codex.catalog_template_not_loaded" =>
         {
             "ownerUnavailable"
         }
@@ -58,9 +61,16 @@ fn draft_digest(
     provider: &Provider,
     original: &str,
     delete: bool,
+    catalog: Option<&CatalogDecision>,
 ) -> Result<String, AppError> {
-    crate::config::serialize_json_bytes(&json!([app.as_str(), original, provider, delete]))
-        .map(|bytes| digest(Some(&bytes)).unwrap())
+    // Keep the old default request image compatible. An explicit takeover is
+    // additional user intent and therefore belongs in this same request hash.
+    let value = if catalog.is_none() {
+        json!([app.as_str(), original, provider, delete])
+    } else {
+        json!([app.as_str(), original, provider, delete, catalog])
+    };
+    crate::config::serialize_json_bytes(&value).map(|bytes| digest(Some(&bytes)).unwrap())
 }
 fn result(app: &AppType, request: &SaveRequest, status: &str, why: Option<&str>) -> Value {
     let mut value = json!({"app":app.as_str(),"request":request,"status":status});
@@ -324,6 +334,7 @@ fn planned(
     original: &str,
     id: &str,
     delete: bool,
+    catalog: Option<&CatalogDecision>,
 ) -> Result<(Provider, Provider, controller::SaveRowPlan), AppError> {
     admitted(state, app)?;
     if draft.id != original {
@@ -340,7 +351,8 @@ fn planned(
         .get_provider_by_id(original, app.as_str())?
         .ok_or_else(|| problem("readOnly"))?;
     let draft = prepare(state, app, &previous, draft, delete)?;
-    let plan = controller::plan_row_save(&state.proxy_service, app, &previous, &draft, id)?;
+    let plan =
+        controller::plan_row_save(&state.proxy_service, app, &previous, &draft, id, catalog)?;
     Ok((previous, draft, plan))
 }
 fn fields(previous: &Provider, next: &Provider) -> Vec<&'static str> {
@@ -418,7 +430,19 @@ pub(crate) fn preview(
     id: &str,
     delete_credential: bool,
 ) -> Result<Value, AppError> {
-    let draft = draft_digest(app, &provider, original, delete_credential)?;
+    preview_with_catalog(state, app, provider, original, id, delete_credential, None)
+}
+
+pub(crate) fn preview_with_catalog(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    id: &str,
+    delete_credential: bool,
+    catalog: Option<&CatalogDecision>,
+) -> Result<Value, AppError> {
+    let draft = draft_digest(app, &provider, original, delete_credential, catalog)?;
     let mut request = SaveRequest {
         id: id.into(),
         scope: state::SaveScope::Provider,
@@ -430,7 +454,15 @@ pub(crate) fn preview(
     let _switch =
         futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
     let mut value = json!({"app":app.as_str(), "request": request, "status":"blocked", "action":"saveOnly", "fields":[], "files":[], "preserves":[]});
-    match planned(state, app, provider, original, id, delete_credential) {
+    match planned(
+        state,
+        app,
+        provider,
+        original,
+        id,
+        delete_credential,
+        catalog,
+    ) {
         Ok((previous, provider, plan)) => {
             request.revision = plan.revision;
             let roles: &[&str] = match app {
@@ -460,6 +492,10 @@ pub(crate) fn preview(
                 preserves.push("externalCatalog");
             }
             value = json!({"app":app.as_str(),"request":request,"status":"ready","action":if plan.files.is_empty(){"saveOnly"}else{"saveAndApply"},"fields":fields(&previous,&provider),"files":files,"preserves":preserves});
+            if let Some(catalog) = plan.catalog {
+                value["catalog"] = serde_json::to_value(catalog)
+                    .map_err(|source| AppError::JsonSerialize { source })?;
+            }
         }
         Err(error) => value["code"] = json!(code(&error)),
     }
@@ -474,11 +510,32 @@ pub(crate) fn confirm(
     request: SaveRequest,
     delete_credential: bool,
 ) -> Result<Value, AppError> {
+    confirm_with_catalog(
+        state,
+        app,
+        provider,
+        original,
+        request,
+        delete_credential,
+        None,
+    )
+}
+
+pub(crate) fn confirm_with_catalog(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    request: SaveRequest,
+    delete_credential: bool,
+    catalog: Option<&CatalogDecision>,
+) -> Result<Value, AppError> {
     request.validate()?;
     if request.scope != state::SaveScope::Provider
         || request.provider_id.as_deref() != Some(original)
         || provider.id != original
-        || draft_digest(app, &provider, original, delete_credential)? != request.draft_digest
+        || draft_digest(app, &provider, original, delete_credential, catalog)?
+            != request.draft_digest
     {
         return Ok(result(app, &request, "conflict", None));
     }
@@ -498,6 +555,7 @@ pub(crate) fn confirm(
         original,
         &request.id,
         delete_credential,
+        catalog,
     ) {
         Ok(plan) => plan,
         Err(error) => return Ok(result(app, &request, "blocked", Some(code(&error)))),

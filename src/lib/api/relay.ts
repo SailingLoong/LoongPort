@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { CatalogPreview } from "./providers";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 
 import type { UsageResult } from "@/types";
@@ -325,6 +326,8 @@ export type SwitchTierCommandResult =
   | {
       status: "confirmationRequired";
       targetName: string;
+      catalog?: CatalogPreview;
+      quitRequired?: boolean;
     }
   | ({ status: "switched" } & SwitchTierResult);
 

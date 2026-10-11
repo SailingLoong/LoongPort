@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import type { ApplicationRoutingChange } from "@/lib/api/applicationRouting";
+import type {
+  CatalogPreview,
+  ProviderCatalogDecision,
+} from "@/lib/api/providers";
 import type { SwitchTierCommandResult } from "@/lib/api/relay";
 import type { TierSort } from "./tierMetrics";
 
@@ -25,6 +29,8 @@ export function useApplicationRoutingDraft(
     name: string;
     change: ApplicationRoutingChange;
     isCurrent?: () => boolean;
+    catalog?: CatalogPreview;
+    quitRequired?: boolean;
   } | null>(null);
   const pending = useRef(false);
   const lifecycle = useRef(0);
@@ -58,14 +64,30 @@ export function useApplicationRoutingDraft(
     const generation = lifecycle.current;
     pending.current = true;
     setSubmitting(true);
-    setConfirmation(null);
     try {
       const result = await apply(change, quitChatgpt);
       if (generation !== lifecycle.current) return;
       if (result.status === "confirmationRequired") {
-        setConfirmation({ name: result.targetName, change, isCurrent });
+        if (
+          change.catalogPreviewOnly &&
+          (result.catalog?.choice !== change.catalogDecision?.choice ||
+            result.catalog?.revision !== change.catalogDecision?.revision)
+        ) {
+          setConfirmation(null);
+          toast.warning(t("provider.preview.sourceChanged"));
+          return;
+        }
+        setConfirmation({
+          name: result.targetName,
+          change,
+          isCurrent,
+          catalog: result.catalog,
+          quitRequired: result.quitRequired,
+        });
         return;
       }
+      setConfirmation(null);
+      if (change.catalogPreviewOnly) return;
       if (change.order) discard();
       toast.success(t("applications.changesApplied"));
       result.warnings.forEach((warning) => toast.warning(warning));
@@ -75,6 +97,7 @@ export function useApplicationRoutingDraft(
         );
       }
     } catch {
+      if (generation === lifecycle.current) setConfirmation(null);
       // The mutation reports the original error. Keep local intent for retry.
     } finally {
       pending.current = false;
@@ -100,10 +123,47 @@ export function useApplicationRoutingDraft(
     confirmation,
     submit,
     discard,
-    cancel: () => setConfirmation(null),
-    confirm: (quit: boolean) =>
-      confirmation &&
-      void submit(confirmation.change, quit, confirmation.isCurrent),
+    cancel: () => {
+      lifecycle.current += 1;
+      setConfirmation(null);
+      setSubmitting(false);
+    },
+    previewCatalog: async (decision: ProviderCatalogDecision) => {
+      if (
+        !confirmation?.catalog ||
+        decision.revision !== confirmation.catalog.revision
+      )
+        return;
+      await submit(
+        {
+          ...confirmation.change,
+          catalogDecision: decision,
+          catalogPreviewOnly: true,
+        },
+        undefined,
+        confirmation.isCurrent,
+      );
+    },
+    confirm: (quit: boolean, decision?: ProviderCatalogDecision) => {
+      if (!confirmation) return;
+      if (
+        confirmation.catalog &&
+        (decision?.choice !== confirmation.catalog.choice ||
+          decision.revision !== confirmation.catalog.revision)
+      )
+        return;
+      void submit(
+        decision
+          ? {
+              ...confirmation.change,
+              catalogDecision: decision,
+              catalogPreviewOnly: false,
+            }
+          : confirmation.change,
+        quit,
+        confirmation.isCurrent,
+      );
+    },
     saveAs: (name: string, ids: string[]) => {
       setProfileName(name);
       setStagedIds(ids);

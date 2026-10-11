@@ -143,6 +143,8 @@ pub(crate) async fn set_auto_mode_model_impl(
         app_type,
         crate::services::application_selection::ApplicationRoutingChange {
             order: None,
+            catalog_decision: None,
+            catalog_preview_only: false,
             selection: Some(crate::services::application_selection::TierSelection {
                 provider_id,
                 model: model.map(str::to_owned),
@@ -151,7 +153,14 @@ pub(crate) async fn set_auto_mode_model_impl(
         Some(false),
     )
     .await
-    .map(|_| ())
+    .and_then(|outcome| match outcome {
+        crate::services::application_selection::SwitchTierCommandResult::Switched { .. } => Ok(()),
+        crate::services::application_selection::SwitchTierCommandResult::ConfirmationRequired {
+            ..
+        } => Err(crate::error::AppError::Config(
+            "routing.confirmation_required".into(),
+        )),
+    })
     .map_err(|error| error.to_string())
 }
 

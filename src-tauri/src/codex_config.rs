@@ -2235,13 +2235,19 @@ fn fill_template_fields_from_static(template: &mut Value) {
 }
 
 fn load_codex_model_catalog_template_uncached() -> Result<Value, AppError> {
+    load_codex_model_catalog_template_with_bundled(load_codex_model_template_from_bundled)
+}
+
+fn load_codex_model_catalog_template_with_bundled(
+    load_bundled: impl FnOnce() -> Result<Option<Value>, AppError>,
+) -> Result<Value, AppError> {
     // ① models_cache.json (created by Codex when it connects to OpenAI)
     if let Some(mut template) = load_codex_model_template_from_cache()? {
         fill_template_fields_from_static(&mut template);
         return Ok(template);
     }
     // ② codex CLI (PATH + platform-specific common paths)
-    if let Some(mut template) = load_codex_model_template_from_bundled()? {
+    if let Some(mut template) = load_bundled()? {
         fill_template_fields_from_static(&mut template);
         return Ok(template);
     }
@@ -2276,6 +2282,25 @@ fn load_codex_model_catalog_template() -> Result<Value, AppError> {
 #[cfg(test)]
 fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     load_codex_model_catalog_template_uncached()
+}
+
+fn load_codex_model_catalog_template_readonly(
+    cli_sources: Option<&[CodexReasoningSource]>,
+) -> Result<Value, AppError> {
+    #[cfg(not(test))]
+    if let Some(template) = CODEX_MODEL_CATALOG_TEMPLATE_CACHE.get() {
+        return Ok(template.clone());
+    }
+    load_codex_model_catalog_template_with_bundled(|| {
+        // An uninitialized discovery cache is not evidence that no CLI template
+        // exists. Preserve the writer's cache -> CLI -> static priority instead
+        // of silently substituting another tool harness in the preview.
+        let sources = cli_sources
+            .ok_or_else(|| AppError::Config("codex.catalog_template_not_loaded".into()))?;
+        Ok(sources
+            .iter()
+            .find_map(|source| find_codex_model_template(&json!({"models": source.models}))))
+    })
 }
 
 fn codex_model_catalog_from_specs(
@@ -2403,6 +2428,35 @@ fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
 fn load_codex_cli_sources() -> Vec<CodexReasoningSource> {
     // Host executables never enter synthetic CODEX_HOME unit fixtures.
     Vec::new()
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn loaded_codex_cli_sources() -> Option<Vec<CodexReasoningSource>> {
+    CODEX_CLI_SOURCES.get().cloned()
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static TEST_UNLOADED_CODEX_CLI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn test_with_unloaded_codex_cli<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_UNLOADED_CODEX_CLI.set(self.0);
+        }
+    }
+    let _restore = Restore(TEST_UNLOADED_CODEX_CLI.replace(true));
+    run()
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn loaded_codex_cli_sources() -> Option<Vec<CodexReasoningSource>> {
+    // Tests can also exercise an actually uninitialized readonly source without
+    // ever probing host executables. The original default fixture stays empty.
+    (!TEST_UNLOADED_CODEX_CLI.get()).then(Vec::new)
 }
 
 fn load_codex_cache_source() -> Option<CodexReasoningSource> {
@@ -2585,7 +2639,19 @@ fn select_codex_reasoning_sources(sources: &[CodexReasoningSource]) -> Vec<Value
 }
 
 fn load_codex_official_model_sources() -> (Vec<Value>, Vec<Value>) {
-    let mut sources = load_codex_cli_sources();
+    let (bundled, models) = codex_official_model_sources_from_cli(load_codex_cli_sources());
+    if let Ok(mut snapshot) = CODEX_OFFICIAL_MODELS_SNAPSHOT.write() {
+        *snapshot = models.clone();
+    }
+    (bundled, models)
+}
+
+/// Shared source selection without discovery or publishing a process snapshot.
+/// Only the supplied CLI records can be bundled evidence; the merged snapshot
+/// also includes cache/seed facts and must never stand in for a CLI's catalog.
+fn codex_official_model_sources_from_cli(
+    mut sources: Vec<CodexReasoningSource>,
+) -> (Vec<Value>, Vec<Value>) {
     let bundled = sources
         .first()
         .map(|source| source.models.clone())
@@ -2648,9 +2714,6 @@ fn load_codex_official_model_sources() -> (Vec<Value>, Vec<Value>) {
             models.push(facts);
         }
     }
-    if let Ok(mut snapshot) = CODEX_OFFICIAL_MODELS_SNAPSHOT.write() {
-        *snapshot = models.clone();
-    }
     (bundled, models)
 }
 
@@ -2710,6 +2773,26 @@ fn codex_catalog_projection_from_discovered_models(
     bundled: &[Value],
     official_models: &[Value],
 ) -> Result<CodexCatalogProjection, AppError> {
+    codex_catalog_projection_from_models_with_template(
+        settings,
+        config_text,
+        profile,
+        provider,
+        bundled,
+        official_models,
+        load_codex_model_catalog_template,
+    )
+}
+
+fn codex_catalog_projection_from_models_with_template(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider: Option<&crate::provider::Provider>,
+    bundled: &[Value],
+    official_models: &[Value],
+    load_proxy_template: impl FnOnce() -> Result<Value, AppError>,
+) -> Result<CodexCatalogProjection, AppError> {
     let base_url = provider
         .and_then(|provider| {
             provider
@@ -2751,12 +2834,13 @@ fn codex_catalog_projection_from_discovered_models(
         "Discovered Codex catalog has {} rows; external consumer is unbound",
         bundled.len()
     );
-    let mut projection = codex_catalog_projection_with_official(
+    let mut projection = codex_catalog_projection_with_template(
         settings,
         config_text,
         profile,
         &[],
         official_models,
+        load_proxy_template,
     )?;
     if let CodexCatalogProjection::Generated(catalog) = &mut projection {
         if let Some(entries) = catalog.get_mut("models").and_then(Value::as_array_mut) {
@@ -2803,16 +2887,36 @@ fn codex_catalog_projection_from_discovered_models(
     Ok(projection)
 }
 
-/// Pure decision core behind [`codex_catalog_projection_from_settings`];
+/// Decision core behind [`codex_catalog_projection_from_settings`];
 /// `bundled_official_models` is the codex binary's own catalog (what codex
 /// reads when we point it at nothing) and `official_models` is the merged
-/// bundled+cache list used for entry generation.
+/// bundled+cache list used for entry generation. The caller supplies template
+/// resolution so read-only planning cannot fall through to CLI discovery.
+#[cfg(test)]
 fn codex_catalog_projection_with_official(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
     bundled_official_models: &[Value],
     official_models: &[Value],
+) -> Result<CodexCatalogProjection, AppError> {
+    codex_catalog_projection_with_template(
+        settings,
+        config_text,
+        profile,
+        bundled_official_models,
+        official_models,
+        load_codex_model_catalog_template,
+    )
+}
+
+fn codex_catalog_projection_with_template(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    bundled_official_models: &[Value],
+    official_models: &[Value],
+    load_proxy_template: impl FnOnce() -> Result<Value, AppError>,
 ) -> Result<CodexCatalogProjection, AppError> {
     let specs = codex_catalog_model_specs(settings);
     if specs.is_empty() {
@@ -2854,7 +2958,7 @@ fn codex_catalog_projection_with_official(
         CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
             load_codex_native_responses_template()
         }
-        CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
+        CodexCatalogToolProfile::ProxyChat => load_proxy_template()?,
     };
     Ok(CodexCatalogProjection::Generated(
         codex_model_catalog_from_specs(
@@ -8957,6 +9061,160 @@ web_search = "disabled" # cc-switch:managed
     }
 
     #[test]
+    #[serial]
+    fn readonly_catalog_matches_existing_native_and_proxy_generation() {
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({"modelCatalog":{"models":[
+            {"model":"gpt-6.1-sol"},
+            {"model":"relay-alias", "reasoningLevels":["low","high"],
+             "defaultReasoningLevel":"high", "contextWindow":123456}
+        ]}});
+        let provider = crate::provider::Provider::with_id(
+            "fixture".into(),
+            "Fixture".into(),
+            settings.clone(),
+            None,
+        );
+        for profile in [
+            CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::ProxyChat,
+            CodexCatalogToolProfile::Anthropic,
+        ] {
+            let preview = plan_codex_model_catalog_readonly(
+                &settings,
+                "model='relay-alias'\n",
+                profile,
+                &provider,
+            )
+            .unwrap()
+            .expect("catalog preview");
+            let writer =
+                plan_codex_model_catalog(&settings, "model='relay-alias'\n", profile, &provider)
+                    .unwrap()
+                    .expect("catalog generation");
+            assert_eq!(preview, writer);
+            assert_eq!(preview["models"][1]["context_window"], 123456);
+        }
+        assert!(!get_codex_config_path().exists());
+        assert!(!get_codex_model_catalog_path().exists());
+        assert!(!get_codex_config_dir().join("models_cache.json").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn readonly_proxy_template_requires_known_bundled_fallback() {
+        let _home = CodexLiveTestHome::new();
+        assert!(
+            load_codex_model_catalog_template_readonly(None).is_err(),
+            "an unprobed CLI may carry a different harness; do not silently pick static"
+        );
+        let template = load_codex_model_catalog_template_readonly(Some(&[])).unwrap();
+        assert_eq!(template, load_codex_model_template_static().unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn readonly_proxy_template_preserves_cache_before_loaded_cli_priority() {
+        let _home = CodexLiveTestHome::new();
+        let cache_path = get_codex_config_dir().join("models_cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&json!({"models":[{
+                "slug":"gpt-5.5", "base_instructions":"cache harness"
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let source = CodexReasoningSource {
+            kind: CodexReasoningSourceKind::Bundled,
+            identity: "fixture".into(),
+            version: Some("0.149.0".into()),
+            models: vec![json!({"slug":"gpt-5.5", "base_instructions":"CLI harness"})],
+        };
+        for sources in [None, Some(std::slice::from_ref(&source))] {
+            let template = load_codex_model_catalog_template_readonly(sources).unwrap();
+            assert_eq!(template["base_instructions"], "cache harness");
+            assert!(template.get("support_verbosity").is_some());
+        }
+        fs::remove_file(&cache_path).unwrap();
+        let template = load_codex_model_catalog_template_readonly(Some(&[source])).unwrap();
+        assert_eq!(template["base_instructions"], "CLI harness");
+    }
+
+    #[test]
+    #[serial]
+    fn readonly_proxy_template_keeps_malformed_cache_blocked() {
+        let _home = CodexLiveTestHome::new();
+        let path = get_codex_config_dir().join("models_cache.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "not json").unwrap();
+        assert!(load_codex_model_catalog_template_readonly(Some(&[])).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "not json");
+    }
+
+    #[test]
+    #[serial]
+    fn readonly_native_catalog_keeps_seed_only_rows_projected() {
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({"modelCatalog":{"models":[{"model":"gpt-6.1-sol"}]}});
+        let provider = crate::provider::Provider::with_id(
+            "fixture".into(),
+            "Fixture".into(),
+            settings.clone(),
+            None,
+        );
+        let catalog = plan_codex_model_catalog_readonly(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+            &provider,
+        )
+        .unwrap()
+        .expect("seed-only catalog still projects");
+        assert_eq!(catalog["models"][0]["slug"], "gpt-6.1-sol");
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn readonly_native_and_vendor_generation_never_resolves_proxy_template() {
+        let settings = json!({"modelCatalog":{"models":[{"model":"example-model"}]}});
+        for (profile, config) in [
+            (CodexCatalogToolProfile::NativeResponses, ""),
+            (CodexCatalogToolProfile::Anthropic, ""),
+            (CodexCatalogToolProfile::NativeResponses,
+             "model_provider='fixture'\n[model_providers.fixture]\nbase_url='https://api.deepseek.com/v1'\n"),
+        ] {
+            let projection = codex_catalog_projection_with_template(
+                &settings, config, profile, &[], &[],
+                || panic!("native/vendor generation must not request a ProxyChat template"),
+            ).unwrap();
+            assert!(matches!(projection, CodexCatalogProjection::Generated(_)));
+        }
+    }
+
+    #[test]
+    fn readonly_proxy_generation_keeps_unavailable_template_blocked() {
+        let settings = json!({"modelCatalog":{"models":[{"model":"example-model"}]}});
+        let projection = codex_catalog_projection_with_template(
+            &settings,
+            "",
+            CodexCatalogToolProfile::ProxyChat,
+            &[],
+            &[],
+            || Err(AppError::Config("codex.catalog_template_not_loaded".into())),
+        );
+        assert!(matches!(projection, Err(AppError::Config(code))
+            if code == "codex.catalog_template_not_loaded"));
+    }
+
+    #[test]
     fn codex_cli_candidates_include_user_node_manager_bins() {
         let temp_home = tempfile::tempdir().expect("create temp home");
         let home = temp_home.path();
@@ -11086,6 +11344,38 @@ pub(crate) fn plan_codex_model_catalog(
             config_text,
             profile,
             Some(provider),
+        )? {
+            CodexCatalogProjection::Generated(catalog) => Some(catalog),
+            CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => None,
+        },
+    )
+}
+
+/// Read-only editor projection using only already-loaded CLI metadata, the local
+/// cache and the existing static fallbacks. It neither probes nor publishes
+/// caches. The caller binds these generated bytes into its request revision and
+/// consumes that same plan on apply, rather than rediscovering model metadata.
+pub(crate) fn plan_codex_model_catalog_readonly(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider: &crate::provider::Provider,
+) -> Result<Option<Value>, AppError> {
+    if !codex_has_catalog_model_specs(settings) {
+        return Ok(None);
+    }
+    let cli_sources = loaded_codex_cli_sources();
+    let (bundled, official_models) =
+        codex_official_model_sources_from_cli(cli_sources.clone().unwrap_or_default());
+    Ok(
+        match codex_catalog_projection_from_models_with_template(
+            settings,
+            config_text,
+            profile,
+            Some(provider),
+            &bundled,
+            &official_models,
+            || load_codex_model_catalog_template_readonly(cli_sources.as_deref()),
         )? {
             CodexCatalogProjection::Generated(catalog) => Some(catalog),
             CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => None,

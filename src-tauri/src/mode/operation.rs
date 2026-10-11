@@ -1020,7 +1020,13 @@ fn valid_digest(value: &Option<String>) -> bool {
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
     if let Some(request) = &target.save_request {
         request.validate()?;
-        if op != state::op::APPLY {
+        if op
+            != (if request.scope == state::SaveScope::CodexCatalogRestore {
+                state::op::CATALOG
+            } else {
+                state::op::APPLY
+            })
+        {
             return Err(invalid_pending());
         }
         match request.scope {
@@ -1041,9 +1047,25 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
                     state::SaveScope::CodexSharedSettings => "codex",
                     state::SaveScope::ClaudeSharedSettings => "claude",
                     state::SaveScope::GeminiSharedSettings => "gemini",
-                    state::SaveScope::Provider => unreachable!(),
+                    state::SaveScope::Provider | state::SaveScope::CodexCatalogRestore => {
+                        unreachable!()
+                    }
                 };
                 if app != expected_app || !effects.is_empty() {
+                    return Err(invalid_pending());
+                }
+            }
+            state::SaveScope::CodexCatalogRestore => {
+                let mut effects = target.clone();
+                effects.save_request = None;
+                let written = effects.written.take().ok_or_else(invalid_pending)?;
+                if app != "codex"
+                    || !effects.is_empty()
+                    || written
+                        .codex
+                        .as_ref()
+                        .is_none_or(|codex| codex.catalog.is_some())
+                {
                     return Err(invalid_pending());
                 }
             }

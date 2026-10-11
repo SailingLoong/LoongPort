@@ -15,9 +15,13 @@ const mocks = vi.hoisted(() => ({
   state: vi.fn(),
   complete: vi.fn(),
   vendorSwitch: vi.fn(),
+  apply: vi.fn(),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
+}));
+vi.mock("@/lib/api/applicationRouting", () => ({
+  applicationRoutingApi: { apply: mocks.apply },
 }));
 vi.mock("@/lib/api/applicationOverview", () => ({
   applicationOverviewApi: { state: mocks.state },
@@ -297,5 +301,82 @@ it("verifies a vendor plan using its account and selection identity rather than 
     "standard",
     "claude",
     undefined,
+  );
+});
+
+it("previews catalog management before final onboarding apply and never marks preview as success", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "/external/models.json",
+    afterPointer: "/external/models.json",
+  };
+  mocks.switch.mockImplementation(async (_id, app) =>
+    app === "codex"
+      ? {
+          status: "confirmationRequired",
+          targetName: "Codex",
+          catalog,
+          quitRequired: false,
+        }
+      : { status: "switched", warnings: [] },
+  );
+  mocks.apply
+    .mockReset()
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Codex",
+      catalog: {
+        ...catalog,
+        choice: "manage",
+        afterPointer: "/managed/models.json",
+      },
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({ status: "switched", warnings: [] });
+  const { onDone } = mount();
+  await selectBoth();
+  fireEvent.click(
+    screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+  );
+  await screen.findByRole("dialog");
+  fireEvent.click(
+    screen.getByRole("radio", { name: "provider.preview.catalog.manage" }),
+  );
+  expect(
+    screen.getByRole("button", { name: "applications.apply" }),
+  ).toBeDisabled();
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "provider.preview.catalog.confirmChoice",
+    }),
+  );
+  await screen.findByText("/managed/models.json");
+  const catalogDecision = { choice: "manage", revision: "catalog-v1" };
+  expect(mocks.apply).toHaveBeenNthCalledWith(
+    1,
+    "codex",
+    {
+      selection: { providerId: "codex" },
+      catalogDecision,
+      catalogPreviewOnly: true,
+    },
+    undefined,
+  );
+  expect(mocks.complete).not.toHaveBeenCalled();
+  expect(onDone).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "applications.apply" }));
+  await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+  expect(mocks.apply).toHaveBeenNthCalledWith(
+    2,
+    "codex",
+    {
+      selection: { providerId: "codex" },
+      catalogDecision,
+      catalogPreviewOnly: false,
+    },
+    false,
   );
 });

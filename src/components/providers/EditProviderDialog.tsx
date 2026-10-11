@@ -15,8 +15,15 @@ import { toast } from "sonner";
 import { Notice, NoticeSlot } from "@/components/ui/notice";
 import {
   completedProviderEdit,
+  isCodexCatalogRestorePreview,
+  isCodexCatalogRestoreRequest,
+  matchesCodexCatalogRestoreResult,
+  type CodexCatalogRestorePreview,
+  type CodexCatalogRestoreRequest,
+  type CodexCatalogRestoreResult,
   isProviderEditRequest,
   matchesProviderEditResult,
+  type ProviderCatalogDecision,
   type ProviderEditSettings,
   type ProviderEditPreview,
   type ProviderEditRequest,
@@ -24,12 +31,14 @@ import {
   type ProviderUpdateInput,
   type ProviderUpdateResult,
 } from "@/lib/api/providers";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { Provider } from "@/types";
 import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
+import { CatalogChoiceFields } from "@/components/providers/CatalogChoiceFields";
 import { AuthSettingsPanel } from "@/components/providers/AuthSettingsPanel";
 import { providersApi, type AppId, type ManagedAuthProvider } from "@/lib/api";
 
@@ -157,6 +166,24 @@ function EditSession({
           setSubmitted({ request: original.request, version: null });
           setResult(original);
         }
+        const originalRestore = value.originalCatalogRestore;
+        if (value.modeState && originalRestore) {
+          if (
+            appId !== "codex" ||
+            !isCodexCatalogRestoreRequest(originalRestore.request) ||
+            !matchesCodexCatalogRestoreResult(
+              originalRestore,
+              originalRestore.request,
+            )
+          ) {
+            setEditRead(null);
+            setReadFailed(true);
+            return;
+          }
+          // Reopening only recovers the native receipt for querying. It never
+          // creates a restore preview or treats this new form as submitted.
+          setRestoreResult(originalRestore);
+        }
       })
       .catch(() => {
         if (!cancelled && alive.current) setReadFailed(true);
@@ -195,14 +222,22 @@ function EditSession({
   const inFlight = useRef(false);
   const capturedSubmit = useRef(false);
   const intent = useRef<"preview" | "confirm">("preview");
+  const nextCatalogDecision = useRef<ProviderCatalogDecision | undefined>(
+    undefined,
+  );
+  const [catalogSelection, setCatalogSelection] = useState<
+    ProviderCatalogDecision["choice"] | null
+  >(null);
   const ticket = useRef<{
     intent: "preview" | "confirm";
     version: number;
+    catalogDecision?: ProviderCatalogDecision;
   } | null>(null);
   const [busy, setBusy] = useState<"preview" | "save" | "query" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [review, setReview] = useState<{
     value: ProviderEditPreview;
+    catalogDecision?: ProviderCatalogDecision;
     signature: string;
     version: number;
   } | null>(null);
@@ -211,11 +246,27 @@ function EditSession({
     version: number | null;
   } | null>(null);
   const [result, setResult] = useState<ProviderEditResult | null>(null);
+  const restoreGeneration = useRef(0);
+  const [restoreReview, setRestoreReview] = useState<{
+    value: CodexCatalogRestorePreview;
+    version: number;
+  } | null>(null);
+  const [restoreResult, setRestoreResult] =
+    useState<CodexCatalogRestoreResult | null>(null);
+  const invalidateRestore = useCallback(() => {
+    restoreGeneration.current += 1;
+    setRestoreReview(null);
+  }, []);
+  useEffect(invalidateRestore, [readAttempt, invalidateRestore]);
+
   const invalidate = useCallback(() => {
     draftVersion.current += 1;
+    invalidateRestore();
+    nextCatalogDecision.current = undefined;
+    setCatalogSelection(null);
     if (review) setNotice("sourceChanged");
     setReview(null);
-  }, [review]);
+  }, [review, invalidateRestore]);
   const handleDraftRevision = useCallback(
     (revision: number) => {
       if (formVersion.current !== revision) {
@@ -236,6 +287,10 @@ function EditSession({
         ? answer
         : { app: appId, request, status: "unknown" };
       setResult(checked);
+      // A journal response never leaves an old catalog choice writable.
+      setReview(null);
+      setCatalogSelection(null);
+      nextCatalogDecision.current = undefined;
       if (completedProviderEdit(checked, appId, request)) {
         if (draftVersion.current === version) {
           toast.success(t("notifications.updateSuccess"), {
@@ -258,7 +313,9 @@ function EditSession({
         mutationsDisabled ||
         editRead?.modeState?.canWrite === false ||
         inFlight.current ||
-        submitted
+        submitted ||
+        restoreReview ||
+        restoreResult
       )
         return;
       const attempt = ticket.current ?? {
@@ -319,7 +376,8 @@ function EditSession({
             !review ||
             review.value.status !== "ready" ||
             review.version !== attempt.version ||
-            review.signature !== signature
+            review.signature !== signature ||
+            catalogSelection !== null
           ) {
             setReview(null);
             setNotice("sourceChanged");
@@ -333,7 +391,13 @@ function EditSession({
             answer = await onSubmit({
               provider: updatedProvider,
               originalId: provider.id,
-              edit: { request, deleteCredential },
+              edit: {
+                request,
+                deleteCredential,
+                ...(review.catalogDecision
+                  ? { catalogDecision: review.catalogDecision }
+                  : {}),
+              },
             });
           } catch {
             answer = { app: appId, request, status: "unknown" };
@@ -348,6 +412,7 @@ function EditSession({
             provider.id,
             id,
             deleteCredential,
+            attempt.catalogDecision,
           );
           if (!alive.current || draftVersion.current !== attempt.version)
             return;
@@ -363,7 +428,27 @@ function EditSession({
             setNotice("sourceUnavailable");
             return;
           }
-          setReview({ value, signature, version: attempt.version });
+          // A requested choice must be acknowledged by this preview. Missing or
+          // mismatched facts cannot revive the ready preview from before it.
+          if (
+            value.status === "ready" &&
+            ((attempt.catalogDecision &&
+              (!value.catalog ||
+                value.catalog.choice !== attempt.catalogDecision.choice ||
+                value.catalog.revision !== attempt.catalogDecision.revision)) ||
+              (!attempt.catalogDecision && value.catalog?.choice === "manage"))
+          ) {
+            setNotice("sourceUnavailable");
+            return;
+          }
+          setReview({
+            value,
+            signature,
+            version: attempt.version,
+            ...(value.status === "ready" && attempt.catalogDecision
+              ? { catalogDecision: attempt.catalogDecision }
+              : {}),
+          });
         }
       } catch {
         if (alive.current) setNotice("sourceUnavailable");
@@ -383,7 +468,10 @@ function EditSession({
       controlled,
       deleteCredential,
       review,
+      catalogSelection,
       submitted,
+      restoreReview,
+      restoreResult,
       finishResult,
     ],
   );
@@ -416,6 +504,108 @@ function EditSession({
       if (alive.current) setBusy(null);
     }
   };
+  const previewRestore = async () => {
+    if (
+      appId !== "codex" ||
+      !review?.value.catalog?.canRestore ||
+      mutationsDisabled ||
+      editRead?.modeState?.canWrite === false ||
+      inFlight.current ||
+      isFormSubmitting ||
+      submitted ||
+      restoreResult
+    )
+      return;
+    const generation = ++restoreGeneration.current;
+    const version = draftVersion.current;
+    setRestoreReview(null);
+    setNotice(null);
+    inFlight.current = true;
+    setBusy("preview");
+    try {
+      const id = crypto.randomUUID();
+      const value = await providersApi.previewCodexCatalogRestore(id);
+      if (
+        !alive.current ||
+        generation !== restoreGeneration.current ||
+        version !== draftVersion.current
+      )
+        return;
+      if (!isCodexCatalogRestorePreview(value, id)) {
+        setNotice("catalog.restoreUnavailable");
+        return;
+      }
+      setRestoreReview({ value, version });
+    } catch {
+      if (alive.current && generation === restoreGeneration.current)
+        setNotice("catalog.restoreUnavailable");
+    } finally {
+      inFlight.current = false;
+      if (alive.current) setBusy(null);
+    }
+  };
+  const finishRestore = (
+    answer: unknown,
+    request: CodexCatalogRestoreRequest,
+  ) => {
+    if (!alive.current) return;
+    setRestoreResult(
+      matchesCodexCatalogRestoreResult(answer, request)
+        ? answer
+        : { app: "codex", request, status: "unknown" },
+    );
+  };
+  const confirmRestore = async () => {
+    if (
+      !restoreReview ||
+      restoreReview.version !== draftVersion.current ||
+      mutationsDisabled ||
+      editRead?.modeState?.canWrite === false ||
+      inFlight.current ||
+      submitted ||
+      restoreResult
+    )
+      return;
+    const request = restoreReview.value.request;
+    inFlight.current = true;
+    setBusy("save");
+    // Retain this association across draft edits and transport failures. Only
+    // this receipt is queried; the provider form never enters the restore IPC.
+    setRestoreResult({ app: "codex", request, status: "pending" });
+    invalidateRestore();
+    setReview(null);
+    setCatalogSelection(null);
+    nextCatalogDecision.current = undefined;
+    setNotice(null);
+    try {
+      finishRestore(
+        await providersApi.confirmCodexCatalogRestore(request),
+        request,
+      );
+    } catch {
+      finishRestore(null, request);
+    } finally {
+      inFlight.current = false;
+      if (alive.current) setBusy(null);
+    }
+  };
+  const queryRestore = async () => {
+    if (!restoreResult || inFlight.current) return;
+    const request = restoreResult.request;
+    inFlight.current = true;
+    setBusy("query");
+    try {
+      finishRestore(
+        await providersApi.queryCodexCatalogRestore(request),
+        request,
+      );
+    } catch {
+      finishRestore(null, request);
+    } finally {
+      inFlight.current = false;
+      if (alive.current) setBusy(null);
+    }
+  };
   const submitDisabled =
     mutationsDisabled ||
     !initialData ||
@@ -423,7 +613,9 @@ function EditSession({
     isFormSubmitting ||
     !isFormReady ||
     !!busy ||
-    !!submitted;
+    !!submitted ||
+    !!restoreReview ||
+    !!restoreResult;
   const fieldRoles = [
     "connection",
     "authentication",
@@ -473,6 +665,7 @@ function EditSession({
     "unsupported",
     "sourceUnavailable",
     "savedPreviousDraft",
+    "catalog.restoreUnavailable",
   ];
 
   if (!provider) {
@@ -493,6 +686,7 @@ function EditSession({
             disabled={submitDisabled}
             onClick={() => {
               intent.current = "preview";
+              nextCatalogDecision.current = undefined;
             }}
             variant={review ? "outline" : "default"}
           >
@@ -503,7 +697,11 @@ function EditSession({
             <Button
               type="submit"
               form="provider-form"
-              disabled={submitDisabled || review.value.status !== "ready"}
+              disabled={
+                submitDisabled ||
+                review.value.status !== "ready" ||
+                catalogSelection !== null
+              }
               onClick={() => {
                 intent.current = "confirm";
               }}
@@ -592,6 +790,8 @@ function EditSession({
                       setSubmitted(null);
                       setReview(null);
                       setNotice(null);
+                      setCatalogSelection(null);
+                      nextCatalogDecision.current = undefined;
                     }}
                   >
                     {t("provider.preview.backToEdit")}
@@ -602,6 +802,74 @@ function EditSession({
           />
         </NoticeSlot>
       )}
+      {restoreResult && (
+        <NoticeSlot>
+          <Notice
+            tone={restoreResult.status === "completed" ? "neutral" : "warning"}
+            title={t(
+              restoreResult.status === "completed"
+                ? "provider.preview.catalog.restored"
+                : `provider.preview.result.${statusRoles.includes(restoreResult.status) ? restoreResult.status : "unknown"}`,
+            )}
+            actions={
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!!busy}
+                  onClick={() => void queryRestore()}
+                >
+                  {t("provider.preview.queryOriginal")}
+                </Button>
+                {[
+                  "completed",
+                  "notRecorded",
+                  "discarded",
+                  "abandoned",
+                  "stale",
+                  "blocked",
+                  "conflict",
+                ].includes(restoreResult.status) && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!!busy}
+                    onClick={() => setRestoreResult(null)}
+                  >
+                    {t("provider.preview.backToEdit")}
+                  </Button>
+                )}
+              </>
+            }
+          >
+            {t("provider.preview.catalog.restoreHint")}
+          </Notice>
+        </NoticeSlot>
+      )}
+      <ConfirmDialog
+        isOpen={!!restoreReview}
+        title={t("provider.preview.catalog.restoreTitle")}
+        message={
+          restoreReview
+            ? [
+                t("provider.preview.catalog.restoreHint"),
+                `${t("provider.preview.catalog.beforePointer")}: ${restoreReview.value.beforePointer ?? t("provider.preview.catalog.noPointer")}`,
+                `${t("provider.preview.catalog.afterPointer")}: ${restoreReview.value.afterPointer ?? t("provider.preview.catalog.noPointer")}`,
+              ].join("\n\n")
+            : ""
+        }
+        variant="info"
+        confirmText={t("provider.preview.catalog.confirmRestore")}
+        confirmDisabled={
+          mutationsDisabled ||
+          editRead?.modeState?.canWrite === false ||
+          !!busy ||
+          !!submitted ||
+          !!restoreResult
+        }
+        onConfirm={() => void confirmRestore()}
+        onCancel={invalidateRestore}
+      />
       <div
         className={
           controlled ? "grid items-start gap-6 xl:grid-cols-2" : undefined
@@ -610,16 +878,32 @@ function EditSession({
         <div
           onSubmitCapture={(event) => {
             if (!controlled) return;
-            if (capturedSubmit.current || inFlight.current || submitted) {
+            if (
+              capturedSubmit.current ||
+              inFlight.current ||
+              submitted ||
+              restoreReview ||
+              restoreResult
+            ) {
               event.preventDefault();
               event.stopPropagation();
               return;
             }
             capturedSubmit.current = true;
+            invalidateRestore();
             ticket.current = {
               intent: intent.current,
               version: draftVersion.current,
+              ...(intent.current === "preview" && nextCatalogDecision.current
+                ? { catalogDecision: nextCatalogDecision.current }
+                : {}),
             };
+            if (intent.current === "preview") {
+              // Retire the prior ready result before validation or IPC begins.
+              setReview(null);
+              setCatalogSelection(null);
+            }
+            nextCatalogDecision.current = undefined;
             intent.current = "preview";
           }}
         >
@@ -646,7 +930,13 @@ function EditSession({
             <label className="mt-4 flex items-start gap-2 text-body">
               <Checkbox
                 checked={deleteCredential}
-                disabled={!!busy || !!submitted || mutationsDisabled}
+                disabled={
+                  !!busy ||
+                  !!submitted ||
+                  !!restoreReview ||
+                  !!restoreResult ||
+                  mutationsDisabled
+                }
                 onCheckedChange={(value) => {
                   setDeleteCredential(value === true);
                   invalidate();
@@ -704,11 +994,64 @@ function EditSession({
                       ))}
                   </ul>
                 )}
+                {review?.value.catalog && (
+                  <dl className="mt-3 space-y-2 break-all text-caption">
+                    {review.value.catalog.beforePointer !== null && (
+                      <div>
+                        <dt>{t("provider.preview.catalog.beforePointer")}</dt>
+                        <dd>{review.value.catalog.beforePointer}</dd>
+                      </div>
+                    )}
+                    {review.value.catalog.afterPointer !== null && (
+                      <div>
+                        <dt>{t("provider.preview.catalog.afterPointer")}</dt>
+                        <dd>{review.value.catalog.afterPointer}</dd>
+                      </div>
+                    )}
+                  </dl>
+                )}
                 {review?.value.action === "saveOnly" && (
                   <p>{t("provider.preview.noLiveWrite")}</p>
                 )}
               </TabsContent>
             </Tabs>
+            {review?.value.catalog?.ownership === "unclaimedExternal" &&
+              review.value.catalog.canManage && (
+                <CatalogChoiceFields
+                  choice={catalogSelection ?? review.value.catalog.choice}
+                  disabled={submitDisabled || review.value.status !== "ready"}
+                  onChange={(choice) => {
+                    invalidateRestore();
+                    setCatalogSelection(
+                      choice === review.value.catalog?.choice ? null : choice,
+                    );
+                  }}
+                  onPreviewChoice={(choice) => {
+                    intent.current = "preview";
+                    nextCatalogDecision.current = {
+                      choice,
+                      revision: review.value.catalog!.revision,
+                    };
+                  }}
+                  onCancel={invalidate}
+                />
+              )}
+            {appId === "codex" &&
+              review?.value.catalog?.canRestore === true && (
+                <div className="mt-4 space-y-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={submitDisabled}
+                    onClick={() => void previewRestore()}
+                  >
+                    {t("provider.preview.catalog.restore")}
+                  </Button>
+                  <p className="text-caption text-fg-2">
+                    {t("provider.preview.catalog.restoreHint")}
+                  </p>
+                </div>
+              )}
             {review && (
               <p className="mt-3 text-caption text-fg-2">
                 {t("provider.preview.plannedOnly")}

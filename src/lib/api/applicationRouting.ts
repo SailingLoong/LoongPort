@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ProviderCatalogDecision } from "./providers";
 import type { SwitchTierCommandResult } from "./relay";
 import type { TierBoardModelOption, TierBoardTier } from "./autoMode";
 
@@ -57,6 +58,8 @@ export interface ApplicationRouting {
 }
 
 export interface ApplicationRoutingChange {
+  catalogDecision?: ProviderCatalogDecision;
+  catalogPreviewOnly?: boolean;
   order?: { profileName: string; providerIds: string[] };
   selection?: { providerId: string; model?: string };
 }

@@ -2121,6 +2121,47 @@ fn claude_shared_scope_is_explicit_and_cannot_cross_app_or_add_effects() {
 }
 
 #[test]
+fn catalog_restore_receipt_is_explicit_and_accepts_only_its_narrow_target() {
+    let value = json!({"id":"66666666-6666-4666-8666-6666666666c0","scope":"codexCatalogRestore","draftDigest":"a".repeat(64),"revision":"b".repeat(64)});
+    let request: state::SaveRequest = serde_json::from_value(value)
+        .expect("restore uses the original receipt without impersonating a provider save");
+    request.validate().unwrap();
+    let target = PendingTarget {
+        save_request: Some(request),
+        written: Some(state::Written {
+            codex: Some(state::CodexWritten {
+                version: 1,
+                catalog: None,
+                auth: None,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    validate_operation("codex", state::op::CATALOG, &target).unwrap();
+    for (app, op) in [
+        ("claude", state::op::CATALOG),
+        ("codex", state::op::APPLY),
+        ("codex", state::op::SWITCH),
+    ] {
+        assert!(validate_operation(app, op, &target).is_err());
+    }
+    let mut extra = target.clone();
+    extra.pointer = Some("synthetic-provider".into());
+    assert!(validate_operation("codex", state::op::CATALOG, &extra).is_err());
+    let mut extra = target.clone();
+    extra.state = Some(state::ModeState::default());
+    assert!(validate_operation("codex", state::op::CATALOG, &extra).is_err());
+    let mut extra = target.clone();
+    extra.saved_row = bound_editor_target().saved_row;
+    assert!(validate_operation("codex", state::op::CATALOG, &extra).is_err());
+    let mut extra = target;
+    extra.save_request.as_mut().unwrap().provider_id = Some("synthetic-provider".into());
+    assert!(validate_operation("codex", state::op::CATALOG, &extra).is_err());
+}
+
+#[test]
 fn gemini_shared_scope_is_explicit_and_cannot_cross_app_or_add_effects() {
     let base = json!({"id":"66666666-6666-4666-8666-666666666666","draftDigest":"a".repeat(64),"revision":"b".repeat(64)});
     let missing_id = serde_json::from_value::<state::SaveRequest>(base.clone());

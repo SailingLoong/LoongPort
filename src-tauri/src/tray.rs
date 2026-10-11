@@ -738,7 +738,14 @@ fn handle_managed_tier_click(
             user_choice,
         ))?;
         match outcome {
-            crate::commands::SwitchTierCommandResult::ConfirmationRequired { target_name } => {
+            crate::commands::SwitchTierCommandResult::ConfirmationRequired {
+                target_name,
+                catalog,
+                ..
+            } => {
+                if catalog.is_some() {
+                    return Err(AppError::Message("请在应用工作台预览并确认外部模型目录选择 / Review the external model catalog choice in the application workspace".into()));
+                }
                 // 取消 = 干净中止（配置未动，菜单勾选也还停在旧档位上）。
                 if !confirm_quit_chatgpt(app, &target_name) {
                     return Ok(());
@@ -780,7 +787,14 @@ fn handle_tier_model_click(
             user_choice,
         ))?;
         match outcome {
-            crate::commands::SwitchTierCommandResult::ConfirmationRequired { target_name } => {
+            crate::commands::SwitchTierCommandResult::ConfirmationRequired {
+                target_name,
+                catalog,
+                ..
+            } => {
+                if catalog.is_some() {
+                    return Err(AppError::Message("请在应用工作台预览并确认外部模型目录选择 / Review the external model catalog choice in the application workspace".into()));
+                }
                 if !confirm_quit_chatgpt(app, &target_name) {
                     return Ok(());
                 }

@@ -1034,12 +1034,29 @@ export function ApplicationWorkspace({
       <SwitchTierConfirmDialog
         targetName={draft.confirmation?.name ?? model.confirmation}
         onCancel={draft.confirmation ? draft.cancel : model.cancel}
+        catalog={
+          draft.confirmation ? draft.confirmation.catalog : model.catalog
+        }
+        quitRequired={
+          draft.confirmation
+            ? draft.confirmation.quitRequired
+            : model.quitRequired
+        }
+        onPreviewCatalog={(decision) => {
+          if (!writesBlocked)
+            return (
+              draft.confirmation ? draft.previewCatalog : model.previewCatalog
+            )(decision);
+        }}
         disabled={
           writesBlocked || draft.submitting || routing.busy || model.busy
         }
-        onSwitch={(quit) => {
+        onSwitch={(quit, decision) => {
           if (!writesBlocked)
-            (draft.confirmation ? draft.confirm : model.confirm)(quit);
+            return (draft.confirmation ? draft.confirm : model.confirm)(
+              quit,
+              decision,
+            );
         }}
       />
     </div>

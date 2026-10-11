@@ -4,7 +4,9 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
-import { relayApi } from "@/lib/api/relay";
+import { relayApi, type SwitchTierCommandResult } from "@/lib/api/relay";
+import type { ProviderCatalogDecision } from "@/lib/api/providers";
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { vendorApi } from "@/lib/api/vendor";
 import { serviceOnboardingApi } from "@/lib/api/serviceOnboarding";
 import { applicationOverviewApi } from "@/lib/api/applicationOverview";
@@ -15,6 +17,12 @@ import {
   useServiceOnboardingStatus,
   serviceOnboardingKey,
 } from "./useServiceOnboarding";
+
+type ConfirmationAction = {
+  quitChatgpt?: boolean;
+  catalogDecision?: ProviderCatalogDecision;
+  catalogPreviewOnly: boolean;
+};
 
 export interface ConfigurationResult {
   id: string;
@@ -50,10 +58,13 @@ export function useServiceConfiguration(
   >({});
   const [completionError, setCompletionError] = useState<string | null>(null);
   const pending = useRef(false);
-  const [confirmation, setConfirmation] = useState<string | null>(null);
-  const confirmationResolver = useRef<((value: boolean | null) => void) | null>(
-    null,
-  );
+  const [confirmation, setConfirmation] = useState<Extract<
+    SwitchTierCommandResult,
+    { status: "confirmationRequired" }
+  > | null>(null);
+  const confirmationResolver = useRef<
+    ((value: ConfirmationAction | null) => void) | null
+  >(null);
   const mounted = useRef(true);
   const lifecycle = useRef(0);
   useEffect(() => {
@@ -83,8 +94,16 @@ export function useServiceConfiguration(
     (app === sourceAppId
       ? (choices.data?.find((choice) => choice.app === app)?.id ?? "")
       : "");
-  const resolveConfirmation = (value: boolean | null) => {
-    confirmationResolver.current?.(value);
+  const resolveConfirmation = (
+    value: boolean | null | undefined,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly = false,
+  ) => {
+    confirmationResolver.current?.(
+      value === null
+        ? null
+        : { quitChatgpt: value, catalogDecision, catalogPreviewOnly },
+    );
     confirmationResolver.current = null;
     setConfirmation(null);
   };
@@ -177,18 +196,51 @@ export function useServiceConfiguration(
           return;
         }
         if (!isActive()) return;
-        if (result.status === "confirmationRequired") {
-          setConfirmation(result.targetName);
-          const answer = await new Promise<boolean | null>((resolve) => {
-            confirmationResolver.current = resolve;
-          });
+        while (result.status === "confirmationRequired") {
+          if (!isActive()) return;
+          setConfirmation(result);
+          const answer = await new Promise<ConfirmationAction | null>(
+            (resolve) => {
+              confirmationResolver.current = resolve;
+            },
+          );
           if (answer === null) {
             update(app, { id, state: "cancelled" });
             return;
           }
           if (!isActive()) return;
           try {
-            result = await switchConfig(answer);
+            if (
+              result.catalog &&
+              (!answer.catalogDecision ||
+                answer.catalogDecision.revision !== result.catalog.revision ||
+                (!answer.catalogPreviewOnly &&
+                  answer.catalogDecision.choice !== result.catalog.choice))
+            )
+              throw new Error(t("provider.preview.sourceChanged"));
+            if (answer.catalogDecision) {
+              const providerId = choices.data.find(
+                (choice) => choice.app === app && choice.id === id,
+              )?.providerId;
+              if (!providerId)
+                throw new Error(t("loongport.onboarding.cannotVerify"));
+              result = await applicationRoutingApi.apply(
+                app,
+                {
+                  selection: { providerId },
+                  catalogDecision: answer.catalogDecision,
+                  catalogPreviewOnly: answer.catalogPreviewOnly,
+                },
+                answer.quitChatgpt,
+              );
+              if (
+                answer.catalogPreviewOnly &&
+                (result.status !== "confirmationRequired" ||
+                  result.catalog?.choice !== answer.catalogDecision.choice ||
+                  result.catalog?.revision !== answer.catalogDecision.revision)
+              )
+                throw new Error(t("provider.preview.sourceChanged"));
+            } else result = await switchConfig(answer.quitChatgpt);
           } catch (error) {
             update(app, {
               id,
@@ -257,7 +309,9 @@ export function useServiceConfiguration(
           : previous,
       );
     },
-    confirmation,
+    confirmation: confirmation?.targetName ?? null,
+    catalog: confirmation?.catalog,
+    quitRequired: confirmation?.quitRequired,
     selectFor,
     resolveConfirmation,
     finish,

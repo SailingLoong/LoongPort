@@ -5363,6 +5363,975 @@ fn editor_real_four_app_direct_save_and_lost_response_query() {
 
 #[test]
 #[serial_test::serial]
+fn codex_catalog_choice_is_available_before_the_original_editor_apply() {
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut draft = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    draft.settings_config["modelCatalog"] = json!({"models":[{
+        "model":"synthetic-catalog-model","displayName":"Synthetic catalog model",
+        "contextWindow":32768
+    }]});
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"opaque synthetic external catalog").unwrap();
+    let config = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json = \"synthetic-external.json\" # retain\n{config}"),
+    )
+    .unwrap();
+    let files = crate::services::provider::codex_direct::files();
+    let before = files
+        .iter()
+        .map(|file| read_current(&file.path).unwrap())
+        .collect::<Vec<_>>();
+    let store = DeviceStore::for_device();
+    let journal = std::fs::read(store.state_path()).unwrap();
+    let row = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    let preview = crate::services::provider::edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft,
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c1",
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| read_current(&file.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+    assert_eq!(
+        serde_json::to_value(
+            fx.state
+                .db
+                .get_provider_by_id("a", "codex")
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(row).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(&external).unwrap(),
+        b"opaque synthetic external catalog"
+    );
+    assert!(!preview.to_string().contains("synthetic-key"));
+    assert_eq!(
+        preview["status"], "ready",
+        "the external catalog choice belongs before applying this draft"
+    );
+    assert_eq!(preview["catalog"]["ownership"], "unclaimedExternal");
+    assert_eq!(preview["catalog"]["choice"], "keep");
+    assert_eq!(preview["catalog"]["canManage"], true);
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_takeover_requires_the_same_choice_and_preserves_external_bytes() {
+    use crate::services::provider::{codex_direct, edit};
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut draft = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    draft.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"synthetic-catalog-model","contextWindow":32768}]});
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"opaque external source, never imported").unwrap();
+    let config = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json = \"synthetic-external.json\"\n{config}"),
+    )
+    .unwrap();
+    let first = edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c2",
+        false,
+    )
+    .unwrap();
+    assert_eq!(first["status"], "ready");
+    let decision = codex_direct::CatalogDecision {
+        choice: codex_direct::CatalogChoice::Manage,
+        revision: first["catalog"]["revision"].as_str().unwrap().into(),
+    };
+    let files = codex_direct::files();
+    let before = files
+        .iter()
+        .map(|file| read_current(&file.path).unwrap())
+        .collect::<Vec<_>>();
+    let preview = edit::preview_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c2",
+        false,
+        Some(&decision),
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    assert_eq!(preview["catalog"]["choice"], "manage");
+    assert_eq!(
+        preview["catalog"]["beforePointer"],
+        "synthetic-external.json"
+    );
+    assert_eq!(
+        preview["catalog"]["afterPointer"],
+        crate::live::project::codex::CATALOG_FILENAME
+    );
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| read_current(&file.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        edit::confirm(
+            &fx.state,
+            &AppType::Codex,
+            draft.clone(),
+            "a",
+            request.clone(),
+            false
+        )
+        .unwrap()["status"],
+        "conflict"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| read_current(&file.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        edit::confirm_with_catalog(
+            &fx.state,
+            &AppType::Codex,
+            draft.clone(),
+            "a",
+            request.clone(),
+            false,
+            Some(&decision)
+        )
+        .unwrap()["status"],
+        "completed"
+    );
+    for index in [0, 3, 4] {
+        assert_eq!(
+            read_current(&files[index].path).unwrap(),
+            before[index],
+            "catalog choice does not add an authentication change"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&external).unwrap(),
+        b"opaque external source, never imported"
+    );
+    let text = std::fs::read_to_string(&fx.path).unwrap();
+    assert_eq!(
+        text.parse::<toml_edit::DocumentMut>().unwrap()["model_catalog_json"].as_str(),
+        Some(crate::live::project::codex::CATALOG_FILENAME)
+    );
+    let store = DeviceStore::for_device();
+    let written = state::written(
+        &store,
+        &fx.state.db.secret_session().read().unwrap(),
+        "codex",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        written.codex.unwrap().catalog.unwrap().previous_pointer,
+        "synthetic-external.json"
+    );
+    let journal = std::fs::read(store.state_path()).unwrap();
+    assert_eq!(
+        edit::query(&fx.state, &AppType::Codex, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        edit::confirm_with_catalog(
+            &fx.state,
+            &AppType::Codex,
+            draft,
+            "a",
+            request,
+            false,
+            Some(&decision)
+        )
+        .unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(std::fs::read(store.state_path()).unwrap(), journal);
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_choice_rejects_drift_before_preview_and_before_confirmation() {
+    use crate::services::provider::{codex_direct, edit};
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut draft = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    draft.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"synthetic-catalog-model","contextWindow":32768}]});
+    let original = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json = \"synthetic-external.json\"\n{original}"),
+    )
+    .unwrap();
+    let first = edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c3",
+        false,
+    )
+    .unwrap();
+    let mut decision = codex_direct::CatalogDecision {
+        choice: codex_direct::CatalogChoice::Manage,
+        revision: first["catalog"]["revision"].as_str().unwrap().into(),
+    };
+    let text = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("# external change before choosing\n{text}"),
+    )
+    .unwrap();
+    let changed = std::fs::read(&fx.path).unwrap();
+    let stale = edit::preview_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c3",
+        false,
+        Some(&decision),
+    )
+    .unwrap();
+    assert_eq!(stale["status"], "blocked");
+    assert_eq!(stale["code"], "sourceChanged");
+    assert_eq!(std::fs::read(&fx.path).unwrap(), changed);
+    let fresh = edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c4",
+        false,
+    )
+    .unwrap();
+    decision.revision = fresh["catalog"]["revision"].as_str().unwrap().into();
+    let preview = edit::preview_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c4",
+        false,
+        Some(&decision),
+    )
+    .unwrap();
+    let request = serde_json::from_value(preview["request"].clone()).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!(
+            "# external change after preview\n{}",
+            String::from_utf8(changed).unwrap()
+        ),
+    )
+    .unwrap();
+    let files = codex_direct::files();
+    let before = files
+        .iter()
+        .map(|file| read_current(&file.path).unwrap())
+        .collect::<Vec<_>>();
+    let result = edit::confirm_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        draft,
+        "a",
+        request,
+        false,
+        Some(&decision),
+    )
+    .unwrap();
+    assert_eq!(result["status"], "blocked");
+    assert_eq!(result["code"], "sourceChanged");
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| read_current(&file.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_choice_expires_when_the_external_file_changes() {
+    use crate::services::provider::{codex_direct, edit};
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut draft = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    draft.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"synthetic-model","contextWindow":32768}]});
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"external version one").unwrap();
+    let original = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json = \"synthetic-external.json\"\n{original}"),
+    )
+    .unwrap();
+    let preview = edit::preview(
+        &fx.state,
+        &AppType::Codex,
+        draft.clone(),
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c5",
+        false,
+    )
+    .unwrap();
+    assert_eq!(preview["status"], "ready");
+    let decision = codex_direct::CatalogDecision {
+        choice: codex_direct::CatalogChoice::Manage,
+        revision: preview["catalog"]["revision"].as_str().unwrap().into(),
+    };
+    std::fs::write(&external, b"external version two").unwrap();
+    let before = codex_direct::files()
+        .iter()
+        .map(|file| read_current(&file.path).unwrap())
+        .collect::<Vec<_>>();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let stale = edit::preview_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        draft,
+        "a",
+        "d15d3030-1000-4000-8000-0000000000c5",
+        false,
+        Some(&decision),
+    )
+    .unwrap();
+    assert_eq!(
+        stale["status"], "blocked",
+        "R5 choice is bound to the external file version too"
+    );
+    assert_eq!(stale["code"], "sourceChanged");
+    assert_eq!(
+        codex_direct::files()
+            .iter()
+            .map(|file| read_current(&file.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    assert_eq!(std::fs::read(&external).unwrap(), b"external version two");
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_first_application_previews_then_applies_the_same_catalog_choice() {
+    use crate::services::application_selection::{
+        self as selection, ApplicationRoutingChange, SwitchTierCommandResult, TierSelection,
+    };
+    use crate::services::provider::codex_direct;
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"model-b","contextWindow":32768}]});
+    fx.state.db.save_provider("codex", &provider).unwrap();
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"external untouched").unwrap();
+    let text = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json=\"synthetic-external.json\"\n{text}"),
+    )
+    .unwrap();
+    let mut change = ApplicationRoutingChange {
+        order: None,
+        selection: Some(TierSelection {
+            provider_id: "b".into(),
+            model: None,
+        }),
+        catalog_decision: None,
+        catalog_preview_only: false,
+    };
+    let before = codex_direct::files()
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    let db_before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    let first = selection::application_routing_confirmation(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        None,
+        false,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let SwitchTierCommandResult::ConfirmationRequired {
+        catalog: Some(view),
+        quit_required,
+        ..
+    } = first
+    else {
+        panic!("first apply must show the catalog choice")
+    };
+    assert!(!quit_required);
+    assert_eq!(view.choice, codex_direct::CatalogChoice::Keep);
+    change.catalog_decision = Some(codex_direct::CatalogDecision {
+        choice: codex_direct::CatalogChoice::Manage,
+        revision: view.revision,
+    });
+    change.catalog_preview_only = true;
+    let preview = selection::application_routing_confirmation(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        Some(false),
+        true,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let shown = serde_json::to_value(preview).unwrap();
+    assert_eq!(shown["catalog"]["choice"], "manage");
+    assert_eq!(shown["catalog"]["beforePointer"], "synthetic-external.json");
+    assert_eq!(
+        shown["catalog"]["afterPointer"],
+        crate::live::project::codex::CATALOG_FILENAME
+    );
+    assert_eq!(shown["quitRequired"], false);
+    assert!(!shown.to_string().contains("synthetic-key"));
+    assert_eq!(
+        codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db_before
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+    change.catalog_preview_only = false;
+    assert!(selection::application_routing_confirmation(
+        &fx.state,
+        &AppType::Codex,
+        &change,
+        Some(false),
+        true,
+        false
+    )
+    .unwrap()
+    .is_none());
+    selection::select_with_commit_with_catalog(
+        &fx.state,
+        &AppType::Codex,
+        change.selection.as_ref().unwrap(),
+        None,
+        change.catalog_decision.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(
+        fx.state
+            .db
+            .get_current_provider("codex")
+            .unwrap()
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fx.path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap()["model_catalog_json"]
+            .as_str(),
+        Some(crate::live::project::codex::CATALOG_FILENAME)
+    );
+    assert_eq!(std::fs::read(external).unwrap(), b"external untouched");
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_restore_uses_only_the_pointer_and_original_receipt() {
+    use crate::services::provider::codex_direct;
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut provider = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"model-a","contextWindow":32768}]});
+    fx.state.db.save_provider("codex", &provider).unwrap();
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"external unchanged").unwrap();
+    let config = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json=\"synthetic-external.json\"\n{config}"),
+    )
+    .unwrap();
+    let first = {
+        let _lock =
+            futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+        super::controller::preview_catalog_selection(&fx.state.proxy_service, &provider, None)
+            .unwrap()
+            .unwrap()
+    };
+    let decision = codex_direct::CatalogDecision {
+        choice: codex_direct::CatalogChoice::Manage,
+        revision: first.revision,
+    };
+    ProviderService::switch_with_catalog(&fx.state, AppType::Codex, "a", Some(&decision)).unwrap();
+    let files = codex_direct::files();
+    let before = files
+        .iter()
+        .map(|f| read_current(&f.path).unwrap())
+        .collect::<Vec<_>>();
+    let db_before = crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+    let preview =
+        codex_direct::preview_catalog_restore(&fx.state, "d15d3030-1000-4000-8000-0000000000c6")
+            .unwrap();
+    assert_eq!(preview["afterPointer"], "synthetic-external.json");
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>(),
+        before
+    );
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    assert_eq!(
+        codex_direct::confirm_catalog_restore(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    let reopened = ProviderService::edit_settings(&fx.state, AppType::Codex, "a").unwrap();
+    assert_eq!(
+        reopened["originalCatalogRestore"]["request"],
+        serde_json::to_value(&request).unwrap()
+    );
+    assert_eq!(reopened["originalCatalogRestore"]["status"], "completed");
+    for index in [0, 2, 3, 4] {
+        assert_eq!(read_current(&files[index].path).unwrap(), before[index]);
+    }
+    let config = std::fs::read_to_string(&fx.path).unwrap();
+    assert_eq!(
+        config.parse::<toml_edit::DocumentMut>().unwrap()["model_catalog_json"].as_str(),
+        Some("synthetic-external.json")
+    );
+    assert_eq!(
+        crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+        db_before
+    );
+    assert_eq!(std::fs::read(external).unwrap(), b"external unchanged");
+    let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+    assert_eq!(
+        codex_direct::query_catalog_restore(&fx.state, request.clone()).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        codex_direct::confirm_catalog_restore(&fx.state, request).unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+        journal
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_editor_keeps_unclaimed_catalog_when_cli_template_is_not_loaded() {
+    use crate::services::provider::{codex_direct, edit};
+    let fx = Fixture::for_app(AppType::Codex);
+    let mut draft = fx
+        .state
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    draft.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"model-a","contextWindow":32768}]});
+    let external = fx.path.parent().unwrap().join("synthetic-external.json");
+    std::fs::write(&external, b"external preserved without a template").unwrap();
+    let config = std::fs::read_to_string(&fx.path).unwrap();
+    std::fs::write(
+        &fx.path,
+        format!("model_catalog_json=\"synthetic-external.json\"\n{config}"),
+    )
+    .unwrap();
+    crate::codex_config::test_with_unloaded_codex_cli(|| {
+        let preview = edit::preview(
+            &fx.state,
+            &AppType::Codex,
+            draft.clone(),
+            "a",
+            "d15d3030-1000-4000-8000-0000000000c9",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            preview["status"], "ready",
+            "Keep does not consume a generated catalog template"
+        );
+        assert_eq!(preview["catalog"]["canManage"], false);
+        let manage = codex_direct::CatalogDecision {
+            choice: codex_direct::CatalogChoice::Manage,
+            revision: preview["catalog"]["revision"].as_str().unwrap().into(),
+        };
+        let before = codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        assert_eq!(
+            edit::preview_with_catalog(
+                &fx.state,
+                &AppType::Codex,
+                draft.clone(),
+                "a",
+                "d15d3030-1000-4000-8000-0000000000ca",
+                false,
+                Some(&manage)
+            )
+            .unwrap()["status"],
+            "blocked"
+        );
+        assert_eq!(
+            codex_direct::files()
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+        let request = serde_json::from_value(preview["request"].clone()).unwrap();
+        assert_eq!(
+            edit::confirm(
+                &fx.state,
+                &AppType::Codex,
+                draft.clone(),
+                "a",
+                request,
+                false
+            )
+            .unwrap()["status"],
+            "completed"
+        );
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"external preserved without a template"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fx.path)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap()["model_catalog_json"]
+                .as_str(),
+            Some("synthetic-external.json")
+        );
+        std::fs::write(
+            fx.path.parent().unwrap().join("models_cache.json"),
+            b"malformed known source",
+        )
+        .unwrap();
+        let before = codex_direct::files()
+            .iter()
+            .map(|f| read_current(&f.path).unwrap())
+            .collect::<Vec<_>>();
+        let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+        assert_eq!(
+            edit::preview(
+                &fx.state,
+                &AppType::Codex,
+                draft,
+                "a",
+                "d15d3030-1000-4000-8000-0000000000cb",
+                false
+            )
+            .unwrap()["status"],
+            "blocked",
+            "unknown CLI fallback must not swallow a malformed known source"
+        );
+        assert_eq!(
+            codex_direct::files()
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(
+            std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+            journal
+        );
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_proxy_and_restore_faults_keep_original_recovery_and_query() {
+    use crate::services::{application_selection as selection, provider::codex_direct};
+    for action in ["manage", "restore-pending", "restore-published"] {
+        let mut fx = Fixture::for_app(AppType::Codex);
+        let mut provider = fx
+            .state
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        provider.settings_config["modelCatalog"] =
+            json!({"models":[{"model":"model-b","contextWindow":32768}]});
+        fx.state.db.save_provider("codex", &provider).unwrap();
+        fx.runtime
+            .block_on(fx.state.proxy_service.set_takeover_for_app("codex", true))
+            .unwrap();
+        let external = fx.path.parent().unwrap().join("synthetic-external.json");
+        std::fs::write(&external, b"external never rewritten").unwrap();
+        let config = std::fs::read_to_string(&fx.path).unwrap();
+        std::fs::write(
+            &fx.path,
+            format!("model_catalog_json=\"synthetic-external.json\"\n{config}"),
+        )
+        .unwrap();
+        let mut change: selection::ApplicationRoutingChange =
+            serde_json::from_value(json!({"selection":{"providerId":"b"}})).unwrap();
+        let preview = serde_json::to_value(
+            selection::application_routing_confirmation(
+                &fx.state,
+                &AppType::Codex,
+                &change,
+                Some(false),
+                true,
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        change.catalog_decision = Some(codex_direct::CatalogDecision {
+            choice: codex_direct::CatalogChoice::Manage,
+            revision: preview["catalog"]["revision"].as_str().unwrap().into(),
+        });
+        let apply = |fx: &Fixture| {
+            selection::select_with_commit_with_catalog(
+                &fx.state,
+                &AppType::Codex,
+                change.selection.as_ref().unwrap(),
+                None,
+                change.catalog_decision.as_ref(),
+            )
+        };
+        if action == "manage" {
+            let _fault = Fault::at("published:1");
+            assert!(apply(&fx).is_err());
+        } else {
+            apply(&fx).unwrap();
+        }
+        let mut restore_request = None;
+        if action != "manage" {
+            let preview = codex_direct::preview_catalog_restore(
+                &fx.state,
+                "d15d3030-1000-4000-8000-0000000000c7",
+            )
+            .unwrap();
+            let request: state::SaveRequest =
+                serde_json::from_value(preview["request"].clone()).unwrap();
+            let mut invalid = request.clone();
+            invalid.scope = state::SaveScope::Provider;
+            assert!(codex_direct::query_catalog_restore(&fx.state, invalid).is_err());
+            let mut invalid = request.clone();
+            invalid.id = "invalid-request".into();
+            assert!(codex_direct::query_catalog_restore(&fx.state, invalid).is_err());
+            // A preview of a different file version never authorizes the write.
+            let config = std::fs::read_to_string(&fx.path).unwrap();
+            std::fs::write(&fx.path, format!("{config}\n# external user edit\n")).unwrap();
+            let files = codex_direct::files();
+            let before = files
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>();
+            let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+            let stale = codex_direct::confirm_catalog_restore(&fx.state, request).unwrap();
+            assert_eq!(stale["status"], "blocked");
+            assert_eq!(stale["code"], "sourceChanged");
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|f| read_current(&f.path).unwrap())
+                    .collect::<Vec<_>>(),
+                before
+            );
+            assert_eq!(
+                std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+                journal
+            );
+            let preview = codex_direct::preview_catalog_restore(
+                &fx.state,
+                "d15d3030-1000-4000-8000-0000000000c8",
+            )
+            .unwrap();
+            let request: state::SaveRequest =
+                serde_json::from_value(preview["request"].clone()).unwrap();
+            let expected = if action == "restore-pending" {
+                "pending"
+            } else {
+                "verificationRequired"
+            };
+            {
+                let _fault = Fault::at(if action == "restore-pending" {
+                    "pending"
+                } else {
+                    "published:1"
+                });
+                assert_eq!(
+                    codex_direct::confirm_catalog_restore(&fx.state, request.clone()).unwrap()
+                        ["status"],
+                    expected
+                );
+            }
+            let pending_files = files
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>();
+            let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+            assert_eq!(
+                codex_direct::query_catalog_restore(&fx.state, request.clone()).unwrap()["status"],
+                expected
+            );
+            assert_eq!(
+                codex_direct::confirm_catalog_restore(&fx.state, request.clone()).unwrap()
+                    ["status"],
+                expected
+            );
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|f| read_current(&f.path).unwrap())
+                    .collect::<Vec<_>>(),
+                pending_files
+            );
+            assert_eq!(
+                std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+                journal
+            );
+            let reopened = ProviderService::edit_settings(&fx.state, AppType::Codex, "b").unwrap();
+            assert_eq!(
+                reopened["originalCatalogRestore"]["request"],
+                serde_json::to_value(&request).unwrap()
+            );
+            assert_eq!(reopened["originalCatalogRestore"]["status"], expected);
+            assert!(!reopened["originalCatalogRestore"]
+                .to_string()
+                .contains("synthetic-key"));
+            restore_request = Some(request);
+        }
+        fx.runtime.block_on(fx.state.proxy_service.stop()).unwrap();
+        fx.state = AppState::new(fx.state.db.clone()).unwrap();
+        let _lock =
+            futures::executor::block_on(fx.state.proxy_service.lock_switch_for_app("codex"));
+        assert_eq!(
+            super::controller::recover_locked(&fx.state.proxy_service, &AppType::Codex).unwrap(),
+            Some(if action == "restore-pending" {
+                super::operation::RecoveryOutcome::Discarded
+            } else {
+                super::operation::RecoveryOutcome::RolledForward
+            })
+        );
+        drop(_lock);
+        if let Some(request) = restore_request {
+            assert_eq!(
+                codex_direct::query_catalog_restore(&fx.state, request).unwrap()["status"],
+                if action == "restore-pending" {
+                    "discarded"
+                } else {
+                    "completed"
+                }
+            );
+        }
+        let state = state::load_app(
+            &DeviceStore::for_device(),
+            &fx.state.db.secret_session().read().unwrap(),
+            "codex",
+        )
+        .unwrap();
+        assert!(state.apps["codex"].pending.is_none());
+        assert_eq!(state.apps["codex"].proxy_route.as_deref(), Some("b"));
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"external never rewritten"
+        );
+        let config = std::fs::read_to_string(&fx.path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            config["model_catalog_json"].as_str(),
+            Some(if action == "restore-published" {
+                "synthetic-external.json"
+            } else {
+                crate::live::project::codex::CATALOG_FILENAME
+            })
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn editor_real_blank_preserves_and_explicit_delete_keeps_original_auth_boundary() {
     for active in [false, true] {
         let fx = Fixture::claude();

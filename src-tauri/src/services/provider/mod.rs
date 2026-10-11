@@ -6283,6 +6283,20 @@ impl ProviderService {
     ///    d. Write target provider config to live files
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
+        Self::switch_with_catalog(state, app_type, id, None)
+    }
+
+    pub(crate) fn switch_with_catalog(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+        catalog: Option<&codex_direct::CatalogDecision>,
+    ) -> Result<SwitchResult, AppError> {
+        if catalog.is_some() && app_type != AppType::Codex {
+            return Err(AppError::Config(
+                "codex.catalog_takeover_unavailable".into(),
+            ));
+        }
         // Provider switches and takeover toggles both mutate live config and the
         // restore backup. Serialize them per app, then decide from the locked
         // current state so a just-started takeover cannot be overwritten by a
@@ -6317,11 +6331,11 @@ impl ProviderService {
                 )?
             };
             if mode.is_proxy() {
-                crate::rt::block_on(
-                    state
-                        .proxy_service
-                        .hot_switch_provider_inner(app_type.as_str(), id),
-                )
+                crate::rt::block_on(state.proxy_service.hot_switch_provider_inner_with_catalog(
+                    app_type.as_str(),
+                    id,
+                    catalog.cloned(),
+                ))
                 .map_err(AppError::Message)?;
                 return Ok(SwitchResult::default());
             }
@@ -6334,7 +6348,16 @@ impl ProviderService {
             let mut result = SwitchResult::default();
             match app_type {
                 AppType::Codex => {
-                    if codex_direct::switch_to(state, previous.as_ref(), &provider)? {
+                    let preserved = match catalog {
+                        Some(catalog) => codex_direct::switch_to_with_catalog(
+                            state,
+                            previous.as_ref(),
+                            &provider,
+                            Some(catalog),
+                        )?,
+                        None => codex_direct::switch_to(state, previous.as_ref(), &provider)?,
+                    };
+                    if preserved {
                         result
                             .warnings
                             .push(codex_direct::CATALOG_PRESERVED_WARNING.into());
@@ -6355,6 +6378,11 @@ impl ProviderService {
             return Ok(result);
         }
 
+        if catalog.is_some() {
+            return Err(AppError::Config(
+                "codex.catalog_takeover_unavailable".into(),
+            ));
+        }
         if app_type.supports_local_proxy() {
             let provider = state
                 .db
@@ -7642,7 +7670,7 @@ impl ProviderService {
         });
         let modern = app_type.supports_local_proxy()
             && crate::mode::operation::uses_upstream4_schema(&state.db)?;
-        let (original, pending) = if modern {
+        let (original, catalog_restore, pending) = if modern {
             let vault = state.db.secret_session().read()?;
             let live = crate::mode::state::load_app(
                 &crate::live::engine::DeviceStore::for_device(),
@@ -7650,8 +7678,16 @@ impl ProviderService {
                 app_type.as_str(),
             )?;
             let entry = live.apps.get(app_type.as_str());
+            let pending_restore = entry
+                .and_then(|entry| entry.pending.as_ref())
+                .and_then(|pending| pending.target.save_request.as_ref())
+                .is_some_and(|request| {
+                    request.scope == crate::mode::state::SaveScope::CodexCatalogRestore
+                });
+            let has_pending = entry.is_some_and(|entry| entry.pending.is_some());
             (
                 entry
+                    .filter(|_| !pending_restore)
                     .map(|entry| {
                         crate::mode::operation::original_save_view(
                             app_type.as_str(),
@@ -7661,10 +7697,22 @@ impl ProviderService {
                     })
                     .transpose()?
                     .flatten(),
-                entry.is_some_and(|entry| entry.pending.is_some()),
+                entry
+                    .filter(|_| app_type == AppType::Codex && (!has_pending || pending_restore))
+                    .map(|entry| {
+                        crate::mode::operation::saved_request_view(
+                            app_type.as_str(),
+                            entry,
+                            crate::mode::state::SaveScope::CodexCatalogRestore,
+                            None,
+                        )
+                    })
+                    .transpose()?
+                    .flatten(),
+                has_pending,
             )
         } else {
-            (None, false)
+            (None, None, false)
         };
         // A partial native image is not a new edit seed. The original request
         // stays queryable before any write/checkpoint admission is attempted.
@@ -7688,10 +7736,16 @@ impl ProviderService {
                 "app": app_type.as_str(), "request": view.request, "status": view.status,
             })
         });
+        let catalog_restore = catalog_restore.map(|view| {
+            serde_json::json!({
+                "app": app_type.as_str(), "request": view.request, "status": view.status,
+            })
+        });
         Ok(serde_json::json!({
             "settingsConfig": settings,
             "modeState": crate::mode::current::read_view(&state.proxy_service, &app_type),
             "originalSave": original,
+            "originalCatalogRestore": catalog_restore,
         }))
     }
 

@@ -34,6 +34,8 @@ export function ServiceConfiguration({
     completionError,
     reapply,
     confirmation,
+    catalog,
+    quitRequired,
     selectFor,
     resolveConfirmation,
     finish,
@@ -199,6 +201,11 @@ export function ServiceConfiguration({
       </div>
       <SwitchTierConfirmDialog
         targetName={confirmation}
+        catalog={catalog}
+        quitRequired={quitRequired}
+        onPreviewCatalog={(decision) =>
+          resolveConfirmation(undefined, decision, true)
+        }
         onCancel={() => resolveConfirmation(null)}
         onSwitch={resolveConfirmation}
       />
