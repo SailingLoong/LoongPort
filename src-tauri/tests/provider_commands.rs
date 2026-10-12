@@ -11,8 +11,9 @@ use cc_switch_lib::{
 mod support;
 use std::collections::HashMap;
 use support::{
-    create_test_state, create_test_state_with_config, enable_codex_official_auth_preservation,
-    ensure_test_home, reset_test_fs, test_mutex,
+    create_direct_test_state, create_direct_test_state_with_config, create_source17_test_state,
+    create_source17_test_state_with_config, create_test_state, create_test_state_with_config,
+    enable_codex_official_auth_preservation, ensure_test_home, reset_test_fs, test_mutex,
 };
 
 fn settings_path(home: &Path) -> PathBuf {
@@ -46,7 +47,7 @@ fn grokbuild_import_and_switch_write_live_config() {
     let imported_config = grokbuild_config("Imported", "https://old.example/v1", "old-key");
     std::fs::write(&live_path, &imported_config).expect("seed Grok Build config");
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state(AppType::GrokBuild).expect("create test state");
     import_default_config_test_hook(&state, AppType::GrokBuild)
         .expect("import Grok Build default provider");
 
@@ -394,7 +395,7 @@ command = "say"
         },
     );
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state = create_source17_test_state_with_config(&config).expect("create test state");
 
     switch_provider_test_hook(&app_state, AppType::Codex, "new-provider")
         .expect("switch provider should succeed");
@@ -549,7 +550,7 @@ fn switch_provider_updates_claude_live_and_state() {
         );
     }
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state = create_source17_test_state_with_config(&config).expect("create test state");
 
     switch_provider_test_hook(&app_state, AppType::Claude, "new-provider")
         .expect("switch provider should succeed");
@@ -648,7 +649,8 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
         );
     }
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state =
+        create_direct_test_state_with_config(&config, AppType::Codex).expect("create test state");
 
     let err = switch_provider_test_hook(&app_state, AppType::Codex, "invalid")
         .expect_err("switching should fail when auth missing");
@@ -770,7 +772,7 @@ fn current_provider_editor_preserves_stored_mapping_when_live_omits_it() {
     let _guard = test_mutex().lock().unwrap();
     reset_test_fs();
     ensure_test_home();
-    let state = create_test_state().unwrap();
+    let state = create_source17_test_state().unwrap();
     let catalog = json!({"models": [{"model": "custom-model", "contextWindow": 123456}]});
     let provider = Provider::with_id(
         "mapping-test".into(),

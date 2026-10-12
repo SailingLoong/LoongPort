@@ -8,8 +8,9 @@ use cc_switch_lib::{
 #[path = "support.rs"]
 mod support;
 use support::{
-    create_test_state, create_test_state_with_config, enable_codex_official_auth_preservation,
-    ensure_test_home, reset_test_fs, test_mutex,
+    create_direct_test_state_with_config, create_source17_test_state,
+    create_source17_test_state_with_config, create_test_state, create_test_state_with_config,
+    enable_codex_official_auth_preservation, ensure_test_home, reset_test_fs, test_mutex,
 };
 
 fn sanitize_provider_name(name: &str) -> String {
@@ -50,7 +51,7 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
         );
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -175,7 +176,7 @@ command = "say"
         },
     );
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "new-provider")
         .expect("switch provider should succeed");
@@ -305,7 +306,7 @@ requires_openai_auth = true
         );
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "new-provider")
         .expect("switch provider should succeed");
@@ -442,7 +443,7 @@ requires_openai_auth = true
         );
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "bridge-provider")
         .expect("switch to bridge provider should succeed");
@@ -600,7 +601,7 @@ wire_api = "responses"
             .insert("deepseek-provider".to_string(), deepseek_provider);
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
     proxy_config.listen_port = 0;
@@ -783,7 +784,8 @@ requires_openai_auth = true
         );
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_direct_test_state_with_config(&initial_config, AppType::Codex)
+        .expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "third-party")
         .expect("switch to third-party provider should succeed");
@@ -860,7 +862,8 @@ requires_openai_auth = true
             .insert("codex-official".to_string(), official_provider);
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_direct_test_state_with_config(&initial_config, AppType::Codex)
+        .expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official provider should succeed without API key");
@@ -950,7 +953,7 @@ requires_openai_auth = true
             .insert("official-provider".to_string(), official_provider);
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "official-provider")
         .expect("switch to official provider should succeed");
@@ -1017,7 +1020,8 @@ fn provider_service_reswitch_current_official_keeps_live_auth() {
             .insert("official-provider".to_string(), official_provider);
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_direct_test_state_with_config(&initial_config, AppType::Codex)
+        .expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "official-provider")
         .expect("re-switch to current official provider should succeed");
@@ -1118,7 +1122,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         },
     );
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official provider");
@@ -1217,7 +1221,8 @@ fn reapply_codex_official_live_projects_mcp_despite_broken_claude_json() {
         },
     );
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_direct_test_state_with_config(&initial_config, AppType::Codex)
+        .expect("create test state");
 
     // 先切换建立"当前=官方"的前置状态，再破坏 claude 文件，
     // 让损坏只作用于被测的 reapply 路径。
@@ -1310,7 +1315,7 @@ fn switch_codex_projects_mcp_despite_broken_claude_json() {
         },
     );
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
 
     // 坏 JSON 能通过 should_sync_claude_mcp 门控（文件存在即过），
     // 但 read_mcp_servers_map 解析必然报错；codex-only 服务器也会
@@ -1462,7 +1467,7 @@ fn provider_service_switch_codex_official_accounts_write_auth_json() {
             .insert("official-b".to_string(), official_b);
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "official-b")
         .expect("switch to official account B should write auth.json");
@@ -1573,7 +1578,7 @@ requires_openai_auth = true
         );
     }
 
-    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let state = create_source17_test_state_with_config(&initial_config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Codex, "provider-b")
         .expect("switch to provider b should succeed");
@@ -1650,7 +1655,7 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
             .insert("current-provider".to_string(), provider);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -1793,7 +1798,7 @@ wire_api = "responses"
             .insert("new-provider".to_string(), new_provider);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     futures::executor::block_on(
         state.db.save_live_backup(
             "codex",
@@ -1873,7 +1878,7 @@ fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_source17_test_state().expect("create test state");
     state
         .db
         .set_config_snippet_cleared(AppType::Claude.as_str(), true)
@@ -1974,7 +1979,8 @@ fn switch_packycode_gemini_updates_security_selected_type() {
         );
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state =
+        create_direct_test_state_with_config(&config, AppType::Gemini).expect("create test state");
 
     ProviderService::switch(&state, AppType::Gemini, "packy-gemini")
         .expect("switching to PackyCode Gemini should succeed");
@@ -2025,7 +2031,8 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
         manager.providers.insert("packy-meta".to_string(), provider);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state =
+        create_direct_test_state_with_config(&config, AppType::Gemini).expect("create test state");
 
     ProviderService::switch(&state, AppType::Gemini, "packy-meta")
         .expect("switching to partner meta provider should succeed");
@@ -2077,7 +2084,8 @@ fn switch_google_official_gemini_preserves_env_vars() {
             .insert("google-official".to_string(), provider);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state =
+        create_direct_test_state_with_config(&config, AppType::Gemini).expect("create test state");
 
     ProviderService::switch(&state, AppType::Gemini, "google-official")
         .expect("switching to Google official Gemini should succeed");
@@ -2164,7 +2172,7 @@ fn provider_service_switch_claude_updates_live_and_state() {
         );
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
 
     ProviderService::switch(&state, AppType::Claude, "new-provider")
         .expect("switch provider should succeed");
@@ -2258,7 +2266,7 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
         manager.providers.insert("b".to_string(), provider_b);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -2380,7 +2388,7 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
         manager.providers.insert("b".to_string(), provider_b);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     // 片段里仍残留 enableAllProjectMcpServers（上次共享的）
     state
         .db
@@ -2493,7 +2501,7 @@ command = "ghost-cmd"
         manager.providers.insert("b".to_string(), provider_b);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -2643,7 +2651,7 @@ wire_api = "responses"
         }
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -2728,7 +2736,7 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
         );
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet(
@@ -2808,7 +2816,7 @@ fn switch_claude_respects_explicitly_cleared_common_config() {
         manager.providers.insert("b".to_string(), provider_b);
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state = create_source17_test_state_with_config(&config).expect("create test state");
     state
         .db
         .set_config_snippet_cleared(AppType::Claude.as_str(), true)
@@ -2871,7 +2879,8 @@ fn provider_service_switch_codex_missing_auth_returns_error() {
         );
     }
 
-    let state = create_test_state_with_config(&config).expect("create test state");
+    let state =
+        create_direct_test_state_with_config(&config, AppType::Codex).expect("create test state");
 
     let err = ProviderService::switch(&state, AppType::Codex, "invalid")
         .expect_err("switching should fail without auth");
@@ -2930,7 +2939,8 @@ fn provider_service_delete_codex_removes_provider_and_files() {
     std::fs::write(&auth_path, "{}").expect("seed auth file");
     std::fs::write(&cfg_path, "base_url = \"https://example\"").expect("seed config file");
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state =
+        create_direct_test_state_with_config(&config, AppType::Codex).expect("create test state");
 
     ProviderService::delete(&app_state, AppType::Codex, "to-delete")
         .expect("delete provider should succeed");
@@ -2991,7 +3001,8 @@ fn provider_service_delete_claude_removes_provider_files() {
     std::fs::write(&by_name, "{}").expect("seed settings by name");
     std::fs::write(&by_id, "{}").expect("seed settings by id");
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state =
+        create_direct_test_state_with_config(&config, AppType::Claude).expect("create test state");
 
     ProviderService::delete(&app_state, AppType::Claude, "delete").expect("delete claude provider");
 
@@ -3032,7 +3043,8 @@ fn provider_service_delete_current_provider_returns_error() {
         );
     }
 
-    let app_state = create_test_state_with_config(&config).expect("create test state");
+    let app_state =
+        create_direct_test_state_with_config(&config, AppType::Claude).expect("create test state");
 
     let err = ProviderService::delete(&app_state, AppType::Claude, "keep")
         .expect_err("deleting current provider should fail");
@@ -3077,7 +3089,7 @@ fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_ba
     )
     .expect("write taken over live");
 
-    let state = create_test_state().expect("create test state");
+    let state = create_source17_test_state().expect("create test state");
 
     // 模拟历史异常：接管态 Live 已被导入成 current provider（SSOT 被污染）
     let provider = Provider::with_id(

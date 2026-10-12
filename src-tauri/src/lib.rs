@@ -27,6 +27,9 @@ mod gemini_mcp;
 mod grok_config;
 pub mod hermes_config;
 mod init_status;
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub mod integration_test_support;
 #[cfg(feature = "gui")]
 mod lightweight;
 #[cfg(all(target_os = "linux", feature = "gui"))]

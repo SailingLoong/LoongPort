@@ -13,7 +13,10 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
+use support::{
+    create_direct_test_state_for_apps, create_test_state, ensure_test_home, reset_test_fs,
+    test_mutex,
+};
 
 fn claude_provider(id: &str, token: &str) -> Provider {
     Provider::with_id(
@@ -104,7 +107,13 @@ fn profile_snapshot_apply_roundtrip_restores_configuration() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     // ---- 种子数据：2 个 Claude 供应商（p1 为当前）+ 2 个 MCP + 1 个 Skill + 2 个 Prompt ----
     state
@@ -284,7 +293,13 @@ fn shared_profile_sides_are_isolated_and_mergeable() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     // 种子：Claude 侧有当前供应商 + 启用的 MCP
     state
@@ -398,7 +413,13 @@ fn profile_apply_reports_dangling_references_and_continues() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     state
         .db
@@ -493,7 +514,13 @@ fn switching_profile_autosaves_previous_profile_state() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     // ---- 种子：Claude 侧两套供应商 / MCP / Prompt ----
     state
@@ -649,7 +676,13 @@ fn profile_switch_auto_disables_takeover_before_apply() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     // 使用临时端口，避免测试机器端口冲突
     futures::executor::block_on(async {
@@ -755,7 +788,13 @@ fn claude_desktop_profile_scope_is_independent() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state_for_apps(&[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ])
+    .expect("create test state");
 
     state
         .db

@@ -20,7 +20,7 @@ impl Database {
     pub(crate) fn apply_upstream4_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
         Self::apply_schema_migrations_to(conn, super::UPSTREAM4_SCHEMA_VERSION)
     }
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub(crate) fn apply_upgrade_source_migrations_on_conn(
         conn: &Connection,
     ) -> Result<(), AppError> {
