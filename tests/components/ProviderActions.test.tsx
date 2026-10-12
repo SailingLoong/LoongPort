@@ -141,4 +141,28 @@ describe("ProviderActions Pi provider switching", () => {
       screen.queryByRole("button", { name: "failover.addQueue" }),
     ).not.toBeInTheDocument();
   });
+  it("locks configuration mutations while leaving diagnostics available", () => {
+    render(
+      <ProviderActions
+        appId="claude"
+        isCurrent={false}
+        canEdit
+        canDelete
+        mutationsDisabled
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onConfigureUsage={vi.fn()}
+        onTest={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "common.edit" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "common.delete" }),
+    ).toBeDisabled();
+    expect(screen.getByTitle("provider.duplicate")).toBeDisabled();
+    expect(screen.getByTitle("provider.configureUsage")).toBeDisabled();
+    expect(screen.getByTitle("检测连通")).toBeEnabled();
+  });
 });

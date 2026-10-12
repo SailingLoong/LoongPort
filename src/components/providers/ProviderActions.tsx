@@ -33,6 +33,7 @@ interface OpenClawDefaultModelOption {
 }
 
 interface ProviderActionsProps {
+  mutationsDisabled?: boolean;
   appId?: AppId;
   isCurrent: boolean;
   isInConfig?: boolean;
@@ -77,6 +78,7 @@ interface MainButtonState {
 }
 
 export function ProviderActions({
+  mutationsDisabled = false,
   appId,
   isCurrent,
   isInConfig = false,
@@ -121,6 +123,7 @@ export function ProviderActions({
   const piStateChangeHint = t("pi.current.stateUnavailableHint");
 
   const handleMainButtonClick = () => {
+    if (mutationsDisabled) return;
     if (isOmo) {
       if (isCurrent) {
         onDisableOmo?.();
@@ -313,6 +316,7 @@ export function ProviderActions({
                     size="sm"
                     variant="default"
                     className={defaultButtonClassName}
+                    disabled={mutationsDisabled}
                   >
                     <Zap className="h-4 w-4" />
                     {inactiveLabel}
@@ -331,7 +335,10 @@ export function ProviderActions({
                   {defaultModelOptions.map((model) => (
                     <DropdownMenuItem
                       key={model.id}
-                      onSelect={() => onSetAsDefault(model.id)}
+                      disabled={mutationsDisabled}
+                      onSelect={() => {
+                        if (!mutationsDisabled) onSetAsDefault(model.id);
+                      }}
                       className="flex min-w-0 flex-col items-start gap-0.5"
                     >
                       <span className="max-w-72 truncate">
@@ -354,11 +361,11 @@ export function ProviderActions({
               size="sm"
               variant={isDefaultModel ? "secondary" : "default"}
               onClick={
-                isDefaultModel
+                isDefaultModel || mutationsDisabled
                   ? undefined
                   : () => onSetAsDefault(defaultModelOptions[0]?.id)
               }
-              disabled={isDefaultModel}
+              disabled={isDefaultModel || mutationsDisabled}
               className={defaultButtonClassName}
             >
               <Zap className="h-4 w-4" />
@@ -392,7 +399,7 @@ export function ProviderActions({
             size="sm"
             variant={buttonState.variant}
             onClick={handleMainButtonClick}
-            disabled={buttonState.disabled}
+            disabled={buttonState.disabled || mutationsDisabled}
             className={cn("w-[4.5rem] px-2.5", buttonState.className)}
           >
             {buttonState.icon}
@@ -405,8 +412,8 @@ export function ProviderActions({
           <Button
             size="icon"
             variant="ghost"
-            onClick={canEdit ? onEdit : undefined}
-            disabled={!canEdit}
+            onClick={canEdit && !mutationsDisabled ? onEdit : undefined}
+            disabled={!canEdit || mutationsDisabled}
             aria-label={t("common.edit")}
             title={canEdit ? t("common.edit") : readOnlyHint}
             className={cn(
@@ -421,7 +428,8 @@ export function ProviderActions({
             <Button
               size="icon"
               variant="ghost"
-              onClick={onDuplicate}
+              onClick={mutationsDisabled ? undefined : onDuplicate}
+              disabled={mutationsDisabled}
               title={t("provider.duplicate")}
               className={iconButtonClass}
             >
@@ -450,7 +458,10 @@ export function ProviderActions({
           <Button
             size="icon"
             variant="ghost"
-            onClick={onConfigureUsage || undefined}
+            onClick={
+              mutationsDisabled ? undefined : onConfigureUsage || undefined
+            }
+            disabled={mutationsDisabled}
             title={t("provider.configureUsage")}
             className={cn(
               iconButtonClass,
@@ -479,8 +490,8 @@ export function ProviderActions({
           <Button
             size="icon"
             variant="ghost"
-            onClick={deleteEnabled ? onDelete : undefined}
-            disabled={!deleteEnabled}
+            onClick={deleteEnabled && !mutationsDisabled ? onDelete : undefined}
+            disabled={!deleteEnabled || mutationsDisabled}
             aria-label={t("common.delete")}
             title={deleteHint}
             className={cn(

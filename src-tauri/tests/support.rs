@@ -47,7 +47,10 @@ impl KeyStore for TestKeyStore {
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join(format!("cc-switch-test-home-{}", std::process::id()));
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("resolve physical test temporary directory")
+            .join(format!("cc-switch-test-home-{}", std::process::id()));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -167,4 +170,61 @@ pub fn create_test_state_with_config(
     let db = Arc::new(Database::init_with_secrets(test_secret_session())?);
     db.migrate_from_json(config)?;
     Ok(AppState::new(db).unwrap())
+}
+
+#[allow(dead_code)]
+pub fn create_direct_test_state(
+    app: cc_switch_lib::AppType,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    ensure_test_settings();
+    Ok(cc_switch_lib::integration_test_support::direct_state(
+        test_secret_session(),
+        None,
+        &[app],
+    )?)
+}
+
+#[allow(dead_code)]
+pub fn create_direct_test_state_with_config(
+    config: &MultiAppConfig,
+    app: cc_switch_lib::AppType,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    ensure_test_settings();
+    Ok(cc_switch_lib::integration_test_support::direct_state(
+        test_secret_session(),
+        Some(config),
+        &[app],
+    )?)
+}
+
+#[allow(dead_code)]
+pub fn create_direct_test_state_for_apps(
+    apps: &[cc_switch_lib::AppType],
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    ensure_test_settings();
+    Ok(cc_switch_lib::integration_test_support::direct_state(
+        test_secret_session(),
+        None,
+        apps,
+    )?)
+}
+
+#[allow(dead_code)]
+pub fn create_source17_test_state() -> Result<AppState, Box<dyn std::error::Error>> {
+    ensure_test_settings();
+    Ok(cc_switch_lib::integration_test_support::source17_state(
+        test_secret_session(),
+        None,
+    )?)
+}
+
+#[allow(dead_code)]
+pub fn create_source17_test_state_with_config(
+    config: &MultiAppConfig,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    ensure_test_settings();
+    Ok(cc_switch_lib::integration_test_support::source17_state(
+        test_secret_session(),
+        Some(config),
+    )?)
 }

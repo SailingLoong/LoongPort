@@ -300,80 +300,10 @@ fn update_provider_internal(
     state: &AppState,
     app_type: AppType,
     original_id: Option<&str>,
-    mut provider: Provider,
+    provider: Provider,
 ) -> Result<bool, AppError> {
-    // ## 托管档位**可以**改内容，但**不许改 id**
-    //
-    // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
-    // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
-    // 改成了「已存在的档位只换 sk、保住用户的编辑」（`crate::relay::provider_config::patch_api_key`），
-    // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
-    //
-    // 中转站区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
-    // 那页支持全部字段，我们不重做）。用户点它之前会先看到一道警告：保存后这个档位
-    // 归他自己维护，出问题用「恢复默认配置」退回来。
-    //
-    // ## 但**不许凭空造出一个托管 id**
-    //
-    // id 是托管判据本身（`crate::relay::managed::provider_id_for` 生成的前缀），所以：
-    //
-    // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
-    //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
-    // - 普通 → 托管 id：**伪装成托管项** —— 它会出现在中转站区里，
-    //   而「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
-    //
-    // ⚠️ **判据不能是「id 变了没有」** —— review 抓出那样有个绕过口子：
-    // `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
-    // 自己当原 id（`services/provider/mod.rs:2608`），于是「不是改名」成立、
-    // 守卫不介入，而 `save_provider` 是 **upsert** ⇒ 一条自选的 `loongport-*`
-    // 记录被凭空写进库里。
-    //
-    // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
-    // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
-    // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
-    let existing_managed = if crate::relay::is_managed(&provider.id) {
-        match state
-            .db
-            .get_provider_by_id(&provider.id, app_type.as_str())?
-        {
-            Some(existing) => Some(existing),
-            None => {
-                return Err(AppError::Message(
-                    "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成"
-                        .to_string(),
-                ));
-            }
-        }
-    } else {
-        None
-    };
-    // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
-    if let Some(old) = original_id.filter(|old| *old != provider.id) {
-        crate::relay::reject_if_managed(old)?;
-    }
-
-    // 托管档位的站点归属与 sk 由 LoongPort 管，不属于用户可编辑配置。
-    //
-    // 倍率查询会从 `website_url` 定位 `/v1/sub2api/billing`，再从
-    // `settings_config` 提取 sk。若直接保存编辑器提交的整份 Provider，用户只改模型
-    // 也可能因表单 round-trip 丢掉认证 section，结果是倍率/连通检测一起静默失效。
-    // 这里保留这两个 owner 字段，其余配置仍照用户提交的保存。
-    if let Some(existing) = existing_managed {
-        provider.website_url = existing.website_url;
-        if let Some(api_key) =
-            crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
-        {
-            if !crate::relay::provider_config::ensure_api_key(
-                &mut provider.settings_config,
-                &app_type,
-                &api_key,
-            ) {
-                return Err(AppError::Config(
-                    "托管档位的配置必须是对象，无法保留由 LoongPort 管理的密钥".to_string(),
-                ));
-            }
-        }
-    }
+    let provider =
+        ProviderService::prepare_managed_update(state, app_type.clone(), original_id, provider)?;
 
     let provider_id = provider.id.clone();
     // `app_type` 下一步会被 move 进 update，先扣出字符串给 set_user_edited 用。
@@ -425,6 +355,15 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
+    switch_provider_internal_with_catalog(state, app_type, id, None)
+}
+
+fn switch_provider_internal_with_catalog(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+    catalog: Option<&crate::services::provider::codex_direct::CatalogDecision>,
+) -> Result<SwitchResult, AppError> {
     // 切托管档位必须走 `relay_switch_tier` —— 只有它编排「退出 ChatGPT → 切换 → 重开」。
     // 从这条通用命令切进去的结果是配置改了、ChatGPT 还拿着旧分组的 sk 在跑，界面上却显示
     // 切换成功，用户无从察觉。
@@ -432,7 +371,12 @@ fn switch_provider_internal(
     // 守卫落在这一层而不是 `ProviderService::switch`：那是上游代码，且 `relay_switch_tier`
     // 正当地要调它。
     crate::relay::reject_if_managed(id)?;
-    let result = ProviderService::switch(state, app_type.clone(), id)?;
+    let result = match catalog {
+        Some(catalog) => {
+            ProviderService::switch_with_catalog(state, app_type.clone(), id, Some(catalog))?
+        }
+        None => ProviderService::switch(state, app_type.clone(), id)?,
+    };
     crate::services::application_overview::record_successful_selection(&state.db, &app_type, id);
     Ok(result)
 }
@@ -477,6 +421,9 @@ pub fn switch_provider_test_hook(
 pub enum ProviderSwitchCommandResult {
     ConfirmationRequired {
         target_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        catalog: Option<crate::services::provider::codex_direct::CatalogPreview>,
+        quit_required: bool,
     },
     Switched {
         warnings: Vec<String>,
@@ -498,6 +445,8 @@ pub async fn switch_provider(
     app: String,
     id: String,
     quit_chatgpt: Option<bool>,
+    catalog_decision: Option<crate::services::provider::codex_direct::CatalogDecision>,
+    catalog_preview_only: Option<bool>,
 ) -> Result<ProviderSwitchCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     let state = app_handle
@@ -509,14 +458,45 @@ pub async fn switch_provider(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("供应商 {id} 不存在"))?;
 
-    if should_request_chatgpt_confirmation(
+    let catalog_intent = catalog_decision.is_some() || catalog_preview_only.unwrap_or(false);
+    let catalog = if app_type == AppType::Codex
+        && crate::mode::operation::uses_upstream4_schema(&state.db)
+            .map_err(|_| "codex.catalog_preview_unavailable")?
+    {
+        let _switch = state.proxy_service.lock_switch_for_app("codex").await;
+        crate::relay::reject_if_managed(&id).map_err(|error| error.to_string())?;
+        let effective = if crate::services::provider::is_app_taken_over(&state, &app_type) {
+            ProviderService::provider_for_native_projection(&state.db, &app_type, &provider)
+                .map_err(|_| "codex.catalog_preview_unavailable")?
+        } else {
+            provider.clone()
+        };
+        crate::mode::controller::preview_catalog_selection(
+            &state.proxy_service,
+            &effective,
+            catalog_decision.as_ref(),
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    if catalog_intent && catalog.is_none() {
+        return Err("codex.catalog_takeover_unavailable".into());
+    }
+    let quit_required = should_request_chatgpt_confirmation(
         &app_type,
         quit_chatgpt,
         crate::relay::chatgpt_app::needs_user_attention()
             && !crate::services::provider::is_app_taken_over(&state, &app_type),
-    ) {
+    );
+    if quit_required
+        || (catalog.is_some() && catalog_decision.is_none())
+        || catalog_preview_only.unwrap_or(false)
+    {
         return Ok(ProviderSwitchCommandResult::ConfirmationRequired {
             target_name: provider.name,
+            catalog,
+            quit_required,
         });
     }
 
@@ -539,7 +519,14 @@ pub async fn switch_provider(
             .try_state::<AppState>()
             .ok_or_else(|| "应用状态不可用".to_string())?;
 
-        let switch_once = || switch_provider_internal(state.inner(), app_type.clone(), &id);
+        let switch_once = || {
+            switch_provider_internal_with_catalog(
+                state.inner(),
+                app_type.clone(),
+                &id,
+                catalog_decision.as_ref(),
+            )
+        };
 
         if !quit_chatgpt {
             return switch_once().map_err(|e| e.to_string());
@@ -657,7 +644,9 @@ mod managed_guard_tests {
     /// 所以 `ProviderService::update` 自己会因为「provider 不存在 / 缺 auth 配置」
     /// 报错。判据是那条错误**不是**守卫那条指路文案。
     #[test]
+    #[serial_test::serial]
     fn update_provider_allows_editing_a_managed_tier_in_place() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let provider = Provider::with_id(
             id.clone(),
@@ -684,7 +673,9 @@ mod managed_guard_tests {
     /// 只在改过 id 时给 `originalId`）—— 拿 `None` 当「可能改名」来拦，
     /// 等于把最常见的那条编辑路径又堵回去了。
     #[test]
+    #[serial_test::serial]
     fn update_provider_allows_a_managed_tier_when_original_id_is_omitted() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let provider = Provider::with_id(
             id.clone(),
@@ -703,7 +694,9 @@ mod managed_guard_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn managed_tier_edit_preserves_relay_origin_and_api_key() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let state = empty_state();
         let site_origin = "https://bestapi.store";
@@ -778,7 +771,9 @@ mod managed_guard_tests {
     /// 抓不到：它对 `Err` 只断言「文案不含 LoongPort」，而这个失败的文案是
     /// 「生图档位不写入任何 CLI 配置…」。
     #[test]
+    #[serial_test::serial]
     fn editing_the_current_image_tier_saves_without_error() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let id = managed_id();
         let state = empty_state();
         let existing = Provider::with_id(
@@ -1135,25 +1130,7 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
     let imported = ProviderService::import_default_config(state, app_type.clone())?;
 
     if imported {
-        // Extract common config snippet (mirrors old startup logic in lib.rs)
-        if state
-            .db
-            .should_auto_extract_config_snippet(app_type.as_str())?
-        {
-            match ProviderService::extract_common_config_snippet(state, app_type.clone()) {
-                Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
-                    let _ = state
-                        .db
-                        .set_config_snippet(app_type.as_str(), Some(snippet));
-                    let _ = state
-                        .db
-                        .set_config_snippet_cleared(app_type.as_str(), false);
-                }
-                _ => {}
-            }
-        }
-
-        ProviderService::migrate_legacy_common_config_usage_if_needed(state, app_type.clone())?;
+        ProviderService::finish_import_common_config(state, app_type.clone())?;
     }
 
     Ok(imported)
@@ -1770,6 +1747,167 @@ pub fn get_provider_edit_settings(
     ProviderService::edit_settings(state.inner(), app_type, &id).map_err(|e| e.to_string())
 }
 
+// These commands expose only redacted editor DTOs. Parser/configuration errors
+// stay inside the existing provider owner, never in IPC error text.
+#[tauri::command]
+pub async fn preview_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    provider: Provider,
+    #[allow(non_snake_case)] originalId: String,
+    #[allow(non_snake_case)] requestId: String,
+    #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] catalogDecision: Option<
+        crate::services::provider::codex_direct::CatalogDecision,
+    >,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        if catalogDecision.is_none() {
+            return crate::services::provider::edit::preview(
+                state.inner(),
+                &app,
+                provider,
+                &originalId,
+                &requestId,
+                deleteCredential,
+            )
+            .map_err(|_| "provider.edit_unavailable");
+        }
+        crate::services::provider::edit::preview_with_catalog(
+            state.inner(),
+            &app,
+            provider,
+            &originalId,
+            &requestId,
+            deleteCredential,
+            catalogDecision.as_ref(),
+        )
+        .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn confirm_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    provider: Provider,
+    #[allow(non_snake_case)] originalId: Option<String>,
+    request: crate::mode::state::SaveRequest,
+    #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] catalogDecision: Option<
+        crate::services::provider::codex_direct::CatalogDecision,
+    >,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        let original = originalId.as_deref().unwrap_or(&provider.id).to_owned();
+        if catalogDecision.is_none() {
+            return crate::services::provider::edit::confirm(
+                state.inner(),
+                &app,
+                provider,
+                &original,
+                request,
+                deleteCredential,
+            )
+            .map_err(|_| "provider.edit_unavailable");
+        }
+        crate::services::provider::edit::confirm_with_catalog(
+            state.inner(),
+            &app,
+            provider,
+            &original,
+            request,
+            deleteCredential,
+            catalogDecision.as_ref(),
+        )
+        .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn query_provider_edit(
+    app_handle: tauri::AppHandle,
+    app: String,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app).map_err(|_| "provider.edit_unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("provider.edit_unavailable")?;
+        crate::services::provider::edit::query(state.inner(), &app, request)
+            .map_err(|_| "provider.edit_unavailable")
+    })
+    .await
+    .map_err(|_| "provider.edit_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn preview_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    #[allow(non_snake_case)] requestId: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::preview_catalog_restore(state.inner(), &requestId)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn confirm_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::confirm_catalog_restore(state.inner(), request)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub async fn query_codex_catalog_restore(
+    app_handle: tauri::AppHandle,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or("codex.catalog_restore_unavailable")?;
+        crate::services::provider::codex_direct::query_catalog_restore(state.inner(), request)
+            .map_err(|_| "codex.catalog_restore_unavailable")
+    })
+    .await
+    .map_err(|_| "codex.catalog_restore_unavailable".to_owned())?
+    .map_err(str::to_owned)
+}
+
 #[tauri::command]
 pub async fn test_api_endpoints(
     urls: Vec<String>,
@@ -2246,6 +2384,8 @@ mod switch_command_result_wire_tests {
         let confirmation =
             serde_json::to_value(ProviderSwitchCommandResult::ConfirmationRequired {
                 target_name: "供应商".into(),
+                catalog: None,
+                quit_required: true,
             })
             .unwrap();
         assert_eq!(confirmation["status"], "confirmationRequired");

@@ -1,9 +1,105 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
-import { createContext, useContext, type ComponentProps } from "react";
+import {
+  createContext,
+  useContext,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { SettingsPage } from "@/components/settings/SettingsPage";
+import {
+  SettingsPage,
+  type SettingsPageHandle,
+} from "@/components/settings/SettingsPage";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+
+const shared = vi.hoisted(() => ({
+  get: vi.fn(),
+  preview: vi.fn(),
+  save: vi.fn(),
+  result: vi.fn(),
+  getImport: vi.fn(),
+  previewImport: vi.fn(),
+}));
+const claudeShared = vi.hoisted(() => ({
+  get: vi.fn(),
+  preview: vi.fn(),
+  save: vi.fn(),
+  result: vi.fn(),
+  getImport: vi.fn(),
+  previewImport: vi.fn(),
+}));
+const geminiShared = vi.hoisted(() => ({
+  get: vi.fn(),
+  preview: vi.fn(),
+  save: vi.fn(),
+  result: vi.fn(),
+  getImport: vi.fn(),
+  previewImport: vi.fn(),
+}));
+vi.mock("@/lib/api/config", () => ({
+  getSharedSettingsApi: (app: string) =>
+    app === "gemini" ? geminiShared : app === "claude" ? claudeShared : shared,
+  getClaudeSharedSettings: claudeShared.get,
+  previewClaudeSharedSettings: claudeShared.preview,
+  saveClaudeSharedSettings: claudeShared.save,
+  getClaudeSharedSettingsSaveResult: claudeShared.result,
+  getClaudeSharedSettingsImport: claudeShared.getImport,
+  previewClaudeSharedSettingsImport: claudeShared.previewImport,
+  getCodexSharedSettings: shared.get,
+  previewCodexSharedSettings: shared.preview,
+  saveCodexSharedSettings: shared.save,
+  getCodexSharedSettingsSaveResult: shared.result,
+  getCodexSharedSettingsImport: shared.getImport,
+  previewCodexSharedSettingsImport: shared.previewImport,
+}));
+vi.mock("@/components/JsonEditor", () => ({
+  default: ({
+    value,
+    onChange,
+    readOnly,
+    ariaLabel,
+    language,
+    showFormat,
+    showValidation,
+  }: any) => (
+    <textarea
+      aria-label={ariaLabel}
+      data-language={language}
+      data-show-format={String(showFormat)}
+      data-show-validation={String(showValidation)}
+      value={value}
+      readOnly={readOnly}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+}));
+const sharedRequest = {
+  id: "shared-1",
+  scope: "codexSharedSettings",
+  draftDigest: "digest",
+  revision: "revision",
+};
+const initialSharedConfig = 'approval_policy = "on-request"';
+const editedSharedConfig = 'approval_policy = "never"';
+const importedSharedConfig =
+  'approval_policy = "untrusted"\n[history]\n"max.bytes" = 9007199254740993\n';
+const legacyFields = [
+  {
+    path: ["history", "max.bytes"],
+    field: 'history."max.bytes"',
+    value: "9007199254740993",
+  },
+  { path: ["tools", "web_search"], field: "tools.web_search", value: "false" },
+];
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -145,16 +241,6 @@ const TabsContext = createContext<{
   value: "general",
 });
 
-vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ open, children }: any) =>
-    open ? <div data-testid="dialog-root">{children}</div> : null,
-  DialogContent: ({ children }: any) => <div>{children}</div>,
-  DialogHeader: ({ children }: any) => <div>{children}</div>,
-  DialogFooter: ({ children }: any) => <div>{children}</div>,
-  DialogTitle: ({ children }: any) => <h2>{children}</h2>,
-  DialogDescription: ({ children }: any) => <div>{children}</div>,
-}));
-
 vi.mock("@/components/ui/tabs", () => {
   return {
     Tabs: ({ value, onValueChange, children }: any) => (
@@ -240,6 +326,42 @@ vi.mock("@/components/settings/WebdavSyncSection", () => ({
 
 let settingsApi: any;
 
+function SharedSettingsGuardHarness(
+  props: Partial<ComponentProps<typeof SettingsPage>>,
+) {
+  const ref = useRef<SettingsPageHandle>(null);
+  const [pending, setPending] = useState<(() => void) | null>(null);
+  return (
+    <>
+      <SettingsPage
+        ref={ref}
+        open
+        onOpenChange={vi.fn()}
+        beforeLeave={(proceed) => {
+          if (ref.current?.submitting) return;
+          if (ref.current?.hasPendingChanges) setPending(() => proceed);
+          else proceed();
+        }}
+        {...props}
+      />
+      <ConfirmDialog
+        isOpen={!!pending}
+        title="applications.leaveDraftTitle"
+        message="applications.leaveDraftDescription"
+        cancelText="loongport.tier.editConfirmButton"
+        confirmText="applications.discardAndLeave"
+        onCancel={() => setPending(null)}
+        onConfirm={() => {
+          ref.current?.discard();
+          const proceed = pending;
+          setPending(null);
+          proceed?.();
+        }}
+      />
+    </>
+  );
+}
+
 const renderSettingsPage = (
   props?: Partial<ComponentProps<typeof SettingsPage>>,
 ) => {
@@ -250,7 +372,7 @@ const renderSettingsPage = (
   });
   return render(
     <QueryClientProvider client={client}>
-      <SettingsPage open={true} onOpenChange={vi.fn()} {...props} />
+      <SharedSettingsGuardHarness {...props} />
     </QueryClientProvider>,
   );
 };
@@ -258,6 +380,44 @@ const renderSettingsPage = (
 describe("SettingsPage Component", () => {
   beforeEach(async () => {
     tMock.mockImplementation((key: string) => key);
+    shared.get.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      config: initialSharedConfig,
+      originalSave: null,
+    });
+    shared.preview.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      request: sharedRequest,
+      changes: [
+        { field: "approval_policy", before: '"on-request"', after: '"never"' },
+      ],
+      files: [{ role: "codexConfig", change: "write" }],
+    });
+    shared.getImport.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      fields: legacyFields,
+    });
+    shared.previewImport.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      request: sharedRequest,
+      config: importedSharedConfig,
+      changes: [{ field: 'history."max.bytes"', after: "9007199254740993" }],
+      files: [{ role: "codexConfig", change: "write" }],
+    });
+    shared.save.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "completed",
+      request: sharedRequest,
+    });
+    shared.result.mockReset().mockResolvedValue({
+      app: "codex",
+      status: "pending",
+      request: sharedRequest,
+    });
     settingsMock = createSettingsMock();
     importExportMock = createImportExportMock();
     useImportExportSpy.mockReset();
@@ -278,6 +438,1277 @@ describe("SettingsPage Component", () => {
     vi.unstubAllGlobals();
   });
 
+  it("opens an independent Codex shared settings editor without saving other settings", async () => {
+    renderSettingsPage();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.title" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "codexSharedSettings.title" }),
+    ).toBeInTheDocument();
+    expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+    expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+  });
+
+  const openShared = async () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.title" }),
+    );
+    return screen.findByRole("textbox", { name: "codexSharedSettings.editor" });
+  };
+  const previewShared = async () => {
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+    );
+    await screen.findByText("approval_policy");
+    return editor;
+  };
+
+  const openLegacyOptions = async () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+    );
+    return screen.findByRole("checkbox", { name: 'history."max.bytes"' });
+  };
+  const previewLegacySelection = async () => {
+    const option = await openLegacyOptions();
+    fireEvent.click(option);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "codexSharedSettings.import.preview",
+      }),
+    );
+  };
+
+  it("reads legacy options only after opening them and previews selected original paths before saving", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    expect(shared.getImport).not.toHaveBeenCalled();
+    const option = await openLegacyOptions();
+    expect(option).not.toBeChecked();
+    expect(screen.getByText("9007199254740993")).toBeVisible();
+    expect(screen.getByText("false")).toBeVisible();
+    expect(editor).toHaveValue(initialSharedConfig);
+    expect(shared.previewImport).not.toHaveBeenCalled();
+    expect(shared.save).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", {
+        name: "codexSharedSettings.import.preview",
+      }),
+    ).toBeDisabled();
+    fireEvent.click(option);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "codexSharedSettings.import.preview",
+      }),
+    );
+    await waitFor(() => expect(editor).toHaveValue(importedSharedConfig));
+    expect(shared.previewImport).toHaveBeenCalledExactlyOnceWith(
+      [["history", "max.bytes"]],
+      expect.any(String),
+    );
+    expect(shared.preview).not.toHaveBeenCalled();
+    expect(shared.save).not.toHaveBeenCalled();
+    expect(screen.getByText("codexSharedSettings.added")).toBeVisible();
+    expect(screen.getByText("9007199254740993")).toBeVisible();
+    expect(screen.getByText("codexSharedSettings.versionCheck")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    );
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(shared.save).toHaveBeenCalledExactlyOnceWith(
+      importedSharedConfig,
+      sharedRequest,
+    );
+    expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+    expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps unsaved content until the existing guard confirms replacing it with an import preview", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    await previewLegacySelection();
+    await screen.findByText("applications.leaveDraftTitle");
+    expect(editor).toHaveValue(editedSharedConfig);
+    expect(shared.previewImport).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "loongport.tier.editConfirmButton" }),
+    );
+    expect(editor).toHaveValue(editedSharedConfig);
+    expect(
+      screen.getByRole("checkbox", { name: 'history."max.bytes"' }),
+    ).toBeChecked();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "codexSharedSettings.import.preview",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await waitFor(() => expect(editor).toHaveValue(importedSharedConfig));
+    expect(shared.previewImport).toHaveBeenCalledOnce();
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it("cancels legacy selection without changing the existing draft or writing", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    fireEvent.click(await openLegacyOptions());
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.import.cancel" }),
+    );
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(editor).toHaveValue(editedSharedConfig);
+    expect(shared.previewImport).not.toHaveBeenCalled();
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["common.cancel", "common.close"])(
+    "guards an imported draft on %s without saving",
+    async (action) => {
+      renderSettingsPage();
+      const editor = await openShared();
+      await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+      await previewLegacySelection();
+      await waitFor(() => expect(editor).toHaveValue(importedSharedConfig));
+      fireEvent.click(screen.getByRole("button", { name: action }));
+      await screen.findByText("applications.leaveDraftTitle");
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(editor).toHaveValue(importedSharedConfig);
+      fireEvent.click(screen.getByRole("button", { name: action }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+      );
+      expect(shared.save).not.toHaveBeenCalled();
+    },
+  );
+
+  it("shows when the legacy snippet has no missing ordinary fields", async () => {
+    shared.getImport.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      fields: [],
+    });
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+    );
+    await screen.findByText("codexSharedSettings.import.empty");
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(shared.previewImport).not.toHaveBeenCalled();
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacyDisabled", "secret-parser-source"])(
+    "shows only safe legacy import errors for %s",
+    async (code) => {
+      shared.getImport.mockResolvedValue({
+        app: "codex",
+        status: "blocked",
+        fields: legacyFields,
+        code,
+      });
+      renderSettingsPage();
+      const editor = await openShared();
+      await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      await screen.findByText(
+        `codexSharedSettings.error.${code === "legacyDisabled" ? code : "generic"}`,
+      );
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+      expect(editor).toHaveValue(initialSharedConfig);
+      expect(document.body).not.toHaveTextContent("secret-parser-source");
+      expect(shared.previewImport).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves the draft unchanged when the legacy import preview is blocked", async () => {
+    shared.previewImport.mockResolvedValue({
+      app: "codex",
+      status: "blocked",
+      config: "",
+      request: sharedRequest,
+      changes: [],
+      files: [],
+      code: "sourceChanged",
+    });
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    await previewLegacySelection();
+    await screen.findByText("codexSharedSettings.error.sourceChanged");
+    expect(editor).toHaveValue(initialSharedConfig);
+    expect(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    ).toBeDisabled();
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it("queries an uncertain imported save without starting another import or write", async () => {
+    shared.save.mockRejectedValue(new Error("secret-save-source"));
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    await previewLegacySelection();
+    await waitFor(() => expect(editor).toHaveValue(importedSharedConfig));
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    );
+    await screen.findByText("codexSharedSettings.result.pending");
+    expect(shared.result).toHaveBeenCalledExactlyOnceWith(sharedRequest);
+    const reopen = screen.getByRole("button", {
+      name: "codexSharedSettings.import.open",
+    });
+    expect(reopen).toBeDisabled();
+    fireEvent.click(reopen);
+    expect(shared.getImport).toHaveBeenCalledOnce();
+    expect(shared.previewImport).toHaveBeenCalledOnce();
+    expect(shared.save).toHaveBeenCalledOnce();
+  });
+
+  it("allows a later explicitly opened legacy import after a verified save", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    await previewLegacySelection();
+    await waitFor(() => expect(editor).toHaveValue(importedSharedConfig));
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    );
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(shared.getImport).toHaveBeenCalledOnce();
+    await openLegacyOptions();
+    expect(shared.getImport).toHaveBeenCalledTimes(2);
+    expect(shared.save).toHaveBeenCalledOnce();
+  });
+
+  it.each(["pending", "verificationRequired", "unknown"])(
+    "never starts a legacy import while an original %s save is unresolved",
+    async (status) => {
+      shared.get.mockResolvedValue({
+        app: "codex",
+        status: "ready",
+        config: initialSharedConfig,
+        originalSave: { app: "codex", status, request: sharedRequest },
+      });
+      renderSettingsPage();
+      await openShared();
+      await screen.findByText(`codexSharedSettings.result.${status}`);
+      const open = screen.getByRole("button", {
+        name: "codexSharedSettings.import.open",
+      });
+      expect(open).toBeDisabled();
+      fireEvent.click(open);
+      expect(shared.getImport).not.toHaveBeenCalled();
+      expect(shared.previewImport).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["getImport", "previewImport"] as const)(
+    "keeps a lost %s response read-only and hides its raw error",
+    async (command) => {
+      shared[command].mockRejectedValue(new Error("secret-parser-source"));
+      renderSettingsPage();
+      const editor = await openShared();
+      await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+      if (command === "getImport") {
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: "codexSharedSettings.import.open",
+          }),
+        );
+      } else {
+        await previewLegacySelection();
+      }
+      await screen.findByText("codexSharedSettings.error.generic");
+      expect(editor).toHaveValue(initialSharedConfig);
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      ).toBeDisabled();
+      expect(document.body).not.toHaveTextContent("secret-parser-source");
+      expect(shared.save).not.toHaveBeenCalled();
+      expect(shared.result).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves a newly filled live field returned by the backend instead of restoring the selected legacy value", async () => {
+    const latestConfig =
+      'approval_policy = "on-request"\n[history]\n"max.bytes" = 42\n';
+    shared.previewImport.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      request: sharedRequest,
+      config: latestConfig,
+      changes: [],
+      files: [{ role: "codexConfig", change: "unchanged" }],
+    });
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    await previewLegacySelection();
+    await waitFor(() => expect(editor).toHaveValue(latestConfig));
+    expect(screen.queryByText("9007199254740993")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    );
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(shared.save).toHaveBeenCalledExactlyOnceWith(
+      latestConfig,
+      sharedRequest,
+    );
+  });
+
+  it("requires a fresh field preview and saves only the shared page", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    expect(
+      screen.getByText("codexSharedSettings.readOnlyFields"),
+    ).toBeInTheDocument();
+    const save = screen.getByRole("button", {
+      name: "codexSharedSettings.save",
+    });
+    expect(save).toBeDisabled();
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    expect(save).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+    );
+    await screen.findByText("approval_policy");
+    expect(
+      screen.getByText("codexSharedSettings.versionCheck"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("codexSharedSettings.result.completed"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(save);
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(shared.save).toHaveBeenCalledExactlyOnceWith(
+      editedSharedConfig,
+      sharedRequest,
+    );
+    expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+    expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+  });
+
+  it("shows the actual before and after values and identifies additions and removals", async () => {
+    shared.preview.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      request: sharedRequest,
+      changes: [
+        { field: "approval_policy", before: '"on-request"', after: '"never"' },
+        { field: "tools.web_search", after: "false" },
+        { field: "history.max_bytes", before: "9007199254740993" },
+      ],
+      files: [{ role: "codexConfig", change: "write" }],
+    });
+    renderSettingsPage();
+    await previewShared();
+    const modified = within(screen.getByText("approval_policy").closest("li")!);
+    expect(modified.getByText('"on-request"')).toBeVisible();
+    expect(modified.getByText('"never"')).toBeVisible();
+    expect(modified.getByText("codexSharedSettings.modified")).toBeVisible();
+    expect(modified.getByText("codexSharedSettings.before")).toBeVisible();
+    expect(modified.getByText("codexSharedSettings.after")).toBeVisible();
+    const added = within(screen.getByText("tools.web_search").closest("li")!);
+    expect(added.getByText("codexSharedSettings.added")).toBeVisible();
+    expect(added.getByText("false")).toBeVisible();
+    expect(
+      added.queryByText("codexSharedSettings.before"),
+    ).not.toBeInTheDocument();
+    const removed = within(
+      screen.getByText("history.max_bytes").closest("li")!,
+    );
+    expect(removed.getByText("codexSharedSettings.removed")).toBeVisible();
+    expect(removed.getByText("9007199254740993")).toBeVisible();
+    expect(
+      removed.queryByText("codexSharedSettings.after"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("codexSharedSettings.result.completed"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("invalidates the preview when the draft changes", async () => {
+    renderSettingsPage();
+    const editor = await previewShared();
+    fireEvent.change(editor, {
+      target: { value: 'approval_policy = "untrusted"' },
+    });
+    expect(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    ).toBeDisabled();
+    expect(screen.queryByText("approval_policy")).not.toBeInTheDocument();
+  });
+
+  it("keeps failed reads non-writable without displaying raw errors", async () => {
+    shared.get.mockRejectedValue(new Error("secret-parser-source"));
+    renderSettingsPage();
+    await openShared();
+    await screen.findByText("codexSharedSettings.error.generic");
+    expect(screen.getByRole("textbox")).toHaveAttribute("readonly");
+    expect(
+      screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+    ).toBeDisabled();
+    expect(document.body).not.toHaveTextContent("secret-parser-source");
+  });
+
+  it.each([
+    "readOnlyFields",
+    "invalidFormat",
+    "sourceChanged",
+    "ownerUnavailable",
+    "vaultLocked",
+    "pendingOperation",
+  ])("shows a safe %s failure and never enables save", async (code) => {
+    shared.preview.mockResolvedValue({
+      app: "codex",
+      status: "blocked",
+      request: sharedRequest,
+      changes: [],
+      files: [],
+      code,
+    });
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+    );
+    await screen.findByText(`codexSharedSettings.error.${code}`);
+    expect(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    ).toBeDisabled();
+  });
+
+  it("queries the same request after an uncertain save rather than repeating the write", async () => {
+    shared.save.mockRejectedValue(new Error("secret-save-source"));
+    renderSettingsPage();
+    await previewShared();
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.save" }),
+    );
+    await screen.findByText("codexSharedSettings.result.pending");
+    expect(shared.result).toHaveBeenCalledExactlyOnceWith(sharedRequest);
+    expect(shared.save).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+    ).toBeDisabled();
+    shared.result.mockResolvedValue({
+      app: "codex",
+      status: "completed",
+      request: sharedRequest,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+    );
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(shared.result).toHaveBeenLastCalledWith(sharedRequest);
+    expect(shared.save).toHaveBeenCalledTimes(1);
+    expect(document.body).not.toHaveTextContent("secret-save-source");
+  });
+
+  it("recovers an original pending request without constructing a replacement", async () => {
+    shared.get.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      config: initialSharedConfig,
+      originalSave: {
+        app: "codex",
+        status: "verificationRequired",
+        request: sharedRequest,
+      },
+    });
+    renderSettingsPage();
+    await openShared();
+    await screen.findByText("codexSharedSettings.result.verificationRequired");
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+    );
+    await waitFor(() =>
+      expect(shared.result).toHaveBeenCalledExactlyOnceWith(sharedRequest),
+    );
+    expect(shared.preview).not.toHaveBeenCalled();
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it("requires a new read after resolving a save from a previous session", async () => {
+    shared.get.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      config: initialSharedConfig,
+      originalSave: { app: "codex", status: "pending", request: sharedRequest },
+    });
+    shared.result.mockResolvedValue({
+      app: "codex",
+      status: "completed",
+      request: sharedRequest,
+    });
+    renderSettingsPage();
+    const editor = await openShared();
+    await screen.findByText("codexSharedSettings.result.pending");
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+    );
+    await screen.findByText("codexSharedSettings.result.completed");
+    expect(editor).toHaveAttribute("readonly");
+    shared.get.mockResolvedValue({
+      app: "codex",
+      status: "ready",
+      config: editedSharedConfig,
+      originalSave: null,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.reload" }),
+    );
+    await waitFor(() => expect(editor).toHaveValue(editedSharedConfig));
+    expect(editor).not.toHaveAttribute("readonly");
+  });
+
+  it("requires keeping or discarding a draft before leaving the shared editor", async () => {
+    renderSettingsPage();
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    fireEvent.click(screen.getByRole("button", { name: "common.close" }));
+    await screen.findByText("applications.leaveDraftTitle");
+    fireEvent.click(
+      screen.getByRole("button", { name: "loongport.tier.editConfirmButton" }),
+    );
+    expect(editor).toHaveValue(editedSharedConfig);
+    fireEvent.click(screen.getByRole("button", { name: "common.close" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+    );
+    expect(shared.save).not.toHaveBeenCalled();
+  });
+
+  it("routes MCP management through the existing callback after discarding a draft", async () => {
+    const onManageCodexMcp = vi.fn();
+    renderSettingsPage({ onManageCodexMcp });
+    const editor = await openShared();
+    await waitFor(() => expect(editor).toHaveValue(initialSharedConfig));
+    fireEvent.change(editor, { target: { value: editedSharedConfig } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexSharedSettings.manageMcp" }),
+    );
+    expect(onManageCodexMcp).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "applications.discardAndLeave" }),
+    );
+    expect(onManageCodexMcp).toHaveBeenCalledOnce();
+  });
+
+  describe("Claude shared settings", () => {
+    const request = {
+      id: "claude-shared-1",
+      scope: "claudeSharedSettings",
+      draftDigest: "claude-digest",
+      revision: "claude-revision",
+    };
+    const initial = '{"permissions":{"defaultMode":"default"}}';
+    const edited =
+      '{"permissions":{"defaultMode":"plan"},"large":9007199254740993}';
+    const imported =
+      '{"permissions":{"defaultMode":"default"},"ui":{"literal.key":9007199254740993}}';
+    beforeEach(() => {
+      claudeShared.get.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        config: initial,
+        originalSave: null,
+      });
+      claudeShared.preview.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        request,
+        changes: [{ field: "large", after: "9007199254740993" }],
+        files: [{ role: "claudeSettings", change: "write" }],
+      });
+      claudeShared.save
+        .mockReset()
+        .mockResolvedValue({ app: "claude", request, status: "completed" });
+      claudeShared.result
+        .mockReset()
+        .mockResolvedValue({ app: "claude", request, status: "pending" });
+      claudeShared.getImport.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        fields: [
+          {
+            path: ["ui", "literal.key"],
+            field: 'ui."literal.key"',
+            value: "9007199254740993",
+          },
+        ],
+      });
+      claudeShared.previewImport.mockReset().mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        request,
+        config: imported,
+        changes: [{ field: 'ui."literal.key"', after: "9007199254740993" }],
+        files: [{ role: "claudeSettings", change: "write" }],
+      });
+    });
+    async function openClaude() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "claudeSharedSettings.title" }),
+      );
+      const editor = await screen.findByRole("textbox", {
+        name: "claudeSharedSettings.editor",
+      });
+      await waitFor(() => expect(editor).toHaveValue(initial));
+      return editor;
+    }
+    async function selectImport() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: 'ui."literal.key"',
+      });
+      expect(option).not.toBeChecked();
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+    }
+    async function previewClaude() {
+      const editor = await openClaude();
+      fireEvent.change(editor, { target: { value: edited } });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      );
+      return editor;
+    }
+    it("opens the real Claude settings entry and submits exact JSON only through Claude commands", async () => {
+      renderSettingsPage();
+      const editor = await previewClaude();
+      expect(editor).toHaveAttribute("data-language", "json");
+      expect(editor).toHaveAttribute("data-show-format", "false");
+      await screen.findByText("9007199254740993");
+      expect(claudeShared.preview).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        expect.any(String),
+      );
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.save).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        request,
+      );
+      expect(editor).toHaveValue(edited);
+      expect(shared.get).not.toHaveBeenCalled();
+      expect(shared.save).not.toHaveBeenCalled();
+      expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+      expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+    });
+    it("imports selected exact missing paths only explicitly and allows another manual import after saving", async () => {
+      renderSettingsPage();
+      const editor = await openClaude();
+      expect(claudeShared.getImport).not.toHaveBeenCalled();
+      await selectImport();
+      await waitFor(() => expect(editor).toHaveValue(imported));
+      expect(claudeShared.previewImport).toHaveBeenCalledExactlyOnceWith(
+        [["ui", "literal.key"]],
+        expect.any(String),
+      );
+      expect(claudeShared.preview).not.toHaveBeenCalled();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.save).toHaveBeenCalledExactlyOnceWith(
+        imported,
+        request,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      await screen.findByRole("checkbox", { name: 'ui."literal.key"' });
+      expect(claudeShared.getImport).toHaveBeenCalledTimes(2);
+      expect(claudeShared.save).toHaveBeenCalledOnce();
+    });
+    it("keeps the Claude draft and selected import on guard cancellation before explicit replacement", async () => {
+      renderSettingsPage();
+      const editor = await openClaude();
+      fireEvent.change(editor, { target: { value: edited } });
+      await selectImport();
+      await screen.findByText("applications.leaveDraftTitle");
+      expect(editor).toHaveValue(edited);
+      expect(claudeShared.previewImport).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(editor).toHaveValue(edited);
+      expect(
+        screen.getByRole("checkbox", { name: 'ui."literal.key"' }),
+      ).toBeChecked();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() => expect(editor).toHaveValue(imported));
+      expect(claudeShared.previewImport).toHaveBeenCalledOnce();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+    });
+    it.each(["invalidFormat", "sourceChanged", "secret-parser-source"])(
+      "shows a safe Claude %s preview failure and keeps its draft",
+      async (code) => {
+        claudeShared.preview.mockResolvedValue({
+          app: "claude",
+          status: "blocked",
+          request,
+          changes: [],
+          files: [],
+          code,
+        });
+        renderSettingsPage();
+        const editor = await previewClaude();
+        const key =
+          code === "invalidFormat"
+            ? "claudeSharedSettings.invalidFormat"
+            : `codexSharedSettings.error.${code === "sourceChanged" ? code : "generic"}`;
+        await screen.findByText(key);
+        expect(editor).toHaveValue(edited);
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        expect(document.body).not.toHaveTextContent("secret-parser-source");
+        expect(claudeShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("queries the exact unknown Claude save and blocks repeated writes and imports", async () => {
+      claudeShared.save.mockRejectedValue(new Error("secret-save-source"));
+      claudeShared.result.mockRejectedValue(new Error("secret-result-source"));
+      renderSettingsPage();
+      await previewClaude();
+      await screen.findByText("9007199254740993");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.unknown");
+      expect(claudeShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      ).toBeDisabled();
+      claudeShared.result.mockResolvedValue({
+        app: "claude",
+        request,
+        status: "completed",
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(claudeShared.result).toHaveBeenLastCalledWith(request);
+      expect(claudeShared.save).toHaveBeenCalledOnce();
+      expect(shared.result).not.toHaveBeenCalled();
+      expect(document.body).not.toHaveTextContent("secret-save-source");
+      expect(document.body).not.toHaveTextContent("secret-result-source");
+    });
+    it("requires a fresh Claude read after resolving an original save from a previous session", async () => {
+      claudeShared.get.mockResolvedValue({
+        app: "claude",
+        status: "ready",
+        config: initial,
+        originalSave: {
+          app: "claude",
+          request,
+          status: "verificationRequired",
+        },
+      });
+      claudeShared.result.mockResolvedValue({
+        app: "claude",
+        request,
+        status: "completed",
+      });
+      renderSettingsPage();
+      const editor = await openClaude();
+      expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(editor).toHaveAttribute("readonly");
+      expect(claudeShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(claudeShared.preview).not.toHaveBeenCalled();
+      expect(claudeShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.reload" }),
+      );
+      await waitFor(() => expect(claudeShared.get).toHaveBeenCalledTimes(2));
+    });
+  });
+
+  describe("Gemini shared settings", () => {
+    const request = {
+      id: "gemini-shared-1",
+      scope: "geminiSharedSettings",
+      draftDigest: "gemini-digest",
+      revision: "gemini-revision",
+    };
+    const initial = {
+      env: '# shared preferences\nGEMINI_CLI_THEME="default"\n',
+      settings: '{ "ui": { "theme": "default" }, "large": 9007199254740993 }\n',
+    };
+    const edited = {
+      env: '# shared preferences\nGEMINI_CLI_THEME="dark"\n',
+      settings: '{ "ui": { "theme": "dark" }, "large": 9007199254740993 }\n',
+    };
+    const imported = {
+      env: '# fresh live\nGEMINI_CLI_THEME="light"\n',
+      settings: '{ "fresh": true, "large": 9007199254740993 }\n',
+    };
+    const changes = [
+      {
+        role: "geminiEnv",
+        field: "GEMINI_CLI_THEME",
+        before: '"default"',
+        after: '"dark"',
+      },
+      {
+        role: "geminiSettings",
+        field: "ui.theme",
+        before: '"default"',
+        after: '"dark"',
+      },
+    ];
+    const files = [
+      { role: "geminiEnv", change: "write" },
+      { role: "geminiSettings", change: "unchanged" },
+    ];
+    beforeEach(() => {
+      geminiShared.get.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        config: { ...initial },
+        originalSave: null,
+      });
+      geminiShared.preview.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        request,
+        changes,
+        files,
+      });
+      geminiShared.save
+        .mockReset()
+        .mockResolvedValue({ app: "gemini", request, status: "completed" });
+      geminiShared.result
+        .mockReset()
+        .mockResolvedValue({ app: "gemini", request, status: "pending" });
+      geminiShared.getImport.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        fields: [
+          {
+            path: ["GEMINI_CLI_THEME"],
+            field: "GEMINI_CLI_THEME",
+            value: '"light"',
+          },
+        ],
+      });
+      geminiShared.previewImport.mockReset().mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        request,
+        config: imported,
+        changes: [
+          { role: "geminiEnv", field: "GEMINI_CLI_THEME", after: '"light"' },
+        ],
+        files,
+      });
+    });
+    async function openGemini() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "geminiSharedSettings.title" }),
+      );
+      const env = await screen.findByRole("textbox", {
+        name: "geminiSharedSettings.envEditor",
+      });
+      const settings = await screen.findByRole("textbox", {
+        name: "geminiSharedSettings.settingsEditor",
+      });
+      await waitFor(() => expect(env).toHaveValue(initial.env));
+      expect(settings).toHaveValue(initial.settings);
+      return { env, settings };
+    }
+    function changeEditors(editors: {
+      env: HTMLElement;
+      settings: HTMLElement;
+    }) {
+      fireEvent.change(editors.env, { target: { value: edited.env } });
+      fireEvent.change(editors.settings, {
+        target: { value: edited.settings },
+      });
+    }
+    async function previewGemini() {
+      const editors = await openGemini();
+      changeEditors(editors);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      );
+      await screen.findByText("codexSharedSettings.versionCheck");
+      return editors;
+    }
+    async function selectGeminiImport() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: "GEMINI_CLI_THEME",
+      });
+      expect(option).not.toBeChecked();
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+    }
+    it("opens two original-format Gemini editors and saves exact text with role-labelled file outcomes", async () => {
+      renderSettingsPage();
+      const editors = await previewGemini();
+      expect(editors.env).toHaveAttribute("data-language", "javascript");
+      expect(editors.settings).toHaveAttribute("data-language", "json");
+      for (const editor of Object.values(editors)) {
+        expect(editor).toHaveAttribute("data-show-format", "false");
+        expect(editor).toHaveAttribute("data-show-validation", "false");
+      }
+      expect(
+        screen.getByText("geminiSharedSettings.preservedEnv"),
+      ).toBeVisible();
+      const fileList = within(
+        screen.getByRole("list", { name: "geminiSharedSettings.files.title" }),
+      );
+      const envFile = within(
+        fileList
+          .getByText("geminiSharedSettings.files.geminiEnv")
+          .closest("li")!,
+      );
+      expect(
+        envFile.getByText("geminiSharedSettings.files.write"),
+      ).toBeVisible();
+      const settingsFile = within(
+        fileList
+          .getByText("geminiSharedSettings.files.geminiSettings")
+          .closest("li")!,
+      );
+      expect(
+        settingsFile.getByText("geminiSharedSettings.files.unchanged"),
+      ).toBeVisible();
+      for (const change of changes) {
+        expect(
+          within(screen.getByText(change.field).closest("li")!).getByText(
+            `geminiSharedSettings.files.${change.role}`,
+          ),
+        ).toBeVisible();
+      }
+      expect(geminiShared.preview).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        expect.any(String),
+      );
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.save).toHaveBeenCalledExactlyOnceWith(
+        edited,
+        request,
+      );
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(shared.get).not.toHaveBeenCalled();
+      expect(shared.save).not.toHaveBeenCalled();
+      expect(settingsMock.saveSettings).not.toHaveBeenCalled();
+      expect(settingsMock.autoSaveSettings).not.toHaveBeenCalled();
+    });
+    it("compares both Gemini text values and allows leaving after reverting to identical contents", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      for (const field of ["env", "settings"] as const) {
+        fireEvent.change(editors[field], { target: { value: initial[field] } });
+      }
+      expect(
+        screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+      ).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      expect(
+        screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("dialog", { name: "geminiSharedSettings.title" }),
+      ).not.toBeInTheDocument();
+    });
+    it.each(["env", "settings"] as const)(
+      "invalidates a Gemini preview after editing %s and keeps both drafts on leave cancellation",
+      async (field) => {
+        renderSettingsPage();
+        const editors = await previewGemini();
+        fireEvent.change(editors[field], {
+          target: { value: edited[field] + "\n" },
+        });
+        expect(
+          screen.queryByText("codexSharedSettings.versionCheck"),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+        await screen.findByText("applications.leaveDraftTitle");
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: "loongport.tier.editConfirmButton",
+          }),
+        );
+        expect(editors.env).toHaveValue(
+          edited.env + (field === "env" ? "\n" : ""),
+        );
+        expect(editors.settings).toHaveValue(
+          edited.settings + (field === "settings" ? "\n" : ""),
+        );
+        expect(geminiShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("imports selected Gemini env paths explicitly and adopts the complete fresh backend draft", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      expect(geminiShared.getImport).not.toHaveBeenCalled();
+      await selectGeminiImport();
+      await waitFor(() => expect(editors.env).toHaveValue(imported.env));
+      expect(editors.settings).toHaveValue(imported.settings);
+      expect(geminiShared.previewImport).toHaveBeenCalledExactlyOnceWith(
+        [["GEMINI_CLI_THEME"]],
+        expect.any(String),
+      );
+      expect(geminiShared.preview).not.toHaveBeenCalled();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.save).toHaveBeenCalledExactlyOnceWith(
+        imported,
+        request,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+      expect(
+        screen.queryByRole("dialog", { name: "applications.leaveDraftTitle" }),
+      ).not.toBeInTheDocument();
+    });
+    it("retains both Gemini drafts and selected import until replacement is confirmed", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      await selectGeminiImport();
+      await screen.findByText("applications.leaveDraftTitle");
+      expect(geminiShared.previewImport).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "loongport.tier.editConfirmButton",
+        }),
+      );
+      expect(editors.env).toHaveValue(edited.env);
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(
+        screen.getByRole("checkbox", { name: "GEMINI_CLI_THEME" }),
+      ).toBeChecked();
+      expect(
+        screen.getByText("geminiSharedSettings.importDescription"),
+      ).toBeVisible();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.preview",
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "applications.discardAndLeave" }),
+      );
+      await waitFor(() => expect(editors.env).toHaveValue(imported.env));
+      expect(editors.settings).toHaveValue(imported.settings);
+      expect(geminiShared.previewImport).toHaveBeenCalledOnce();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+    });
+    it("cancels Gemini legacy selection without mutating either draft", async () => {
+      renderSettingsPage();
+      const editors = await openGemini();
+      changeEditors(editors);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.import.open" }),
+      );
+      const option = await screen.findByRole("checkbox", {
+        name: "GEMINI_CLI_THEME",
+      });
+      fireEvent.click(option);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "codexSharedSettings.import.cancel",
+        }),
+      );
+      expect(editors.env).toHaveValue(edited.env);
+      expect(editors.settings).toHaveValue(edited.settings);
+      expect(geminiShared.previewImport).not.toHaveBeenCalled();
+      expect(geminiShared.save).not.toHaveBeenCalled();
+    });
+    it("locks both Gemini editors while saving and queries the exact unknown receipt without another write", async () => {
+      let rejectSave!: (reason: Error) => void;
+      geminiShared.save.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectSave = reject;
+          }),
+      );
+      geminiShared.result.mockRejectedValue(new Error("secret-result-source"));
+      renderSettingsPage();
+      const editors = await previewGemini();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.save" }),
+      );
+      expect(geminiShared.save).toHaveBeenCalledOnce();
+      rejectSave(new Error("secret-save-source"));
+      await screen.findByText("codexSharedSettings.result.unknown");
+      expect(geminiShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      for (const action of ["import.open", "preview", "save", "reload"]) {
+        expect(
+          screen.getByRole("button", { name: `codexSharedSettings.${action}` }),
+        ).toBeDisabled();
+      }
+      geminiShared.result.mockResolvedValue({
+        app: "gemini",
+        request,
+        status: "completed",
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      expect(geminiShared.result).toHaveBeenLastCalledWith(request);
+      expect(geminiShared.save).toHaveBeenCalledOnce();
+      for (const editor of Object.values(editors))
+        expect(editor).not.toHaveAttribute("readonly");
+      expect(document.body).not.toHaveTextContent("secret-save-source");
+      expect(document.body).not.toHaveTextContent("secret-result-source");
+      expect(shared.result).not.toHaveBeenCalled();
+    });
+    it.each(["invalidFormat", "sourceChanged", "secret-parser-source"])(
+      "shows a safe Gemini %s failure without dropping either draft",
+      async (code) => {
+        geminiShared.preview.mockResolvedValue({
+          app: "gemini",
+          status: "blocked",
+          request,
+          changes: [],
+          files: [],
+          code,
+        });
+        renderSettingsPage();
+        const editors = await openGemini();
+        changeEditors(editors);
+        fireEvent.click(
+          screen.getByRole("button", { name: "codexSharedSettings.preview" }),
+        );
+        await screen.findByText(
+          code === "invalidFormat"
+            ? "geminiSharedSettings.invalidFormat"
+            : `codexSharedSettings.error.${code === "sourceChanged" ? code : "generic"}`,
+        );
+        expect(editors.env).toHaveValue(edited.env);
+        expect(editors.settings).toHaveValue(edited.settings);
+        expect(
+          screen.getByRole("button", { name: "codexSharedSettings.save" }),
+        ).toBeDisabled();
+        expect(document.body).not.toHaveTextContent("secret-parser-source");
+        expect(geminiShared.save).not.toHaveBeenCalled();
+      },
+    );
+    it("requires a fresh Gemini read after resolving an original save from a previous session", async () => {
+      geminiShared.get.mockResolvedValue({
+        app: "gemini",
+        status: "ready",
+        config: initial,
+        originalSave: {
+          app: "gemini",
+          request,
+          status: "verificationRequired",
+        },
+      });
+      geminiShared.result.mockResolvedValue({
+        app: "gemini",
+        request,
+        status: "completed",
+      });
+      renderSettingsPage();
+      const editors = await openGemini();
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.checkResult" }),
+      );
+      await screen.findByText("codexSharedSettings.result.completed");
+      for (const editor of Object.values(editors))
+        expect(editor).toHaveAttribute("readonly");
+      expect(geminiShared.result).toHaveBeenCalledExactlyOnceWith(request);
+      expect(geminiShared.save).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexSharedSettings.reload" }),
+      );
+      await waitFor(() => expect(geminiShared.get).toHaveBeenCalledTimes(2));
+    });
+  });
+
   it("should not render form content when loading", () => {
     settingsMock = createSettingsMock({ settings: null, isLoading: true });
 
@@ -296,7 +1727,11 @@ describe("SettingsPage Component", () => {
     });
     const { rerender } = render(
       <QueryClientProvider client={client}>
-        <SettingsPage open={false} onOpenChange={vi.fn()} />
+        <SettingsPage
+          open={false}
+          onOpenChange={vi.fn()}
+          beforeLeave={(proceed) => proceed()}
+        />
       </QueryClientProvider>,
     );
 
@@ -304,7 +1739,11 @@ describe("SettingsPage Component", () => {
 
     rerender(
       <QueryClientProvider client={client}>
-        <SettingsPage open={true} onOpenChange={vi.fn()} />
+        <SettingsPage
+          open={true}
+          onOpenChange={vi.fn()}
+          beforeLeave={(proceed) => proceed()}
+        />
       </QueryClientProvider>,
     );
 

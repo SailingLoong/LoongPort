@@ -1,6 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { SwitchResult } from "@/lib/api/providers";
+import type {
+  ProviderCatalogDecision,
+  SwitchResult,
+} from "@/lib/api/providers";
 import type { Provider } from "@/types";
 
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
@@ -35,33 +38,108 @@ export function useCodexSwitchGuard(
   switchProvider: (
     provider: Provider,
     quitChatgpt?: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly?: boolean,
   ) => Promise<SwitchResult | undefined>,
+  disabled = false,
 ) {
-  const [pending, setPending] = useState<{
-    provider: Provider;
-    targetName: string;
-  } | null>(null);
-
-  // 只在 codex 页问一次后端。`switchProvider` 每次渲染都可能是新引用，
-  // 所以用 ref 取当前值，避免把它写进依赖里让这个 effect 反复跑。
+  const [pending, setPending] = useState<
+    | ({
+        provider: Provider;
+      } & Extract<SwitchResult, { status: "confirmationRequired" }>)
+    | null
+  >(null);
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const lifecycle = useRef(0);
+  useEffect(
+    () => () => {
+      lifecycle.current += 1;
+    },
+    [],
+  );
   const switchRef = useRef(switchProvider);
   switchRef.current = switchProvider;
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
 
-  const guardedSwitch = useCallback(async (provider: Provider) => {
-    const result = await switchRef.current(provider);
-    if (result?.status === "confirmationRequired") {
-      setPending({ provider, targetName: result.targetName });
-    }
-  }, []);
-
+  const submit = useCallback(
+    async (
+      provider: Provider,
+      quitChatgpt?: boolean,
+      catalogDecision?: ProviderCatalogDecision,
+      catalogPreviewOnly = false,
+    ) => {
+      if (disabledRef.current || inFlight.current) return;
+      const generation = lifecycle.current;
+      inFlight.current = true;
+      setBusy(true);
+      try {
+        const result = catalogDecision
+          ? await switchRef.current(
+              provider,
+              quitChatgpt,
+              catalogDecision,
+              catalogPreviewOnly,
+            )
+          : quitChatgpt === undefined
+            ? await switchRef.current(provider)
+            : await switchRef.current(provider, quitChatgpt);
+        if (generation !== lifecycle.current) return;
+        if (result?.status === "confirmationRequired") {
+          // A preview response must describe the exact choice/version requested.
+          if (
+            catalogPreviewOnly &&
+            (result.catalog?.choice !== catalogDecision?.choice ||
+              result.catalog?.revision !== catalogDecision?.revision)
+          ) {
+            setPending(null);
+            return;
+          }
+          setPending({ provider, ...result });
+        } else {
+          // Errors are reported by the mutation. Never leave an old consent reusable.
+          setPending(null);
+        }
+      } catch {
+        if (generation === lifecycle.current) setPending(null);
+      } finally {
+        inFlight.current = false;
+        if (generation === lifecycle.current) setBusy(false);
+      }
+    },
+    [],
+  );
+  const guardedSwitch = useCallback(
+    (provider: Provider) => submit(provider),
+    [submit],
+  );
+  const cancel = () => {
+    lifecycle.current += 1;
+    setPending(null);
+    setBusy(false);
+  };
   const switchDialog = (
     <SwitchTierConfirmDialog
       targetName={pending?.targetName ?? null}
-      onCancel={() => setPending(null)}
-      onSwitch={(quitChatgpt) => {
-        const target = pending?.provider;
-        setPending(null);
-        if (target) switchRef.current(target, quitChatgpt);
+      catalog={pending?.catalog}
+      quitRequired={pending?.quitRequired}
+      disabled={disabled || busy}
+      onCancel={cancel}
+      onPreviewCatalog={(decision) => {
+        if (!pending?.catalog || decision.revision !== pending.catalog.revision)
+          return;
+        return submit(pending.provider, undefined, decision, true);
+      }}
+      onSwitch={(quitChatgpt, decision) => {
+        if (!pending) return;
+        if (
+          pending.catalog &&
+          (decision?.choice !== pending.catalog.choice ||
+            decision.revision !== pending.catalog.revision)
+        )
+          return;
+        return submit(pending.provider, quitChatgpt, decision);
       }}
     />
   );

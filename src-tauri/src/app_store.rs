@@ -22,6 +22,26 @@ fn update_cached_override(value: Option<PathBuf>) {
     }
 }
 
+/// Isolated tests only: restore the process cache before their home is removed.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) struct TestAppConfigRoot(Option<PathBuf>);
+#[cfg(any(test, feature = "test-hooks"))]
+impl TestAppConfigRoot {
+    pub(crate) fn enter(root: PathBuf) -> Self {
+        let home = std::env::var_os("CC_SWITCH_TEST_HOME").expect("isolated test home");
+        assert!(root.starts_with(PathBuf::from(home)));
+        let previous = get_app_config_dir_override();
+        update_cached_override(Some(root));
+        Self(previous)
+    }
+}
+#[cfg(any(test, feature = "test-hooks"))]
+impl Drop for TestAppConfigRoot {
+    fn drop(&mut self) {
+        update_cached_override(self.0.take());
+    }
+}
+
 /// 获取缓存中的 app_config_dir 覆盖路径
 pub fn get_app_config_dir_override() -> Option<PathBuf> {
     override_cache().read().ok()?.clone()

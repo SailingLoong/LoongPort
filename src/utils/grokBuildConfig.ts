@@ -130,7 +130,10 @@ export function updateGrokBuildConfig(
   return `${stringifyToml(config).trim()}\n`;
 }
 
-export function validateGrokBuildConfig(configToml: string): string | null {
+export function validateGrokBuildConfig(
+  configToml: string,
+  options: { allowBlankCredential?: boolean } = {},
+): string | null {
   if (!configToml.trim()) return "config.toml must not be empty";
   try {
     const root = asRecord(parseToml(configToml));
@@ -142,6 +145,7 @@ export function validateGrokBuildConfig(configToml: string): string | null {
       if (!asString(selected[field]).trim()) return `Missing ${field}`;
     }
     if (
+      !options.allowBlankCredential &&
       !asString(selected.api_key).trim() &&
       !asString(selected.env_key).trim()
     ) {

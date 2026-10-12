@@ -8,6 +8,240 @@ import type {
 } from "@/types";
 import type { AppId } from "./types";
 import { PROVIDER_SWITCHED } from "./events";
+import type { ApplicationModeState } from "./applicationRouting";
+
+/** Only the existing mode owner decides whether an edit requires U02 preview. */
+export interface ProviderEditSettings {
+  settingsConfig: Record<string, unknown>;
+  modeState: ApplicationModeState | null;
+  /** Original journal result for this app/row, never inferred from row equality. */
+  originalSave?: ProviderEditResult | null;
+  /** The native mode owner selects this receipt only for its restore scope. */
+  originalCatalogRestore?: CodexCatalogRestoreResult | null;
+}
+
+export interface ProviderEditRequest {
+  id: string;
+  providerId: string;
+  draftDigest: string;
+  revision: string;
+}
+
+export function isProviderEditRequest(
+  value: unknown,
+): value is ProviderEditRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as ProviderEditRequest;
+  return (
+    typeof request.id === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+      request.id,
+    ) &&
+    typeof request.providerId === "string" &&
+    request.providerId.length > 0 &&
+    typeof request.draftDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(request.draftDigest) &&
+    typeof request.revision === "string" &&
+    /^[a-f0-9]{64}$/.test(request.revision)
+  );
+}
+
+export type ProviderEditCode =
+  | "invalidFormat"
+  | "readOnly"
+  | "sourceChanged"
+  | "vaultLocked"
+  | "pendingOperation"
+  | "ownerUnavailable"
+  | "credentialConflict"
+  | "unsupported";
+export interface ProviderCatalogDecision {
+  choice: "keep" | "manage";
+  revision: string;
+}
+
+export interface CatalogPreview {
+  ownership: "unclaimedExternal" | "configuredExternal" | "managed" | "none";
+  choice: ProviderCatalogDecision["choice"];
+  canManage: boolean;
+  canRestore?: boolean;
+  revision: string;
+  beforePointer: string | null;
+  afterPointer: string | null;
+}
+
+export interface ProviderEditPreview {
+  app: AppId;
+  request: ProviderEditRequest;
+  status: "ready" | "blocked";
+  action: "saveOnly" | "saveAndApply";
+  fields: Array<
+    "connection" | "authentication" | "models" | "dedicated" | "metadata"
+  >;
+  files: Array<{
+    role:
+      | "claudeSettings"
+      | "codexAuth"
+      | "codexConfig"
+      | "codexCatalog"
+      | "managedAuth"
+      | "deviceAuthStash"
+      | "geminiEnv"
+      | "geminiSettings"
+      | "grokConfig";
+    change: "write" | "delete" | "unchanged";
+  }>;
+  preserves: Array<
+    | "unownedJsonKeys"
+    | "untouchedTomlBytes"
+    | "untouchedDotenvBytes"
+    | "sharedSettings"
+    | "externalCatalog"
+  >;
+  catalog?: CatalogPreview;
+  code?: ProviderEditCode;
+}
+
+export interface ProviderEditResult {
+  app: AppId;
+  request: ProviderEditRequest;
+  status:
+    | "completed"
+    | "notRecorded"
+    | "pending"
+    | "partial"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "unknown"
+    | "conflict"
+    | "stale"
+    | "blocked";
+  code?: ProviderEditCode;
+}
+
+/** The existing save receipt scoped to pointer-only restoration, without a draft. */
+export interface CodexCatalogRestoreRequest extends Omit<
+  ProviderEditRequest,
+  "providerId"
+> {
+  scope: "codexCatalogRestore";
+  providerId?: never;
+}
+
+export interface CodexCatalogRestorePreview {
+  app: "codex";
+  status: "ready";
+  request: CodexCatalogRestoreRequest;
+  beforePointer: string | null;
+  afterPointer: string | null;
+}
+
+export interface CodexCatalogRestoreResult extends Omit<
+  ProviderEditResult,
+  "app" | "request"
+> {
+  app: "codex";
+  request: CodexCatalogRestoreRequest;
+}
+
+export function isCodexCatalogRestoreRequest(
+  value: unknown,
+): value is CodexCatalogRestoreRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as CodexCatalogRestoreRequest;
+  return (
+    typeof request.id === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+      request.id,
+    ) &&
+    request.scope === "codexCatalogRestore" &&
+    request.providerId === undefined &&
+    typeof request.draftDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(request.draftDigest) &&
+    typeof request.revision === "string" &&
+    /^[a-f0-9]{64}$/.test(request.revision)
+  );
+}
+
+export function isCodexCatalogRestorePreview(
+  value: unknown,
+  requestId: string,
+): value is CodexCatalogRestorePreview {
+  if (!value || typeof value !== "object") return false;
+  const preview = value as CodexCatalogRestorePreview;
+  return (
+    preview.app === "codex" &&
+    preview.status === "ready" &&
+    isCodexCatalogRestoreRequest(preview.request) &&
+    preview.request.id === requestId &&
+    (preview.beforePointer === null ||
+      typeof preview.beforePointer === "string") &&
+    (preview.afterPointer === null || typeof preview.afterPointer === "string")
+  );
+}
+
+export function matchesCodexCatalogRestoreResult(
+  value: unknown,
+  request: CodexCatalogRestoreRequest,
+): value is CodexCatalogRestoreResult {
+  if (!value || typeof value !== "object") return false;
+  const result = value as CodexCatalogRestoreResult;
+  return (
+    result.app === "codex" &&
+    result.request?.scope === request.scope &&
+    result.request.providerId === undefined &&
+    result.request.id === request.id &&
+    result.request.draftDigest === request.draftDigest &&
+    result.request.revision === request.revision
+  );
+}
+
+export interface ProviderUpdateInput {
+  provider: Provider;
+  originalId?: string;
+  edit?: {
+    request: ProviderEditRequest;
+    deleteCredential: boolean;
+    catalogDecision?: ProviderCatalogDecision;
+    // Frontend routing only. The query command receives just app + request.
+    queryOnly?: true;
+  };
+}
+export type ProviderUpdateResult = Provider | ProviderEditResult;
+
+export function matchesProviderEditResult(
+  result: unknown,
+  app: AppId,
+  request: ProviderEditRequest,
+): result is ProviderEditResult {
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("request" in result) ||
+    !("app" in result)
+  )
+    return false;
+  const value = result as ProviderEditResult;
+  return (
+    value.app === app &&
+    value.request?.id === request.id &&
+    value.request.providerId === request.providerId &&
+    value.request.draftDigest === request.draftDigest &&
+    value.request.revision === request.revision
+  );
+}
+
+export function completedProviderEdit(
+  result: unknown,
+  app: AppId,
+  request: ProviderEditRequest,
+): result is ProviderEditResult {
+  return (
+    matchesProviderEditResult(result, app, request) &&
+    result.status === "completed"
+  );
+}
 
 export interface ProviderSortUpdate {
   id: string;
@@ -23,6 +257,8 @@ export type SwitchResult =
   | {
       status: "confirmationRequired";
       targetName: string;
+      catalog?: CatalogPreview;
+      quitRequired?: boolean;
     }
   | {
       status: "switched";
@@ -67,8 +303,68 @@ export const providersApi = {
   async getEditSettings(
     id: string,
     appId: AppId,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<ProviderEditSettings> {
     return await invoke("get_provider_edit_settings", { id, app: appId });
+  },
+
+  async previewEdit(
+    provider: Provider,
+    appId: AppId,
+    originalId: string,
+    requestId: string,
+    deleteCredential: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+  ): Promise<ProviderEditPreview> {
+    return await invoke("preview_provider_edit", {
+      app: appId,
+      provider,
+      originalId,
+      requestId,
+      deleteCredential,
+      ...(catalogDecision ? { catalogDecision } : {}),
+    });
+  },
+
+  async confirmEdit(
+    input: ProviderUpdateInput,
+    appId: AppId,
+  ): Promise<ProviderEditResult> {
+    if (!input.edit) throw new Error("provider.preview.invalidRequest");
+    return await invoke("confirm_provider_edit", {
+      app: appId,
+      provider: input.provider,
+      originalId: input.originalId,
+      request: input.edit.request,
+      deleteCredential: input.edit.deleteCredential,
+      ...(input.edit.catalogDecision
+        ? { catalogDecision: input.edit.catalogDecision }
+        : {}),
+    });
+  },
+
+  async queryEdit(
+    appId: AppId,
+    request: ProviderEditRequest,
+  ): Promise<ProviderEditResult> {
+    return await invoke("query_provider_edit", { app: appId, request });
+  },
+
+  async previewCodexCatalogRestore(
+    requestId: string,
+  ): Promise<CodexCatalogRestorePreview> {
+    return await invoke("preview_codex_catalog_restore", { requestId });
+  },
+
+  async confirmCodexCatalogRestore(
+    request: CodexCatalogRestoreRequest,
+  ): Promise<CodexCatalogRestoreResult> {
+    return await invoke("confirm_codex_catalog_restore", { request });
+  },
+
+  async queryCodexCatalogRestore(
+    request: CodexCatalogRestoreRequest,
+  ): Promise<CodexCatalogRestoreResult> {
+    return await invoke("query_codex_catalog_restore", { request });
   },
 
   async add(
@@ -124,11 +420,15 @@ export const providersApi = {
     id: string,
     appId: AppId,
     quitChatgpt?: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly?: boolean,
   ): Promise<SwitchResult> {
     return await invoke("switch_provider", {
       id,
       app: appId,
       quitChatgpt: quitChatgpt ?? null,
+      ...(catalogDecision ? { catalogDecision } : {}),
+      ...(catalogPreviewOnly !== undefined ? { catalogPreviewOnly } : {}),
     });
   },
 

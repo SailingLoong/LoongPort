@@ -98,3 +98,157 @@ export async function extractCommonConfigSnippet(
 
   return invoke<string>("extract_common_config_snippet", args);
 }
+
+export type SharedSettingsApp = "codex" | "claude" | "gemini";
+
+export interface GeminiSharedSettingsConfig {
+  env: string;
+  settings: string;
+}
+export type SharedSettingsConfig<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> = App extends "gemini" ? GeminiSharedSettingsConfig : string;
+export type SharedSettingsFileRole<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> = App extends "gemini"
+  ? "geminiEnv" | "geminiSettings"
+  : App extends "codex"
+    ? "codexConfig"
+    : "claudeSettings";
+type SharedSettingsChange<App extends SharedSettingsApp> = {
+  field: string;
+  before?: string;
+  after?: string;
+} & (App extends "gemini" ? { role: SharedSettingsFileRole<App> } : {});
+
+export interface SharedSettingsRequest<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  id: string;
+  scope: `${App}SharedSettings`;
+  draftDigest: string;
+  revision: string;
+}
+
+export interface SharedSettingsResult<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  request: SharedSettingsRequest<App>;
+  status:
+    | "completed"
+    | "pending"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "notRecorded"
+    | "unknown"
+    | "conflict"
+    | "stale"
+    | "blocked";
+  code?: string;
+}
+
+export interface SharedSettingsSnapshot<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  status: "ready" | "blocked";
+  config: SharedSettingsConfig<App>;
+  originalSave: SharedSettingsResult<App> | null;
+  code?: string;
+}
+
+export interface SharedSettingsPreview<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  request: SharedSettingsRequest<App>;
+  status: "ready" | "blocked";
+  changes: SharedSettingsChange<App>[];
+  files: {
+    role: SharedSettingsFileRole<App>;
+    change: "write" | "unchanged";
+  }[];
+  code?: string;
+}
+
+export interface SharedSettingsImport<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> {
+  app: App;
+  status: "ready" | "blocked";
+  fields: { path: string[]; field: string; value: string }[];
+  code?: string;
+}
+
+export interface SharedSettingsImportPreview<
+  App extends SharedSettingsApp = SharedSettingsApp,
+> extends SharedSettingsPreview<App> {
+  config: SharedSettingsConfig<App>;
+}
+
+/** All editors echo backend text and receipts without parsing business values. */
+export function getSharedSettingsApi<App extends SharedSettingsApp>(app: App) {
+  return {
+    get: () =>
+      invoke<SharedSettingsSnapshot<App>>(`get_${app}_shared_settings`),
+    preview: (config: SharedSettingsConfig<App>, requestId: string) =>
+      invoke<SharedSettingsPreview<App>>(`preview_${app}_shared_settings`, {
+        config,
+        requestId,
+      }),
+    save: (
+      config: SharedSettingsConfig<App>,
+      request: SharedSettingsRequest<App>,
+    ) =>
+      invoke<SharedSettingsResult<App>>(`save_${app}_shared_settings`, {
+        config,
+        request,
+      }),
+    result: (request: SharedSettingsRequest<App>) =>
+      invoke<SharedSettingsResult<App>>(
+        `get_${app}_shared_settings_save_result`,
+        { request },
+      ),
+    getImport: () =>
+      invoke<SharedSettingsImport<App>>(`get_${app}_shared_settings_import`),
+    previewImport: (fields: string[][], requestId: string) =>
+      invoke<SharedSettingsImportPreview<App>>(
+        `preview_${app}_shared_settings_import`,
+        { fields, requestId },
+      ),
+  };
+}
+
+export type CodexSharedSettingsRequest = SharedSettingsRequest<"codex">;
+export type CodexSharedSettingsResult = SharedSettingsResult<"codex">;
+export type CodexSharedSettingsSnapshot = SharedSettingsSnapshot<"codex">;
+export type CodexSharedSettingsPreview = SharedSettingsPreview<"codex">;
+export type CodexSharedSettingsImport = SharedSettingsImport<"codex">;
+export type CodexSharedSettingsImportPreview =
+  SharedSettingsImportPreview<"codex">;
+export const {
+  get: getCodexSharedSettings,
+  preview: previewCodexSharedSettings,
+  save: saveCodexSharedSettings,
+  result: getCodexSharedSettingsSaveResult,
+  getImport: getCodexSharedSettingsImport,
+  previewImport: previewCodexSharedSettingsImport,
+} = getSharedSettingsApi("codex");
+
+export type ClaudeSharedSettingsRequest = SharedSettingsRequest<"claude">;
+export type ClaudeSharedSettingsResult = SharedSettingsResult<"claude">;
+export type ClaudeSharedSettingsSnapshot = SharedSettingsSnapshot<"claude">;
+export type ClaudeSharedSettingsPreview = SharedSettingsPreview<"claude">;
+export type ClaudeSharedSettingsImport = SharedSettingsImport<"claude">;
+export type ClaudeSharedSettingsImportPreview =
+  SharedSettingsImportPreview<"claude">;
+export const {
+  get: getClaudeSharedSettings,
+  preview: previewClaudeSharedSettings,
+  save: saveClaudeSharedSettings,
+  result: getClaudeSharedSettingsSaveResult,
+  getImport: getClaudeSharedSettingsImport,
+  previewImport: previewClaudeSharedSettingsImport,
+} = getSharedSettingsApi("claude");

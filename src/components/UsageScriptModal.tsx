@@ -45,6 +45,7 @@ const VOLCENGINE_KEY_CONSOLE_URL =
 const ZHIPU_TEAM_USAGE_URL = "https://bigmodel.cn/coding-plan/team/usage-stats";
 
 interface UsageScriptModalProps {
+  mutationsDisabled?: boolean;
   provider: Provider;
   appId: AppId;
   isOpen: boolean;
@@ -173,6 +174,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  mutationsDisabled = false,
 }) => {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -460,6 +462,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   };
 
   const handleSave = () => {
+    if (mutationsDisabled) return;
     // 专用模板不需要脚本验证
     if (!NATIVE_USAGE_TEMPLATES.has(selectedTemplate || "")) {
       if (script.enabled && !script.code.trim()) {
@@ -845,6 +848,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           {t("common.cancel")}
         </Button>
         <Button
+          disabled={mutationsDisabled}
           onClick={handleSave}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >

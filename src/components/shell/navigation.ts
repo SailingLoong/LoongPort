@@ -1,4 +1,4 @@
-import { useCallback, useReducer } from "react";
+import { useCallback, useReducer, useRef } from "react";
 import type { AppId } from "@/lib/api";
 
 export type ClientView =
@@ -110,7 +110,9 @@ export function navigationReducer(
     };
   }
   if (action.type === "app")
-    return { ...state, current: { ...state.current, app: action.app } };
+    return action.app === state.current.app
+      ? state
+      : { ...state, current: { ...state.current, app: action.app } };
   const current: ClientRoute = {
     view: action.view,
     app: action.app ?? state.current.app,
@@ -141,6 +143,7 @@ export function navigationReducer(
 export function useClientNavigation(
   initial: () => ClientView,
   initialApp: () => AppId,
+  beforeNavigate?: (proceed: () => void) => void,
 ) {
   const [state, dispatch] = useReducer(navigationReducer, undefined, () => {
     const savedView = initial();
@@ -156,20 +159,31 @@ export function useClientNavigation(
       history: [],
     };
   });
+  const current = useRef(state);
+  current.current = state;
+  const guard = useRef(beforeNavigate);
+  guard.current = beforeNavigate;
+  // Keep the original reducer/history owner. The caller may defer this one action.
+  const request = useCallback((action: NavigationAction) => {
+    if (navigationReducer(current.current, action) === current.current) return;
+    const proceed = () => dispatch(action);
+    if (guard.current) guard.current(proceed);
+    else proceed();
+  }, []);
   const navigate = useCallback(
     (view: ClientView, app?: AppId, account?: AccountRoute) =>
-      dispatch({ type: "navigate", view, app, account }),
-    [],
+      request({ type: "navigate", view, app, account }),
+    [request],
   );
   const replace = useCallback(
-    (view: ClientView) => dispatch({ type: "replace", view }),
-    [],
+    (view: ClientView) => request({ type: "replace", view }),
+    [request],
   );
   const setApp = useCallback(
-    (app: AppId) => dispatch({ type: "app", app }),
-    [],
+    (app: AppId) => request({ type: "app", app }),
+    [request],
   );
-  const back = useCallback(() => dispatch({ type: "back" }), []);
+  const back = useCallback(() => request({ type: "back" }), [request]);
   return {
     view: state.current.view,
     app: state.current.app,

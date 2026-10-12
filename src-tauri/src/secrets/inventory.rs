@@ -171,6 +171,26 @@ pub(crate) fn validate_database(conn: &Connection, vault: &VaultContext) -> Resu
     })
 }
 
+/// Bind an upgrade recovery snapshot to its logical contents across key changes.
+/// Only this private in-memory copy is decrypted; the source is never modified.
+pub(crate) fn upgrade_archive_content_digest(
+    source: &Connection,
+    vault: &VaultContext,
+) -> Result<String, AppError> {
+    crate::database::vault::check_identity(source, vault)?;
+    let mut image = Connection::open_in_memory().map_err(database_error)?;
+    crate::database::vault::copy(source, &mut image)?;
+    process_values(&image, |table, column, keys, value| {
+        open_db(vault, table, column, keys, value).map(Some)
+    })?;
+    // Key wrappers change on password updates and rotation; retain the schema
+    // and every other table/column in the original complete-image digest.
+    image
+        .execute("DELETE FROM loongport_vault", [])
+        .map_err(database_error)?;
+    crate::database::Database::content_digest(&image)
+}
+
 /// Explicit reset only: discard protected contents without an old key.
 pub(crate) fn reset_database(conn: &Connection, target: &VaultContext) -> Result<usize, AppError> {
     let mut cleared = 0;

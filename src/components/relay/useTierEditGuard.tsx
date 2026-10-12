@@ -7,6 +7,12 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { providersApi } from "@/lib/api";
 import type { AppId } from "@/lib/api";
 import type { Provider } from "@/types";
+import {
+  completedProviderEdit,
+  matchesProviderEditResult,
+  type ProviderUpdateInput,
+  type ProviderUpdateResult,
+} from "@/lib/api/providers";
 
 /**
  * 这个 hook 需要被编辑对象提供的**全部**信息。
@@ -130,23 +136,37 @@ export function useTierEditGuard(
    * 不 catch），只抛不 toast 用户就只看到弹窗不关、不知道为什么。
    */
   const handleSubmit = useCallback(
-    async ({
-      provider,
-      originalId,
-    }: {
-      provider: Provider;
-      originalId?: string;
-    }) => {
+    async (input: ProviderUpdateInput): Promise<ProviderUpdateResult> => {
+      if (input.edit) {
+        let result;
+        try {
+          result = input.edit.queryOnly
+            ? await providersApi.queryEdit(appId, input.edit.request)
+            : await providersApi.confirmEdit(input, appId);
+        } catch {
+          return { app: appId, request: input.edit.request, status: "unknown" };
+        }
+        if (!matchesProviderEditResult(result, appId, input.edit.request)) {
+          return { app: appId, request: input.edit.request, status: "unknown" };
+        }
+        if (completedProviderEdit(result, appId, input.edit.request)) {
+          try {
+            await onSaved();
+          } catch {
+            /* The completed write remains completed. */
+          }
+        }
+        return result;
+      }
       try {
-        await providersApi.update(provider, appId, originalId);
+        await providersApi.update(input.provider, appId, input.originalId);
       } catch (e) {
         toast.error(String(e));
-        // 见上：不 throw 的话 `EditProviderDialog` 会照常关掉弹窗。
+        // Legacy callers still receive the rejection and keep the editor open.
         throw e;
       }
-      setEditing(null);
-      // 刷新：配置变了，「已手动维护」那个标记要跟着变（后端每次现算）。
       await onSaved();
+      return input.provider;
     },
     [appId, onSaved],
   );

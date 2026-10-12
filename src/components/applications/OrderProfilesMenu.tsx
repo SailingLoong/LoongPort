@@ -36,6 +36,7 @@ export function OrderProfilesMenu({
   onSaved,
   selectedName,
   disabled = false,
+  writeBlocked = false,
   onBusyChange,
   onProfileRenamed,
   onProfileRemoved,
@@ -51,6 +52,7 @@ export function OrderProfilesMenu({
   onSaved: (name: string, ids: string[]) => void;
   selectedName?: string;
   disabled?: boolean;
+  writeBlocked?: boolean;
   onBusyChange: (busy: boolean) => void;
   onProfileRenamed: (from: string, to: string) => void;
   onProfileRemoved: (name: string) => void;
@@ -66,8 +68,9 @@ export function OrderProfilesMenu({
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const locked = disabled || busy;
-  const run = async (operation: () => Promise<void>) => {
-    if (pending.current || disabled) return;
+  const mutationLocked = locked || writeBlocked;
+  const run = async (operation: () => Promise<void>, mutates = true) => {
+    if (pending.current || disabled || (mutates && writeBlocked)) return;
     pending.current = true;
     setBusy(true);
     onBusyChange(true);
@@ -98,6 +101,7 @@ export function OrderProfilesMenu({
   };
 
   const save = async () => {
+    if (writeBlocked) return;
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
@@ -113,6 +117,7 @@ export function OrderProfilesMenu({
   };
 
   const rename = async () => {
+    if (writeBlocked) return;
     const to = renameTo.trim();
     if (!to || renaming == null) return;
     try {
@@ -126,6 +131,7 @@ export function OrderProfilesMenu({
   };
 
   const remove = async (profileName: string) => {
+    if (writeBlocked) return;
     try {
       await orderProfilesApi.remove(appType, profileName);
       onProfileRemoved(profileName);
@@ -136,6 +142,7 @@ export function OrderProfilesMenu({
   };
 
   const importFromFile = async () => {
+    if (writeBlocked) return;
     try {
       const count = await orderProfilesApi.import(appType);
       if (count != null) {
@@ -203,7 +210,7 @@ export function OrderProfilesMenu({
                 </span>
                 <Button
                   size="icon"
-                  disabled={locked}
+                  disabled={mutationLocked}
                   variant="ghost"
                   className="h-6 w-6 shrink-0"
                   aria-label={t("applications.orderProfileRename", {
@@ -215,7 +222,7 @@ export function OrderProfilesMenu({
                   // 下拉里的行内动作不能触发外层 onSelect 的载入：截断事件。
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (pending.current || disabled) return;
+                    if (pending.current || disabled || writeBlocked) return;
                     setRenaming(profile.name);
                     setRenameTo(profile.name);
                   }}
@@ -224,7 +231,7 @@ export function OrderProfilesMenu({
                 </Button>
                 <Button
                   size="icon"
-                  disabled={locked}
+                  disabled={mutationLocked}
                   variant="ghost"
                   className="h-6 w-6 shrink-0"
                   aria-label={t("applications.orderProfileDelete", {
@@ -245,23 +252,24 @@ export function OrderProfilesMenu({
           })}
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            disabled={locked}
+            disabled={mutationLocked}
             onSelect={() => {
-              if (!pending.current && !disabled) setSaveOpen(true);
+              if (!pending.current && !disabled && !writeBlocked)
+                setSaveOpen(true);
             }}
           >
             <Save className="h-3.5 w-3.5" />
             {t("applications.orderProfileSaveCurrent")}
           </DropdownMenuItem>
           <DropdownMenuItem
-            disabled={locked}
+            disabled={mutationLocked}
             onSelect={() => void run(importFromFile)}
           >
             {t("applications.orderProfileImport")}
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={locked}
-            onSelect={() => void run(exportToFile)}
+            onSelect={() => void run(exportToFile, false)}
           >
             {t("applications.orderProfileExport")}
           </DropdownMenuItem>
@@ -299,7 +307,7 @@ export function OrderProfilesMenu({
               {t("common.cancel")}
             </Button>
             <Button
-              disabled={locked || !name.trim()}
+              disabled={mutationLocked || !name.trim()}
               onClick={() => void run(save)}
             >
               {t("common.save")}
@@ -337,7 +345,9 @@ export function OrderProfilesMenu({
             </Button>
             <Button
               disabled={
-                locked || !renameTo.trim() || renameTo.trim() === renaming
+                mutationLocked ||
+                !renameTo.trim() ||
+                renameTo.trim() === renaming
               }
               onClick={() => void run(rename)}
             >

@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
-    pub proxy_service: ProxyService,
+    pub proxy_service: Arc<ProxyService>,
     pub usage_cache: Arc<UsageCache>,
     pub model_verification: Arc<ModelVerificationCoordinator>,
     /// 浏览器代拉 API 请求的回传调度器（登录窗代拉防护站时用）。

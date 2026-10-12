@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ProviderCatalogDecision } from "./providers";
 import type { SwitchTierCommandResult } from "./relay";
 import type { TierBoardModelOption, TierBoardTier } from "./autoMode";
 
@@ -28,7 +29,21 @@ export interface SubscriptionWindow {
   resetAt: number | null;
 }
 
+/** Read-only facts from the existing mode owner; not a serialized operation journal. */
+export interface ApplicationModeState {
+  status: "ready" | "pending" | "unknown";
+  mode: "direct" | "proxy" | null;
+  attached: boolean | null;
+  currentProviderId: string | null;
+  directProviderId: string | null;
+  publicationStarted: boolean | null;
+  canWrite: boolean;
+  canRecheck: boolean;
+  legacyCommonConfigWritable?: boolean;
+}
+
 export interface ApplicationRouting {
+  modeState?: ApplicationModeState | null;
   autoFailoverEnabled: boolean;
   /** This application is currently served by a running proxy with takeover. */
   routingActive: boolean;
@@ -43,17 +58,75 @@ export interface ApplicationRouting {
 }
 
 export interface ApplicationRoutingChange {
+  catalogDecision?: ProviderCatalogDecision;
+  catalogPreviewOnly?: boolean;
   order?: { profileName: string; providerIds: string[] };
   selection?: { providerId: string; model?: string };
 }
 
+export interface ApplicationRoutingRequest {
+  id: string;
+  scope: "applicationRouting";
+  draftDigest: string;
+  revision: string;
+}
+export interface ApplicationRoutingRequestResult {
+  request: ApplicationRoutingRequest;
+  status:
+    | "completed"
+    | "pending"
+    | "verificationRequired"
+    | "discarded"
+    | "abandoned"
+    | "notRecorded"
+    | "unknown"
+    | "conflict";
+}
+export type ApplicationRoutingCommandResult =
+  | SwitchTierCommandResult
+  | { status: "requestResolved"; result: ApplicationRoutingRequestResult };
+
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt?: boolean,
+): Promise<SwitchTierCommandResult>;
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt: boolean | undefined,
+  request: ApplicationRoutingRequest,
+): Promise<ApplicationRoutingCommandResult>;
+function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
+  quitChatgpt?: boolean,
+  request?: ApplicationRoutingRequest,
+): Promise<ApplicationRoutingCommandResult> {
+  return invoke("apply_application_routing", {
+    appType,
+    change,
+    quitChatgpt,
+    ...(request ? { request } : {}),
+  });
+}
 export const applicationRoutingApi = {
-  apply: (
+  apply: applyRouting,
+  prepareRequest: (
     appType: string,
     change: ApplicationRoutingChange,
-    quitChatgpt?: boolean,
-  ): Promise<SwitchTierCommandResult> =>
-    invoke("apply_application_routing", { appType, change, quitChatgpt }),
+    requestId: string,
+  ): Promise<ApplicationRoutingRequest> =>
+    invoke("prepare_application_routing_request", {
+      appType,
+      change,
+      requestId,
+    }),
+  queryRequest: (
+    appType: string,
+    request: ApplicationRoutingRequest,
+  ): Promise<ApplicationRoutingRequestResult> =>
+    invoke("get_application_routing_request_result", { appType, request }),
   get: (appType: string): Promise<ApplicationRouting> =>
     invoke("get_application_routing", { appType }),
   setOrder: (appType: string, orderedIds: string[]): Promise<void> =>

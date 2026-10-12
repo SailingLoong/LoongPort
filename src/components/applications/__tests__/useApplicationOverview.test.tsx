@@ -7,6 +7,8 @@ import { useApplicationOverview } from "../useApplicationOverview";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   relay: vi.fn(),
+  relayModel: vi.fn(),
+  apply: vi.fn(),
   vendor: vi.fn(),
   error: vi.fn(),
   success: vi.fn(),
@@ -14,7 +16,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api/applicationOverview", () => ({
   applicationOverviewApi: { get: mocks.get },
 }));
-vi.mock("@/lib/api/relay", () => ({ relayApi: { switchTier: mocks.relay } }));
+vi.mock("@/lib/api/relay", () => ({
+  relayApi: { switchTier: mocks.relay, switchTierModel: mocks.relayModel },
+}));
+vi.mock("@/lib/api/applicationRouting", () => ({
+  applicationRoutingApi: { apply: mocks.apply },
+}));
 vi.mock("@/lib/api/vendor", () => ({ vendorApi: { switch: mocks.vendor } }));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("sonner", () => ({
@@ -162,4 +169,111 @@ describe("configuration selection", () => {
     expect(mocks.relay).toHaveBeenCalledTimes(1);
     expect(mocks.success).not.toHaveBeenCalled();
   });
+});
+
+it("retains the selected model and uses canonical routing for the catalog preview and final apply", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "/external/models.json",
+    afterPointer: "/external/models.json",
+  };
+  const decision = { choice: "manage" as const, revision: "catalog-v1" };
+  mocks.relayModel.mockResolvedValueOnce({
+    status: "confirmationRequired",
+    targetName: "Example",
+    catalog,
+    quitRequired: false,
+  });
+  mocks.apply
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Example",
+      catalog: {
+        ...catalog,
+        choice: "manage",
+        afterPointer: "/managed/models.json",
+      },
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "switched",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
+  const { result } = renderHook(
+    () => useApplicationOverview("codex", providers, vi.fn()),
+    { wrapper },
+  );
+  await act(async () => {
+    await result.current.select(target, undefined, "model-b");
+  });
+  expect(result.current.catalog).toEqual(catalog);
+  expect(result.current.quitRequired).toBe(false);
+  await act(async () => {
+    await result.current.previewCatalog(decision);
+  });
+  expect(mocks.apply).toHaveBeenNthCalledWith(
+    1,
+    "codex",
+    {
+      selection: { providerId: target.providerId, model: "model-b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: true,
+    },
+    undefined,
+  );
+  expect(mocks.success).not.toHaveBeenCalled();
+  await act(async () => {
+    await result.current.confirm(false, decision);
+  });
+  expect(mocks.apply).toHaveBeenNthCalledWith(
+    2,
+    "codex",
+    {
+      selection: { providerId: target.providerId, model: "model-b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: false,
+    },
+    false,
+  );
+  expect(mocks.success).toHaveBeenCalledOnce();
+  expect(result.current.confirmation).toBeNull();
+});
+
+it("drops a catalog confirmation when the application changes", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "/external/models.json",
+    afterPointer: "/external/models.json",
+  };
+  mocks.relay.mockResolvedValueOnce({
+    status: "confirmationRequired",
+    targetName: "Example",
+    catalog,
+  });
+  const { result, rerender } = renderHook(
+    ({ app }: { app: "codex" | "claude" }) =>
+      useApplicationOverview(app, providers, vi.fn()),
+    { wrapper, initialProps: { app: "codex" as "codex" | "claude" } },
+  );
+  await act(async () => {
+    await result.current.select(target);
+  });
+  expect(result.current.catalog).toEqual(catalog);
+  rerender({ app: "claude" });
+  expect(result.current.confirmation).toBeNull();
+  await act(async () => {
+    await result.current.confirm(false, {
+      choice: "keep",
+      revision: "catalog-v1",
+    });
+  });
+  expect(mocks.apply).not.toHaveBeenCalled();
 });

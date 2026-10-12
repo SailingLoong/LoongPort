@@ -115,6 +115,10 @@ pub struct CodexProviderTemplateBucketMigrationOutcome {
 pub fn maybe_migrate_codex_third_party_history_provider_bucket(
     db: &Database,
 ) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     if crate::settings::is_codex_third_party_history_provider_bucket_migrated() {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("already_migrated".to_string()),
@@ -170,6 +174,10 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
 pub fn maybe_migrate_codex_provider_template_bucket(
     db: &Database,
 ) -> Result<CodexProviderTemplateBucketMigrationOutcome, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     if crate::settings::is_codex_provider_template_migrated() {
         return Ok(CodexProviderTemplateBucketMigrationOutcome {
             skipped_reason: Some("already_migrated".to_string()),
@@ -197,6 +205,10 @@ pub fn maybe_migrate_codex_provider_template_bucket(
 /// 迁移前 jsonl / state DB 均备份到 `~/.cc-switch/backups/codex-official-history-unify-v1/`。
 pub fn maybe_migrate_codex_official_history_to_unified_bucket(
 ) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     if !crate::settings::unify_codex_session_history() {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("unify_toggle_off".to_string()),

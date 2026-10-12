@@ -16,6 +16,9 @@ const state = vi.hoisted(() => ({
   resetTierErrors: vi.fn(),
   removeProfile: vi.fn(),
   overviewError: null as Error | null,
+  overviewUpdatedAt: 1000,
+  writeBlocked: false,
+  modeState: undefined as any,
   refetchOverview: vi.fn(),
   refetchRouting: vi.fn(),
   refetchProfiles: vi.fn(),
@@ -25,6 +28,7 @@ vi.mock("../useApplicationOverview", () => ({
     data: state.data,
     isPending: false,
     error: state.overviewError,
+    dataUpdatedAt: state.overviewUpdatedAt,
     refetch: state.refetchOverview,
     select: state.select,
     busy: false,
@@ -36,6 +40,9 @@ vi.mock("../useApplicationOverview", () => ({
 vi.mock("../useApplicationRouting", () => ({
   useApplicationRouting: () => ({
     data: state.routing,
+    writeBlocked: state.writeBlocked,
+    modeState: state.modeState,
+    dataUpdatedAt: 1000,
     isPending: false,
     error: null,
     refetch: state.refetchRouting,
@@ -48,7 +55,10 @@ vi.mock("../useApplicationRouting", () => ({
   }),
 }));
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, options?: { time?: string }) =>
+      options?.time ? `${key} ${options.time}` : key,
+  }),
 }));
 // 工作台本体直接用 react-query 取配置档状态（列表+当前档）；主文件不包
 // Provider，把 useQuery/useQueryClient 打桩，配置档数据流在 order.test 专测。
@@ -64,9 +74,6 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
     useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   };
 });
-vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
-  SwitchTierConfirmDialog: () => null,
-}));
 // 验真 Provider 在工作台内拉 summaries；空结果即可（入口按钮只看资格字段）。
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
@@ -107,6 +114,9 @@ const names = () =>
 beforeEach(() => {
   vi.clearAllMocks();
   state.overviewError = null;
+  state.writeBlocked = false;
+  state.modeState = undefined;
+  state.overviewUpdatedAt = 1000;
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
   state.apply.mockResolvedValue({
@@ -772,4 +782,135 @@ describe("order profile menu pending state", () => {
     await act(async () => finish());
     expect(onProfileRemoved).toHaveBeenCalledWith("Saved");
   });
+  it("shows pending-owner notice and locks writes without locking view controls or re-running actions", async () => {
+    state.routing.autoFailoverEnabled = true;
+    state.routing.routingActive = false;
+    state.writeBlocked = true;
+    state.modeState = {
+      status: "pending",
+      canWrite: false,
+      canRecheck: true,
+      publicationStarted: true,
+    };
+    render(<ApplicationWorkspace {...props} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "applications.operationNeedsVerification",
+    );
+    expect(
+      screen.getByRole("switch", { name: "applications.autoFailover" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "applications.resumeRouting" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "applications.use Premium" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "applications.metrics.balanceUsd" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.recheckOperation" }),
+    );
+    expect(state.refetchRouting).toHaveBeenCalledOnce();
+    expect(state.apply).not.toHaveBeenCalled();
+    expect(state.setFailover).not.toHaveBeenCalled();
+    expect(state.select).not.toHaveBeenCalled();
+  });
+});
+
+it.each([
+  ["direct", false, "routingModeDirect"],
+  ["proxy", true, "routingModeProxy"],
+  ["proxy", false, "routingModeDetached"],
+])(
+  "shows backend mode %s with attached=%s independently of failover permission",
+  (mode, attached, label) => {
+    state.routing.autoFailoverEnabled = false;
+    state.modeState = { status: "ready", mode, attached, canWrite: true };
+    render(<ApplicationWorkspace {...props} />);
+    expect(screen.getByText(`applications.${label}`)).toBeVisible();
+  },
+);
+
+it("dates a failed overview from its retained read rather than the fresh routing poll", () => {
+  state.overviewError = new Error("unavailable");
+  state.overviewUpdatedAt = 123456000;
+  render(<ApplicationWorkspace {...props} />);
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    `applications.lastSuccessfulRead ${new Date(123456000).toLocaleString()}`,
+  );
+});
+
+it("wires the real catalog confirmation through preview-only and final routing apply", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "/external/models.json",
+    afterPointer: "/external/models.json",
+  };
+  state.routing.autoFailoverEnabled = true;
+  state.apply
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Premium",
+      catalog,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Premium",
+      catalog: {
+        ...catalog,
+        choice: "manage",
+        afterPointer: "/managed/models.json",
+      },
+      quitRequired: false,
+    });
+  render(<ApplicationWorkspace {...props} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "applications.use Premium" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  await userEvent.click(
+    within(dialog).getByRole("radio", {
+      name: "provider.preview.catalog.manage",
+    }),
+  );
+  expect(
+    within(dialog).getByRole("button", { name: "applications.apply" }),
+  ).toBeDisabled();
+  await userEvent.click(
+    within(dialog).getByRole("button", {
+      name: "provider.preview.catalog.confirmChoice",
+    }),
+  );
+  const decision = { choice: "manage", revision: "catalog-v1" };
+  expect(state.apply).toHaveBeenNthCalledWith(
+    2,
+    {
+      selection: { providerId: "b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: true,
+    },
+    undefined,
+  );
+  const updated = screen.getByRole("dialog");
+  expect(within(updated).getByText("/managed/models.json")).toBeVisible();
+  await userEvent.click(
+    within(updated).getByRole("button", { name: "applications.apply" }),
+  );
+  expect(state.apply).toHaveBeenNthCalledWith(
+    3,
+    {
+      selection: { providerId: "b" },
+      catalogDecision: decision,
+      catalogPreviewOnly: false,
+    },
+    false,
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
 });

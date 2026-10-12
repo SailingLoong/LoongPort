@@ -33,6 +33,18 @@ fn lock_backup_file_operations() -> Result<BackupFileOperationGuard, AppError> {
         .map_err(|e| AppError::Database(format!("Backup file operation lock failed: {e}")))
 }
 
+fn is_upgrade_archive_filename(filename: &str) -> bool {
+    let filename = filename.to_ascii_lowercase();
+    filename
+        .strip_prefix("upgrade_")
+        .and_then(|name| name.strip_suffix(".db"))
+        .is_some_and(|id| {
+            uuid::Uuid::parse_str(id)
+                .map(|uuid| uuid.to_string() == id)
+                .unwrap_or(false)
+        })
+}
+
 /// `dump_sql` 会写出的 PRAGMA。其余 PRAGMA 一律拒绝——`temp_store_directory`
 /// 能把临时文件重定向到任意目录，`writable_schema` 能绕过 schema 完整性检查。
 const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
@@ -129,6 +141,73 @@ pub(crate) struct ValidatedSyncSnapshot {
 }
 
 impl Database {
+    /// Complete logical image fingerprint used by explicit upgrade verification.
+    #[allow(dead_code)]
+    pub(crate) fn content_digest(conn: &Connection) -> Result<String, AppError> {
+        use sha2::{Digest, Sha256};
+        fn frame(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        let mut hash = Sha256::new();
+        frame(&mut hash, b"loongport-database-content-v1");
+        frame(&mut hash, &Self::get_user_version(conn)?.to_le_bytes());
+        let mut statement =
+            conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name,type")?;
+        let objects = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for object in objects {
+            let encoded = serde_json::to_vec(&object)
+                .map_err(|_| AppError::Database("Cannot encode database fingerprint".into()))?;
+            frame(&mut hash, &encoded);
+            if object.0 != "table" {
+                continue;
+            }
+            let columns = Self::get_table_columns(conn, &object.1)?;
+            let columns_encoded = serde_json::to_vec(&columns)
+                .map_err(|_| AppError::Database("Cannot encode database fingerprint".into()))?;
+            frame(&mut hash, &columns_encoded);
+            if columns.is_empty() {
+                continue;
+            }
+            let names = columns
+                .iter()
+                .map(|name| Self::quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = conn.prepare(&format!(
+                "SELECT {names} FROM {}",
+                Self::quote_identifier(&object.1)
+            ))?;
+            let mut rows = statement.query([])?;
+            let mut row_hashes = Vec::<[u8; 32]>::new();
+            while let Some(row) = rows.next()? {
+                let mut values = zeroize::Zeroizing::new(Vec::with_capacity(columns.len()));
+                for index in 0..columns.len() {
+                    values.push(Self::format_sql_value(row.get_ref(index)?)?);
+                }
+                let encoded =
+                    zeroize::Zeroizing::new(serde_json::to_vec(&*values).map_err(|_| {
+                        AppError::Database("Cannot encode database fingerprint".into())
+                    })?);
+                row_hashes.push(Sha256::digest(&*encoded).into());
+            }
+            row_hashes.sort_unstable();
+            frame(&mut hash, &(row_hashes.len() as u64).to_le_bytes());
+            for row_hash in row_hashes {
+                frame(&mut hash, &row_hash);
+            }
+        }
+        Ok(hex::encode(hash.finalize()))
+    }
     /// Raw snapshots are test fixtures; public file exports require portable keys.
     #[cfg(test)]
     pub(crate) fn export_sql_string(&self) -> Result<String, AppError> {
@@ -232,6 +311,55 @@ impl Database {
         })
     }
 
+    /// Validate a sync image against the existing authenticated receiver.
+    /// Ordinary imports keep their original ceiling; only an existing exact
+    /// upstream4 receiver can stage the same tuple without a schema migration.
+    pub(crate) fn validate_sync_snapshot_for_current(
+        &self,
+        sql: &str,
+        expected: &VaultMetadata,
+        vault: &VaultContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let current = self.secrets.read()?;
+        let conn = self.conn.lock()?;
+        super::vault::check_identity(&conn, &current)?;
+        let version = Self::get_user_version(&conn)?;
+        let loongport = super::loongport_schema::read_stored_version(&conn)?;
+        if version <= super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+            super::vault::preflight_connection(&conn)?;
+            drop(conn);
+            drop(current);
+            return Self::validate_sync_snapshot(sql, expected, vault);
+        }
+        if version != super::UPSTREAM4_SCHEMA_VERSION
+            || loongport != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config("secret.database_version_too_new".into()));
+        }
+        drop(conn);
+        Self::validate_sync_source(vault, expected)?;
+        let connection = Self::stage_import_sql(sql, true)?;
+        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        if Self::get_user_version(&connection)? != version
+            || super::loongport_schema::read_stored_version(&connection)? != loongport
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        let source = VaultContext::from_key(expected.clone(), vault.export_key())
+            .map_err(crate::secrets::inventory::secret_error)?;
+        crate::secrets::inventory::validate_database(&connection, &source)?;
+        crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
+        super::vault::stamp(&connection, vault)?;
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: vault.metadata().clone(),
+        })
+    }
+
     /// Preserve device-local rows under the incoming key while the transition
     /// engine holds the current session generation and database connection.
     pub(crate) fn prepare_sync_join(
@@ -244,9 +372,28 @@ impl Database {
             return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
         super::vault::check_identity(current_conn, current)?;
+        let version = Self::get_user_version(current_conn)?;
+        // Joining vault generations is not a schema upgrade/downgrade owner.
+        // Explicitly staged v4 databases retain their cursor columns in the
+        // private rewrapping copy; ordinary import/startup admission is unchanged.
+        if version != super::SCHEMA_VERSION
+            || Self::get_user_version(&incoming.connection)? != version
+            || super::loongport_schema::read_stored_version(current_conn)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || super::loongport_schema::read_stored_version(&incoming.connection)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
         let local = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&local)?;
+        Self::apply_schema_migrations_on_conn(&local)?;
         super::loongport_schema::apply(&local)?;
+        if version == super::UPSTREAM4_SCHEMA_VERSION {
+            Self::apply_upstream4_migrations_on_conn(&local)?;
+        }
         Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
         crate::secrets::inventory::transform_database(&local, Some(current), next)?;
         Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
@@ -715,6 +862,36 @@ impl Database {
         self.backup_database_file_locked(&backup_file_guard, &vault)
     }
 
+    /// Keep the authenticated pre-upgrade image with the original backup owner.
+    /// The caller pins the current vault generation and verifies checkpoint identity.
+    /// Existing key rotation already rewraps every .db in this backup directory.
+    pub(crate) fn archive_upgrade_database(
+        &self,
+        source: &Connection,
+        checkpoint_id: &str,
+        vault: &VaultContext,
+    ) -> Result<PathBuf, AppError> {
+        if !is_upgrade_archive_filename(&format!("upgrade_{checkpoint_id}.db")) {
+            return Err(AppError::InvalidInput(
+                "Invalid upgrade checkpoint ID".into(),
+            ));
+        }
+        let backup_file_guard = lock_backup_file_operations()?;
+        let current = lock_conn!(self.conn);
+        super::vault::check_identity(&current, vault)?;
+        crate::secrets::inventory::validate_database(&current, vault)?;
+        Self::backup_database_file_from_conn_for_upgrade(
+            &backup_file_guard,
+            source,
+            self.secrets.root(),
+            vault,
+            &[],
+            Some(checkpoint_id),
+            |_, _| Ok(()),
+        )?
+        .ok_or_else(|| AppError::Config("backup.upgrade_database_missing".into()))
+    }
+
     fn backup_database_file_locked(
         &self,
         backup_file_guard: &BackupFileOperationGuard,
@@ -750,11 +927,34 @@ impl Database {
     }
 
     fn backup_database_file_from_conn_with_hook<F>(
+        backup_file_guard: &BackupFileOperationGuard,
+        source_conn: &Connection,
+        root: &Path,
+        vault: &VaultContext,
+        protected_paths: &[&Path],
+        before_publish: F,
+    ) -> Result<Option<PathBuf>, AppError>
+    where
+        F: FnOnce(&Path, &Path) -> Result<(), AppError>,
+    {
+        Self::backup_database_file_from_conn_for_upgrade(
+            backup_file_guard,
+            source_conn,
+            root,
+            vault,
+            protected_paths,
+            None,
+            before_publish,
+        )
+    }
+
+    fn backup_database_file_from_conn_for_upgrade<F>(
         _backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
         root: &Path,
         vault: &VaultContext,
         protected_paths: &[&Path],
+        upgrade_id: Option<&str>,
         before_publish: F,
     ) -> Result<Option<PathBuf>, AppError>
     where
@@ -780,12 +980,24 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        crate::config::ensure_private_directory(&backup_dir)?;
-
         let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
         let mut next_suffix = 0;
-        let mut backup_path =
-            Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix);
+        let mut backup_path = if let Some(id) = upgrade_id {
+            let path = backup_dir.join(format!("upgrade_{id}.db"));
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    Self::finish_upgrade_archive(&path, &snapshot, vault)?;
+                    return Ok(Some(path));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::io(&path, error)),
+            }
+            path
+        } else {
+            Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix)
+        };
+
+        crate::config::ensure_private_directory(&backup_dir)?;
 
         // Build and validate the backup under a non-.db temporary name. Backup
         // discovery and retention only see the final path after the complete
@@ -808,12 +1020,19 @@ impl Database {
         dest_conn
             .close()
             .map_err(|(_, e)| AppError::Database(format!("关闭数据库安全备份失败: {e}")))?;
+        if upgrade_id.is_some() {
+            crate::config::sync_private_file(temp_db_path)?;
+        }
         before_publish(temp_db_path, &backup_path)?;
 
         loop {
             match temp_path.persist_noclobber(&backup_path) {
                 Ok(()) => break,
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if upgrade_id.is_some() {
+                        Self::finish_upgrade_archive(&backup_path, &snapshot, vault)?;
+                        return Ok(Some(backup_path));
+                    }
                     temp_path = error.path;
                     backup_path =
                         Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix);
@@ -823,6 +1042,10 @@ impl Database {
         }
 
         crate::config::ensure_private_file(&backup_path)?;
+        if upgrade_id.is_some() {
+            Self::finish_upgrade_archive(&backup_path, &snapshot, vault)?;
+            return Ok(Some(backup_path));
+        }
 
         // The newly created safety backup must never be the cleanup victim.
         // During restore, the selected source is protected as well. If the
@@ -833,6 +1056,32 @@ impl Database {
         cleanup_protected.extend_from_slice(protected_paths);
         Self::cleanup_db_backups(&backup_dir, &cleanup_protected)?;
         Ok(Some(backup_path))
+    }
+
+    /// A retry may follow publication whose directory fsync failed. Authenticate
+    /// the exact image, then finish durability without rewriting its ciphertext.
+    fn finish_upgrade_archive(
+        path: &Path,
+        source: &Connection,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        let archive = super::inspection::capture(path)?
+            .ok_or_else(|| AppError::Config("backup.upgrade_archive_missing".into()))?;
+        super::vault::check_identity(&archive.image, vault)?;
+        crate::secrets::inventory::validate_database(&archive.image, vault)?;
+        if Self::content_digest(&archive.image)? != Self::content_digest(source)? {
+            return Err(AppError::Config("backup.upgrade_archive_conflict".into()));
+        }
+        super::inspection::verify_unchanged(path, &archive.revision)?;
+        crate::config::ensure_private_file(path)?;
+        crate::config::sync_private_file(path)?;
+        #[cfg(unix)]
+        for directory in path.ancestors().skip(1).take(2) {
+            fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| AppError::io(directory, error))?;
+        }
+        Ok(())
     }
 
     fn next_available_backup_path(
@@ -868,11 +1117,12 @@ impl Database {
             Ok(iter) => iter
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .map(|ext| ext == "db")
-                        .unwrap_or(false)
+                    let path = entry.path();
+                    path.extension().is_some_and(|ext| ext == "db")
+                        && !path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(is_upgrade_archive_filename)
                 })
                 .collect::<Vec<_>>(),
             Err(_) => return Ok(()),
@@ -1239,7 +1489,7 @@ impl Database {
         s
     }
 
-    /// List all database backup files, sorted by creation time (newest first)
+    /// List ordinary database backup files, sorted by creation time (newest first).
     pub fn list_backups() -> Result<Vec<BackupEntry>, AppError> {
         let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
@@ -1251,6 +1501,11 @@ impl Database {
             .map_err(|e| AppError::io(&backup_dir, e))?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|ext| ext == "db").unwrap_or(false))
+            .filter(|e| {
+                !e.file_name()
+                    .to_str()
+                    .is_some_and(is_upgrade_archive_filename)
+            })
             .filter_map(|e| {
                 let metadata = e.metadata().ok()?;
                 let filename = e.file_name().to_string_lossy().to_string();
@@ -1278,6 +1533,11 @@ impl Database {
 
     /// Restore database from a backup file. Returns the safety backup ID.
     pub fn restore_from_backup(&self, filename: &str) -> Result<String, AppError> {
+        if is_upgrade_archive_filename(filename) {
+            return Err(AppError::InvalidInput(
+                "Upgrade recovery archives require coordinated recovery".into(),
+            ));
+        }
         self.restore_from_backup_with_hook(filename, |_| Ok(()))
     }
 
@@ -1405,6 +1665,12 @@ impl Database {
 
         let new_filename = format!("{name_part}.db");
 
+        if is_upgrade_archive_filename(old_filename) || is_upgrade_archive_filename(&new_filename) {
+            return Err(AppError::InvalidInput(
+                "Upgrade recovery archives cannot be renamed".into(),
+            ));
+        }
+
         let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
         let old_path = backup_dir.join(old_filename);
@@ -1429,6 +1695,11 @@ impl Database {
 
     /// Delete a backup file permanently.
     pub fn delete_backup(filename: &str) -> Result<(), AppError> {
+        if is_upgrade_archive_filename(filename) {
+            return Err(AppError::InvalidInput(
+                "Upgrade recovery archives cannot be deleted".into(),
+            ));
+        }
         // Validate filename (path traversal + .db suffix)
         if filename.contains("..")
             || filename.contains('/')
@@ -1462,6 +1733,38 @@ mod tests {
     use crate::settings::{get_settings, update_settings, AppSettings};
     use rusqlite::Connection;
     use serial_test::serial;
+
+    #[test]
+    fn upgrade_fingerprint_tracks_all_logical_rows_and_ignores_page_layout() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "PRAGMA user_version=17;
+            CREATE TABLE entries(id INTEGER PRIMARY KEY,body TEXT,payload BLOB);
+            CREATE TABLE counters(id INTEGER PRIMARY KEY AUTOINCREMENT);
+            INSERT INTO counters DEFAULT VALUES;
+            DELETE FROM counters;",
+        )?;
+        for id in 0..80 {
+            conn.execute(
+                "INSERT INTO entries VALUES(?1,?2,?3)",
+                rusqlite::params![id, "synthetic\0value", vec![id as u8; 128]],
+            )?;
+        }
+        conn.execute("DELETE FROM entries WHERE id%2=0", [])?;
+        let source = Database::content_digest(&conn)?;
+        conn.execute_batch("VACUUM; PRAGMA reverse_unordered_selects=ON;")?;
+        assert_eq!(Database::content_digest(&conn)?, source);
+        conn.execute("UPDATE entries SET payload=X'00' WHERE id=1", [])?;
+        assert_ne!(Database::content_digest(&conn)?, source);
+        let changed = Database::content_digest(&conn)?;
+        conn.execute("UPDATE sqlite_sequence SET seq=2 WHERE name='counters'", [])?;
+        assert_ne!(Database::content_digest(&conn)?, changed);
+        let changed = Database::content_digest(&conn)?;
+        conn.pragma_update(None, "user_version", 18)?;
+        assert_ne!(Database::content_digest(&conn)?, changed);
+        Ok(())
+    }
 
     fn sync_test_database(vault: &VaultContext, root: &std::path::Path) -> Database {
         let conn = Connection::open_in_memory().unwrap();
@@ -1771,7 +2074,7 @@ mod tests {
 
     impl TestHomeGuard {
         fn new() -> Self {
-            let temp_dir = tempfile::tempdir().expect("create isolated test home");
+            let temp_dir = crate::secrets::testing::tempdir().expect("create isolated test home");
             let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temp_dir.path());
             // Prevent the Windows legacy-HOME fallback without mutating HOME:
@@ -2711,13 +3014,15 @@ mod tests {
         let source = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(source.conn);
+            Database::apply_schema_migrations_on_conn(&conn)?;
             conn.execute_batch(
                 "INSERT INTO providers (id, app_type, name, settings_config, meta)
                  VALUES ('cursor-provider', 'claude', 'Cursor Provider', '{}', '{}');
                  INSERT INTO session_log_sync (
-                     file_path, last_modified, last_line_offset, last_synced_at
-                 ) VALUES ('/local/sessions/manual-backup.jsonl', 11, 22, 33);",
+                     file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset, last_tail_fingerprint
+                 ) VALUES ('/local/sessions/manual-backup.jsonl', 11, 22, 33, 444, 'synthetic-tail');",
             )?;
+            crate::database::loongport_schema::apply(&conn)?;
         }
 
         seal_fixture_rows(&source)?;
@@ -2726,15 +3031,22 @@ mod tests {
         target.import_sql_string(&sql)?;
 
         let conn = crate::database::lock_conn!(target.conn);
-        let cursor: (String, i64, i64, i64) = conn.query_row(
-            "SELECT file_path, last_modified, last_line_offset, last_synced_at
+        let cursor: (String, i64, i64, i64, i64, String) = conn.query_row(
+            "SELECT file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset, last_tail_fingerprint
              FROM session_log_sync",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )?;
         assert_eq!(
             cursor,
-            ("/local/sessions/manual-backup.jsonl".into(), 11, 22, 33,)
+            (
+                "/local/sessions/manual-backup.jsonl".into(),
+                11,
+                22,
+                33,
+                444,
+                "synthetic-tail".into()
+            )
         );
         Ok(())
     }
@@ -2944,6 +3256,260 @@ mod tests {
             provider_health_count, 0,
             "同步导入应清除可重建的本地 provider_health 状态"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn upgrade_archive_filename_is_reserved_across_case_aliases() {
+        for name in [
+            "upgrade_09e63c61-aa49-4a6c-91d2-75f5cf0d9541.db",
+            "UPGRADE_09E63C61-AA49-4A6C-91D2-75F5CF0D9541.db",
+            "Upgrade_09e63c61-aa49-4a6c-91d2-75f5cf0d9541.DB",
+        ] {
+            assert!(super::is_upgrade_archive_filename(name));
+        }
+        for name in [
+            "upgrade_not-a-uuid.db",
+            "../upgrade_09e63c61-aa49-4a6c-91d2-75f5cf0d9541.db",
+            "backup_09e63c61-aa49-4a6c-91d2-75f5cf0d9541.db",
+        ] {
+            assert!(!super::is_upgrade_archive_filename(name));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_receiver_rejects_older_sync_image_without_automatic_migration(
+    ) -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        let source = db.snapshot_to_memory()?;
+        let vault = db.secrets.read()?;
+        source.pragma_update(None, "user_version", 17)?;
+        let sql = Database::dump_sql(&source, &[])?;
+        let before = Database::content_digest(&*db.conn.lock()?)?;
+        assert!(
+            db.validate_sync_snapshot_for_current(&sql, vault.metadata(), &vault)
+                .is_err(),
+            "an authenticated old snapshot cannot silently replace the schema20 shape"
+        );
+        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_retains_the_authenticated_source_and_retries_without_replacing_it(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        let vault = db.secrets.read()?;
+        let source = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&source)?;
+        Database::apply_upgrade_source_migrations_on_conn(&source)?;
+        super::super::loongport_schema::apply(&source)?;
+        super::super::vault::stamp(&source, &vault)?;
+        let ciphertext = crate::secrets::inventory::seal_db(
+            &vault,
+            "settings",
+            "value",
+            &["common_config_claude"],
+            "synthetic-upgrade-archive-secret",
+        )?;
+        source.execute(
+            "INSERT INTO settings(key,value) VALUES('common_config_claude',?1)",
+            [&ciphertext],
+        )?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            assert_eq!(Database::get_user_version(&conn)?, 20);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = db.archive_upgrade_database(&source, &id, &vault)?;
+        assert_eq!(
+            path,
+            db.secrets
+                .root()
+                .join("backups")
+                .join(format!("upgrade_{id}.db"))
+        );
+        let archive =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        assert_eq!(Database::get_user_version(&archive)?, 17);
+        assert_eq!(
+            Database::content_digest(&archive)?,
+            Database::content_digest(&source)?
+        );
+        super::super::vault::check_identity(&archive, &vault)?;
+        crate::secrets::inventory::validate_database(&archive, &vault)?;
+        drop(archive);
+        let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+        assert!(!bytes
+            .windows(b"synthetic-upgrade-archive-secret".len())
+            .any(|window| window == b"synthetic-upgrade-archive-secret"));
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            Database::list_backups()?
+                .iter()
+                .all(|entry| entry.filename != filename),
+            "a retained multi-file upgrade archive is not an ordinary one-click DB restore"
+        );
+        assert!(db.restore_from_backup(filename).is_err());
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| AppError::io(&path, e))?,
+            bytes
+        );
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|e| AppError::io(&path, e))?;
+        assert_eq!(db.archive_upgrade_database(&source, &id, &vault)?, path);
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| AppError::io(&path, e))?,
+            bytes
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .map_err(|e| AppError::io(&path, e))?,
+            modified
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .map_err(|e| AppError::io(&path, e))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_refuses_an_authenticated_same_name_different_snapshot(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        let source = db.snapshot_to_memory()?;
+        let vault = db.secrets.read()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = db.archive_upgrade_database(&source, &id, &vault)?;
+        let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
+        source.execute(
+            "INSERT INTO settings(key,value) VALUES('synthetic-archive-marker','changed')",
+            [],
+        )?;
+        assert!(db.archive_upgrade_database(&source, &id, &vault).is_err());
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| AppError::io(&path, e))?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_rejects_plaintext_invalid_ids_and_changed_current_identity(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        db.set_setting("common_config_claude", "synthetic-authenticated-source")?;
+        let source = db.snapshot_to_memory()?;
+        let vault = db.secrets.read()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = db
+            .secrets
+            .root()
+            .join("backups")
+            .join(format!("upgrade_{id}.db"));
+        for invalid in [
+            "../synthetic",
+            "not-a-uuid",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(db
+                .archive_upgrade_database(&source, invalid, &vault)
+                .is_err());
+        }
+        let plaintext = db.snapshot_to_memory()?;
+        plaintext.execute(
+            "UPDATE settings SET value='synthetic-unsealed-value' WHERE key='common_config_claude'",
+            [],
+        )?;
+        assert!(db
+            .archive_upgrade_database(&plaintext, &id, &vault)
+            .is_err());
+        let foreign = VaultContext::generate().map_err(crate::secrets::inventory::secret_error)?;
+        assert!(db.archive_upgrade_database(&source, &id, &foreign).is_err());
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            super::super::vault::stamp(&conn, &foreign)?;
+        }
+        assert!(db.archive_upgrade_database(&source, &id, &vault).is_err());
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_is_excluded_from_automatic_backup_retention() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        let _settings = SettingsGuard::with_backup_retain_count(1);
+        let source = db.snapshot_to_memory()?;
+        let archive = {
+            let vault = db.secrets.read()?;
+            db.archive_upgrade_database(&source, &uuid::Uuid::new_v4().to_string(), &vault)?
+        };
+        let routine = db.backup_database_file()?.expect("file-backed backup");
+        let decoy = db.secrets.root().join("backups/upgrade_not-a-uuid.db");
+        std::fs::write(&decoy, b"synthetic ordinary backup")
+            .map_err(|e| AppError::io(&decoy, e))?;
+        {
+            let _guard = lock_backup_file_operations()?;
+            Database::cleanup_db_backups(archive.parent().unwrap(), &[routine.as_path()])?;
+        }
+        assert!(
+            archive.exists(),
+            "registered upgrade source must survive automatic cleanup"
+        );
+        assert!(
+            routine.exists(),
+            "the upgrade archive must not consume routine retention"
+        );
+        assert!(
+            !decoy.exists(),
+            "only exact reserved UUID basenames receive protection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_archive_cannot_be_renamed_deleted_or_claimed_by_a_routine_backup(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        let source = db.snapshot_to_memory()?;
+        let archive = {
+            let vault = db.secrets.read()?;
+            db.archive_upgrade_database(&source, &uuid::Uuid::new_v4().to_string(), &vault)?
+        };
+        let filename = archive.file_name().unwrap().to_str().unwrap();
+        assert!(Database::rename_backup(filename, "renamed-upgrade").is_err());
+        assert!(Database::delete_backup(filename).is_err());
+        assert!(archive.exists());
+        let routine = db.backup_database_file()?.expect("file-backed backup");
+        let routine_name = routine.file_name().unwrap().to_str().unwrap();
+        let reserved = format!("upgrade_{}.db", uuid::Uuid::new_v4());
+        assert!(Database::rename_backup(routine_name, &reserved).is_err());
+        let ordinary = Database::rename_backup(routine_name, "upgrade_notes")?;
+        assert_eq!(ordinary, "upgrade_notes.db");
+        Database::delete_backup(&ordinary)?;
         Ok(())
     }
 
@@ -3997,5 +4563,17 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_sync_tests.rs"]
+mod sync_join_tests;
+
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_versioned_sync_join() {
+        sync_join_tests::verify();
     }
 }

@@ -1,7 +1,7 @@
 #[cfg(feature = "gui")]
 pub mod app_update;
 pub mod application_overview;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod application_selection;
 pub(crate) mod backup_transfer;
 pub mod balance;

@@ -4,12 +4,14 @@ import { Button } from "@/components/ui/button";
 import type { AppId } from "@/lib/api/types";
 
 interface ProviderEmptyStateProps {
+  importDisabled?: boolean;
   appId: AppId;
   onCreate?: () => void;
   onImport?: () => void;
 }
 
 export function ProviderEmptyState({
+  importDisabled = false,
   appId,
   onCreate,
   onImport,
@@ -39,7 +41,12 @@ export function ProviderEmptyState({
       )}
       <div className="mt-6 flex flex-col gap-2">
         {onImport && (
-          <Button onClick={onImport}>
+          <Button
+            disabled={importDisabled}
+            onClick={() => {
+              if (!importDisabled) onImport();
+            }}
+          >
             <Download className="mr-2 h-4 w-4" />
             {appId === "claude-desktop"
               ? t("provider.importFromClaude", {

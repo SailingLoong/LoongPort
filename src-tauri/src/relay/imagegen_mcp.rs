@@ -80,6 +80,10 @@ pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
 /// 2. 用户关了开关（`settings::imagegen_mcp_enabled`，见那里的文档：只要注册着，
 ///    工具描述就占宿主每次会话的上下文 —— 只想直接生图的用户要的是**根本不注册**）。
 pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+
     let has_image_tiers = ProviderService::list(state, crate::app_config::AppType::CodexImage)?
         .values()
         .any(|provider| crate::relay::is_managed(&provider.id));

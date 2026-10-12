@@ -332,6 +332,13 @@ impl ProfileService {
         profile_id: &str,
         scope: ProfileScope,
     ) -> Result<(Vec<String>, bool), AppError> {
+        let modern = crate::mode::operation::uses_upstream4_schema(&state.db)?;
+        if modern {
+            for app in scope.apps().iter().filter(|app| app.supports_local_proxy()) {
+                // Release the borrowed writer/vault before service lifecycle locks.
+                crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
+            }
+        }
         let mut warnings = Vec::new();
 
         // 自动保存旧项目当前状态（仅当前分组），失败不阻塞切换
@@ -366,6 +373,9 @@ impl ProfileService {
             // 接管态下 live 文件属于代理；用户希望切换工作目录时总是退出当前
             // 代理环境，再按快照写入真实供应商配置。
             if let Err(e) = state.proxy_service.disable_takeover_for_app_sync(app) {
+                if modern {
+                    return Err(AppError::Message(e));
+                }
                 warnings.push(format!(
                     "[{app_str}] auto-disable proxy takeover before profile switch failed: {e}"
                 ));
@@ -383,9 +393,14 @@ impl ProfileService {
                     if current.as_deref() != Some(target_pid.as_str()) {
                         match ProviderService::switch(state, app.clone(), target_pid) {
                             Ok(result) => warnings.extend(result.warnings),
-                            Err(e) => warnings.push(format!(
-                                "[{app_str}] switch provider '{target_pid}' failed: {e}"
-                            )),
+                            Err(e) => {
+                                if modern {
+                                    return Err(e);
+                                }
+                                warnings.push(format!(
+                                    "[{app_str}] switch provider '{target_pid}' failed: {e}"
+                                ));
+                            }
                         }
                         // ⚠️ **切 codex 时 ChatGPT 桌面版必须重启，否则新配置对它不生效**。
                         //
@@ -493,7 +508,11 @@ impl ProfileService {
             .set_current_profile_id(scope.as_str(), Some(profile_id))?;
 
         // 当前分组内所有接管已关闭；若其它应用也无接管，可停止代理服务。
-        let should_stop_proxy = !state.db.is_live_takeover_active_sync();
+        let should_stop_proxy = if modern {
+            !crate::mode::controller::needs_listener(&state.proxy_service)?
+        } else {
+            !state.db.is_live_takeover_active_sync()
+        };
 
         Ok((warnings, should_stop_proxy))
     }

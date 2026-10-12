@@ -51,7 +51,9 @@ pub struct ProxyState {
     /// [`providers::codex_tool_carriers`]。
     pub codex_tool_carriers: Arc<CodexToolCarrierStore>,
     /// AppHandle，用于发射事件和更新托盘菜单
+    #[cfg(feature = "gui")]
     pub app_handle: Option<tauri::AppHandle>,
+    pub service_owner: std::sync::Weak<crate::services::ProxyService>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
     /// 被动模型监控入口：响应路径顺路观察托管档流量，满即丢不阻塞转发。
@@ -70,10 +72,14 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    pub(crate) fn failover_manager(&self) -> &Arc<FailoverSwitchManager> {
+        &self.state.failover_manager
+    }
+
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,
-        app_handle: Option<tauri::AppHandle>,
+        #[cfg(feature = "gui")] app_handle: Option<tauri::AppHandle>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
         model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
     ) -> Self {
@@ -92,7 +98,9 @@ impl ProxyServer {
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             codex_tool_carriers: Arc::new(CodexToolCarrierStore::default()),
+            #[cfg(feature = "gui")]
             app_handle,
+            service_owner: std::sync::Weak::new(),
             failover_manager,
             passive_ingress,
             model_alignment,
@@ -106,16 +114,32 @@ impl ProxyServer {
         }
     }
 
+    pub(crate) fn with_service_owner(
+        mut self,
+        owner: std::sync::Weak<crate::services::ProxyService>,
+    ) -> Self {
+        self.state.service_owner = owner.clone();
+        Arc::get_mut(&mut self.state.failover_manager)
+            .expect("unpublished failover owner")
+            .set_service_owner(owner);
+        self
+    }
+
     pub async fn start(&self) -> Result<ProxyServerInfo, ProxyError> {
         // 检查是否已在运行
         if self.shutdown_tx.read().await.is_some() {
             return Err(ProxyError::AlreadyRunning);
         }
 
-        let addr: SocketAddr =
-            format!("{}:{}", self.config.listen_address, self.config.listen_port)
-                .parse()
-                .map_err(|e| ProxyError::BindFailed(format!("无效的地址: {e}")))?;
+        let addr: SocketAddr = self
+            .config
+            .listen_address
+            .parse::<std::net::IpAddr>()
+            .map(|ip| SocketAddr::new(ip, self.config.listen_port))
+            .or_else(|_| {
+                format!("{}:{}", self.config.listen_address, self.config.listen_port).parse()
+            })
+            .map_err(|e| ProxyError::BindFailed(format!("无效的地址: {e}")))?;
 
         // 创建关闭通道
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -267,6 +291,16 @@ impl ProxyServer {
         } else {
             Ok(())
         }
+    }
+
+    /// A retained server slot/status alone cannot prove a live accept task.
+    pub(crate) async fn listener_is_running(&self) -> bool {
+        self.server_handle
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+            && self.state.status.read().await.running
     }
 
     pub async fn get_status(&self) -> ProxyStatus {

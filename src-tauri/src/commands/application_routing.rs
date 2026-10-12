@@ -1,4 +1,4 @@
-use super::auto_mode::{tier_board_impl, TierBoardModelOption, TierBoardTier};
+use super::auto_mode::{tier_board_locked, TierBoardModelOption, TierBoardTier};
 use crate::relay::model_verification::target as verification_target;
 use crate::{app_config::AppType, proxy::application_routing as routing, store::AppState};
 use std::str::FromStr;
@@ -31,6 +31,8 @@ pub struct ApplicationRoutingTier {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationRouting {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_state: Option<crate::mode::current::RoutingReadView>,
     pub auto_failover_enabled: bool,
     pub routing_active: bool,
     pub model: Option<String>,
@@ -41,14 +43,42 @@ pub struct ApplicationRouting {
     pub tiers: Vec<ApplicationRoutingTier>,
 }
 
+/// Safe structured errors preserve React Query's last successful page data.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationRoutingReadError {
+    pub code: &'static str,
+    pub mode_state: Option<crate::mode::current::RoutingReadView>,
+}
+impl From<String> for ApplicationRoutingReadError {
+    fn from(_: String) -> Self {
+        Self {
+            code: "application_routing.read_failed",
+            mode_state: None,
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn apply_application_routing(
     app_handle: tauri::AppHandle,
     app_type: String,
     change: crate::services::application_selection::ApplicationRoutingChange,
     quit_chatgpt: Option<bool>,
-) -> Result<crate::services::application_selection::SwitchTierCommandResult, String> {
+    request: Option<crate::mode::state::SaveRequest>,
+) -> Result<serde_json::Value, String> {
     let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    if let Some(request) = request {
+        return crate::services::application_selection::apply_requested_application_routing(
+            &app_handle,
+            app,
+            change,
+            quit_chatgpt,
+            request,
+        )
+        .await
+        .map_err(|error| error.to_string());
+    }
     crate::services::application_selection::apply_application_routing(
         &app_handle,
         app,
@@ -56,26 +86,66 @@ pub async fn apply_application_routing(
         quit_chatgpt,
     )
     .await
+    .and_then(|result| {
+        serde_json::to_value(result)
+            .map_err(|error| crate::error::AppError::Message(error.to_string()))
+    })
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn prepare_application_routing_request(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    change: crate::services::application_selection::ApplicationRoutingChange,
+    request_id: String,
+) -> Result<crate::mode::state::SaveRequest, String> {
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::prepare_routing_request(
+        &state,
+        &app,
+        &change,
+        &request_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_application_routing_request_result(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    request: crate::mode::state::SaveRequest,
+) -> Result<crate::services::application_selection::RoutingRequestResult, String> {
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::query_routing_request(&state, &app, request)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn get_application_routing(
     state: tauri::State<'_, AppState>,
     app_type: String,
-) -> Result<ApplicationRouting, String> {
+) -> Result<ApplicationRouting, ApplicationRoutingReadError> {
     application_routing_impl(&state, &app_type).await
 }
 
 pub(crate) async fn application_routing_impl(
     state: &AppState,
     app_type: &str,
-) -> Result<ApplicationRouting, String> {
+) -> Result<ApplicationRouting, ApplicationRoutingReadError> {
     let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
+    let _guard = state.proxy_service.lock_switch_for_app(app_type).await;
+    let mode_state = crate::mode::current::read_view(&state.proxy_service, &app);
+    if mode_state.as_ref().is_some_and(|mode| !mode.can_write) {
+        return Err(ApplicationRoutingReadError {
+            code: "mode.verification_required",
+            mode_state,
+        });
+    }
     let supports_proxy = app.supports_local_proxy();
     // 验证资格的判据收在 target 模块（relay 行级同一条）；这里只对托管档位放行。
     let verification_supported = verification_target::supports_app_type(&app);
-    let board = tier_board_impl(state, app_type).await?;
+    let board = tier_board_locked(state, app_type).await?;
     let providers = state
         .db
         .get_all_providers(app_type)
@@ -83,7 +153,12 @@ pub(crate) async fn application_routing_impl(
     let enabled = supports_proxy
         && routing::failover_enabled(&state.db, app_type).map_err(|e| e.to_string())?;
     let model_routing_active = supports_proxy
-        && routing::takeover_enabled(&state.db, app_type).map_err(|e| e.to_string())?
+        && match mode_state.as_ref() {
+            Some(mode) => {
+                mode.mode == Some(crate::mode::state::Mode::Proxy) && mode.attached == Some(true)
+            }
+            None => routing::takeover_enabled(&state.db, app_type).map_err(|e| e.to_string())?,
+        }
         && state.proxy_service.is_running().await;
     let current_position = board.tiers.iter().position(|p| p.is_current);
     let current_official_account = current_position
@@ -157,6 +232,7 @@ pub(crate) async fn application_routing_impl(
         })
         .collect();
     Ok(ApplicationRouting {
+        mode_state,
         auto_failover_enabled: enabled,
         routing_active: model_routing_active,
         model: board.model,
@@ -176,7 +252,20 @@ pub async fn set_application_priority(
     app_type: String,
     ordered_ids: Vec<String>,
 ) -> Result<(), String> {
-    routing::set_order(&state.db, &app_type, &ordered_ids).map_err(|e| e.to_string())
+    let app = app_type
+        .parse::<crate::app_config::AppType>()
+        .map_err(|e| e.to_string())?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::application_selection::apply_current_order_change(
+            &state,
+            &app,
+            &ordered_ids,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -186,9 +275,10 @@ pub async fn set_application_tier_blocked(
     provider_id: String,
     blocked: bool,
 ) -> Result<(), String> {
-    let _guard = state.proxy_service.lock_switch_for_app(&app_type).await;
-    routing::set_tier_blocked(&state.db, &app_type, &provider_id, blocked)
-        .map_err(|e| e.to_string())
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::set_tier_blocked(&state, &app, &provider_id, blocked)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

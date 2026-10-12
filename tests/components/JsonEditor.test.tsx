@@ -1,10 +1,35 @@
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 
 import JsonEditor from "@/components/JsonEditor";
 
 describe("JsonEditor", () => {
+  it("can disable JSON formatting while retaining exact editable text", () => {
+    const onChange = vi.fn();
+    const value = '{"large":9007199254740993}';
+    const { container } = render(
+      <JsonEditor
+        value={value}
+        onChange={onChange}
+        language="json"
+        showFormat={false}
+        showValidation={false}
+      />,
+    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    const view = EditorView.findFromDOM(
+      container.querySelector(".cm-content") as HTMLElement,
+    );
+    expect(view?.state.doc.toString()).toBe(value);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("preserves the existing JSON formatter by default", () => {
+    render(<JsonEditor value="{}" onChange={vi.fn()} />);
+    expect(screen.getByRole("button")).toBeVisible();
+  });
+
   it("updates height and callbacks without recreating the editor view", () => {
     const firstOnChange = vi.fn();
     const secondOnChange = vi.fn();

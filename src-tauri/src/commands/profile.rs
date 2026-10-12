@@ -208,7 +208,7 @@ pub fn apply_profile(
         let profile_id = id.clone();
         let proxy_service = state.proxy_service.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = proxy_service.stop().await {
+            if let Err(e) = proxy_service.stop_when_unused().await {
                 log::warn!("切换项目后停止代理服务失败: {e}");
             }
             if let Some(app_state) = app_handle.try_state::<AppState>() {

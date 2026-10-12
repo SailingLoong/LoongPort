@@ -78,6 +78,9 @@ function isForbiddenCommonEnvKey(name: string): boolean {
 }
 
 interface UseGeminiCommonConfigProps {
+  readOnly?: boolean;
+  isWriteAllowed?: () => boolean;
+  enabled?: boolean;
   envValue: string;
   onEnvChange: (env: string) => void;
   envStringToObj: (envString: string) => Record<string, string>;
@@ -112,14 +115,36 @@ export function useGeminiCommonConfig({
   initialData,
   initialEnabled,
   selectedPresetId,
+  readOnly = false,
+  isWriteAllowed,
+  enabled = true,
 }: UseGeminiCommonConfigProps) {
   const { t } = useTranslation();
+  const admission = useRef({ enabled, readOnly, isWriteAllowed });
+  admission.current = { enabled, readOnly, isWriteAllowed };
+  const canWrite = useCallback(() => {
+    const current = admission.current;
+    return (
+      current.enabled &&
+      !current.readOnly &&
+      (current.isWriteAllowed?.() ?? true)
+    );
+  }, []);
+  const persistSnippet = useCallback(
+    async (_app: "claude" | "codex" | "gemini", value: string) => {
+      if (!canWrite()) throw new Error("mode.legacy_common_config_frozen");
+      await configApi.setCommonConfigSnippet(_app, value);
+    },
+    [canWrite],
+  );
+
   const [useCommonConfig, setUseCommonConfig] = useState(false);
   const [commonConfigSnippet, setCommonConfigSnippetState] = useState<string>(
     DEFAULT_GEMINI_COMMON_CONFIG_SNIPPET,
   );
   const [commonConfigError, setCommonConfigError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const snippetReadReady = useRef(false);
   const [isExtracting, setIsExtracting] = useState(false);
 
   // 用于跟踪是否正在通过通用配置更新
@@ -221,6 +246,12 @@ export function useGeminiCommonConfig({
 
   // 初始化：从 config.json 加载，支持从 localStorage 迁移
   useEffect(() => {
+    snippetReadReady.current = false;
+    setIsLoading(true);
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
     let mounted = true;
 
     const loadSnippet = async () => {
@@ -238,7 +269,12 @@ export function useGeminiCommonConfig({
             try {
               const legacySnippet =
                 window.localStorage.getItem(LEGACY_STORAGE_KEY);
-              if (legacySnippet && legacySnippet.trim()) {
+              if (
+                mounted &&
+                canWrite() &&
+                legacySnippet &&
+                legacySnippet.trim()
+              ) {
                 const parsed = parseSnippetEnv(legacySnippet);
                 if (parsed.error) {
                   console.warn(
@@ -247,12 +283,13 @@ export function useGeminiCommonConfig({
                   return;
                 }
                 // 迁移到 config.json
-                await configApi.setCommonConfigSnippet("gemini", legacySnippet);
+                await persistSnippet("gemini", legacySnippet);
                 if (mounted) {
                   setCommonConfigSnippetState(legacySnippet);
                 }
                 // 清理 localStorage
-                window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+                if (mounted && canWrite())
+                  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
                 console.log(
                   "[迁移] Gemini 通用配置已从 localStorage 迁移到 config.json",
                 );
@@ -266,6 +303,7 @@ export function useGeminiCommonConfig({
         console.error("加载 Gemini 通用配置失败:", error);
       } finally {
         if (mounted) {
+          snippetReadReady.current = true;
           setIsLoading(false);
         }
       }
@@ -276,10 +314,11 @@ export function useGeminiCommonConfig({
     return () => {
       mounted = false;
     };
-  }, [parseSnippetEnv]);
+  }, [parseSnippetEnv, enabled, readOnly]);
 
   // 初始化时检查通用配置片段（编辑模式）
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (
       !initialData?.settingsConfig ||
       isLoading ||
@@ -340,6 +379,8 @@ export function useGeminiCommonConfig({
       // ignore parse error
     }
   }, [
+    readOnly,
+    enabled,
     applySnippetToEnv,
     commonConfigSnippet,
     envObjToString,
@@ -355,6 +396,7 @@ export function useGeminiCommonConfig({
 
   // 新建模式：如果通用配置片段存在且有效，默认启用
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (initialData || isLoading || hasInitializedNewMode.current) {
       return;
     }
@@ -384,6 +426,8 @@ export function useGeminiCommonConfig({
       isUpdatingFromCommonConfig.current = false;
     }, 0);
   }, [
+    readOnly,
+    enabled,
     initialData,
     isLoading,
     commonConfigSnippet,
@@ -398,6 +442,7 @@ export function useGeminiCommonConfig({
   // 处理通用配置开关
   const handleCommonConfigToggle = useCallback(
     (checked: boolean) => {
+      if (!canWrite()) return;
       const parsed = parseSnippetEnv(commonConfigSnippet);
       if (parsed.error) {
         setCommonConfigError(parsed.error);
@@ -440,6 +485,7 @@ export function useGeminiCommonConfig({
   // 处理通用配置片段变化
   const handleCommonConfigSnippetChange = useCallback(
     (value: string): boolean => {
+      if (!canWrite()) return false;
       const previousSnippet = commonConfigSnippet;
 
       if (!value.trim()) {
@@ -462,14 +508,12 @@ export function useGeminiCommonConfig({
         }
 
         setCommonConfigSnippetState("");
-        configApi
-          .setCommonConfigSnippet("gemini", "")
-          .catch((error: unknown) => {
-            console.error("保存 Gemini 通用配置失败:", error);
-            setCommonConfigError(
-              t("geminiConfig.saveFailed", { error: String(error) }),
-            );
-          });
+        persistSnippet("gemini", "").catch((error: unknown) => {
+          console.error("保存 Gemini 通用配置失败:", error);
+          setCommonConfigError(
+            t("geminiConfig.saveFailed", { error: String(error) }),
+          );
+        });
         return true;
       }
 
@@ -505,14 +549,12 @@ export function useGeminiCommonConfig({
 
       setCommonConfigError("");
       setCommonConfigSnippetState(value);
-      configApi
-        .setCommonConfigSnippet("gemini", value)
-        .catch((error: unknown) => {
-          console.error("保存 Gemini 通用配置失败:", error);
-          setCommonConfigError(
-            t("geminiConfig.saveFailed", { error: String(error) }),
-          );
-        });
+      persistSnippet("gemini", value).catch((error: unknown) => {
+        console.error("保存 Gemini 通用配置失败:", error);
+        setCommonConfigError(
+          t("geminiConfig.saveFailed", { error: String(error) }),
+        );
+      });
 
       return true;
     },
@@ -532,6 +574,7 @@ export function useGeminiCommonConfig({
 
   // 当 env 变化时检查是否包含通用配置（但避免在通过通用配置更新时检查）
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (isUpdatingFromCommonConfig.current || isLoading) {
       return;
     }
@@ -542,6 +585,8 @@ export function useGeminiCommonConfig({
       hasEnvCommonConfigSnippet(envObj, parsed.env as Record<string, string>),
     );
   }, [
+    readOnly,
+    enabled,
     envValue,
     commonConfigSnippet,
     envStringToObj,
@@ -552,6 +597,7 @@ export function useGeminiCommonConfig({
 
   // 从编辑器当前内容提取通用配置片段
   const handleExtract = useCallback(async () => {
+    if (!canWrite()) return;
     setIsExtracting(true);
     setCommonConfigError("");
 
@@ -562,6 +608,7 @@ export function useGeminiCommonConfig({
         }),
       });
 
+      if (!canWrite()) return;
       if (!extracted || extracted === "{}") {
         setCommonConfigError(t("geminiConfig.extractNoCommonConfig"));
         return;
@@ -578,7 +625,7 @@ export function useGeminiCommonConfig({
       setCommonConfigSnippetState(extracted);
 
       // 保存到后端
-      await configApi.setCommonConfigSnippet("gemini", extracted);
+      await persistSnippet("gemini", extracted);
     } catch (error) {
       console.error("提取 Gemini 通用配置失败:", error);
       setCommonConfigError(

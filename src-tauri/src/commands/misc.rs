@@ -4659,6 +4659,24 @@ mod tests {
         assert!(out.status.success());
     }
 
+    /// Exercise the real path adapter as well as its shared process helpers.
+    #[cfg(unix)]
+    #[test]
+    fn path_probe_adapter_captures_stdout_and_stderr() {
+        let output = crate::process::run_tool_at_path_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "printf 'synthetic stdout'; printf 'synthetic stderr' >&2",
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .expect("healthy path probe must complete within its deadline");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"synthetic stdout");
+        assert_eq!(output.stderr, b"synthetic stderr");
+    }
+
     /// 超时击杀路径：挂死的子进程到点被整组击杀、wait 返回超时错误而非永等。
     /// 同时锚定 setsid 改造后的语义——child 是新会话/新进程组组长，
     /// terminate_child_tree 的 kill(-pid) 仍能命中（回归红线：改回 process_group
@@ -4685,6 +4703,70 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "kill should return promptly instead of waiting out the sleep"
         );
+    }
+
+    /// A successfully exited shell does not prove its inherited output pipes
+    /// reached EOF. A descendant can still own both handles after the parent exits.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn exited_parent_with_inherited_pipes_still_obeys_deadline() {
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "sleep 30 & printf 'parent done\\n'; printf 'parent error\\n' >&2; exit 0",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        isolate_child_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn isolated synthetic shell");
+        let group = -(child.id() as libc::pid_t);
+        let shell_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= shell_deadline {
+                // SAFETY: this is the isolated group created by this test only.
+                unsafe {
+                    libc::kill(group, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                panic!("synthetic shell did not exit before the pipe-wait test");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (send, receive) = mpsc::channel();
+        let started = Instant::now();
+        let waiter = std::thread::spawn(move || {
+            let result = wait_child_output(
+                child,
+                CommandDeadline::from_timeout(Some(Duration::from_millis(200))),
+            );
+            let _ = send.send(result);
+        });
+        let received = receive.recv_timeout(Duration::from_secs(5));
+        // Always clean up this test's process group, including a broken helper
+        // whose pipe join exceeded the watchdog. Never wait out the 30s sleep.
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+        if received.is_err() {
+            let _ = receive.recv_timeout(Duration::from_secs(1));
+            panic!("pipe wait exceeded the outer watchdog");
+        }
+        waiter.join().unwrap();
+        let result = received.unwrap();
+        assert!(
+            result.is_err(),
+            "inherited pipes must produce the deadline error: {result:?}"
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(target_os = "windows")]

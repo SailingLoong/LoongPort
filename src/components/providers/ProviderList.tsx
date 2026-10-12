@@ -39,6 +39,7 @@ import { usePiCurrentState } from "@/lib/query/pi";
 import { isProxyAppId } from "@/config/appConfig";
 
 interface ProviderListProps {
+  mutationsDisabled?: boolean;
   providers: Record<string, Provider>;
   appId: AppId;
   onSwitch: (provider: Provider) => void;
@@ -62,6 +63,7 @@ interface ProviderListProps {
 }
 
 export function ProviderList({
+  mutationsDisabled = false,
   providers,
   appId,
   onSwitch,
@@ -142,13 +144,14 @@ export function ProviderList({
 
   const handleToggleFailover = useCallback(
     (providerId: string, enabled: boolean) => {
+      if (mutationsDisabled) return;
       if (enabled) {
         addToQueue.mutate({ appType: appId, providerId });
       } else {
         removeFromQueue.mutate({ appType: appId, providerId });
       }
     },
-    [appId, addToQueue, removeFromQueue],
+    [appId, addToQueue, removeFromQueue, mutationsDisabled],
   );
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -187,6 +190,7 @@ export function ProviderList({
   const queryClient = useQueryClient();
   const importMutation = useMutation({
     mutationFn: async (): Promise<boolean> => {
+      if (mutationsDisabled) throw new Error("mode.verification_required");
       if (appId === "opencode") {
         const count = await providersApi.importOpenCodeFromLive();
         return count > 0;
@@ -369,6 +373,7 @@ export function ProviderList({
       <div className="mt-4 space-y-4">
         {piStateErrorNotice}
         <ProviderEmptyState
+          importDisabled={mutationsDisabled}
           appId={appId}
           onCreate={appId === "pi" ? undefined : onCreate}
           onImport={appId === "pi" ? undefined : () => importMutation.mutate()}
@@ -381,7 +386,9 @@ export function ProviderList({
     <DndContext
       sensors={sensors}
       collisionDetection={closestCenter}
-      onDragEnd={handleDragEnd}
+      onDragEnd={(event) => {
+        if (!mutationsDisabled) handleDragEnd(event);
+      }}
     >
       <SortableContext
         items={filteredProviders.map((provider) => provider.id)}
@@ -394,6 +401,7 @@ export function ProviderList({
             return (
               <SortableProviderCard
                 key={provider.id}
+                mutationsDisabled={mutationsDisabled}
                 provider={provider}
                 isCurrent={provider.presentation?.isCurrent === true}
                 appId={appId}
@@ -404,14 +412,46 @@ export function ProviderList({
                 }
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
-                onSwitch={onSwitch}
-                onEdit={onEdit}
-                onDelete={onDelete}
-                onRemoveFromConfig={onRemoveFromConfig}
-                onDisableOmo={onDisableOmo}
-                onDisableOmoSlim={onDisableOmoSlim}
-                onDuplicate={onDuplicate}
-                onConfigureUsage={onConfigureUsage}
+                onSwitch={(item) => {
+                  if (!mutationsDisabled) onSwitch(item);
+                }}
+                onEdit={(item) => {
+                  if (!mutationsDisabled) onEdit(item);
+                }}
+                onDelete={(item) => {
+                  if (!mutationsDisabled) onDelete(item);
+                }}
+                onRemoveFromConfig={
+                  onRemoveFromConfig
+                    ? (item) => {
+                        if (!mutationsDisabled) onRemoveFromConfig(item);
+                      }
+                    : undefined
+                }
+                onDisableOmo={
+                  onDisableOmo
+                    ? () => {
+                        if (!mutationsDisabled) onDisableOmo();
+                      }
+                    : undefined
+                }
+                onDisableOmoSlim={
+                  onDisableOmoSlim
+                    ? () => {
+                        if (!mutationsDisabled) onDisableOmoSlim();
+                      }
+                    : undefined
+                }
+                onDuplicate={(item) => {
+                  if (!mutationsDisabled) onDuplicate(item);
+                }}
+                onConfigureUsage={
+                  onConfigureUsage
+                    ? (item) => {
+                        if (!mutationsDisabled) onConfigureUsage(item);
+                      }
+                    : undefined
+                }
                 onOpenWebsite={onOpenWebsite}
                 onOpenTerminal={onOpenTerminal}
                 onTest={handleTest}
@@ -444,7 +484,10 @@ export function ProviderList({
                 }
                 onSetAsDefault={
                   onSetAsDefault && provider.presentation?.canSetAsDefault
-                    ? (modelId) => onSetAsDefault(provider, modelId)
+                    ? (modelId) => {
+                        if (!mutationsDisabled)
+                          onSetAsDefault(provider, modelId);
+                      }
                     : undefined
                 }
               />
@@ -551,6 +594,7 @@ export function ProviderList({
 }
 
 interface SortableProviderCardProps {
+  mutationsDisabled: boolean;
   provider: Provider;
   isCurrent: boolean;
   appId: AppId;
@@ -584,6 +628,7 @@ interface SortableProviderCardProps {
 }
 
 function SortableProviderCard({
+  mutationsDisabled,
   provider,
   isCurrent,
   appId,
@@ -621,7 +666,7 @@ function SortableProviderCard({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: provider.id });
+  } = useSortable({ id: provider.id, disabled: mutationsDisabled });
 
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -631,6 +676,7 @@ function SortableProviderCard({
   return (
     <div ref={setNodeRef} style={style}>
       <ProviderCard
+        mutationsDisabled={mutationsDisabled}
         provider={provider}
         isCurrent={isCurrent}
         appId={appId}

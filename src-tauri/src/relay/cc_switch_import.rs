@@ -8,9 +8,9 @@
 //!
 //! ## 版本闸：cc-switch 比本仓新时收起入口
 //!
-//! cc-switch 升级可能把源库 `user_version` 推到本仓 [`SCHEMA_VERSION`] 之后，导入路径的
+//! cc-switch 升级可能把源库 `user_version` 推到本仓 [`UPSTREAM4_SOURCE_SCHEMA_VERSION`] 之后，导入路径的
 //! 迁移层会拒（「数据库版本过新」）。与其让用户点了才见报错，预览直接给最终事实
-//! `can_import = user_version ≤ SCHEMA_VERSION`，前端据此隐藏全部入口 —— 判据与迁移闸
+//! `can_import = user_version ≤ UPSTREAM4_SOURCE_SCHEMA_VERSION`，前端据此隐藏全部入口 —— 判据与迁移闸
 //! 同一个常量，跟上游吸收新 schema 后入口自动恢复，不用改前端。
 //!
 //! ## 覆盖式：复用上游导入路径
@@ -41,7 +41,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::app_config::AppType;
-use crate::database::{Database, SCHEMA_VERSION};
+use crate::database::{Database, UPSTREAM4_SOURCE_SCHEMA_VERSION};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::relay::provider_fingerprint;
@@ -74,7 +74,7 @@ pub struct SkippedProvider {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlan {
     pub source_exists: bool,
-    /// 这份源库**当前应用能不能导**：源库在，且 `user_version` ≤ 内置 [`SCHEMA_VERSION`]
+    /// 这份源库**当前应用能不能导**：源库在，且 `user_version` ≤ 内置 [`UPSTREAM4_SOURCE_SCHEMA_VERSION`]
     /// （与导入路径里迁移层版本闸同一个常量）。前端据此决定入口显隐 —— cc-switch 比
     /// 本仓新时静默收起入口，别把「数据库版本过新」留给用户点了之后才弹。
     pub can_import: bool,
@@ -385,7 +385,7 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
 
     Ok(ImportPlan {
         source_exists: true,
-        can_import: version <= i64::from(SCHEMA_VERSION),
+        can_import: version <= i64::from(UPSTREAM4_SOURCE_SCHEMA_VERSION),
         providers: ProviderPlan {
             will_import: classified.will_import.len() + classified.cannot_fingerprint.len(),
             skipped: skipped_list,
@@ -1105,7 +1105,7 @@ mod tests {
         .unwrap();
     }
 
-    /// cc-switch 比本仓新（源库 `user_version` 超过 [`SCHEMA_VERSION`]）⇒ 预览必须给
+    /// cc-switch 比本仓新（源库 `user_version` 超过 [`UPSTREAM4_SOURCE_SCHEMA_VERSION`]）⇒ 预览必须给
     /// `can_import=false` —— 前端据此隐藏全部入口，别让用户点了才见「数据库版本过新」。
     /// 纯读路径（不碰 home 目录），不用 `#[serial]`。
     #[test]
@@ -1114,16 +1114,22 @@ mod tests {
 
         // 比本仓支持的新：上游又发版推了 schema。
         let newer = tempfile::NamedTempFile::new().unwrap();
-        create_source_db(newer.path(), i64::from(SCHEMA_VERSION) + 1);
+        create_source_db(
+            newer.path(),
+            i64::from(crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION) + 1,
+        );
         let plan = plan_import(&db, newer.path()).expect("预览不该失败");
         assert!(plan.source_exists, "源库在");
         assert!(!plan.can_import, "超版本的源库必须判不可导");
 
-        // 恰好等于 SCHEMA_VERSION：可导（≤ 是闭区间）。
+        // 恰好等于原 source17 导入边界：可导（≤ 是闭区间）。
         let current = tempfile::NamedTempFile::new().unwrap();
-        create_source_db(current.path(), i64::from(SCHEMA_VERSION));
+        create_source_db(
+            current.path(),
+            i64::from(crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION),
+        );
         let plan = plan_import(&db, current.path()).expect("预览不该失败");
-        assert!(plan.can_import, "等于 SCHEMA_VERSION 必须可导");
+        assert!(plan.can_import, "等于原 source17 导入边界 必须可导");
 
         // 没有源库：不可导（入口本就不显）。
         let plan = plan_import(&db, Path::new("/nonexistent/cc-switch.db")).expect("预览不该失败");
@@ -1159,7 +1165,7 @@ mod tests {
     #[test]
     #[serial]
     fn replacement_import_maintains_saved_orders_before_export_round_trip() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::secrets::testing::tempdir().unwrap();
         let _home = TestHomeGuard::set(home.path());
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
@@ -1483,7 +1489,7 @@ mod tests {
 
         // ── cc-switch 源库文件 ──
         let src = tempfile::NamedTempFile::new().expect("临时源库");
-        // 16（旧于当前 SCHEMA_VERSION）：顺带覆盖「导入路径把旧版本迁上来」的链路。
+        // 16（旧于当前 UPSTREAM4_SOURCE_SCHEMA_VERSION）：顺带覆盖「导入路径把旧版本迁上来」的链路。
         create_source_db(src.path(), 16);
         let before = std::fs::read(src.path()).expect("读源库字节");
 

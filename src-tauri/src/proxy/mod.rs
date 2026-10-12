@@ -11,15 +11,15 @@ pub(crate) mod content_encoding;
 pub mod copilot_optimizer;
 pub mod error;
 pub mod error_mapper;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub(crate) mod failover_switch;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod forwarder;
 pub mod gemini_url;
 pub mod handler_config;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod handler_context;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod handlers;
 pub mod http_client;
 pub mod hyper_client;
@@ -31,9 +31,9 @@ pub mod model_alignment;
 pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod response_processor;
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub(crate) mod server;
 pub mod session;
 pub(crate) mod sse;

@@ -665,4 +665,33 @@ describe("ProviderList Component", () => {
     >;
     expect(Object.keys(passedProviders)).toEqual(["loongport-mine"]);
   });
+  it("guards management callbacks and drag handles when the app owner blocks writes", () => {
+    const provider = createProvider({ id: "a", name: "A" });
+    const mutate = vi.fn();
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ a: provider }}
+        appId="claude"
+        mutationsDisabled
+        onSwitch={mutate}
+        onEdit={mutate}
+        onDelete={mutate}
+        onDuplicate={mutate}
+        onConfigureUsage={mutate}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+    for (const action of ["switch", "edit", "duplicate", "usage", "delete"]) {
+      fireEvent.click(screen.getByTestId(`${action}-a`));
+    }
+    expect(mutate).not.toHaveBeenCalled();
+    expect(useSortableMock).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: true }),
+    );
+  });
 });

@@ -496,14 +496,28 @@ mod tests {
         assert_eq!(resolved, home.path().join(APP_DIR_NAME));
     }
 
-    fn assert_atomic_write_replaces_existing_file(dir: &Path) {
+    fn atomic_write_contract_stage(started: std::time::Instant, stage: &str) {
+        eprintln!(
+            "atomic-write-contract stage={stage} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+
+    fn assert_atomic_write_replaces_existing_file(dir: &Path, started: std::time::Instant) {
         let path = dir.join("atomic-write-contract.json");
+        atomic_write_contract_stage(started, "old_write.begin");
         std::fs::write(&path, b"old contents").unwrap();
+        atomic_write_contract_stage(started, "old_write.done");
 
+        atomic_write_contract_stage(started, "atomic_write.begin");
         atomic_write(&path, b"new contents").unwrap();
+        atomic_write_contract_stage(started, "atomic_write.done");
 
+        atomic_write_contract_stage(started, "read.begin");
         assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
+        atomic_write_contract_stage(started, "read.done");
         let tmp_prefix = "atomic-write-contract.json.tmp.";
+        atomic_write_contract_stage(started, "scan.begin");
         let leftovers: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap())
@@ -514,13 +528,22 @@ mod tests {
             leftovers.is_empty(),
             "temporary files remain: {leftovers:?}"
         );
+        atomic_write_contract_stage(started, "scan.done");
+        atomic_write_contract_stage(started, "unlink.begin");
         std::fs::remove_file(path).unwrap();
+        atomic_write_contract_stage(started, "unlink.done");
     }
 
     #[test]
     fn atomic_write_replaces_existing_file() {
+        let started = std::time::Instant::now();
+        atomic_write_contract_stage(started, "tempdir.begin");
         let dir = tempfile::tempdir().unwrap();
-        assert_atomic_write_replaces_existing_file(dir.path());
+        atomic_write_contract_stage(started, "tempdir.done");
+        assert_atomic_write_replaces_existing_file(dir.path(), started);
+        atomic_write_contract_stage(started, "cleanup.begin");
+        drop(dir);
+        atomic_write_contract_stage(started, "cleanup.done");
     }
 
     #[cfg(unix)]
@@ -603,6 +626,8 @@ mod tests {
     #[test]
     #[ignore = "requires CC_SWITCH_WSL_TEST_DIR to point to a WSL2 UNC directory"]
     fn atomic_write_replaces_existing_wsl_unc_file() {
+        let started = std::time::Instant::now();
+        atomic_write_contract_stage(started, "test.enter");
         let root = PathBuf::from(
             std::env::var_os("CC_SWITCH_WSL_TEST_DIR").expect("CC_SWITCH_WSL_TEST_DIR must be set"),
         );
@@ -625,11 +650,17 @@ mod tests {
             );
         }
 
+        atomic_write_contract_stage(started, "paths.ready");
+        atomic_write_contract_stage(started, "tempdir.begin");
         let dir = tempfile::Builder::new()
             .prefix("atomic-write-contract-")
             .tempdir_in(&root)
             .unwrap();
-        assert_atomic_write_replaces_existing_file(dir.path());
+        atomic_write_contract_stage(started, "tempdir.done");
+        assert_atomic_write_replaces_existing_file(dir.path(), started);
+        atomic_write_contract_stage(started, "cleanup.begin");
+        drop(dir);
+        atomic_write_contract_stage(started, "cleanup.done");
     }
 
     #[test]

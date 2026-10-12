@@ -44,6 +44,7 @@ interface DragHandleProps {
 }
 
 interface ProviderCardProps {
+  mutationsDisabled?: boolean;
   provider: Provider;
   isCurrent: boolean;
   appId: AppId;
@@ -126,6 +127,7 @@ const extractApiUrl = (provider: Provider, fallbackText: string) => {
 };
 
 export function ProviderCard({
+  mutationsDisabled = false,
   provider,
   isCurrent,
   appId,
@@ -506,7 +508,10 @@ export function ProviderCard({
                     <button
                       type="button"
                       className="shrink-0 text-sm font-medium text-primary hover:underline"
-                      onClick={() => onEdit(provider)}
+                      disabled={mutationsDisabled}
+                      onClick={() => {
+                        if (!mutationsDisabled) onEdit(provider);
+                      }}
                     >
                       {t("codex.chooseAccount", {
                         defaultValue: "选择账号",
@@ -626,6 +631,7 @@ export function ProviderCard({
               内部（主按钮在上、图标组自带 hover 组），这里不再整组包一层。 */}
           <div className="flex-shrink-0">
             <ProviderActions
+              mutationsDisabled={mutationsDisabled}
               appId={appId}
               isCurrent={isCurrent}
               isInConfig={isInConfig}

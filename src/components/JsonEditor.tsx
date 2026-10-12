@@ -20,6 +20,10 @@ interface JsonEditorProps {
   darkMode?: boolean;
   rows?: number;
   showValidation?: boolean;
+  /** Disable value-normalizing formatting for backend-owned configuration text. */
+  showFormat?: boolean;
+  /** Omit source fragments from diagnostics for controlled configuration edits. */
+  redactErrors?: boolean;
   language?: "json" | "javascript";
   height?: string | number;
   showMinimap?: boolean; // 添加此属性以防未来使用
@@ -91,6 +95,8 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
   darkMode = false,
   rows = 3,
   showValidation = true,
+  showFormat = true,
+  redactErrors = false,
   language = "json",
   height,
   readOnly = false,
@@ -130,7 +136,9 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
         } catch (e) {
           // 简单处理JSON解析错误
           const message =
-            e instanceof SyntaxError ? e.message : t("jsonEditor.invalidJson");
+            e instanceof SyntaxError && !redactErrors
+              ? e.message
+              : t("jsonEditor.invalidJson");
           diagnostics.push({
             from: 0,
             to: doc.length,
@@ -141,7 +149,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
 
         return diagnostics;
       }),
-    [showValidation, language, t],
+    [showValidation, language, t, redactErrors],
   );
 
   useEffect(() => {
@@ -335,8 +343,11 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
         closeButton: true,
       });
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+      const errorMessage = redactErrors
+        ? t("jsonEditor.invalidJson")
+        : error instanceof Error
+          ? error.message
+          : String(error);
       toast.error(
         t("common.formatError", {
           defaultValue: "格式化失败：{{error}}",
@@ -368,7 +379,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
         }}
         className={isFullHeight ? "flex-1 min-h-0" : ""}
       />
-      {language === "json" && !readOnly && (
+      {language === "json" && showFormat && !readOnly && (
         <button
           type="button"
           onClick={handleFormat}

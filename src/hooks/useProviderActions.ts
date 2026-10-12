@@ -3,6 +3,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { piApi, providersApi, openclawApi, type AppId } from "@/lib/api";
+import {
+  completedProviderEdit,
+  type ProviderUpdateInput,
+  type ProviderCatalogDecision,
+} from "@/lib/api/providers";
 import type {
   Provider,
   UsageScript,
@@ -100,11 +105,18 @@ export function useProviderActions(activeApp: AppId) {
 
   // 更新供应商
   const updateProvider = useCallback(
-    async (provider: Provider, originalId?: string) => {
-      await updateProviderMutation.mutateAsync({
+    async (
+      provider: Provider,
+      originalId?: string,
+      edit?: ProviderUpdateInput["edit"],
+    ) => {
+      const result = await updateProviderMutation.mutateAsync({
         provider,
         originalId,
+        ...(edit ? { edit } : {}),
       });
+      if (edit && !completedProviderEdit(result, activeApp, edit.request))
+        return result;
 
       // 更新托盘菜单（失败不影响主操作）
       try {
@@ -112,11 +124,12 @@ export function useProviderActions(activeApp: AppId) {
       } catch (trayError) {
         console.error(
           "Failed to update tray menu after updating provider",
-          trayError,
+          ...(edit ? [] : [trayError]),
         );
       }
+      return result;
     },
-    [updateProviderMutation],
+    [updateProviderMutation, activeApp],
   );
 
   // 切换供应商
@@ -135,11 +148,18 @@ export function useProviderActions(activeApp: AppId) {
    * 就关掉他正开着的 app 是不能接受的。
    */
   const switchProvider = useCallback(
-    async (provider: Provider, quitChatgpt?: boolean) => {
+    async (
+      provider: Provider,
+      quitChatgpt?: boolean,
+      catalogDecision?: ProviderCatalogDecision,
+      catalogPreviewOnly?: boolean,
+    ) => {
       try {
         const result = await switchProviderMutation.mutateAsync({
           providerId: provider.id,
           quitChatgpt,
+          ...(catalogDecision ? { catalogDecision } : {}),
+          ...(catalogPreviewOnly !== undefined ? { catalogPreviewOnly } : {}),
         });
         if (result.status === "confirmationRequired") {
           return result;

@@ -376,8 +376,8 @@ mod tests {
             Ok(DeleteResult::Removed)
         }
     }
-    fn fixture() -> (tempfile::TempDir, Database, Remote) {
-        let temporary = tempfile::tempdir().unwrap();
+    fn fixture() -> (crate::secrets::testing::TestHome, Database, Remote) {
+        let temporary = crate::secrets::testing::TestHome::new().unwrap();
         let vault = VaultContext::generate()
             .unwrap()
             .with_password("cleanup recovery password")
@@ -469,6 +469,7 @@ mod tests {
         )
     }
     #[tokio::test]
+    #[serial_test::serial]
     async fn preview_is_read_only_and_cleanup_only_removes_confirmed_legacy_objects() {
         let (_home, db, remote) = fixture();
         let plan = preview(&db, &remote).await.unwrap();
@@ -503,6 +504,7 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[serial_test::serial]
     async fn ignored_delete_conditions_only_remove_the_probe() {
         let (_home, db, remote) = fixture();
         let plan = preview(&db, &remote).await.unwrap();
@@ -525,6 +527,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    #[serial_test::serial]
     async fn changed_legacy_object_or_head_rejects_before_any_probe_or_delete() {
         let (_home, db, mut remote) = fixture();
         let plan = preview(&db, &remote).await.unwrap();
@@ -548,6 +551,7 @@ mod tests {
         assert!(remote.state.lock().unwrap().writes.is_empty());
     }
     #[tokio::test]
+    #[serial_test::serial]
     async fn partial_failure_retains_the_manifest_and_retry_targets_only_remaining_objects() {
         let (_home, db, remote) = fixture();
         let plan = preview(&db, &remote).await.unwrap();
@@ -571,6 +575,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    #[serial_test::serial]
     async fn changing_the_encrypted_head_during_the_probe_keeps_legacy_objects() {
         let (_home, db, remote) = fixture();
         let plan = preview(&db, &remote).await.unwrap();
@@ -594,6 +599,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn unrecognized_manifests_and_orphan_objects_are_not_cleanup_targets() {
         for orphan in [false, true] {
             let (_home, db, remote) = fixture();
@@ -614,6 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn a_valid_head_with_a_different_password_wrapper_cannot_authorize_cleanup() {
         let (_home, db, mut remote) = fixture();
         let alternate = db
@@ -652,6 +659,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn an_invalid_encrypted_head_never_authorizes_legacy_cleanup() {
         let (_home, db, mut remote) = fixture();
         remote.snapshot.db_sql = b"invalid".to_vec();

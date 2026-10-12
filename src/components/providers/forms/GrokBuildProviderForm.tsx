@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -74,6 +74,8 @@ export function GrokBuildProviderForm({
   onSubmit,
   onCancel,
   onSubmittingChange,
+  onDraftRevisionChange,
+  preserveBlankCredential = false,
   initialData,
   showButtons = true,
 }: GrokBuildProviderFormProps) {
@@ -284,7 +286,12 @@ export function GrokBuildProviderForm({
 
   const handleRawConfigChange = (value: string) => {
     setRawConfig(value);
-    if (validateGrokBuildConfig(value)) return;
+    if (
+      validateGrokBuildConfig(value, {
+        allowBlankCredential: preserveBlankCredential && !!initialData,
+      })
+    )
+      return;
     const parsed = parseGrokBuildConfig(value, form.getValues("name"));
     setProfile(parsed.model);
     setUpstreamModel(parsed.upstreamModel ?? parsed.model);
@@ -293,6 +300,45 @@ export function GrokBuildProviderForm({
     setContextWindow(String(parsed.contextWindow));
     if (parsed.name) form.setValue("name", parsed.name);
   };
+
+  const watchedDraft = useWatch({
+    control: form.control,
+    disabled: !onDraftRevisionChange,
+  });
+  const draftSignature = onDraftRevisionChange
+    ? JSON.stringify([
+        watchedDraft,
+        selectedPresetId,
+        category,
+        profile,
+        upstreamModel,
+        baseUrl,
+        apiKey,
+        contextWindow,
+        rawConfig,
+        apiFormat,
+        anthropicAuthField,
+        impersonateClaudeCode,
+        maxOutputTokens,
+        codexChatReasoning,
+        promptCacheRouting,
+        isFullUrl,
+        customUserAgent,
+        headersOverride,
+        bodyOverride,
+        endpointAutoSelect,
+      ])
+    : "";
+  const draftRevision = useRef({ signature: draftSignature, value: 0 });
+  useLayoutEffect(() => {
+    if (draftRevision.current.signature !== draftSignature) {
+      draftRevision.current = {
+        signature: draftSignature,
+        value: draftRevision.current.value + 1,
+      };
+    }
+    onDraftRevisionChange?.(draftRevision.current.value);
+  }, [draftSignature, onDraftRevisionChange]);
 
   const handleSubmit = async (values: ProviderFormData) => {
     const name = values.name.trim();
@@ -313,12 +359,22 @@ export function GrokBuildProviderForm({
       return;
     }
 
+    // The controlled editor previews the actual raw draft. The legacy helper
+    // rebuilds malformed TOML from structured inputs; never use that fallback
+    // to silently replace an invalid U02 draft with a different configuration.
+    if (preserveBlankCredential && rawConfigError) {
+      toast.error(t("provider.preview.invalidFormat"));
+      return;
+    }
+
     const parsedContextWindow = Number.parseInt(contextWindow, 10);
     const envKey = parseGrokBuildConfig(rawConfig).envKey?.trim();
     if (
       !name ||
       !baseUrl.trim() ||
-      (!apiKey.trim() && !envKey) ||
+      (!apiKey.trim() &&
+        !envKey &&
+        !(preserveBlankCredential && initialData)) ||
       !profile.trim()
     ) {
       toast.error(
@@ -346,7 +402,9 @@ export function GrokBuildProviderForm({
       apiBackend: GROK_BUILD_DEFAULT_API_BACKEND,
       contextWindow: parsedContextWindow,
     });
-    const configError = validateGrokBuildConfig(finalConfig);
+    const configError = validateGrokBuildConfig(finalConfig, {
+      allowBlankCredential: preserveBlankCredential && !!initialData,
+    });
     if (configError) {
       toast.error(
         t("grokBuild.invalidToml", {
@@ -362,7 +420,11 @@ export function GrokBuildProviderForm({
       bodyOverride,
     );
     if (requestOverrides.error) {
-      toast.error(requestOverrides.error);
+      toast.error(
+        preserveBlankCredential
+          ? t("provider.preview.invalidFormat")
+          : requestOverrides.error,
+      );
       return;
     }
 
@@ -408,7 +470,9 @@ export function GrokBuildProviderForm({
     await onSubmit(payload);
   };
 
-  const rawConfigError = validateGrokBuildConfig(rawConfig);
+  const rawConfigError = validateGrokBuildConfig(rawConfig, {
+    allowBlankCredential: preserveBlankCredential && !!initialData,
+  });
 
   return (
     <Form {...form}>
@@ -519,10 +583,12 @@ export function GrokBuildProviderForm({
               />
               {rawConfigError && (
                 <p className="text-xs text-destructive">
-                  {t("grokBuild.invalidToml", {
-                    error: rawConfigError,
-                    defaultValue: `Invalid config.toml: ${rawConfigError}`,
-                  })}
+                  {preserveBlankCredential
+                    ? t("provider.preview.invalidFormat")
+                    : t("grokBuild.invalidToml", {
+                        error: rawConfigError,
+                        defaultValue: `Invalid config.toml: ${rawConfigError}`,
+                      })}
                 </p>
               )}
             </div>

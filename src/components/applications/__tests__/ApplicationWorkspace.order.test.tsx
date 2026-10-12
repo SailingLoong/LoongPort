@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApplicationWorkspace } from "../ApplicationWorkspace";
@@ -158,6 +165,19 @@ const drag = (ids: string[]) =>
     tableProps.current.onReorder(ids);
   });
 
+const openReview = async () => {
+  await userEvent.click(
+    screen.getByRole("button", { name: /applications.applyOrder/ }),
+  );
+  return screen.getByRole("dialog", { name: "applications.reviewChanges" });
+};
+const reviewAndConfirm = async () => {
+  const dialog = await openReview();
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "common.confirm" }),
+  );
+};
+
 describe("failover order staging", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -219,6 +239,215 @@ describe("failover order staging", () => {
     };
   });
 
+  it("reviews the concrete applied order before writing and keeps the draft on cancel", async () => {
+    renderWorkspace();
+    await drag(["c", "a", "b"]);
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", {
+      name: "applications.reviewChanges",
+    });
+    const proposed = within(dialog).getByRole("list", {
+      name: "applications.proposedOrder",
+    });
+    expect(
+      within(proposed)
+        .getAllByRole("listitem")
+        .map((row) => row.textContent),
+    ).toEqual([
+      "Unknown · Example service · Personal",
+      "Standard · Example service · Personal",
+      "Premium · Example service · Personal",
+    ]);
+    expect(
+      within(dialog).getByText("applications.noExplicitSelection"),
+    ).toBeVisible();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "common.cancel" }),
+    );
+    expect(state.apply).not.toHaveBeenCalled();
+    expect(tableProps.current.orderedIds).toEqual(["c", "a", "b"]);
+    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+  });
+
+  it("confirms the displayed request once even when clicked repeatedly", async () => {
+    let resolve!: (value: unknown) => void;
+    state.apply.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
+    const dialog = await openReview();
+    const confirm = within(dialog).getByRole("button", {
+      name: "common.confirm",
+    });
+    act(() => {
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+    expect(state.apply).toHaveBeenCalledTimes(1);
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "default", providerIds: ["b", "a", "c"] } },
+      undefined,
+    );
+    await act(async () => {
+      resolve({ status: "switched", warnings: [] });
+    });
+  });
+
+  it.each(["common.close", "Escape"])(
+    "keeps the draft when the review is dismissed with %s",
+    async (action) => {
+      renderWorkspace();
+      await drag(["b", "a", "c"]);
+      const dialog = await openReview();
+      if (action === "Escape") await userEvent.keyboard("{Escape}");
+      else
+        await userEvent.click(
+          within(dialog).getByRole("button", { name: action }),
+        );
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(state.apply).not.toHaveBeenCalled();
+      expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+    },
+  );
+
+  it("requires reviewing a changed draft again instead of submitting different contents", async () => {
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
+    const dialog = await openReview();
+    await drag(["c", "b", "a"]);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "applications.reviewChanged",
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    ).toBeDisabled();
+    expect(state.apply).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "common.cancel" }),
+    );
+    await reviewAndConfirm();
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "default", providerIds: ["c", "b", "a"] } },
+      undefined,
+    );
+  });
+
+  it.each(["chain", "current", "model", "blocked"])(
+    "invalidates review when applied %s facts change",
+    async (fact) => {
+      const view = renderWorkspace();
+      await drag(["b", "a", "c"]);
+      const dialog = await openReview();
+      if (fact === "chain")
+        state.routing = { ...state.routing, chainIds: ["a", "c"] };
+      if (fact === "model")
+        state.routing = { ...state.routing, model: "new-model" };
+      if (fact === "blocked")
+        state.routing = { ...state.routing, modeState: { canWrite: false } };
+      if (fact === "current")
+        state.data = {
+          ...state.data,
+          configurations: state.data.configurations.map((item: any) => ({
+            ...item,
+            presentation: {
+              ...item.presentation,
+              isCurrent: item.providerId === "c",
+            },
+          })),
+        };
+      rerenderWorkspace(view);
+      expect(
+        within(dialog).getByRole("button", { name: "common.confirm" }),
+      ).toBeDisabled();
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(
+        "applications.reviewChanged",
+      );
+      expect(state.apply).not.toHaveBeenCalled();
+    },
+  );
+
+  it("checks the existing routing cache again before confirming, even before a render", async () => {
+    queryClient.setQueryData(["applicationRouting", "codex"], state.routing);
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
+    const dialog = await openReview();
+    act(() => {
+      queryClient.setQueryData(["applicationRouting", "codex"], {
+        ...state.routing,
+        chainIds: ["c"],
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "common.confirm" }),
+      );
+    });
+    expect(state.apply).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "applications.reviewChanged",
+    );
+  });
+
+  it("keeps a review usable across unchanged readback and unrelated metrics", async () => {
+    const view = renderWorkspace();
+    await drag(["b", "a", "c"]);
+    const dialog = await openReview();
+    state.routing = {
+      ...state.routing,
+      tiers: state.routing.tiers.map((tier: any) => ({
+        ...tier,
+        balanceUsd: 99,
+      })),
+    };
+    rerenderWorkspace(view);
+    expect(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    );
+    expect(state.apply).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the explicit current tier and model request without claiming a runtime result", async () => {
+    state.routing.model = "model-a";
+    state.routing.tiers[0].models = ["model-a"];
+    state.routing.tiers[1].models = ["model-b"];
+    state.routing.tiers[2].models = ["model-a"];
+    renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
+    const dialog = await openReview();
+    expect(
+      within(dialog).getByText("Standard · Example service · Personal", {
+        selector: "p",
+      }),
+    ).toBeVisible();
+    expect(within(dialog).getByText("model-a")).toBeVisible();
+    expect(within(dialog).getByText("model-b")).toBeVisible();
+    expect(
+      within(dialog).getByText("applications.requestedSelection"),
+    ).toBeVisible();
+    expect(state.apply).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      {
+        order: { profileName: "default", providerIds: ["b"] },
+        selection: { providerId: "b", model: "model-b" },
+      },
+      undefined,
+    );
+  });
+
   it("submits a reordered chain and its profile together, and converges after readback", async () => {
     const view = renderWorkspace();
     await waitFor(() =>
@@ -228,9 +457,7 @@ describe("failover order staging", () => {
     );
     await drag(["c", "a", "b"]);
     expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       { order: { profileName: "default", providerIds: ["c", "a", "b"] } },
       undefined,
@@ -259,9 +486,7 @@ describe("failover order staging", () => {
       await screen.findByRole("menuitem", { name: /Travel/ }),
     );
     expect(profilesApi.setCurrent).not.toHaveBeenCalled();
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       { order: { profileName: "Travel", providerIds: ["c", "b"] } },
       undefined,
@@ -318,9 +543,7 @@ describe("failover order staging", () => {
       screen.getByRole("combobox", { name: "applications.modelFilter" }),
     );
     await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       {
         order: { profileName: "default", providerIds: ["a", "b", "c"] },
@@ -361,9 +584,7 @@ describe("failover order staging", () => {
     });
     renderWorkspace();
     await drag(["b", "a", "c"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(screen.getByRole("dialog")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Cancel switch" }),
@@ -371,9 +592,7 @@ describe("failover order staging", () => {
     expect(state.apply).toHaveBeenCalledTimes(1);
     expect(profilesApi.saveCalls).toEqual([]);
     expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     await userEvent.click(
       screen.getByRole("button", { name: "Confirm switch" }),
     );
@@ -383,13 +602,30 @@ describe("failover order staging", () => {
     );
   });
 
+  it("requires a fresh review when applied facts change during native confirmation", async () => {
+    state.apply.mockResolvedValue({
+      status: "confirmationRequired",
+      targetName: "Example",
+    });
+    const view = renderWorkspace();
+    await drag(["b", "a", "c"]);
+    await reviewAndConfirm();
+    expect(state.apply).toHaveBeenCalledTimes(1);
+    state.routing = { ...state.routing, model: "new-model" };
+    rerenderWorkspace(view);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirm switch" }),
+    );
+    expect(state.apply).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+  });
+
   it("retains the draft on failure", async () => {
     state.apply.mockRejectedValue(new Error("Cannot update"));
     renderWorkspace();
     await drag(["b", "a", "c"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
     expect(screen.getByText("applications.pendingChanges")).toBeVisible();
   });
@@ -437,9 +673,7 @@ describe("failover order staging", () => {
       "Travel",
     );
     expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       { order: { profileName: "Travel", providerIds: ["c", "b", "a"] } },
       undefined,
@@ -467,9 +701,7 @@ describe("failover order staging", () => {
     await userEvent.click(
       await screen.findByRole("menuitem", { name: /Travel/ }),
     );
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     state.routing = {
       ...state.routing,
       chainIds: ["c", "b"],
@@ -526,9 +758,7 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       {
         order: { profileName: "Travel", providerIds: ["a", "b", "c"] },
@@ -552,9 +782,7 @@ describe("failover order staging", () => {
     expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
     await userEvent.type(screen.getByRole("searchbox"), "Plan");
     expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       { order: { profileName: "default", providerIds: ["b", "a"] } },
       undefined,
@@ -606,9 +834,7 @@ describe("failover order staging", () => {
     expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
     expect(state.apply).not.toHaveBeenCalled();
     await userEvent.keyboard("{Escape}");
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
+    await reviewAndConfirm();
     expect(state.apply).toHaveBeenCalledWith(
       { order: { profileName: "Remote", providerIds: ["c", "b"] } },
       undefined,

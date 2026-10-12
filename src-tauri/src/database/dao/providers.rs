@@ -213,7 +213,7 @@ impl Database {
         ))
     }
 
-    fn get_all_providers_on_connection(
+    pub(crate) fn get_all_providers_on_connection(
         conn: &rusqlite::Connection,
         vault: &VaultContext,
         app_type: &str,
@@ -356,6 +356,20 @@ impl Database {
         app_type: &str,
     ) -> Result<Option<Provider>, AppError> {
         let vault = self.secrets.read()?;
+        self.get_provider_by_id_with_vault(id, app_type, self.secrets.as_ref(), &vault)
+    }
+
+    pub(crate) fn get_provider_by_id_with_vault(
+        &self,
+        id: &str,
+        app_type: &str,
+        session: &crate::secrets::session::SecretSession,
+        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<Option<Provider>, AppError> {
+        if !std::ptr::eq(session, self.secrets.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue, available_models
@@ -397,13 +411,13 @@ impl Database {
         match result {
             Ok((mut provider, settings, meta)) => {
                 provider.settings_config =
-                    Self::decode_provider_json(&vault, "settings_config", id, app_type, &settings)?;
+                    Self::decode_provider_json(vault, "settings_config", id, app_type, &settings)?;
                 provider.meta = Some(Self::decode_provider_json(
-                    &vault, "meta", id, app_type, &meta,
+                    vault, "meta", id, app_type, &meta,
                 )?);
                 if let Some(meta) = &mut provider.meta {
                     meta.custom_endpoints =
-                        Self::get_endpoints_on_connection(&conn, &vault, id, app_type)?;
+                        Self::get_endpoints_on_connection(&conn, vault, id, app_type)?;
                 }
                 Ok(Some(provider))
             }
@@ -414,15 +428,60 @@ impl Database {
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
         let vault = self.secrets.read()?;
+        self.save_provider_with_vault(
+            app_type,
+            provider,
+            None,
+            false,
+            self.secrets.as_ref(),
+            &vault,
+        )
+    }
+
+    /// The existing provider SQL owner, under the operation's pinned generation.
+    /// Compare the row and publish its replacement in this same SQLite transaction.
+    pub(crate) fn save_provider_with_vault(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        expected: Option<&str>,
+        mark_user_edited: bool,
+        session: &crate::secrets::session::SecretSession,
+        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+    ) -> Result<(), AppError> {
+        if !std::ptr::eq(session, self.secrets.as_ref()) {
+            return Err(AppError::Config("settings.session_mismatch".into()));
+        }
+        session.ensure_available()?;
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
+        if let Some(expected) = expected {
+            let current = Self::get_all_providers_on_connection(&tx, vault, app_type)?
+                .shift_remove(&provider.id)
+                .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
+            let current_digest = Self::provider_update_digest(&current)?;
+            if current_digest == Self::provider_update_digest(provider)? {
+                if mark_user_edited {
+                    tx.execute(
+                        "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
+                        params![provider.id, app_type],
+                    )?;
+                    tx.commit()?;
+                }
+                return Ok(());
+            }
+            if current_digest != expected {
+                return Err(AppError::Config("mode.provider_changed".into()));
+            }
+        }
+
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
         let settings = seal_db(
-            &vault,
+            vault,
             "providers",
             "settings_config",
             &[&provider.id, app_type],
@@ -430,7 +489,7 @@ impl Database {
                 .map_err(|e| AppError::Database(e.to_string()))?,
         )?;
         let meta = seal_db(
-            &vault,
+            vault,
             "providers",
             "meta",
             &[&provider.id, app_type],
@@ -443,7 +502,7 @@ impl Database {
                 params![provider.id, app_type],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok();
+            .optional().map_err(|e| AppError::Database(e.to_string()))?;
 
         let is_update = existing.is_some();
         let (is_current, in_failover_queue) =
@@ -509,17 +568,16 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
             for (url, endpoint) in endpoints {
-                insert_endpoint_on_tx(
-                    &tx,
-                    &vault,
-                    &provider.id,
-                    app_type,
-                    &url,
-                    endpoint.added_at,
-                )?;
+                insert_endpoint_on_tx(&tx, vault, &provider.id, app_type, &url, endpoint.added_at)?;
             }
         }
 
+        if mark_user_edited {
+            tx.execute(
+                "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
+                params![provider.id, app_type],
+            )?;
+        }
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         // 释放连接锁再追加链成员：note_provider_created 内部要拿同一把锁，
         // conn 守卫活到函数尾的话这里就死锁了。
@@ -538,6 +596,23 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn provider_update_value(
+        provider: &Provider,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut provider = provider.clone();
+        provider.in_failover_queue = false;
+        let mut meta = provider.meta.take().unwrap_or_default();
+        meta.custom_endpoints.clear();
+        provider.meta = Some(meta);
+        serde_json::to_value(provider)
+            .map_err(|_| AppError::Config("mode.invalid_saved_row".into()))
+    }
+
+    pub(crate) fn provider_update_digest(provider: &Provider) -> Result<String, AppError> {
+        let bytes = crate::config::serialize_json_bytes(&Self::provider_update_value(provider)?)?;
+        Ok(crate::live::engine::sha256_hex(&bytes))
     }
 
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {

@@ -7,6 +7,8 @@ import { Save, Download, Loader2, Package } from "lucide-react";
 import JsonEditor from "@/components/JsonEditor";
 
 interface CommonConfigEditorProps {
+  redactErrors?: boolean;
+  commonConfigReadOnly?: boolean;
   value: string;
   onChange: (value: string) => void;
   useCommonConfig: boolean;
@@ -22,6 +24,8 @@ interface CommonConfigEditorProps {
 }
 
 export function CommonConfigEditor({
+  redactErrors,
+  commonConfigReadOnly = false,
   value,
   onChange,
   useCommonConfig,
@@ -167,7 +171,11 @@ export function CommonConfigEditor({
                 type="checkbox"
                 id="useCommonConfig"
                 checked={useCommonConfig}
-                onChange={(e) => onCommonConfigToggle(e.target.checked)}
+                disabled={commonConfigReadOnly}
+                onChange={(e) => {
+                  if (!commonConfigReadOnly)
+                    onCommonConfigToggle(e.target.checked);
+                }}
                 className="w-4 h-4 text-blue-500 bg-white dark:bg-gray-800 border-border-default rounded focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-2"
               />
               <span>
@@ -248,6 +256,7 @@ export function CommonConfigEditor({
           </label>
         </div>
         <JsonEditor
+          redactErrors={redactErrors}
           value={localValue}
           onChange={handleLocalChange}
           placeholder={`{
@@ -275,8 +284,10 @@ export function CommonConfigEditor({
               <Button
                 type="button"
                 variant="outline"
-                onClick={onExtract}
-                disabled={isExtracting}
+                onClick={() => {
+                  if (!commonConfigReadOnly) onExtract();
+                }}
+                disabled={commonConfigReadOnly || isExtracting}
                 className="gap-2"
               >
                 {isExtracting ? (
@@ -292,7 +303,12 @@ export function CommonConfigEditor({
             <Button type="button" variant="outline" onClick={onModalClose}>
               {t("common.cancel")}
             </Button>
-            <Button type="button" onClick={onModalClose} className="gap-2">
+            <Button
+              type="button"
+              disabled={commonConfigReadOnly}
+              onClick={onModalClose}
+              className="gap-2"
+            >
               <Save className="w-4 h-4" />
               {t("common.save")}
             </Button>
@@ -300,6 +316,11 @@ export function CommonConfigEditor({
         }
       >
         <div className="space-y-4">
+          {commonConfigReadOnly && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("commonConfig.frozenHint")}
+            </p>
+          )}
           <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 p-3 space-y-1.5">
             <p className="text-sm font-medium text-blue-800 dark:text-blue-300">
               {t("commonConfig.guideTitle")}
@@ -329,8 +350,12 @@ export function CommonConfigEditor({
             </div>
           )}
           <JsonEditor
+            redactErrors={redactErrors}
             value={commonConfigSnippet}
-            onChange={onCommonConfigSnippetChange}
+            readOnly={commonConfigReadOnly}
+            onChange={(value) => {
+              if (!commonConfigReadOnly) onCommonConfigSnippetChange(value);
+            }}
             placeholder={`{
   "env": {
     "ANTHROPIC_BASE_URL": "https://your-api-endpoint.com"

@@ -22,7 +22,6 @@ import {
   APP_IDS,
   getAppDisplayName,
 } from "@/config/appConfig";
-import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
@@ -218,7 +217,6 @@ export function AppSwitcher({
 
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
-    localStorage.setItem(LAST_APP_STORAGE_KEY, app);
     onSwitch(app);
   };
 

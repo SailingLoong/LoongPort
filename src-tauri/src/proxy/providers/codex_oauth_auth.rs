@@ -300,6 +300,127 @@ pub(crate) struct ManagedTokenBundle {
     pub last_refresh: String,
 }
 
+/// Borrowed facts under the manager's existing lifecycle/account/maps guards.
+/// This is one bounded publication/recovery read, never a second token cache.
+pub(crate) struct CodexLiveAuthGuard<'a> {
+    session: &'a Arc<SecretSession>,
+    accounts: &'a HashMap<String, CodexAccountData>,
+    access_tokens: &'a HashMap<String, CachedAccessToken>,
+}
+impl CodexLiveAuthGuard<'_> {
+    pub(crate) fn belongs_to(&self, session: &SecretSession) -> bool {
+        std::ptr::eq(self.session.as_ref(), session)
+    }
+
+    /// Authenticate the captured persistence image under the caller's existing
+    /// vault. An active manager alone cannot prove that its generation survived
+    /// a failed save. This read neither reloads nor repairs either owner.
+    pub(crate) fn native_store_matches(
+        &self,
+        vault: &crate::secrets::VaultContext,
+        bytes: Option<&[u8]>,
+    ) -> Option<bool> {
+        let plaintext = CredentialFile::Codex.decode(vault, bytes?).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).ok()?;
+        let store: CodexOAuthStore = serde_json::from_value(value.clone()).ok()?;
+        if store.version != 1
+            || store
+                .accounts
+                .iter()
+                .any(|(id, data)| id.is_empty() || id != &data.account_id)
+            || serde_json::to_value(&store).ok()? != value
+        {
+            return None;
+        }
+        Some(
+            serde_json::to_value(&store.accounts).ok()?
+                == serde_json::to_value(self.accounts).ok()?,
+        )
+    }
+
+    /// Session-salted transient evidence, never another account/token store.
+    pub(crate) fn native_revision(&self, salt: &str) -> Result<String, crate::error::AppError> {
+        use sha2::{Digest, Sha256};
+        let accounts: std::collections::BTreeMap<_, _> = self.accounts.iter().collect();
+        let tokens: std::collections::BTreeMap<_, _> = self
+            .access_tokens
+            .iter()
+            .map(|(id, value)| {
+                (
+                    id,
+                    (&value.token, value.obtained_at_ms, value.expires_at_ms),
+                )
+            })
+            .collect();
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&(salt, accounts, tokens))
+                .map_err(|source| crate::error::AppError::JsonSerialize { source })?,
+        );
+        Ok(hex::encode(Sha256::digest(&*bytes)))
+    }
+
+    pub(crate) fn matches_prepared(&self, account: &str, auth: &serde_json::Value) -> bool {
+        let Some(stored) = self.accounts.get(account) else {
+            return false;
+        };
+        let Some(cached) = self.access_tokens.get(account) else {
+            return false;
+        };
+        let Some(time) =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(cached.obtained_at_ms)
+        else {
+            return false;
+        };
+        !cached.is_expiring_soon()
+            && *auth
+                == crate::codex_config::codex_managed_oauth_auth_value(
+                    account,
+                    &cached.token,
+                    stored.id_token.as_deref(),
+                    &stored.refresh_token,
+                    &time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                )
+    }
+
+    pub(crate) fn matches_live_generation(&self, account: &str, auth: &serde_json::Value) -> bool {
+        if self.matches_prepared(account, auth) {
+            return true;
+        }
+        let Some(stored) = self.accounts.get(account) else {
+            return false;
+        };
+        let Some(observed) = auth
+            .get("last_refresh")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.timestamp_millis())
+        else {
+            return false;
+        };
+        crate::codex_config::codex_live_auth_is_managed_chatgpt_login(auth, account)
+            && auth
+                .pointer("/tokens/refresh_token")
+                .and_then(serde_json::Value::as_str)
+                == Some(stored.refresh_token.as_str())
+            && auth
+                .pointer("/tokens/id_token")
+                .and_then(serde_json::Value::as_str)
+                == stored.id_token.as_deref()
+            && auth
+                .pointer("/tokens/access_token")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+            && observed >= stored.token_updated_at_ms
+            && self.access_tokens.get(account).is_none_or(|cache| {
+                observed >= cache.obtained_at_ms
+                    && auth
+                        .pointer("/tokens/access_token")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(cache.token.as_str())
+            })
+    }
+}
+
 /// Codex OAuth 认证管理器（多账号）
 pub struct CodexOAuthManager {
     accounts: Arc<RwLock<HashMap<String, CodexAccountData>>>,
@@ -317,14 +438,32 @@ pub struct CodexOAuthManager {
     /// 清除全部认证时递增，使已经在网络请求中的登录流程无法重新登记。
     login_epoch: AtomicU64,
     secrets: Arc<SecretSession>,
+    device: crate::live::engine::DeviceStore,
     /// 持久化串行锁：`save_to_disk` 与 `clear_auth` 的「快照+写盘/删文件」都在此锁内
     /// 完成。此前由外层 `RwLock<CodexOAuthManager>` 的写锁隐式串行化；去掉外层锁后
     /// 需要它防止并发保存/清除交错，导致已删账号被旧快照复活。
     storage_lock: Arc<Mutex<()>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_refresh_response: std::sync::Mutex<Option<OAuthTokenResponse>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_refresh_pause: std::sync::Mutex<Option<TestRefreshPause>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+struct TestRefreshPause {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl CodexOAuthManager {
     pub(crate) fn new(secrets: Arc<SecretSession>) -> Result<Self, CodexOAuthError> {
+        Self::with_device_store(secrets, crate::live::engine::DeviceStore::for_device())
+    }
+
+    fn with_device_store(
+        secrets: Arc<SecretSession>,
+        device: crate::live::engine::DeviceStore,
+    ) -> Result<Self, CodexOAuthError> {
         let manager = Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
@@ -334,7 +473,12 @@ impl CodexOAuthManager {
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             login_epoch: AtomicU64::new(0),
             secrets,
+            device,
             storage_lock: Arc::new(Mutex::new(())),
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_refresh_response: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_refresh_pause: std::sync::Mutex::new(None),
         };
 
         manager.load_from_disk_sync()?;
@@ -567,6 +711,26 @@ impl CodexOAuthManager {
         &self,
         refresh_token: &str,
     ) -> Result<OAuthTokenResponse, CodexOAuthError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            let response = self.test_refresh_response.lock().unwrap().take();
+            if let Some(response) = response {
+                let pause = self.test_refresh_pause.lock().unwrap().take();
+                if let Some(pause) = pause {
+                    let _ = pause.started.send(());
+                    pause.resume.await.map_err(|_| {
+                        CodexOAuthError::TokenFetchFailed("synthetic refresh interrupted".into())
+                    })?;
+                }
+                return Ok(response);
+            }
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() {
+            return Err(CodexOAuthError::TokenFetchFailed(
+                "synthetic refresh response missing".into(),
+            ));
+        }
         let response = crate::proxy::http_client::get()
             .post(OAUTH_TOKEN_URL)
             .timeout(OAUTH_HTTP_TIMEOUT)
@@ -651,7 +815,20 @@ impl CodexOAuthManager {
 
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _guard = refresh_lock.lock().await;
-        self.resolve_valid_cached_token_under_lock(account_id).await
+        self.resolve_valid_cached_token_under_lock(account_id, true)
+            .await
+    }
+
+    /// Called under the existing lifecycle/account locks before automatic adoption
+    /// or refresh. Pending recovery owns native publication and its token generation.
+    fn has_pending_live_operation(&self) -> Result<bool, CodexOAuthError> {
+        let vault = self.secrets.read()?;
+        let live = crate::mode::state::load(&self.device, &vault)?;
+        let app = live.apps.get("codex");
+        if !live.extra.is_empty() || app.is_some_and(|app| !app.extra.is_empty()) {
+            return Err(crate::error::AppError::Config("mode.verification_required".into()).into());
+        }
+        Ok(app.is_some_and(|app| app.pending.is_some()))
     }
 
     /// Resolve a token while the caller owns this account's refresh mutex.
@@ -660,7 +837,22 @@ impl CodexOAuthManager {
     async fn resolve_valid_cached_token_under_lock(
         &self,
         account_id: &str,
+        sync_live: bool,
     ) -> Result<CachedAccessToken, CodexOAuthError> {
+        if self.has_pending_live_operation()? {
+            // A valid cached generation is read-only. Do not adopt even a newer
+            // native bundle while the operation still needs explicit recovery.
+            let accounts = self.accounts.read().await;
+            if !accounts.contains_key(account_id) {
+                return Err(CodexOAuthError::AccountNotFound(account_id.to_string()));
+            }
+            if let Some(cached) = self.access_tokens.read().await.get(account_id) {
+                if !cached.is_expiring_soon() {
+                    return Ok(cached.clone());
+                }
+            }
+            return Err(crate::error::AppError::Config("mode.verification_required".into()).into());
+        }
         // Codex CLI may have advanced the shared refresh-token generation since
         // this manager last used the account. Reload it under the same per-account
         // lock before deciding whether a network refresh is necessary.
@@ -793,16 +985,18 @@ impl CodexOAuthManager {
             &stored_refresh_token,
             &last_refresh,
         );
-        if let Err(err) = crate::codex_config::sync_codex_managed_oauth_live_auth_after_refresh(
-            account_id,
-            &refresh_token,
-            &refreshed_auth,
-        ) {
-            // The manager token remains valid; a later provider write will
-            // retry the live synchronization without rolling it back.
-            log::warn!(
-                "[CodexOAuth] 同步刷新后的 Codex live auth 失败（account={account_id}）: {err}"
-            );
+        if sync_live {
+            if let Err(err) = crate::codex_config::sync_codex_managed_oauth_live_auth_after_refresh(
+                account_id,
+                &refresh_token,
+                &refreshed_auth,
+            ) {
+                // The manager token remains valid; a later provider write will
+                // retry the live synchronization without rolling it back.
+                log::warn!(
+                    "[CodexOAuth] 同步刷新后的 Codex live auth 失败（account={account_id}）: {err}"
+                );
+            }
         }
 
         // 在 accounts 读锁下确认账号仍存在，再写缓存：与 remove/clear（持 accounts
@@ -842,6 +1036,23 @@ impl CodexOAuthManager {
         &self,
         account_id: &str,
     ) -> Result<ManagedTokenBundle, CodexOAuthError> {
+        self.token_bundle_for_account(account_id, true).await
+    }
+
+    /// Resolve using the existing refresh owner, but leave native publication
+    /// to the direct transaction's durable intent.
+    pub(crate) async fn prepare_live_token_bundle(
+        &self,
+        account_id: &str,
+    ) -> Result<ManagedTokenBundle, CodexOAuthError> {
+        self.token_bundle_for_account(account_id, false).await
+    }
+
+    async fn token_bundle_for_account(
+        &self,
+        account_id: &str,
+        sync_live: bool,
+    ) -> Result<ManagedTokenBundle, CodexOAuthError> {
         let _lifecycle = self.lifecycle_lock.read().await;
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _refresh_guard = refresh_lock.lock().await;
@@ -850,7 +1061,7 @@ impl CodexOAuthManager {
         // account generation lock. Otherwise an adoption between these reads
         // can create an invalid A0 + R1/ID1 mixed bundle.
         let cached = self
-            .resolve_valid_cached_token_under_lock(account_id)
+            .resolve_valid_cached_token_under_lock(account_id, sync_live)
             .await?;
 
         // A managed bundle is about to overwrite auth.json. Re-read under the
@@ -860,7 +1071,11 @@ impl CodexOAuthManager {
         // RefreshTokenInvalid recovery path: the server may disprove manager R0,
         // force-adopt disk R1, and only then produce a safe bundle.
         if let Some((live_refresh, live_id_token, live_last_refresh_ms)) =
-            crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
+            if self.has_pending_live_operation()? {
+                None
+            } else {
+                crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
+            }
         {
             let outcome = self
                 .adopt_account_refresh_token_under_lock(
@@ -966,6 +1181,9 @@ impl CodexOAuthManager {
         let _lifecycle = self.lifecycle_lock.read().await;
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _guard = refresh_lock.lock().await;
+        if self.has_pending_live_operation()? {
+            return Err(crate::error::AppError::Config("mode.verification_required".into()).into());
+        }
         {
             let accounts = self.accounts.read().await;
             accounts
@@ -1285,7 +1503,7 @@ impl CodexOAuthManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn add_test_account_with_access_token(
         &self,
         account_id: &str,
@@ -1310,7 +1528,7 @@ impl CodexOAuthManager {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn test_refresh_token_for_account(&self, account_id: &str) -> Option<String> {
         self.accounts
             .read()
@@ -1319,7 +1537,7 @@ impl CodexOAuthManager {
             .map(|account| account.refresh_token.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn test_set_token_updated_at_ms(
         &self,
         account_id: &str,
@@ -1331,6 +1549,104 @@ impl CodexOAuthManager {
             .get_mut(account_id)
             .expect("test account present")
             .token_updated_at_ms = token_updated_at_ms;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) async fn test_set_bundle_time(&self, account: &str, time: i64) {
+        self.accounts
+            .write()
+            .await
+            .get_mut(account)
+            .expect("fixture account")
+            .token_updated_at_ms = time;
+        let mut tokens = self.access_tokens.write().await;
+        let cached = tokens.get_mut(account).expect("fixture cache");
+        cached.obtained_at_ms = time;
+        cached.expires_at_ms = time + 3_600_000;
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn test_refresh_is_queued(&self) -> bool {
+        self.test_refresh_response.lock().unwrap().is_some()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) async fn test_refresh_next(&self, account: &str, access: &str, refresh: &str) {
+        self.access_tokens
+            .write()
+            .await
+            .get_mut(account)
+            .expect("fixture account")
+            .expires_at_ms = 0;
+        *self.test_refresh_response.lock().unwrap() = Some(OAuthTokenResponse {
+            access_token: access.into(),
+            refresh_token: Some(refresh.into()),
+            id_token: Some("synthetic-id-token".into()),
+            expires_in: Some(3600),
+        });
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn test_pause_next_refresh(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        let (sender, resume) = tokio::sync::oneshot::channel();
+        *self.test_refresh_pause.lock().unwrap() = Some(TestRefreshPause { started, resume });
+        (receiver, sender)
+    }
+
+    /// Synchronous app admission may run on an async caller's thread. Borrow the
+    /// same owner only when immediately available; never start a nested runtime
+    /// or wait for a refresh while holding the app/vault locks. Original writers
+    /// with an already-held generation pass that guard directly instead.
+    pub(crate) fn try_with_live_auth_guard<T>(
+        &self,
+        action: impl FnOnce(&CodexLiveAuthGuard<'_>) -> Result<T, crate::error::AppError>,
+    ) -> Result<T, crate::error::AppError> {
+        let busy = || crate::error::AppError::Config("mode.verification_required".into());
+        let _lifecycle = self.lifecycle_lock.try_write().map_err(|_| busy())?;
+        let accounts = self.accounts.try_read().map_err(|_| busy())?;
+        let tokens = self.access_tokens.try_read().map_err(|_| busy())?;
+        action(&CodexLiveAuthGuard {
+            session: &self.secrets,
+            accounts: &accounts,
+            access_tokens: &tokens,
+        })
+    }
+
+    /// Order is switch owner → lifecycle → sorted account generations → vault.
+    /// The action is synchronous and performs no refresh/network/keychain work.
+    pub(crate) async fn with_live_auth_guard<T>(
+        &self,
+        ids: &[String],
+        action: impl FnOnce(&CodexLiveAuthGuard<'_>) -> Result<T, crate::error::AppError>,
+    ) -> Result<T, crate::error::AppError> {
+        // Wait for all in-flight refreshes, including accounts outside this
+        // target, before persisting an intent. New refreshes then see that intent.
+        let _lifecycle = self.lifecycle_lock.write().await;
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let mut locks = Vec::new();
+        for id in &ids {
+            locks.push(self.get_refresh_lock(id).await.lock_owned().await);
+        }
+        let accounts = self.accounts.read().await;
+        if ids.iter().any(|id| !accounts.contains_key(id)) {
+            return Err(crate::error::AppError::Config(
+                "codex.managed_account_missing".into(),
+            ));
+        }
+        let tokens = self.access_tokens.read().await;
+        action(&CodexLiveAuthGuard {
+            session: &self.secrets,
+            accounts: &accounts,
+            access_tokens: &tokens,
+        })
     }
 
     // ==================== 内部方法 ====================
@@ -1370,7 +1686,10 @@ impl CodexOAuthManager {
             refresh_token,
             authenticated_at: now,
             id_token,
-            token_updated_at_ms: now_ms,
+            // The persisted account and initial access cache are one received bundle.
+            token_updated_at_ms: initial_access_token
+                .as_ref()
+                .map_or(now_ms, |cached| cached.obtained_at_ms),
         };
 
         let account = GitHubAccount::from(&data);
@@ -1612,12 +1931,16 @@ mod tests {
     }
 
     fn test_manager(root: PathBuf) -> CodexOAuthManager {
-        CodexOAuthManager::new(test_session(root)).unwrap()
+        CodexOAuthManager::with_device_store(
+            test_session(root.clone()),
+            crate::live::engine::DeviceStore::at(root),
+        )
+        .unwrap()
     }
 
     #[test]
     fn constructor_rejects_unreadable_credentials_without_overwriting_them() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let session = test_session(dir.path().to_path_buf());
         let path = CredentialFile::Codex.path(&session);
         std::fs::write(&path, b"lpenc1.invalid").unwrap();
@@ -1631,7 +1954,7 @@ mod tests {
 
     #[test]
     fn credential_writer_never_persists_plaintext() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(dir.path().to_path_buf());
         manager
             .write_store_atomic(r#"{"version":1,"accounts":{},"github_token":"oauth-canary"}"#)
@@ -1740,15 +2063,96 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_initial_state() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         assert!(!manager.is_authenticated().await);
         assert!(manager.list_accounts().await.is_empty());
     }
 
     #[tokio::test]
+    async fn login_commit_keeps_native_generation_when_access_cache_expires() {
+        let temp = crate::secrets::testing::tempdir().unwrap();
+        let manager = test_manager(temp.path().to_path_buf());
+        let account = "synthetic-generation-account";
+        // The token response predates admission to the account's commit lock.
+        let obtained = chrono::Utc::now().timestamp_millis() - 10_000;
+        manager
+            .add_account_internal(
+                account.into(),
+                "synthetic-refresh".into(),
+                None,
+                Some("synthetic-id".into()),
+                Some(CachedAccessToken {
+                    token: "synthetic-access".into(),
+                    obtained_at_ms: obtained,
+                    expires_at_ms: obtained + 3_600_000,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let stored_time = manager.accounts.read().await[account].token_updated_at_ms;
+        let bundle_time = manager.access_tokens.read().await[account].obtained_at_ms;
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(bundle_time)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let auth = crate::codex_config::codex_managed_oauth_auth_value(
+            account,
+            "synthetic-access",
+            Some("synthetic-id"),
+            "synthetic-refresh",
+            &timestamp,
+        );
+        let path = CredentialFile::Codex.path(&manager.secrets);
+        let inspect = || {
+            manager
+                .try_with_live_auth_guard(|guard| {
+                    let bytes = std::fs::read(&path).unwrap();
+                    let vault = manager.secrets.read()?;
+                    assert_eq!(guard.native_store_matches(&vault, Some(&bytes)), Some(true));
+                    Ok((
+                        guard.matches_prepared(account, &auth),
+                        guard.matches_live_generation(account, &auth),
+                    ))
+                })
+                .unwrap()
+        };
+        assert_eq!(inspect(), (true, true));
+        manager
+            .test_refresh_next(account, "unused-access", "unused-refresh")
+            .await;
+        let before = std::fs::read(&path).unwrap();
+        let expired = inspect();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(manager.test_refresh_is_queued());
+        // Exact controls keep persistence and memory in agreement. Only the
+        // relation between the native bundle and stored generation changes.
+        manager.test_set_bundle_time(account, bundle_time).await;
+        manager.save_to_disk().await.unwrap();
+        manager
+            .test_refresh_next(account, "unused-access", "unused-refresh")
+            .await;
+        assert_eq!(inspect(), (false, true));
+        manager
+            .test_set_token_updated_at_ms(account, bundle_time + 1)
+            .await;
+        manager.save_to_disk().await.unwrap();
+        assert_eq!(inspect(), (false, false));
+        assert_eq!(stored_time, bundle_time, "one login has one generation");
+        assert_eq!(
+            bundle_time, obtained,
+            "retain the actual token acquisition time"
+        );
+        assert!(!expired.0);
+        assert!(
+            expired.1,
+            "the same persisted login generation survives access-cache expiry"
+        );
+    }
+
+    #[tokio::test]
     async fn test_manager_save_and_load() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let path = temp.path().to_path_buf();
         let session = test_session(path);
 
@@ -1779,7 +2183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_account() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
 
         manager
@@ -1813,7 +2217,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_syncs_rotated_value() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
@@ -1868,7 +2272,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_older_live_generation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
@@ -1907,7 +2311,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_undated_live_generation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
@@ -1937,7 +2341,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_stale_id_token_with_same_refresh() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-new"))
@@ -1977,7 +2381,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_equal_timestamp_generation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
@@ -2016,7 +2420,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_account_refresh_token_keeps_legacy_conflict_ambiguous_across_retries() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-manager"))
@@ -2063,7 +2467,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_manager_token_adopts_different_disk_token_without_timestamp() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-manager"))
@@ -2096,7 +2500,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_commit_rejects_flow_cleared_during_network_poll() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         manager.pending_device_codes.write().await.insert(
             "device-auth-id".to_string(),
@@ -2125,7 +2529,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_start_rejects_flow_cleared_during_network_request() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let manager = test_manager(temp.path().to_path_buf());
         let login_epoch = manager.login_epoch.load(Ordering::Acquire);
 

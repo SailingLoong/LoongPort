@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   order: vi.fn(),
   apply: vi.fn(),
+  prepare: vi.fn(),
+  query: vi.fn(),
   failover: vi.fn(),
   status: vi.fn(),
   takeover: vi.fn(),
@@ -20,6 +22,8 @@ vi.mock("@/lib/api/applicationRouting", () => ({
     get: mocks.get,
     setOrder: mocks.order,
     apply: mocks.apply,
+    prepareRequest: mocks.prepare,
+    queryRequest: mocks.query,
     setFailover: mocks.failover,
   },
 }));
@@ -51,6 +55,16 @@ beforeEach(() => {
   mocks.setTakeover.mockResolvedValue(undefined);
   mocks.failover.mockResolvedValue(undefined);
   mocks.order.mockResolvedValue(undefined);
+  mocks.prepare.mockImplementation(async (_app, _change, id) => ({
+    id,
+    scope: "applicationRouting",
+    draftDigest: "a".repeat(64),
+    revision: "b".repeat(64),
+  }));
+  mocks.query.mockImplementation(async (_app, request) => ({
+    request,
+    status: "unknown",
+  }));
 });
 describe("application routing controls", () => {
   it("reads the page without starting or reconfiguring routing", async () => {
@@ -66,6 +80,7 @@ describe("application routing controls", () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
+    await waitFor(() => expect(result.current.data).toBeDefined());
     await act(async () => {
       await result.current.setFailover(true);
     });
@@ -78,6 +93,7 @@ describe("application routing controls", () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
+    await waitFor(() => expect(result.current.data).toBeDefined());
     await act(async () => {
       await result.current.setFailover(false);
     });
@@ -91,6 +107,7 @@ describe("application routing controls", () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
+    await waitFor(() => expect(result.current.data).toBeDefined());
     await act(async () => {
       await expect(result.current.setFailover(true)).rejects.toThrow(
         "configuration is busy",
@@ -106,6 +123,7 @@ describe("application routing controls", () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
+    await waitFor(() => expect(result.current.data).toBeDefined());
     await act(async () => {
       await result.current.setOrder(["b", "a"]);
     });
@@ -131,6 +149,7 @@ describe("application routing controls", () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
+    await waitFor(() => expect(result.current.data).toBeDefined());
     const change = {
       order: { profileName: "Travel", providerIds: ["b"] },
       selection: { providerId: "b", model: "model-b" },
@@ -142,7 +161,12 @@ describe("application routing controls", () => {
     await act(async () => {
       await result.current.apply(change, false);
     });
-    expect(mocks.apply).toHaveBeenLastCalledWith("codex", change, false);
+    expect(mocks.apply).toHaveBeenLastCalledWith(
+      "codex",
+      change,
+      false,
+      expect.objectContaining({ scope: "applicationRouting" }),
+    );
     for (const owner of [
       "applicationRouting",
       "applicationOverview",
@@ -167,4 +191,103 @@ describe("application routing controls", () => {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: [owner, "codex"] });
     }
   });
+  it("keeps the last successful read and blocks writes when the owner requires verification", async () => {
+    const last = {
+      autoFailoverEnabled: true,
+      routingActive: true,
+      tiers: [{ providerId: "a" }],
+    };
+    mocks.get.mockResolvedValue(last);
+    const { result } = renderHook(() => useApplicationRouting("codex"), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.data).toEqual(last));
+    const changedAt = result.current.dataUpdatedAt;
+    mocks.get.mockRejectedValue({
+      code: "mode.verification_required",
+      modeState: {
+        status: "pending",
+        mode: null,
+        attached: null,
+        currentProviderId: null,
+        directProviderId: null,
+        publicationStarted: true,
+        canWrite: false,
+        canRecheck: true,
+      },
+    });
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.data).toEqual(last);
+    expect(result.current.dataUpdatedAt).toBe(changedAt);
+    await waitFor(() => expect(result.current.writeBlocked).toBe(true));
+    expect(result.current.modeState?.status).toBe("pending");
+    await act(async () => {
+      await expect(
+        result.current.apply({ selection: { providerId: "b" } }),
+      ).rejects.toThrow("mode.verification_required");
+      await expect(result.current.setFailover(true)).rejects.toThrow(
+        "mode.verification_required",
+      );
+      await result.current.refetch();
+    });
+    expect(mocks.apply).not.toHaveBeenCalled();
+    expect(mocks.failover).not.toHaveBeenCalled();
+    expect(result.current.data).toEqual(last);
+  });
+});
+
+it("prepares a catalog decision before showing its confirmation and reuses the original request", async () => {
+  const catalog = {
+    ownership: "unclaimedExternal",
+    choice: "keep",
+    canManage: true,
+    revision: "catalog-v1",
+    beforePointer: "synthetic-external",
+    afterPointer: "synthetic-external",
+  };
+  mocks.apply
+    .mockResolvedValueOnce({
+      status: "confirmationRequired",
+      targetName: "Synthetic",
+      catalog,
+      quitRequired: false,
+    })
+    .mockResolvedValueOnce({
+      status: "switched",
+      providerName: "Synthetic",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
+  const { result } = renderHook(() => useApplicationRouting("codex"), {
+    wrapper,
+  });
+  await waitFor(() => expect(result.current.data).toBeDefined());
+  const change = { selection: { providerId: "b", model: "model-b" } };
+  await act(async () => {
+    await result.current.prepareRequest(change);
+  });
+  await act(async () => {
+    await result.current.apply(change);
+  });
+  expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  expect(mocks.prepare.mock.calls[1][2]).toEqual(
+    mocks.prepare.mock.calls[0][2],
+  );
+  await act(async () => {
+    await result.current.apply(
+      {
+        ...change,
+        catalogDecision: { choice: "keep", revision: "catalog-v1" },
+        catalogPreviewOnly: false,
+      },
+      false,
+    );
+  });
+  expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  expect(mocks.apply.mock.calls[1][3].id).toEqual(
+    mocks.apply.mock.calls[0][3].id,
+  );
 });

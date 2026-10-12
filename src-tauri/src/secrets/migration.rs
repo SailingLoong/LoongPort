@@ -12,7 +12,16 @@ pub(crate) fn prepare_files(session: &SecretSession, legacy_allowed: bool) -> Re
     let settings_path = crate::settings::settings_path();
     let settings = match std::fs::read(&settings_path) {
         Ok(bytes) => {
-            let ciphertext = match crate::settings::decode_settings_with_vault(&bytes, &vault) {
+            let decoded = if legacy_allowed {
+                crate::settings::decode_settings_with_vault(&bytes, &vault).map(|_| ())
+            } else {
+                crate::settings::validate_runtime_settings_with_vault(
+                    &bytes,
+                    &vault,
+                    session.root(),
+                )
+            };
+            let ciphertext = match decoded {
                 Ok(_) => bytes.clone(),
                 Err(_) if legacy_allowed => {
                     crate::settings::encrypt_legacy_settings_with_vault(&bytes, &vault)?

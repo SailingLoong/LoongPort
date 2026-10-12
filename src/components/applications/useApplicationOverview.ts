@@ -8,6 +8,11 @@ import {
   applicationOverviewApi,
   type ApplicationConfiguration,
 } from "@/lib/api/applicationOverview";
+import type {
+  CatalogPreview,
+  ProviderCatalogDecision,
+} from "@/lib/api/providers";
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { relayApi } from "@/lib/api/relay";
 import { vendorApi } from "@/lib/api/vendor";
 import { PROVIDER_SWITCHED, VENDOR_ACCOUNTS_CHANGED } from "@/lib/api/events";
@@ -33,9 +38,13 @@ export function useApplicationOverview(
     name: string;
     /** 中转档位要一并切过去的模型（模型筛选场景）；确认往返不丢。 */
     model?: string;
+    catalog?: CatalogPreview;
+    quitRequired?: boolean;
   } | null>(null);
   const lifecycle = useRef(0);
   useEffect(() => {
+    setConfirmation(null);
+    setBusy(false);
     return () => {
       lifecycle.current += 1;
     };
@@ -55,20 +64,33 @@ export function useApplicationOverview(
     target: ApplicationConfiguration,
     quitChatgpt?: boolean,
     model?: string,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly = false,
   ) => {
     if (!target.canSelect || pending.current) return;
     const generation = lifecycle.current;
     pending.current = true;
     setBusy(true);
-    setConfirmation(null);
     try {
       if (target.selection.kind === "provider") {
         const provider = providers[target.providerId];
         if (provider) await onSwitchProvider(provider);
         return;
       }
-      const result =
-        target.selection.kind === "vendor"
+      const result = catalogDecision
+        ? await applicationRoutingApi.apply(
+            appId,
+            {
+              selection: {
+                providerId: target.providerId,
+                ...(model ? { model } : {}),
+              },
+              catalogDecision,
+              catalogPreviewOnly,
+            },
+            quitChatgpt,
+          )
+        : target.selection.kind === "vendor"
           ? await vendorApi.switch(
               target.selection.rowId,
               target.selection.planId,
@@ -87,9 +109,26 @@ export function useApplicationOverview(
             : await relayApi.switchTier(target.providerId, appId, quitChatgpt);
       if (generation !== lifecycle.current) return;
       if (result.status === "confirmationRequired") {
-        setConfirmation({ target, name: result.targetName, model });
+        if (
+          catalogPreviewOnly &&
+          (result.catalog?.choice !== catalogDecision?.choice ||
+            result.catalog?.revision !== catalogDecision?.revision)
+        ) {
+          setConfirmation(null);
+          toast.error(t("provider.preview.sourceChanged"));
+          return;
+        }
+        setConfirmation({
+          target,
+          name: result.targetName,
+          model,
+          catalog: result.catalog,
+          quitRequired: result.quitRequired,
+        });
         return;
       }
+      setConfirmation(null);
+      if (catalogPreviewOnly) return;
       toast.success(
         t(
           result.chatgptRelaunched
@@ -106,8 +145,10 @@ export function useApplicationOverview(
         client.invalidateQueries({ queryKey: ["providers", appId] }),
       ]);
     } catch (error) {
-      if (generation === lifecycle.current)
+      if (generation === lifecycle.current) {
+        setConfirmation(null);
         toast.error(extractErrorMessage(error));
+      }
     } finally {
       pending.current = false;
       if (generation === lifecycle.current) setBusy(false);
@@ -118,9 +159,36 @@ export function useApplicationOverview(
     busy,
     select,
     confirmation: confirmation?.name ?? null,
-    cancel: () => setConfirmation(null),
-    confirm: (quit: boolean) =>
-      confirmation &&
-      void select(confirmation.target, quit, confirmation.model),
+    catalog: confirmation?.catalog,
+    quitRequired: confirmation?.quitRequired,
+    cancel: () => {
+      lifecycle.current += 1;
+      setConfirmation(null);
+      setBusy(false);
+    },
+    previewCatalog: async (decision: ProviderCatalogDecision) => {
+      if (
+        !confirmation?.catalog ||
+        decision.revision !== confirmation.catalog.revision
+      )
+        return;
+      await select(
+        confirmation.target,
+        undefined,
+        confirmation.model,
+        decision,
+        true,
+      );
+    },
+    confirm: (quit: boolean, decision?: ProviderCatalogDecision) => {
+      if (!confirmation) return;
+      if (
+        confirmation.catalog &&
+        (decision?.choice !== confirmation.catalog.choice ||
+          decision.revision !== confirmation.catalog.revision)
+      )
+        return;
+      void select(confirmation.target, quit, confirmation.model, decision);
+    },
   };
 }

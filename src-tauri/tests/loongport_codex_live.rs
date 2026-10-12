@@ -24,7 +24,7 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_direct_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
 /// 复刻 `relay::provider_config::codex_config_toml` 的产物形态。
 ///
@@ -164,7 +164,7 @@ fn provisioned_provider_switches_and_lands_correct_config() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state(AppType::Codex).expect("create modern Direct test state");
 
     // 复刻 relay_provision 写库的那条记录（含它那两个容易漏的字段）。
     let provider_id = "loongport-test0000000001";
@@ -247,7 +247,7 @@ fn refreshing_the_current_tiers_key_updates_the_live_config() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let state = create_test_state().expect("create test state");
+    let state = create_direct_test_state(AppType::Codex).expect("create modern Direct test state");
     let provider_id = "loongport-test0000000002";
 
     let tier = |api_key: &str| Provider {

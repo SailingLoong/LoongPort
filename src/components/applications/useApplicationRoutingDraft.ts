@@ -1,7 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import type { ApplicationRoutingChange } from "@/lib/api/applicationRouting";
+import type {
+  CatalogPreview,
+  ProviderCatalogDecision,
+} from "@/lib/api/providers";
 import type { SwitchTierCommandResult } from "@/lib/api/relay";
 import type { TierSort } from "./tierMetrics";
 
@@ -24,7 +34,18 @@ export function useApplicationRoutingDraft(
   const [confirmation, setConfirmation] = useState<{
     name: string;
     change: ApplicationRoutingChange;
+    isCurrent?: () => boolean;
+    catalog?: CatalogPreview;
+    quitRequired?: boolean;
   } | null>(null);
+  const intent = useRef(0);
+  const submittedIntent = useRef<number | null>(null);
+  const edit =
+    <T>(setter: Dispatch<SetStateAction<T>>) =>
+    (value: SetStateAction<T>) => {
+      intent.current += 1;
+      setter(value);
+    };
   const pending = useRef(false);
   const lifecycle = useRef(0);
   useEffect(
@@ -35,6 +56,7 @@ export function useApplicationRoutingDraft(
   );
 
   const discard = () => {
+    intent.current += 1;
     setStagedIds(null);
     setProfileName(null);
     setShowAll(false);
@@ -43,23 +65,50 @@ export function useApplicationRoutingDraft(
     setModelFilter(null);
     setSearch("");
   };
+  const discardSubmitted = () => {
+    if (submittedIntent.current === intent.current) discard();
+    submittedIntent.current = null;
+  };
   const submit = async (
     change: ApplicationRoutingChange,
     quitChatgpt?: boolean,
+    isCurrent?: () => boolean,
   ) => {
     if (pending.current) return;
+    if (isCurrent && !isCurrent()) {
+      setConfirmation(null);
+      toast.warning(t("applications.reviewChanged"));
+      return;
+    }
     const generation = lifecycle.current;
+    submittedIntent.current = intent.current;
     pending.current = true;
     setSubmitting(true);
-    setConfirmation(null);
     try {
       const result = await apply(change, quitChatgpt);
       if (generation !== lifecycle.current) return;
       if (result.status === "confirmationRequired") {
-        setConfirmation({ name: result.targetName, change });
+        if (
+          change.catalogPreviewOnly &&
+          (result.catalog?.choice !== change.catalogDecision?.choice ||
+            result.catalog?.revision !== change.catalogDecision?.revision)
+        ) {
+          setConfirmation(null);
+          toast.warning(t("provider.preview.sourceChanged"));
+          return;
+        }
+        setConfirmation({
+          name: result.targetName,
+          change,
+          isCurrent,
+          catalog: result.catalog,
+          quitRequired: result.quitRequired,
+        });
         return;
       }
-      if (change.order) discard();
+      setConfirmation(null);
+      if (change.catalogPreviewOnly) return;
+      if (change.order) discardSubmitted();
       toast.success(t("applications.changesApplied"));
       result.warnings.forEach((warning) => toast.warning(warning));
       if (result.chatgptWasRunning && !result.chatgptRelaunched) {
@@ -68,6 +117,7 @@ export function useApplicationRoutingDraft(
         );
       }
     } catch {
+      if (generation === lifecycle.current) setConfirmation(null);
       // The mutation reports the original error. Keep local intent for retry.
     } finally {
       pending.current = false;
@@ -76,27 +126,67 @@ export function useApplicationRoutingDraft(
   };
   return {
     search,
-    setSearch,
+    setSearch: edit(setSearch),
     sort,
-    setSort,
+    setSort: edit(setSort),
     accountFilter,
-    setAccountFilter,
+    setAccountFilter: edit(setAccountFilter),
     modelFilter,
-    setModelFilter,
+    setModelFilter: edit(setModelFilter),
     stagedIds,
-    setStagedIds,
+    setStagedIds: edit(setStagedIds),
     profileName,
-    setProfileName,
+    setProfileName: edit(setProfileName),
     showAll,
-    setShowAll,
+    setShowAll: edit(setShowAll),
     submitting,
     confirmation,
     submit,
     discard,
-    cancel: () => setConfirmation(null),
-    confirm: (quit: boolean) =>
-      confirmation && void submit(confirmation.change, quit),
+    discardSubmitted,
+    cancel: () => {
+      lifecycle.current += 1;
+      setConfirmation(null);
+      setSubmitting(false);
+    },
+    previewCatalog: async (decision: ProviderCatalogDecision) => {
+      if (
+        !confirmation?.catalog ||
+        decision.revision !== confirmation.catalog.revision
+      )
+        return;
+      await submit(
+        {
+          ...confirmation.change,
+          catalogDecision: decision,
+          catalogPreviewOnly: true,
+        },
+        undefined,
+        confirmation.isCurrent,
+      );
+    },
+    confirm: (quit: boolean, decision?: ProviderCatalogDecision) => {
+      if (!confirmation) return;
+      if (
+        confirmation.catalog &&
+        (decision?.choice !== confirmation.catalog.choice ||
+          decision.revision !== confirmation.catalog.revision)
+      )
+        return;
+      void submit(
+        decision
+          ? {
+              ...confirmation.change,
+              catalogDecision: decision,
+              catalogPreviewOnly: false,
+            }
+          : confirmation.change,
+        quit,
+        confirmation.isCurrent,
+      );
+    },
     saveAs: (name: string, ids: string[]) => {
+      intent.current += 1;
       setProfileName(name);
       setStagedIds(ids);
       setSort(null);

@@ -31,6 +31,9 @@ const DEFAULT_CODEX_COMMON_CONFIG_SNIPPET = `# Common Codex config
 # Add your common TOML configuration here`;
 
 interface UseCodexCommonConfigProps {
+  readOnly?: boolean;
+  isWriteAllowed?: () => boolean;
+  enabled?: boolean;
   codexConfig: string;
   onConfigChange: (config: string) => void;
   initialData?: {
@@ -50,14 +53,36 @@ export function useCodexCommonConfig({
   initialData,
   initialEnabled,
   selectedPresetId,
+  readOnly = false,
+  isWriteAllowed,
+  enabled = true,
 }: UseCodexCommonConfigProps) {
   const { t } = useTranslation();
+  const admission = useRef({ enabled, readOnly, isWriteAllowed });
+  admission.current = { enabled, readOnly, isWriteAllowed };
+  const canWrite = useCallback(() => {
+    const current = admission.current;
+    return (
+      current.enabled &&
+      !current.readOnly &&
+      (current.isWriteAllowed?.() ?? true)
+    );
+  }, []);
+  const persistSnippet = useCallback(
+    async (_app: "claude" | "codex" | "gemini", value: string) => {
+      if (!canWrite()) throw new Error("mode.legacy_common_config_frozen");
+      await configApi.setCommonConfigSnippet(_app, value);
+    },
+    [canWrite],
+  );
+
   const [useCommonConfig, setUseCommonConfig] = useState(false);
   const [commonConfigSnippet, setCommonConfigSnippetState] = useState<string>(
     DEFAULT_CODEX_COMMON_CONFIG_SNIPPET,
   );
   const [commonConfigError, setCommonConfigError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const snippetReadReady = useRef(false);
   const [isExtracting, setIsExtracting] = useState(false);
 
   // 用于跟踪是否正在通过通用配置更新
@@ -82,6 +107,7 @@ export function useCodexCommonConfig({
   // config 基线已被外部改写（用户手动编辑为准）。任一成立即丢弃结果。
   const isTomlOpStale = useCallback(
     (seq: number, baseConfig: string) =>
+      !canWrite() ||
       seq !== tomlOpSeqRef.current ||
       baseConfig !== latestCodexConfigRef.current,
     [],
@@ -119,6 +145,12 @@ export function useCodexCommonConfig({
 
   // 初始化：从 config.json 加载，支持从 localStorage 迁移
   useEffect(() => {
+    snippetReadReady.current = false;
+    setIsLoading(true);
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
     let mounted = true;
 
     const loadSnippet = async () => {
@@ -136,14 +168,20 @@ export function useCodexCommonConfig({
             try {
               const legacySnippet =
                 window.localStorage.getItem(LEGACY_STORAGE_KEY);
-              if (legacySnippet && legacySnippet.trim()) {
+              if (
+                mounted &&
+                canWrite() &&
+                legacySnippet &&
+                legacySnippet.trim()
+              ) {
                 // 迁移到 config.json
-                await configApi.setCommonConfigSnippet("codex", legacySnippet);
+                await persistSnippet("codex", legacySnippet);
                 if (mounted) {
                   setCommonConfigSnippetState(legacySnippet);
                 }
                 // 清理 localStorage
-                window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+                if (mounted && canWrite())
+                  window.localStorage.removeItem(LEGACY_STORAGE_KEY);
                 console.log(
                   "[迁移] Codex 通用配置已从 localStorage 迁移到 config.json",
                 );
@@ -157,6 +195,7 @@ export function useCodexCommonConfig({
         console.error("加载 Codex 通用配置失败:", error);
       } finally {
         if (mounted) {
+          snippetReadReady.current = true;
           setIsLoading(false);
         }
       }
@@ -167,10 +206,11 @@ export function useCodexCommonConfig({
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [enabled, readOnly]);
 
   // 初始化时检查通用配置片段（编辑模式）
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (
       !initialData?.settingsConfig ||
       isLoading ||
@@ -239,6 +279,8 @@ export function useCodexCommonConfig({
     setCommonConfigError("");
     setUseCommonConfig(hasCommon);
   }, [
+    readOnly,
+    enabled,
     codexConfig,
     commonConfigSnippet,
     initialData,
@@ -251,6 +293,7 @@ export function useCodexCommonConfig({
 
   // 新建模式：如果通用配置片段存在且有效，默认启用
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (initialData || isLoading || hasInitializedNewMode.current) {
       return;
     }
@@ -298,6 +341,8 @@ export function useCodexCommonConfig({
       cancelled = true;
     };
   }, [
+    readOnly,
+    enabled,
     initialData,
     commonConfigSnippet,
     isLoading,
@@ -310,6 +355,7 @@ export function useCodexCommonConfig({
   // 处理通用配置开关
   const handleCommonConfigToggle = useCallback(
     async (checked: boolean) => {
+      if (!canWrite()) return;
       // 在同步校验之前领号：即使本次走同步早退分支，也要让更早发出、
       // 仍在飞的异步结果作废，避免它晚到后把开关翻回去。
       const seq = ++tomlOpSeqRef.current;
@@ -367,6 +413,7 @@ export function useCodexCommonConfig({
   // 处理通用配置片段变化
   const handleCommonConfigSnippetChange = useCallback(
     async (value: string): Promise<boolean> => {
+      if (!canWrite()) return false;
       // 与 handleCommonConfigToggle 同一套序号：连续保存或保存与开关
       // 交错时，只允许最后一次操作的结果落地。
       const seq = ++tomlOpSeqRef.current;
@@ -400,14 +447,12 @@ export function useCodexCommonConfig({
         }
 
         setCommonConfigSnippetState("");
-        configApi
-          .setCommonConfigSnippet("codex", "")
-          .catch((error: unknown) => {
-            console.error("保存 Codex 通用配置失败:", error);
-            setCommonConfigError(
-              t("codexConfig.saveFailed", { error: String(error) }),
-            );
-          });
+        persistSnippet("codex", "").catch((error: unknown) => {
+          console.error("保存 Codex 通用配置失败:", error);
+          setCommonConfigError(
+            t("codexConfig.saveFailed", { error: String(error) }),
+          );
+        });
         return true;
       }
 
@@ -460,14 +505,12 @@ export function useCodexCommonConfig({
 
       setCommonConfigError("");
       setCommonConfigSnippetState(value);
-      configApi
-        .setCommonConfigSnippet("codex", value)
-        .catch((error: unknown) => {
-          console.error("保存 Codex 通用配置失败:", error);
-          setCommonConfigError(
-            t("codexConfig.saveFailed", { error: String(error) }),
-          );
-        });
+      persistSnippet("codex", value).catch((error: unknown) => {
+        console.error("保存 Codex 通用配置失败:", error);
+        setCommonConfigError(
+          t("codexConfig.saveFailed", { error: String(error) }),
+        );
+      });
 
       return true;
     },
@@ -484,6 +527,7 @@ export function useCodexCommonConfig({
 
   // 当配置变化时检查是否包含通用配置（但避免在通过通用配置更新时检查）
   useEffect(() => {
+    if (!canWrite() || !snippetReadReady.current) return;
     if (isUpdatingFromCommonConfig.current || isLoading) {
       return;
     }
@@ -497,10 +541,18 @@ export function useCodexCommonConfig({
       commonConfigSnippet,
     );
     setUseCommonConfig(hasCommon);
-  }, [codexConfig, commonConfigSnippet, isLoading, parseCommonConfigSnippet]);
+  }, [
+    readOnly,
+    enabled,
+    codexConfig,
+    commonConfigSnippet,
+    isLoading,
+    parseCommonConfigSnippet,
+  ]);
 
   // 从编辑器当前内容提取通用配置片段
   const handleExtract = useCallback(async () => {
+    if (!canWrite()) return;
     setIsExtracting(true);
     setCommonConfigError("");
 
@@ -511,6 +563,7 @@ export function useCodexCommonConfig({
         }),
       });
 
+      if (!canWrite()) return;
       if (!extracted || !extracted.trim()) {
         setCommonConfigError(t("codexConfig.extractNoCommonConfig"));
         return;
@@ -520,7 +573,7 @@ export function useCodexCommonConfig({
       setCommonConfigSnippetState(extracted);
 
       // 保存到后端
-      await configApi.setCommonConfigSnippet("codex", extracted);
+      await persistSnippet("codex", extracted);
     } catch (error) {
       console.error("提取 Codex 通用配置失败:", error);
       setCommonConfigError(

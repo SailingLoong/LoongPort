@@ -1,3 +1,9 @@
+import { useState } from "react";
+import { CatalogChoiceFields } from "@/components/providers/CatalogChoiceFields";
+import type {
+  CatalogPreview,
+  ProviderCatalogDecision,
+} from "@/lib/api/providers";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -33,19 +39,49 @@ export interface SwitchTierConfirmDialogProps {
   /** 要切到的目标显示名；`null` = 不显示弹窗。 */
   targetName: string | null;
   onCancel: () => void;
+  disabled?: boolean;
   /** `quitChatgpt` = 用户选了「退出并切换」还是「只切换，我自己重启」。 */
-  onSwitch: (quitChatgpt: boolean) => void;
+  catalog?: CatalogPreview;
+  quitRequired?: boolean;
+  onPreviewCatalog?: (decision: ProviderCatalogDecision) => void;
+  onSwitch: (quitChatgpt: boolean, decision?: ProviderCatalogDecision) => void;
 }
 
-export function SwitchTierConfirmDialog({
+export function SwitchTierConfirmDialog(props: SwitchTierConfirmDialogProps) {
+  return (
+    <SwitchConfirmation
+      key={JSON.stringify([
+        props.targetName,
+        props.catalog?.revision,
+        props.catalog?.choice,
+      ])}
+      {...props}
+    />
+  );
+}
+
+function SwitchConfirmation({
   targetName,
   onCancel,
   onSwitch,
+  disabled = false,
+  catalog,
+  quitRequired = true,
+  onPreviewCatalog,
 }: SwitchTierConfirmDialogProps) {
   const { t } = useTranslation();
   // 在渲染期算而不是 useState/useEffect：平台在一次会话里不会变，
   // 上钩子只会多一次渲染。
   const onWindows = isWindows();
+  const [choice, setChoice] = useState(catalog?.choice ?? "keep");
+  const confirmDisabled =
+    disabled || Boolean(catalog && choice !== catalog.choice);
+  const confirm = (quit: boolean) => {
+    if (confirmDisabled) return;
+    if (catalog)
+      onSwitch(quit, { choice: catalog.choice, revision: catalog.revision });
+    else onSwitch(quit);
+  };
 
   return (
     <Dialog
@@ -54,15 +90,20 @@ export function SwitchTierConfirmDialog({
         if (!open) onCancel();
       }}
     >
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {t("loongport.quitConfirm.title", { name: targetName ?? "" })}
+            {quitRequired
+              ? t("loongport.quitConfirm.title", { name: targetName ?? "" })
+              : t("provider.preview.catalog.applyTitle", {
+                  name: targetName ?? "",
+                })}
           </DialogTitle>
-          <DialogDescription>
-            {t("loongport.quitConfirm.body")}
-            <br />
-            {/* ⚠️ **两个平台的退出方式不同，文案必须跟着分** —— 这条弹窗是
+          {quitRequired ? (
+            <DialogDescription>
+              {t("loongport.quitConfirm.body")}
+              <br />
+              {/* ⚠️ **两个平台的退出方式不同，文案必须跟着分** —— 这条弹窗是
                 「强制关闭」的知情同意书，说错了就是骗用户签字：
 
                 - macOS：AppleScript `quit`，走 app 自己的退出流程。它有进行中的对话时
@@ -74,18 +115,60 @@ export function SwitchTierConfirmDialog({
 
                 用 `declineNote` 那句去糊 Windows 是错的：那句承诺「会弹确认框、可以取消」，
                 而那边压根不会弹 —— 用户以为还有一道保险，实际点下去就直接杀了。 */}
-            {onWindows
-              ? t("loongport.quitConfirm.forceKillWarning")
-              : t("loongport.quitConfirm.declineNote")}
-            <br />
-            {/* 「代为退出」失败时（macOS 权限被拒 / Windows 杀不掉）配置照样切好，
+              {onWindows
+                ? t("loongport.quitConfirm.forceKillWarning")
+                : t("loongport.quitConfirm.declineNote")}
+              <br />
+              {/* 「代为退出」失败时（macOS 权限被拒 / Windows 杀不掉）配置照样切好，
                 只是要用户自己重启。不说清这件事，用户点了「退出并切换」发现
                 ChatGPT 还开着会以为坏了。 */}
-            <span className="text-xs">
-              {t("loongport.quitConfirm.platformNote")}
-            </span>
-          </DialogDescription>
+              <span className="text-xs">
+                {t("loongport.quitConfirm.platformNote")}
+              </span>
+            </DialogDescription>
+          ) : (
+            <DialogDescription>
+              {t("provider.preview.catalog.previewHint")}
+            </DialogDescription>
+          )}
         </DialogHeader>
+        {catalog && (
+          <div className="px-6 pb-4 space-y-3">
+            <dl className="space-y-2 break-all text-caption">
+              {catalog.beforePointer !== null && (
+                <div>
+                  <dt>{t("provider.preview.catalog.beforePointer")}</dt>
+                  <dd>{catalog.beforePointer}</dd>
+                </div>
+              )}
+              {catalog.afterPointer !== null && (
+                <div>
+                  <dt>{t("provider.preview.catalog.afterPointer")}</dt>
+                  <dd>{catalog.afterPointer}</dd>
+                </div>
+              )}
+            </dl>
+            {catalog.ownership === "unclaimedExternal" &&
+            catalog.canManage &&
+            onPreviewCatalog ? (
+              <CatalogChoiceFields
+                form={null}
+                choice={choice}
+                disabled={disabled}
+                onChange={setChoice}
+                onPreviewChoice={(next) =>
+                  onPreviewCatalog({ choice: next, revision: catalog.revision })
+                }
+                onCancel={onCancel}
+              />
+            ) : catalog.ownership === "unclaimedExternal" &&
+              catalog.choice === "keep" ? (
+              <p className="text-caption text-fg-2">
+                {t("provider.preview.catalog.keepHint")}
+              </p>
+            ) : null}
+          </div>
+        )}
         {/* 三个按钮，视觉权重从低到高（左 → 右）：**取消** / 只切换 / 退出并切换。
 
             ⚠️ **「取消」不可省** —— 原来只有两个按钮，两个都会执行切换，
@@ -98,12 +181,20 @@ export function SwitchTierConfirmDialog({
           <Button variant="ghost" onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button variant="outline" onClick={() => onSwitch(false)}>
-            {t("loongport.quitConfirm.switchOnly")}
+          <Button
+            variant={quitRequired ? "outline" : "default"}
+            disabled={confirmDisabled}
+            onClick={() => confirm(false)}
+          >
+            {quitRequired
+              ? t("loongport.quitConfirm.switchOnly")
+              : t("applications.apply")}
           </Button>
-          <Button onClick={() => onSwitch(true)}>
-            {t("loongport.quitConfirm.quitAndSwitch")}
-          </Button>
+          {quitRequired && (
+            <Button disabled={confirmDisabled} onClick={() => confirm(true)}>
+              {t("loongport.quitConfirm.quitAndSwitch")}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

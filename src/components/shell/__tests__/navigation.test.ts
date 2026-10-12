@@ -1,5 +1,5 @@
-import { renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import {
   navigationReducer,
   useClientNavigation,
@@ -157,4 +157,44 @@ it("restores native configuration on an unsupported saved view", () => {
   );
   expect(result.current.view).toBe("providers");
   expect(result.current.app).toBe("zcode");
+});
+
+it("defers the existing Back action without changing its original history", () => {
+  let proceed: (() => void) | undefined;
+  const guard = vi.fn((next: () => void) => {
+    proceed = next;
+  });
+  const { result } = renderHook(() =>
+    useClientNavigation(
+      () => "services",
+      () => "claude",
+      guard,
+    ),
+  );
+  act(() => result.current.navigate("addHub"));
+  expect(result.current.view).toBe("services");
+  act(() => proceed?.());
+  expect(result.current.view).toBe("addHub");
+  act(() => result.current.back());
+  expect(result.current.view).toBe("addHub");
+  act(() => proceed?.());
+  expect(result.current.view).toBe("services");
+  expect(result.current.canGoBack).toBe(false);
+});
+
+it("does not request departure for unchanged app, route, or unavailable Back", () => {
+  const guard = vi.fn();
+  const { result } = renderHook(() =>
+    useClientNavigation(
+      () => "providers",
+      () => "claude",
+      guard,
+    ),
+  );
+  act(() => {
+    result.current.setApp("claude");
+    result.current.navigate("providers");
+    result.current.back();
+  });
+  expect(guard).not.toHaveBeenCalled();
 });

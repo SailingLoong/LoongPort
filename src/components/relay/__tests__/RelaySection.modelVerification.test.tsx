@@ -28,6 +28,9 @@ const api = vi.hoisted(() => ({
   openLogin: vi.fn(),
   vendorRefresh: vi.fn(),
   applySiteConfig: vi.fn(),
+  switchTier: vi.fn(),
+  switchTierModel: vi.fn(),
+  apply: vi.fn(),
 }));
 const dialogState = vi.hoisted(() => ({
   onOpenChange: (_open: boolean) => {},
@@ -48,6 +51,9 @@ vi.mock("@/lib/api", () => ({
   SITE_BALANCES_UPDATED: "site-balances-updated",
 }));
 vi.mock("@/lib/api/relay", () => ({ relayApi: api }));
+vi.mock("@/lib/api/applicationRouting", () => ({
+  applicationRoutingApi: { apply: api.apply },
+}));
 vi.mock("@/lib/api/vendor", () => ({
   DEEPSEEK_VENDOR_ID: "deepseek",
   vendorApi: {
@@ -145,6 +151,14 @@ vi.mock("@/components/relay/RelayTierList", async () => {
           {props.relays.flatMap((relay: any) =>
             relay.tiers.map((tier: any) => (
               <div key={tier.providerId}>
+                <button onClick={() => props.onSwitchTier(relay.id, tier)}>
+                  use {tier.providerId}
+                </button>
+                <button
+                  onClick={() => props.onSelectTierModel(tier, "gpt-5-next")}
+                >
+                  model {tier.providerId}
+                </button>
                 <span data-testid={`verdict-${tier.providerId}`}>
                   {verdictFor(tier.providerId) ?? "none"}
                 </span>
@@ -176,9 +190,6 @@ vi.mock("@/components/relay/VendorBlock", () => ({
 vi.mock("@/components/ConfirmDialog", () => ({
   ConfirmDialog: ({ isOpen, message }: any) =>
     isOpen ? <div role="alertdialog">{message}</div> : null,
-}));
-vi.mock("../SwitchTierConfirmDialog", () => ({
-  SwitchTierConfirmDialog: () => null,
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -310,6 +321,79 @@ describe("RelaySection model verification ownership", () => {
       },
     );
   });
+
+  it.each(["use", "model"])(
+    "passes the original %s target through catalog preview and final apply",
+    async (action) => {
+      const catalog = {
+        ownership: "unclaimedExternal",
+        choice: "keep",
+        canManage: true,
+        revision: "catalog-v1",
+        beforePointer: "/external/models.json",
+        afterPointer: "/external/models.json",
+      };
+      const initial = {
+        status: "confirmationRequired",
+        targetName: "Example",
+        catalog,
+        quitRequired: false,
+      };
+      api.switchTier.mockReset().mockResolvedValue(initial);
+      api.switchTierModel.mockReset().mockResolvedValue(initial);
+      api.apply
+        .mockReset()
+        .mockResolvedValueOnce({
+          ...initial,
+          catalog: {
+            ...catalog,
+            choice: "manage",
+            afterPointer: "/managed/models.json",
+          },
+        })
+        .mockResolvedValueOnce({
+          status: "switched",
+          warnings: [],
+          providerName: "Example",
+        });
+      renderSection("codex");
+      await userEvent.click(
+        await screen.findByRole("button", { name: `${action} provider-a` }),
+      );
+      await userEvent.click(
+        screen.getByRole("radio", { name: "provider.preview.catalog.manage" }),
+      );
+      expect(
+        screen.getByRole("button", { name: "applications.apply" }),
+      ).toBeDisabled();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "provider.preview.catalog.confirmChoice",
+        }),
+      );
+      await screen.findByText("/managed/models.json");
+      const catalogDecision = { choice: "manage", revision: "catalog-v1" };
+      const selection = {
+        providerId: "provider-a",
+        ...(action === "model" ? { model: "gpt-5-next" } : {}),
+      };
+      expect(api.apply).toHaveBeenNthCalledWith(
+        1,
+        "codex",
+        { selection, catalogDecision, catalogPreviewOnly: true },
+        undefined,
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "applications.apply" }),
+      );
+      expect(api.apply).toHaveBeenNthCalledWith(
+        2,
+        "codex",
+        { selection, catalogDecision, catalogPreviewOnly: false },
+        false,
+      );
+    },
+  );
 
   it("does not probe or configure accounts on mount", async () => {
     renderSection("codex");

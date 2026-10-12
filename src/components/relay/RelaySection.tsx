@@ -21,6 +21,11 @@ import {
   VENDOR_ACCOUNTS_CHANGED,
   PROVIDER_SWITCHED,
 } from "@/lib/api";
+import type {
+  CatalogPreview,
+  ProviderCatalogDecision,
+} from "@/lib/api/providers";
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
   RefreshResult,
@@ -152,8 +157,27 @@ export function RelaySection({
   );
   const [confirmSwitch, setConfirmSwitch] = useState<{
     name: string;
-    run: (quitChatgpt: boolean) => void;
+    catalog?: CatalogPreview;
+    quitRequired?: boolean;
+    busyKey: string;
+    run: (
+      quitChatgpt?: boolean,
+      decision?: ProviderCatalogDecision,
+      previewOnly?: boolean,
+    ) => void;
   } | null>(null);
+  const switchPending = useRef(false);
+  const switchLifecycle = useRef(0);
+  const cancelSwitch = () => {
+    switchLifecycle.current += 1;
+    setConfirmSwitch(null);
+  };
+  useEffect(() => {
+    setConfirmSwitch(null);
+    return () => {
+      switchLifecycle.current += 1;
+    };
+  }, [appId]);
   // 余额**不在这里** —— 它由每一行自己的 `useRowBalanceQuery`（react-query）拉，
   // 见 `RowBalance`。曾经这里有两份 `Record<RowKey, …>` state 加两个 effect，
   // 而那个形状有个死路：effect 的依赖键是 `id:accountLabel`，某一行拉失败过一次、
@@ -524,23 +548,45 @@ export function RelaySection({
     rowId: number,
     plan: VendorPlanInfo,
     quitChatgpt?: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly = false,
   ) => {
-    setConfirmSwitch(null);
+    if (switchPending.current) return;
+    switchPending.current = true;
+    const generation = switchLifecycle.current;
     return run(vendorPlanBusyKey("switch", plan.providerId), async () => {
       try {
-        const result = await vendorApi.switch(
-          rowId,
-          plan.planId,
-          appId,
-          quitChatgpt,
-        );
+        const result = catalogDecision
+          ? await applicationRoutingApi.apply(
+              appId,
+              {
+                selection: { providerId: plan.providerId },
+                catalogDecision,
+                catalogPreviewOnly,
+              },
+              quitChatgpt,
+            )
+          : await vendorApi.switch(rowId, plan.planId, appId, quitChatgpt);
+        if (generation !== switchLifecycle.current) return;
+        if (
+          catalogPreviewOnly &&
+          (result.status !== "confirmationRequired" ||
+            result.catalog?.choice !== catalogDecision?.choice ||
+            result.catalog?.revision !== catalogDecision?.revision)
+        )
+          throw new Error(t("provider.preview.sourceChanged"));
         if (result.status === "confirmationRequired") {
           setConfirmSwitch({
             name: result.targetName,
-            run: (choice) => void doVendorSwitch(rowId, plan, choice),
+            catalog: result.catalog,
+            quitRequired: result.quitRequired,
+            busyKey: vendorPlanBusyKey("switch", plan.providerId),
+            run: (choice, decision, previewOnly) =>
+              void doVendorSwitch(rowId, plan, choice, decision, previewOnly),
           });
           return;
         }
+        setConfirmSwitch(null);
         const name = plan.planName;
         toast.success(
           result.chatgptRelaunched
@@ -552,7 +598,12 @@ export function RelaySection({
         for (const warning of result.warnings) toast.warning(warning);
         await reload();
       } catch (e) {
-        toast.error(String(e));
+        if (generation === switchLifecycle.current) {
+          setConfirmSwitch(null);
+          toast.error(String(e));
+        }
+      } finally {
+        switchPending.current = false;
       }
     });
   };
@@ -697,22 +748,48 @@ export function RelaySection({
       }
     });
 
-  const doSwitch = (tier: TierInfo, quitChatgpt?: boolean) => {
-    setConfirmSwitch(null);
+  const doSwitch = (
+    tier: TierInfo,
+    quitChatgpt?: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly = false,
+  ) => {
+    if (switchPending.current) return;
+    switchPending.current = true;
+    const generation = switchLifecycle.current;
     return run(`switch:${tier.providerId}`, async () => {
       try {
-        const result = await relayApi.switchTier(
-          tier.providerId,
-          appId,
-          quitChatgpt,
-        );
+        const result = catalogDecision
+          ? await applicationRoutingApi.apply(
+              appId,
+              {
+                selection: { providerId: tier.providerId },
+                catalogDecision,
+                catalogPreviewOnly,
+              },
+              quitChatgpt,
+            )
+          : await relayApi.switchTier(tier.providerId, appId, quitChatgpt);
+        if (generation !== switchLifecycle.current) return;
+        if (
+          catalogPreviewOnly &&
+          (result.status !== "confirmationRequired" ||
+            result.catalog?.choice !== catalogDecision?.choice ||
+            result.catalog?.revision !== catalogDecision?.revision)
+        )
+          throw new Error(t("provider.preview.sourceChanged"));
         if (result.status === "confirmationRequired") {
           setConfirmSwitch({
             name: result.targetName,
-            run: (choice) => void doSwitch(tier, choice),
+            catalog: result.catalog,
+            quitRequired: result.quitRequired,
+            busyKey: `switch:${tier.providerId}`,
+            run: (choice, decision, previewOnly) =>
+              void doSwitch(tier, choice, decision, previewOnly),
           });
           return;
         }
+        setConfirmSwitch(null);
         // 三个分支各取一个**完整句**的 key，不拼后缀 —— 与 `provision.ready*` 同理
         // （中文靠前置逗号粘接，英/日语序下会散架）。
         toast.success(
@@ -729,7 +806,12 @@ export function RelaySection({
         for (const warning of result.warnings) toast.warning(warning);
         await reload();
       } catch (e) {
-        toast.error(String(e));
+        if (generation === switchLifecycle.current) {
+          setConfirmSwitch(null);
+          toast.error(String(e));
+        }
+      } finally {
+        switchPending.current = false;
       }
     });
   };
@@ -801,23 +883,56 @@ export function RelaySection({
     tier: TierInfo,
     model: string,
     quitChatgpt?: boolean,
+    catalogDecision?: ProviderCatalogDecision,
+    catalogPreviewOnly = false,
   ) => {
-    setConfirmSwitch(null);
+    if (switchPending.current) return;
+    switchPending.current = true;
+    const generation = switchLifecycle.current;
     return run(`model:${tier.providerId}`, async () => {
       try {
-        const result = await relayApi.switchTierModel(
-          tier.providerId,
-          appId,
-          model,
-          quitChatgpt,
-        );
+        const result = catalogDecision
+          ? await applicationRoutingApi.apply(
+              appId,
+              {
+                selection: { providerId: tier.providerId, model },
+                catalogDecision,
+                catalogPreviewOnly,
+              },
+              quitChatgpt,
+            )
+          : await relayApi.switchTierModel(
+              tier.providerId,
+              appId,
+              model,
+              quitChatgpt,
+            );
+        if (generation !== switchLifecycle.current) return;
+        if (
+          catalogPreviewOnly &&
+          (result.status !== "confirmationRequired" ||
+            result.catalog?.choice !== catalogDecision?.choice ||
+            result.catalog?.revision !== catalogDecision?.revision)
+        )
+          throw new Error(t("provider.preview.sourceChanged"));
         if (result.status === "confirmationRequired") {
           setConfirmSwitch({
             name: result.targetName,
-            run: (choice) => void doSelectTierModel(tier, model, choice),
+            catalog: result.catalog,
+            quitRequired: result.quitRequired,
+            busyKey: `model:${tier.providerId}`,
+            run: (choice, decision, previewOnly) =>
+              void doSelectTierModel(
+                tier,
+                model,
+                choice,
+                decision,
+                previewOnly,
+              ),
           });
           return;
         }
+        setConfirmSwitch(null);
         toast.success(
           result.chatgptRelaunched
             ? t("loongport.switch.modelDoneRelaunched", {
@@ -837,7 +952,12 @@ export function RelaySection({
         for (const warning of result.warnings) toast.warning(warning);
         await reload();
       } catch (e) {
-        toast.error(String(e));
+        if (generation === switchLifecycle.current) {
+          setConfirmSwitch(null);
+          toast.error(String(e));
+        }
+      } finally {
+        switchPending.current = false;
       }
     });
   };
@@ -1188,8 +1308,23 @@ export function RelaySection({
 
       <SwitchTierConfirmDialog
         targetName={confirmSwitch?.name ?? null}
-        onCancel={() => setConfirmSwitch(null)}
-        onSwitch={(quitChatgpt) => confirmSwitch?.run(quitChatgpt)}
+        catalog={confirmSwitch?.catalog}
+        quitRequired={confirmSwitch?.quitRequired}
+        disabled={Boolean(confirmSwitch && busy.has(confirmSwitch.busyKey))}
+        onCancel={cancelSwitch}
+        onPreviewCatalog={(decision) => {
+          if (decision.revision === confirmSwitch?.catalog?.revision)
+            confirmSwitch.run(undefined, decision, true);
+        }}
+        onSwitch={(quitChatgpt, decision) => {
+          if (
+            confirmSwitch?.catalog &&
+            (decision?.choice !== confirmSwitch.catalog.choice ||
+              decision.revision !== confirmSwitch.catalog.revision)
+          )
+            return;
+          confirmSwitch?.run(quitChatgpt, decision, false);
+        }}
       />
     </>
   );

@@ -633,3 +633,30 @@ it("clears loading flag when all mutations idle", () => {
 
   expect(result.current.isLoading).toBe(false);
 });
+
+it("forwards catalog preview intent separately from quit consent without success notification", async () => {
+  const catalogDecision = { choice: "manage" as const, revision: "catalog-v1" };
+  switchProviderMutateAsync.mockResolvedValue({
+    status: "confirmationRequired",
+    targetName: "Example",
+    catalog: { choice: "manage", revision: "catalog-v1" },
+  });
+  const { wrapper } = createWrapper();
+  const { result } = renderHook(() => useProviderActions("codex"), { wrapper });
+  const provider = createProvider();
+  await act(async () => {
+    await result.current.switchProvider(
+      provider,
+      undefined,
+      catalogDecision,
+      true,
+    );
+  });
+  expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+    providerId: provider.id,
+    quitChatgpt: undefined,
+    catalogDecision,
+    catalogPreviewOnly: true,
+  });
+  expect(toastSuccessMock).not.toHaveBeenCalled();
+});
