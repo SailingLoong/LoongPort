@@ -470,7 +470,9 @@ fn source17_runtime_keeps_legacy_owner_without_forcing_upgrade() {
 }
 
 #[test]
+#[serial_test::serial]
 fn source17_database_prepare_preserves_the_existing_schema() {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
     let f = Fixture::new();
     let path = f.root.join(crate::config::DB_FILE_NAME);
     let before = super::review_tests::snapshot(f._temporary.path());

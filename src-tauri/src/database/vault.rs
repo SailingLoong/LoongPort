@@ -107,7 +107,7 @@ pub(crate) fn upgrade_staging(conn: &Connection, vault: &VaultContext) -> Result
     upgrade_staging_for_target(conn, vault, super::SCHEMA_VERSION)
 }
 
-fn upgrade_staging_for_target(
+pub(crate) fn upgrade_staging_for_target(
     conn: &Connection,
     vault: &VaultContext,
     target: i32,
@@ -182,7 +182,12 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
         }
         // Normal startup preserves the legacy owner. Explicit v4 migration and
         // imports retain their existing targets; the supported ceiling stays 20.
-        upgrade_staging_for_target(&staged, vault, super::UPSTREAM4_SOURCE_SCHEMA_VERSION)?;
+        let target = if Database::get_user_version(&staged)? == super::UPSTREAM4_SCHEMA_VERSION {
+            super::UPSTREAM4_SCHEMA_VERSION
+        } else {
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        };
+        upgrade_staging_for_target(&staged, vault, target)?;
         // VACUUM before serialization removes plaintext free pages in the memory image.
         staged
             .execute_batch("PRAGMA secure_delete=ON; VACUUM;")

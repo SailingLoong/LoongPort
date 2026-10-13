@@ -44,7 +44,9 @@ fn join_preserves_local_facts(version: i32) {
         .set_setting("synthetic-synced-setting", "incoming-value")
         .unwrap();
     let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
-    let staged = Database::validate_sync_snapshot(&sql, &metadata, &next).unwrap();
+    let staged = local
+        .validate_sync_snapshot_for_current(&sql, &metadata, &next)
+        .unwrap();
     let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
     let joined = Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &current, &next)
         .unwrap_or_else(|error| panic!("source{version} encrypted sync join: {error}"));
@@ -113,29 +115,8 @@ fn join_preserves_local_facts(version: i32) {
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn source17_sync_join_requires_explicit_upgrade() {
-    let home = TestHome::new().unwrap();
-    let vault = VaultContext::generate()
-        .unwrap()
-        .with_password("synthetic-source17-password")
-        .unwrap();
-    let local = database(&vault, &home.path().join("current"), 17);
-    let incoming = database(&vault, &home.path().join("incoming"), 17);
-    let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
-    let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
-    let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();
-    assert!(matches!(
-        Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &vault, &vault),
-        Err(AppError::Config(code)) if code == "sync.database_version_incompatible"
-    ));
-    assert_eq!(
-        Database::content_digest(&local.conn.lock().unwrap()).unwrap(),
-        before
-    );
-    assert_eq!(
-        Database::get_user_version(&local.conn.lock().unwrap()).unwrap(),
-        17
-    );
+fn source17_sync_join_preserves_local_facts() {
+    join_preserves_local_facts(17);
 }
 
 #[cfg_attr(test, test)]
@@ -148,7 +129,7 @@ fn source20_sync_join_preserves_local_facts() {
 pub(super) fn verify() {
     sync_join_cannot_change_the_current_schema_version();
     sync_join_rejects_unknown_schema_and_normal_import_accepts20();
-    source17_sync_join_requires_explicit_upgrade();
+    source17_sync_join_preserves_local_facts();
     source20_sync_join_preserves_local_facts();
 }
 
