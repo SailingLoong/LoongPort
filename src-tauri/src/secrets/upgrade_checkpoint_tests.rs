@@ -461,27 +461,23 @@ fn completed_schema20_is_a_normal_supported_database() {
 }
 
 #[cfg_attr(test, test)]
-fn source17_runtime_requires_explicit_upgrade_before_writes() {
+fn source17_runtime_keeps_legacy_owner_without_forcing_upgrade() {
     let f = Fixture::new();
     let before = super::review_tests::snapshot(f._temporary.path());
     let inspected = inspect(&f.root, &f.device).unwrap();
-    assert!(
-        matches!(inspected.ensure_runtime_admitted(),
-        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending"),
-        "source17 must enter readonly review before normal initialization can migrate it"
-    );
+    inspected.ensure_runtime_admitted().unwrap();
     assert!(super::review_tests::snapshot(f._temporary.path()) == before);
 }
 
 #[test]
-fn source17_database_prepare_refuses_before_ordinary_runtime_changes() {
+#[serial_test::serial]
+fn source17_database_prepare_preserves_the_existing_schema() {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
     let f = Fixture::new();
     let path = f.root.join(crate::config::DB_FILE_NAME);
     let before = super::review_tests::snapshot(f._temporary.path());
-    assert!(
-        matches!(database::vault::prepare(&path, &f.vault),
-        Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending"),
-        "DB/CLI callers must not bypass the explicit source17 upgrade"
-    );
+    let connection = database::vault::prepare(&path, &f.vault).unwrap();
+    assert_eq!(Database::get_user_version(&connection).unwrap(), 17);
+    drop(connection);
     assert!(super::review_tests::snapshot(f._temporary.path()) == before);
 }

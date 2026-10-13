@@ -243,9 +243,6 @@ impl UpgradeInspection {
         let device = match self {
             Self::Stable(stable) => {
                 if let Some(versions) = stable.source_versions {
-                    if versions.upstream == database::UPSTREAM4_SOURCE_SCHEMA_VERSION {
-                        return Err(AppError::Config("upgrade.checkpoint_pending".into()));
-                    }
                     if versions.upstream > database::UPSTREAM4_SOURCE_SCHEMA_VERSION
                         && versions.upstream < database::UPSTREAM4_SCHEMA_VERSION
                     {

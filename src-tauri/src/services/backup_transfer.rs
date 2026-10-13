@@ -14,7 +14,7 @@ pub(crate) fn restore_sql(
     store: &dyn KeyStore,
 ) -> Result<String, AppError> {
     let current = db.secrets.read()?.clone();
-    let incoming = Database::prepare_backup_content(sql, password, &current)?;
+    let incoming = db.prepare_backup_content(sql, password, &current)?;
     let automatic_unlock = read_metadata(db.secrets.root())?.automatic_unlock;
     let _skills = skill_state_write_guard();
     // Authentication and schema validation finish before even the safety copy.
@@ -83,6 +83,9 @@ mod tests {
         Database::from_connection(conn, session)
     }
     fn portable_sql(home: &Home) -> String {
+        portable_sql_for_version(home, 17)
+    }
+    fn portable_sql_for_version(home: &Home, version: i32) -> String {
         let source_root = home.temporary.path().join("source");
         let context = VaultContext::generate()
             .unwrap()
@@ -93,6 +96,9 @@ mod tests {
             &context,
         )
         .unwrap();
+        if version == 20 {
+            Database::apply_upstream4_migrations_on_conn(&connection).unwrap();
+        }
         let db = Database::from_connection(
             connection,
             SecretSession::from_context(source_root, context),
@@ -142,10 +148,14 @@ mod tests {
     #[serial_test::serial]
     fn explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials() {
         let home = Home::new();
-        let source = Database::memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        let source = Database::from_connection(conn, SecretSession::ephemeral().unwrap());
         {
             let conn = source.conn.lock().unwrap();
-            conn.execute_batch("DROP TABLE loongport_vault;
+            conn.execute_batch("DROP TABLE IF EXISTS loongport_vault;
                 INSERT INTO providers(id,app_type,name,settings_config,meta)
                 VALUES ('legacy-provider','claude','Legacy provider','{\"apiKey\":\"legacy-backup-canary\"}','{}')").unwrap();
         }
@@ -199,6 +209,77 @@ mod tests {
             .load(&previous.vault_id, &previous.key_id)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn manual_backup_restore_preserves_supported_schema_matrix() {
+        for (source_version, receiver_version) in [(17, 17), (17, 20), (20, 20), (20, 17)] {
+            let home = Home::new();
+            let sql = portable_sql_for_version(&home, source_version);
+            let source_bytes = sql.clone();
+            let store = MemoryKeyStore::default();
+            let db = local(&home, &store);
+            if receiver_version == 20 {
+                Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
+            }
+            let original_metadata = db.secrets.read().unwrap().metadata().clone();
+            CredentialFile::Codex
+                .write(&db.secrets, br#"{"token":"retained-local-token"}"#)
+                .unwrap();
+            crate::rt::block_on(db.save_live_backup("claude", "retained-local-backup")).unwrap();
+            let before = Database::content_digest(&db.conn.lock().unwrap()).unwrap();
+            let vault_bytes = std::fs::read(home.root().join("vault.json")).unwrap();
+            let entries = || {
+                std::fs::read_dir(home.root().join("backups"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            let before_backups = entries();
+            let result = restore_sql(&db, &sql, Some("backup source password"), &store);
+            if source_version > receiver_version {
+                assert!(
+                    result.is_err(),
+                    "a modern backup must not downgrade the receiver"
+                );
+                assert_eq!(
+                    Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
+                    before
+                );
+                assert_eq!(
+                    std::fs::read(home.root().join("vault.json")).unwrap(),
+                    vault_bytes
+                );
+                assert_eq!(entries(), before_backups);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    db.get_provider_by_id("restored-provider", "claude")
+                        .unwrap()
+                        .unwrap()
+                        .settings_config["apiKey"],
+                    "portable-backup-canary"
+                );
+                assert_eq!(
+                    crate::rt::block_on(db.get_live_backup("claude"))
+                        .unwrap()
+                        .unwrap()
+                        .original_config,
+                    "retained-local-backup"
+                );
+            }
+            assert_eq!(
+                Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
+                receiver_version
+            );
+            assert_eq!(db.secrets.read().unwrap().metadata(), &original_metadata);
+            assert_eq!(
+                &**CredentialFile::Codex.read(&db.secrets).unwrap().unwrap(),
+                br#"{"token":"retained-local-token"}"#
+            );
+            assert_eq!(sql, source_bytes);
+        }
     }
 
     #[test]

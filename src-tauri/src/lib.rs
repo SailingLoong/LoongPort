@@ -131,7 +131,7 @@ use std::fmt;
 #[cfg(feature = "gui")]
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", test, feature = "test-hooks"))]
 use std::sync::Arc;
 #[cfg(feature = "gui")]
 use tauri::image::Image;
@@ -485,11 +485,19 @@ pub fn run_imagegen_mcp() -> Result<(), String> {
 /// 两处各写一遍字面量迟早分叉，而症状是宿主那边"启动超时"，看不出是拼写问题。
 pub use relay::imagegen_mcp::IMAGEGEN_MCP_FLAG;
 
-#[cfg(feature = "gui")]
-fn initialize_runtime(
-    app: &tauri::AppHandle,
+// The desktop and storage-startup regression use the same initialization body.
+// Window/event registration remains in initialize_runtime below.
+#[cfg(any(feature = "gui", test, feature = "test-hooks"))]
+type RuntimeCore = (
+    AppState,
+    Arc<tokio::sync::RwLock<proxy::providers::copilot_auth::CopilotAuthManager>>,
+    Arc<tokio::sync::RwLock<proxy::providers::xai_oauth_auth::XaiOAuthManager>>,
+);
+
+#[cfg(any(feature = "gui", test, feature = "test-hooks"))]
+fn initialize_runtime_core(
     session: Arc<secrets::session::SecretSession>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RuntimeCore, Box<dyn std::error::Error>> {
     let legacy_allowed = session.migration_pending()?;
     secrets::migration::prepare_files(&session, legacy_allowed)?;
     settings::unlock_settings(session.clone())?;
@@ -542,6 +550,16 @@ fn initialize_runtime(
         .proxy_service
         .set_managed_auth(copilot_auth_manager.clone(), xai_oauth_manager.clone())?;
     session.complete_migration()?;
+
+    Ok((app_state, copilot_auth_manager, xai_oauth_manager))
+}
+
+#[cfg(feature = "gui")]
+fn initialize_runtime(
+    app: &tauri::AppHandle,
+    session: Arc<secrets::session::SecretSession>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (app_state, copilot_auth_manager, xai_oauth_manager) = initialize_runtime_core(session)?;
 
     // 设置 AppHandle 用于代理故障转移时的 UI 更新
     app_state.proxy_service.set_app_handle(app.clone());

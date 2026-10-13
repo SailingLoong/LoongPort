@@ -2646,3 +2646,23 @@ mod upgrade_handoff_tests {
         }
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "startup_normal_upgrade_tests.rs"]
+mod normal_upgrade_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_normal_upgrade_startup(case: &str) {
+    match case {
+        "old" => normal_upgrade_tests::source17_without_checkpoint_starts_and_preserves_data(),
+        "fresh" => normal_upgrade_tests::fresh_install_starts_without_upgrade_review(),
+        "failure" => {
+            normal_upgrade_tests::failed_database_publication_keeps_recovery_and_restarts()
+        }
+        "guards" => verify_original_startup_admission(),
+        "password-modern" => {
+            normal_upgrade_tests::password_and_existing_modern_database_keep_original_owners()
+        }
+        _ => panic!("unknown startup fixture"),
+    }
+}

@@ -1533,12 +1533,25 @@ mod adoption_tests {
     }
 
     fn database(root: &Path, store: &MemoryKeyStore, password: Option<&str>) -> Database {
+        database_for_version(root, store, password, 20)
+    }
+    fn database_for_version(
+        root: &Path,
+        store: &MemoryKeyStore,
+        password: Option<&str>,
+        version: i32,
+    ) -> Database {
         let secrets = SecretSession::open(root, store, password).unwrap();
         let conn = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
             &secrets.read().unwrap(),
         )
         .unwrap();
+        // These fixtures exercise the current-schema sync owner, independently
+        // of ordinary startup's legacy target.
+        if version == 20 {
+            Database::apply_upstream4_migrations_on_conn(&conn).unwrap();
+        }
         secrets.complete_migration().unwrap();
         Database::from_connection(conn, secrets)
     }
@@ -1599,6 +1612,12 @@ mod adoption_tests {
 
     #[test]
     #[serial_test::serial]
+    fn legacy_actual17_sync_receiver_installs_with_original_transition() {
+        restore_preserves_local_facts(17);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn upstream4_actual20_sync_receiver_installs_with_original_transition() {
         restore_preserves_local_facts(20);
     }
@@ -1617,10 +1636,11 @@ mod adoption_tests {
         ] {
             let home = TestHome::new();
             let store = MemoryKeyStore::default();
-            let source = database(
+            let source = database_for_version(
                 &home.directory.path().join("source"),
                 &store,
                 Some("source recovery password"),
+                source_version.min(20),
             );
             if source_version >= 20 {
                 Database::apply_upstream4_migrations_on_conn(&source.conn.lock().unwrap()).unwrap();
@@ -1643,7 +1663,8 @@ mod adoption_tests {
                     incoming.manifest.vault_metadata().unwrap(),
                 );
             }
-            let local = database(&home.root(), &store, None);
+            let local = database_for_version(&home.root(), &store, None, local_version.min(20));
+            crate::settings::unlock_settings_for_test(local.secrets.clone()).unwrap();
             if local_version >= 20 {
                 Database::apply_upstream4_migrations_on_conn(&local.conn.lock().unwrap()).unwrap();
             }
@@ -1662,17 +1683,31 @@ mod adoption_tests {
             std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
             let native = br#"{"synthetic-user-field":"rejected-image-retained"}"#;
             std::fs::write(&native_path, native).unwrap();
-            assert!(
-                restore_from_sync(
-                    &local,
-                    &incoming,
-                    &incoming.manifest.snapshot_id,
-                    "source recovery password",
-                    &store,
-                )
-                .is_err(),
-                "receiver must reject {local_version}/{source_version}/{source_loongport}/{forged}"
-            );
+            let error = restore_from_sync(
+                &local,
+                &incoming,
+                &incoming.manifest.snapshot_id,
+                "source recovery password",
+                &store,
+            )
+            .unwrap_err();
+            if forged {
+                assert!(
+                    matches!(error, AppError::Config(ref code) if code == "secret.password_rejected")
+                );
+            } else if local_version > 20 {
+                assert!(
+                    matches!(error, AppError::Config(ref code) if code == "secret.database_version_too_new")
+                );
+            } else if local_version == 17 {
+                assert!(
+                    matches!(error, AppError::Database(ref message) if message == "数据库版本过新（20），当前应用仅支持 17，请升级应用后再尝试。")
+                );
+            } else {
+                assert!(
+                    matches!(error, AppError::Config(ref code) if code == "sync.database_version_incompatible")
+                );
+            }
             assert!(std::sync::Arc::ptr_eq(&session, &local.secrets));
             assert_eq!(
                 Database::content_digest(&local.conn.lock().unwrap()).unwrap(),
@@ -1697,10 +1732,11 @@ mod adoption_tests {
         let _sync = crate::rt::block_on(sync_mutex().lock());
         let home = TestHome::new();
         let store = MemoryKeyStore::default();
-        let source = database(
+        let source = database_for_version(
             &home.directory.path().join("source"),
             &store,
             Some("source recovery password"),
+            version,
         );
         let provider = crate::provider::Provider::with_id(
             "cloud-provider".into(),
@@ -1723,7 +1759,7 @@ mod adoption_tests {
                 .unwrap()
                 .contains("synthetic-source-private-session"));
         }
-        let local = database(&home.root(), &store, None);
+        let local = database_for_version(&home.root(), &store, None, version);
         let original_session = local.secrets.clone();
         let device = crate::live::engine::DeviceStore::for_device();
         let native_path = crate::config::get_claude_settings_path();
@@ -1900,9 +1936,11 @@ mod adoption_tests {
             vault::prepare(&source_root.join(crate::config::DB_FILE_NAME), &next).unwrap(),
             SecretSession::from_context(source_root, next.clone()),
         );
+        Database::apply_upstream4_migrations_on_conn(&source.conn.lock().unwrap()).unwrap();
         source
             .set_setting("common_config_claude", "rotated-source-canary")
             .unwrap();
+        crate::settings::unlock_settings_for_test(local.secrets.clone()).unwrap();
         let incoming = snapshot(&source);
         assert!(Database::validate_sync_source(
             &local.secrets.read().unwrap(),

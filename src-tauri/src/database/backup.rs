@@ -248,10 +248,26 @@ impl Database {
     /// Explicit file restore authenticates the source password, then keeps this
     /// device's active generation instead of adopting an older backup key.
     pub(crate) fn prepare_backup_content(
+        &self,
         sql: &str,
         password: Option<&str>,
         current: &VaultContext,
     ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let target = {
+            let conn = self.conn.lock()?;
+            super::vault::check_identity(&conn, current)?;
+            super::vault::preflight_connection(&conn)?;
+            let version = Self::get_user_version(&conn)?;
+            if !matches!(
+                version,
+                super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
+            ) {
+                return Err(AppError::Config(
+                    "sync.database_version_incompatible".into(),
+                ));
+            }
+            version
+        };
         let connection = Self::stage_import_sql(sql, true)?;
         if let Some(metadata) = super::vault::stored_metadata(&connection)? {
             let password = password
@@ -259,11 +275,11 @@ impl Database {
                 .ok_or_else(|| AppError::Config("backup.password_required".into()))?;
             let source = VaultContext::from_password(metadata, password)
                 .map_err(crate::secrets::inventory::secret_error)?;
-            super::vault::upgrade_staging(&connection, &source)?;
+            super::vault::upgrade_staging_for_target(&connection, &source, target)?;
             crate::secrets::inventory::transform_database(&connection, Some(&source), current)?;
             super::vault::stamp(&connection, current)?;
         } else {
-            super::vault::upgrade_staging(&connection, current)?;
+            super::vault::upgrade_staging_for_target(&connection, current, target)?;
         }
         Ok(ValidatedSyncSnapshot {
             connection,
@@ -329,7 +345,20 @@ impl Database {
             super::vault::preflight_connection(&conn)?;
             drop(conn);
             drop(current);
-            return Self::validate_sync_snapshot(sql, expected, vault);
+            Self::validate_sync_source(vault, expected)?;
+            let connection = Self::stage_import_sql(sql, true)?;
+            if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+                return Err(AppError::Config("sync.source_identity_mismatch".into()));
+            }
+            super::vault::upgrade_staging_for_target(
+                &connection,
+                vault,
+                super::UPSTREAM4_SOURCE_SCHEMA_VERSION,
+            )?;
+            return Ok(ValidatedSyncSnapshot {
+                connection,
+                destination: vault.metadata().clone(),
+            });
         }
         if version != super::UPSTREAM4_SCHEMA_VERSION
             || loongport != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
@@ -376,8 +405,10 @@ impl Database {
         // Joining vault generations is not a schema upgrade/downgrade owner.
         // Explicitly staged v4 databases retain their cursor columns in the
         // private rewrapping copy; ordinary import/startup admission is unchanged.
-        if version != super::SCHEMA_VERSION
-            || Self::get_user_version(&incoming.connection)? != version
+        if !matches!(
+            version,
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
+        ) || Self::get_user_version(&incoming.connection)? != version
             || super::loongport_schema::read_stored_version(current_conn)?
                 != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
             || super::loongport_schema::read_stored_version(&incoming.connection)?
@@ -389,11 +420,12 @@ impl Database {
         }
         let local = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&local)?;
-        Self::apply_schema_migrations_on_conn(&local)?;
-        super::loongport_schema::apply(&local)?;
-        if version == super::UPSTREAM4_SCHEMA_VERSION {
-            Self::apply_upstream4_migrations_on_conn(&local)?;
+        if version == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+            Self::apply_upgrade_source_migrations_on_conn(&local)?;
+        } else {
+            Self::apply_schema_migrations_on_conn(&local)?;
         }
+        super::loongport_schema::apply(&local)?;
         Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
         crate::secrets::inventory::transform_database(&local, Some(current), next)?;
         Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
@@ -3283,6 +3315,7 @@ mod tests {
     ) -> Result<(), AppError> {
         let _home = TestHomeGuard::new();
         let db = crate::secrets::testing::initialize_database()?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
         let source = db.snapshot_to_memory()?;
         let vault = db.secrets.read()?;
         source.pragma_update(None, "user_version", 17)?;
@@ -3303,6 +3336,7 @@ mod tests {
     ) -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
         let db = crate::secrets::testing::initialize_database()?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
         let vault = db.secrets.read()?;
         let source = Connection::open_in_memory()?;
         Database::create_tables_on_conn(&source)?;

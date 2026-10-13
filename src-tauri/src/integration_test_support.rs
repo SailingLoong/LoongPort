@@ -63,6 +63,7 @@ pub fn direct_state(
         ));
     }
     let db = Database::init_with_secrets(session)?;
+    Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
     if let Some(config) = config {
         db.migrate_from_json(config)?;
     }
@@ -118,4 +119,10 @@ pub fn source17_state(
         crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
     );
     Ok(state)
+}
+
+/// Execute the original startup chain against isolated synthetic disk fixtures.
+#[cfg(feature = "test-hooks")]
+pub fn verify_normal_upgrade_startup(case: &str) {
+    crate::secrets::startup::verify_normal_upgrade_startup(case);
 }

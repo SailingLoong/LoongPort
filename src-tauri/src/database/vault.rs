@@ -19,18 +19,16 @@ pub(crate) fn preflight(path: &Path) -> Result<(), AppError> {
     result
 }
 
-/// Existing source17 must take the explicit reviewed migration path before
-/// opening a session or changing the original database. Fresh databases still
-/// use ordinary initialization; intermediate upgrade schemas are not admitted.
+/// Ordinary source17 databases remain usable through their existing owners.
+/// Explicit upgrade checkpoints still own recovery; incomplete intermediate
+/// schemas are not ordinary runtime databases.
 pub(crate) fn preflight_runtime(path: &Path) -> Result<(), AppError> {
     let Some(inspected) = super::inspection::capture(path)? else {
         return Ok(());
     };
     preflight_connection(&inspected.image)?;
     let version = Database::get_user_version(&inspected.image)?;
-    let result = if version == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
-        Err(AppError::Config("upgrade.checkpoint_pending".into()))
-    } else if version > super::UPSTREAM4_SOURCE_SCHEMA_VERSION
+    let result = if version > super::UPSTREAM4_SOURCE_SCHEMA_VERSION
         && version < super::UPSTREAM4_SCHEMA_VERSION
     {
         Err(AppError::Config("upgrade.unsupported_source".into()))
@@ -106,6 +104,14 @@ pub(crate) fn copy(source: &Connection, destination: &mut Connection) -> Result<
 }
 
 pub(crate) fn upgrade_staging(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
+    upgrade_staging_for_target(conn, vault, super::SCHEMA_VERSION)
+}
+
+pub(crate) fn upgrade_staging_for_target(
+    conn: &Connection,
+    vault: &VaultContext,
+    target: i32,
+) -> Result<(), AppError> {
     if Database::get_user_version(conn)? > super::SCHEMA_VERSION
         || is_prefork_relic(conn)?
         || super::loongport_schema::read_stored_version(conn)?
@@ -125,7 +131,11 @@ pub(crate) fn upgrade_staging(conn: &Connection, vault: &VaultContext) -> Result
         })
         .transpose()?;
     Database::create_tables_on_conn(conn)?;
-    Database::apply_schema_migrations_on_conn(conn)?;
+    if target == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+        Database::apply_upgrade_source_migrations_on_conn(conn)?;
+    } else {
+        Database::apply_schema_migrations_on_conn(conn)?;
+    }
     super::loongport_schema::apply(conn)?;
     crate::secrets::inventory::transform_database(conn, source.as_ref(), vault)?;
     stamp(conn, vault)
@@ -170,7 +180,14 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
             }
             copy(&source, &mut staged)?;
         }
-        upgrade_staging(&staged, vault)?;
+        // Normal startup preserves the legacy owner. Explicit v4 migration and
+        // imports retain their existing targets; the supported ceiling stays 20.
+        let target = if Database::get_user_version(&staged)? == super::UPSTREAM4_SCHEMA_VERSION {
+            super::UPSTREAM4_SCHEMA_VERSION
+        } else {
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        };
+        upgrade_staging_for_target(&staged, vault, target)?;
         // VACUUM before serialization removes plaintext free pages in the memory image.
         staged
             .execute_batch("PRAGMA secure_delete=ON; VACUUM;")

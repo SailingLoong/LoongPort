@@ -350,6 +350,20 @@ fn install(
     inventory::validate_database(&connection, &current)?;
     let session = SecretSession::from_context(root.to_owned(), current);
     let db = Database::from_connection(connection, session.clone());
+    // Recovery into an existing legacy database keeps its schema. Modern and
+    // fresh bootstrap retain the original prepared image and migration path.
+    let incoming = if Database::get_user_version(&*db.conn.lock()?)?
+        <= crate::database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+    {
+        let sql = std::str::from_utf8(&data.snapshot.db_sql).map_err(|_| invalid())?;
+        db.validate_sync_snapshot_for_current(
+            sql,
+            data.snapshot.manifest.vault_metadata()?,
+            &data.next,
+        )?
+    } else {
+        data.incoming
+    };
     let location = settings.skill_storage_location;
     let skills = transition::SkillsReplacement {
         source: data.skills.source.clone(),
@@ -361,7 +375,7 @@ fn install(
         data.next,
         automatic_unlock,
         move |connection, current, next| {
-            Database::prepare_sync_join(data.incoming, connection, current, next)
+            Database::prepare_sync_join(incoming, connection, current, next)
         },
         Some(skills),
         settings,
@@ -575,12 +589,16 @@ mod tests {
             self.home.path().join(crate::APP_DIR_NAME)
         }
         fn snapshot(&self) -> DownloadedSnapshot {
+            self.snapshot_for_version(20)
+        }
+        fn snapshot_for_version(&self, version: i32) -> DownloadedSnapshot {
             let context = VaultContext::generate()
                 .unwrap()
                 .with_password("remote recovery password")
                 .unwrap();
             let connection = rusqlite::Connection::open_in_memory().unwrap();
-            crate::database::vault::upgrade_staging(&connection, &context).unwrap();
+            crate::database::vault::upgrade_staging_for_target(&connection, &context, version)
+                .unwrap();
             let session = SecretSession::from_context(self.home.path().join("source"), context);
             let source = Database::from_connection(connection, session);
             source
@@ -940,10 +958,17 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn lost_system_key_can_be_recovered_only_by_a_candidate_with_the_same_key() {
-        for same_key in [true, false] {
+        for (source_version, local_version, same_key) in [
+            (17, 17, true),
+            (17, 20, true),
+            (20, 20, true),
+            (20, 17, true),
+            (17, 17, false),
+            (20, 20, false),
+        ] {
             let fixture = Fixture::new();
             let root = fixture.root();
-            let snapshot = fixture.snapshot();
+            let snapshot = fixture.snapshot_for_version(source_version);
             let expected = snapshot.manifest.snapshot_id.clone();
             let candidate = VaultContext::from_password(
                 snapshot.manifest.vault_metadata().unwrap().clone(),
@@ -960,6 +985,9 @@ mod tests {
                     .unwrap();
             session::write_metadata(&root, &session::completed_metadata(&current, true).unwrap())
                 .unwrap();
+            if local_version == 20 {
+                Database::apply_upstream4_migrations_on_conn(&connection).unwrap();
+            }
             let local = SecretSession::from_context(root.clone(), current);
             let database = Database::from_connection(connection, local.clone());
             let account_id = {
@@ -982,15 +1010,22 @@ mod tests {
                 .write(&local, br#"{"access_token":"retained-oauth-canary"}"#)
                 .unwrap();
             let original = std::fs::read(root.join("vault.json")).unwrap();
+            let original_database = std::fs::read(root.join(crate::config::DB_FILE_NAME)).unwrap();
+            let credential_path = crate::secrets::files::CredentialFile::Codex.path(&local);
+            let original_credentials = std::fs::read(&credential_path).unwrap();
             let prepared =
                 prepare_snapshot(snapshot, source(), "remote recovery password", &expected)
                     .unwrap();
             let store = MemoryKeyStore::default();
             let result = finalize(&root, prepared, &store, false);
-            if same_key {
+            if same_key && source_version <= local_version {
                 let session = result.unwrap();
                 let connection =
                     rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
+                assert_eq!(
+                    Database::get_user_version(&connection).unwrap(),
+                    local_version
+                );
                 let database = Database::from_connection(connection, session.clone());
                 {
                     let context = session.read().unwrap();
@@ -1013,6 +1048,14 @@ mod tests {
             } else {
                 assert!(result.is_err());
                 assert_eq!(std::fs::read(root.join("vault.json")).unwrap(), original);
+                assert_eq!(
+                    std::fs::read(root.join(crate::config::DB_FILE_NAME)).unwrap(),
+                    original_database
+                );
+                assert_eq!(
+                    std::fs::read(&credential_path).unwrap(),
+                    original_credentials
+                );
                 assert!(!pending(&root).unwrap());
             }
         }

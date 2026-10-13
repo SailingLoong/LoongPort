@@ -20,7 +20,7 @@ impl Database {
     pub(crate) fn apply_upstream4_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
         Self::apply_schema_migrations_to(conn, super::UPSTREAM4_SCHEMA_VERSION)
     }
-    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    /// Ordinary startup retains the legacy owner until an explicit v4 migration.
     pub(crate) fn apply_upgrade_source_migrations_on_conn(
         conn: &Connection,
     ) -> Result<(), AppError> {
