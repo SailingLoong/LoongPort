@@ -20,6 +20,32 @@ import {
   type SettingsPageHandle,
 } from "@/components/settings/SettingsPage";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import type { ApplicationRouting } from "@/lib/api/applicationRouting";
+
+const routing = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock("@/lib/api/applicationRouting", () => ({
+  applicationRoutingApi: routing,
+}));
+const sharedSettingsApps = ["codex", "claude", "gemini"] as const;
+const modernRouting: ApplicationRouting = {
+  modeState: {
+    status: "ready",
+    mode: "direct",
+    attached: false,
+    currentProviderId: null,
+    directProviderId: null,
+    publicationStarted: null,
+    canWrite: true,
+    canRecheck: true,
+    legacyCommonConfigWritable: false,
+  },
+  autoFailoverEnabled: false,
+  routingActive: false,
+  model: null,
+  modelOptions: [],
+  chainIds: [],
+  tiers: [],
+};
 
 const shared = vi.hoisted(() => ({
   get: vi.fn(),
@@ -362,14 +388,22 @@ function SharedSettingsGuardHarness(
   );
 }
 
-const renderSettingsPage = (
-  props?: Partial<ComponentProps<typeof SettingsPage>>,
-) => {
+const settingsQueryClient = () => {
   const client = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
+      queries: { retry: false, staleTime: Infinity },
     },
   });
+  for (const app of sharedSettingsApps) {
+    client.setQueryData(["applicationRouting", app], modernRouting);
+  }
+  return client;
+};
+
+const renderSettingsPage = (
+  props?: Partial<ComponentProps<typeof SettingsPage>>,
+  client = settingsQueryClient(),
+) => {
   return render(
     <QueryClientProvider client={client}>
       <SharedSettingsGuardHarness {...props} />
@@ -379,6 +413,7 @@ const renderSettingsPage = (
 
 describe("SettingsPage Component", () => {
   beforeEach(async () => {
+    routing.get.mockReset().mockResolvedValue(modernRouting);
     tMock.mockImplementation((key: string) => key);
     shared.get.mockReset().mockResolvedValue({
       app: "codex",
@@ -437,6 +472,65 @@ describe("SettingsPage Component", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+
+  it.each(sharedSettingsApps)(
+    "hides the %s shared settings entry for a confirmed legacy app",
+    (app) => {
+      const client = settingsQueryClient();
+      client.setQueryData(["applicationRouting", app], {
+        ...modernRouting,
+        modeState: null,
+      });
+      renderSettingsPage(undefined, client);
+      expect(
+        screen.queryByRole("button", { name: `${app}SharedSettings.title` }),
+      ).not.toBeInTheDocument();
+      for (const modernApp of sharedSettingsApps.filter(
+        (other) => other !== app,
+      )) {
+        expect(
+          screen.getByRole("button", {
+            name: `${modernApp}SharedSettings.title`,
+          }),
+        ).toBeVisible();
+      }
+    },
+  );
+
+  it("waits for routing facts before exposing shared settings entries", () => {
+    routing.get.mockImplementation(() => new Promise(() => {}));
+    renderSettingsPage(undefined, new QueryClient());
+    for (const app of sharedSettingsApps) {
+      expect(
+        screen.queryByRole("button", { name: `${app}SharedSettings.title` }),
+      ).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(["pending", "unknown"] as const)(
+    "retains modern shared settings entries when routing reports %s",
+    async (status) => {
+      routing.get.mockRejectedValue({
+        code: "mode.verification_required",
+        modeState: {
+          ...modernRouting.modeState,
+          status,
+          canWrite: false,
+        },
+      });
+      renderSettingsPage(
+        undefined,
+        new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+      );
+      for (const app of sharedSettingsApps) {
+        expect(
+          await screen.findByRole("button", {
+            name: `${app}SharedSettings.title`,
+          }),
+        ).toBeVisible();
+      }
+    },
+  );
 
   it("opens an independent Codex shared settings editor without saving other settings", async () => {
     renderSettingsPage();

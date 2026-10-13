@@ -1539,6 +1539,9 @@ mod adoption_tests {
             &secrets.read().unwrap(),
         )
         .unwrap();
+        // These fixtures exercise the current-schema sync owner, independently
+        // of ordinary startup's legacy target.
+        Database::apply_upstream4_migrations_on_conn(&conn).unwrap();
         secrets.complete_migration().unwrap();
         Database::from_connection(conn, secrets)
     }

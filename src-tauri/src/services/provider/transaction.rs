@@ -185,6 +185,9 @@ mod tests {
                 crate::secrets::testing::initialize_source17_database()
                     .expect("initialize isolated legacy vault")
             });
+            if modern {
+                Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
+            }
             crate::settings::mutate_settings(|settings| {
                 settings.claude_config_dir = Some(
                     self.dir

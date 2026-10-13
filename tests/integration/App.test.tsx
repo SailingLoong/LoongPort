@@ -422,6 +422,27 @@ describe("App integration with MSW", () => {
     );
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "settings");
     server.use(
+      http.post("http://tauri.local/get_application_routing", () =>
+        HttpResponse.json({
+          modeState: {
+            status: "ready",
+            mode: "direct",
+            attached: false,
+            currentProviderId: null,
+            directProviderId: null,
+            publicationStarted: null,
+            canWrite: true,
+            canRecheck: true,
+            legacyCommonConfigWritable: false,
+          },
+          autoFailoverEnabled: false,
+          routingActive: false,
+          model: null,
+          modelOptions: [],
+          chainIds: [],
+          tiers: [],
+        }),
+      ),
       http.post("http://tauri.local/get_mcp_servers", () =>
         HttpResponse.json({}),
       ),

@@ -18,6 +18,7 @@ import {
   Globe,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useQueries } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
@@ -34,6 +35,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { settingsApi } from "@/lib/api";
+import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
@@ -64,6 +66,8 @@ import {
   type CodexSharedSettingsHandle,
 } from "@/components/settings/CodexSharedSettings";
 export type { CodexSharedSettingsHandle as SettingsPageHandle } from "@/components/settings/CodexSharedSettings";
+
+const sharedSettingsApps = ["codex", "claude", "gemini"] as const;
 
 interface SettingsDialogProps {
   beforeLeave: (proceed: () => void) => void;
@@ -125,6 +129,14 @@ export function SettingsPage({
   const [sharedSettingsApp, setSharedSettingsApp] = useState<
     "codex" | "claude" | "gemini" | null
   >(null);
+  const sharedSettingsRouting = useQueries({
+    queries: sharedSettingsApps.map((app) => ({
+      queryKey: ["applicationRouting", app],
+      queryFn: () => applicationRoutingApi.get(app),
+      enabled: open,
+      retry: false,
+    })),
+  });
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -277,19 +289,30 @@ export function SettingsPage({
                     />
                     {/* skill 存储位置 / 同步方式两块已挪去 skills 管理页就近
                         （改它们的场景是「在管 skills 的时候」）。 */}
-                    {(["codex", "claude", "gemini"] as const).map((app) => (
-                      <div key={app} className="space-y-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => setSharedSettingsApp(app)}
-                        >
-                          {t(`${app}SharedSettings.title`)}
-                        </Button>
-                        <p className="text-sm text-muted-foreground">
-                          {t(`${app}SharedSettings.description`)}
-                        </p>
-                      </div>
-                    ))}
+                    {sharedSettingsApps.map((app, index) => {
+                      const routing = sharedSettingsRouting[index];
+                      // Legacy reads have no mode owner; restricted modern reads
+                      // retain that fact in the existing structured error.
+                      const modeState =
+                        routing.error &&
+                        typeof routing.error === "object" &&
+                        "modeState" in routing.error
+                          ? routing.error.modeState
+                          : routing.data?.modeState;
+                      return modeState != null ? (
+                        <div key={app} className="space-y-2">
+                          <Button
+                            variant="outline"
+                            onClick={() => setSharedSettingsApp(app)}
+                          >
+                            {t(`${app}SharedSettings.title`)}
+                          </Button>
+                          <p className="text-sm text-muted-foreground">
+                            {t(`${app}SharedSettings.description`)}
+                          </p>
+                        </div>
+                      ) : null;
+                    })}
                     <CodexAuthSettings
                       settings={settings}
                       onChange={handleAutoSave}

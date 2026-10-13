@@ -3283,6 +3283,7 @@ mod tests {
     ) -> Result<(), AppError> {
         let _home = TestHomeGuard::new();
         let db = crate::secrets::testing::initialize_database()?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
         let source = db.snapshot_to_memory()?;
         let vault = db.secrets.read()?;
         source.pragma_update(None, "user_version", 17)?;
@@ -3303,6 +3304,7 @@ mod tests {
     ) -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
         let db = crate::secrets::testing::initialize_database()?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
         let vault = db.secrets.read()?;
         let source = Connection::open_in_memory()?;
         Database::create_tables_on_conn(&source)?;
