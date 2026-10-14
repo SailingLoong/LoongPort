@@ -133,7 +133,9 @@ it("keeps an open Claude snippet readable when the backend cache freezes its wri
       .at(-1)!;
     fireEvent.change(editor, { target: { value: '{"safe":"changed"}' } });
     expect(save).not.toHaveBeenCalled();
-    expect(screen.getByText("commonConfig.frozenHint")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByText("commonConfig.frozenHint")).toBeVisible(),
+    );
     await userEvent.click(
       screen.getAllByRole("button", { name: "common.cancel" }).at(-1)!,
     );
