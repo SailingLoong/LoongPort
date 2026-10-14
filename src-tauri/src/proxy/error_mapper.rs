@@ -72,7 +72,7 @@ pub fn get_error_message(error: &ProxyError) -> String {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .unwrap_or("上游未返回错误内容");
+                .unwrap_or("未附带错误详情");
             format!("上游错误 ({status}): {body}")
         }
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
@@ -163,7 +163,7 @@ mod tests {
         };
         assert_eq!(
             get_error_message(&error_empty),
-            "上游错误 (502): 上游未返回错误内容"
+            "上游错误 (502): 未附带错误详情"
         );
 
         let error_none = ProxyError::UpstreamError {
@@ -172,7 +172,7 @@ mod tests {
         };
         assert_eq!(
             get_error_message(&error_none),
-            "上游错误 (502): 上游未返回错误内容"
+            "上游错误 (502): 未附带错误详情"
         );
     }
 }
