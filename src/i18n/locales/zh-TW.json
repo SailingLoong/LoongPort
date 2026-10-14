@@ -3278,6 +3278,12 @@
     "refresh": "重新整理"
   },
   "loongport": {
+    "sources": {
+      "title": "共用來源",
+      "description": "同一來源的現有應用程式設定。選擇應用程式，繼續切換來源或模型。",
+      "empty": "此帳號尚無已設定的共用來源。",
+      "loadFailed": "無法讀取來源的應用程式關聯，請重試。"
+    },
     "refreshAll": "更新全部中轉站與官方 API 的帳號資訊、額度、群組倍率和連線設定檔",
     "addEntry": {
       "title": "新增",

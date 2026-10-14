@@ -3277,6 +3277,12 @@
     "refresh": "Refresh"
   },
   "loongport": {
+    "sources": {
+      "title": "Shared sources",
+      "description": "Existing app configurations for each source. Open an app to select its source or model.",
+      "empty": "This account has no configured shared sources yet.",
+      "loadFailed": "Could not load source app references. Please retry."
+    },
     "refreshAll": "Update account details, balances, group rates, and connection profiles for all relay services and official APIs",
     "addEntry": {
       "title": "Add",

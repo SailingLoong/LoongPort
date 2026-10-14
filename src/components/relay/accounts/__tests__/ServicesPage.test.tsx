@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
@@ -14,8 +14,12 @@ const mocks = vi.hoisted(() => ({
   vendors: vi.fn(),
   detail: vi.fn(),
   balance: vi.fn(),
+  sources: vi.fn(),
 }));
 vi.mock("@/lib/api/relay", () => ({ relayApi: { listRelays: mocks.relays } }));
+vi.mock("@/lib/api/serviceSources", () => ({
+  serviceSourcesApi: { list: mocks.sources },
+}));
 vi.mock("@/lib/api/vendor", () => ({ vendorApi: { list: mocks.vendors } }));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("../../RelaySection", () => ({
@@ -81,6 +85,7 @@ const vendor: VendorAccountRow = {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  mocks.sources.mockResolvedValue([]);
   mocks.relays.mockResolvedValue([relay]);
   mocks.vendors.mockImplementation(async (app: AppId) => ({
     supported: app === "codex",
@@ -103,7 +108,7 @@ function setup(appId: AppId = "gemini") {
       />
     </QueryClientProvider>,
   );
-  return { onOpenApp, onOpenAddHub, user: userEvent.setup() };
+  return { client, onOpenApp, onOpenAddHub, user: userEvent.setup() };
 }
 
 describe("ServicesPage", () => {
@@ -147,6 +152,44 @@ describe("ServicesPage", () => {
       expect(screen.queryByText("Example Official")).not.toBeInTheDocument(),
     );
     expect(screen.getByText("Example Relay")).toBeInTheDocument();
+  });
+
+  it("opens an existing source's app and refreshes its references after account changes", async () => {
+    mocks.sources.mockResolvedValue([
+      {
+        sourceId: "example-provider",
+        account: { kind: "vendor", id: 1 },
+        name: "Standard",
+        configurationName: "Standard",
+        serviceName: "Example Official",
+        accountLabel: "Official account",
+        bindings: [
+          {
+            appId: "codex",
+            providerId: "example-provider",
+            model: null,
+            usageState: "current",
+            canSelect: true,
+          },
+        ],
+      },
+    ]);
+    const { user, onOpenApp, client } = setup();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await screen.findByText("Example Official");
+    await user.click(
+      screen.getAllByRole("button", { name: "loongport.accounts.detail" })[1],
+    );
+    const source = await screen.findByRole("article");
+    await user.click(within(source).getByRole("button", { name: /Codex/ }));
+    expect(onOpenApp).toHaveBeenCalledWith("codex");
+    await act(async () => {
+      await mocks.detail.mock.lastCall![0].onAccountChanged();
+    });
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["serviceSources"] }),
+    );
+    await waitFor(() => expect(mocks.sources).toHaveBeenCalledTimes(2));
   });
 
   it("navigates configured apps and the actual add flow", async () => {

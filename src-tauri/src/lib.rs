@@ -1780,6 +1780,7 @@ pub fn run() {
             secrets::export::export_plaintext_secrets,
             commands::get_providers,
             commands::get_application_overview,
+            commands::get_service_sources,
             commands::preset_referral_urls,
             commands::get_current_provider,
             commands::add_provider,

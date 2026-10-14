@@ -25,7 +25,8 @@ import { RelaySection, type RelaySectionProps } from "../RelaySection";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 import { formatResetAt } from "@/components/applications/tierMetrics";
 import { usageApi } from "@/lib/api/usage";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ServiceSourceList, serviceSourcesKey } from "./ServiceSourceList";
 import { fmtUsd } from "@/components/usage/format";
 import { RowBalance } from "../RowBalance";
 import { useRowBusy } from "../useRowBusy";
@@ -80,6 +81,12 @@ export function ServicesPage({
 }: ServicesPageProps) {
   const { t } = useTranslation();
   const { accounts, isPending, error, reload } = useServiceAccounts();
+  const queryClient = useQueryClient();
+  const reloadAccounts = () =>
+    Promise.all([
+      reload(),
+      queryClient.invalidateQueries({ queryKey: serviceSourcesKey }),
+    ]);
   const activityOf = useAccountActivity();
   const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
@@ -114,7 +121,7 @@ export function ServicesPage({
             onClick={() => {
               if (onBack) onBack();
               else setSelection(null);
-              void reload();
+              void reloadAccounts();
             }}
           >
             <ArrowLeft className="h-4 w-4" />
@@ -169,6 +176,12 @@ export function ServicesPage({
             </div>
           )}
         </div>
+        {selected && (
+          <ServiceSourceList
+            account={{ kind: selected.kind, id: selected.id }}
+            onOpenApp={onOpenApp}
+          />
+        )}
         {selected?.kind === "relay" && (
           <AccountUsageCard tiers={[...selected.apps.values()]} />
         )}
@@ -196,7 +209,7 @@ export function ServicesPage({
               : null
           }
           onOpenAddHub={onOpenAddHub}
-          onAccountChanged={() => void reload()}
+          onAccountChanged={() => void reloadAccounts()}
         />
       </section>
     );
@@ -207,7 +220,7 @@ export function ServicesPage({
       appId={appId}
       accountSnapshot={null}
       onOpenAddHub={onOpenAddHub}
-      onAccountChanged={() => void reload()}
+      onAccountChanged={() => void reloadAccounts()}
       renderAccounts={(renderActions, renderDelete) => (
         <section className="page-content space-y-6">
           <header className="flex flex-wrap items-center justify-between gap-4">
@@ -236,7 +249,7 @@ export function ServicesPage({
               <Button
                 variant="outline"
                 className="mt-3"
-                onClick={() => void reload()}
+                onClick={() => void reloadAccounts()}
               >
                 {t("common.refresh")}
               </Button>
