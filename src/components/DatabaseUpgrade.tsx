@@ -13,12 +13,12 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { GITHUB_REPO } from "@/config/constants";
+import { OFFICIAL_WEBSITE } from "@/config/constants";
 
 // ⚠️ **必须是 LoongPort 自己的发布页，不能是上游的** —— 这个界面出现的场景是
 // 「数据库被更新版本升级过、当前 app 太旧读不了」。指向上游会让用户去装 cc-switch，
 // 而那个装了照样读不了我们的库（schema 已经分叉），他会卡在同一个界面上。
-const RELEASES_URL = `${GITHUB_REPO}/releases`;
+const RELEASES_URL = OFFICIAL_WEBSITE;
 
 interface DatabaseUpgradeProps {
   payload: {
@@ -40,6 +40,8 @@ type Phase = "checking" | "upgradable" | "incompatible" | "updating" | "error";
 interface DownloadProgress {
   downloaded: number;
   total: number | null;
+  requestId?: string | null;
+  phase?: string;
 }
 
 /**
@@ -57,6 +59,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
+  const requestRef = useRef<string | null>(null);
 
   const dbVersion = payload.db_version;
   const supportedVersion = payload.supported_version;
@@ -88,22 +91,41 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
 
   useEffect(() => {
     return () => {
+      requestRef.current = null;
       unlistenRef.current?.();
     };
   }, []);
 
   const startUpgrade = useCallback(async () => {
+    if (requestRef.current) return;
     setPhase("updating");
     setProgress(null);
     setErrorMsg(null);
+    const requestId = crypto.randomUUID();
+    requestRef.current = requestId;
     try {
       unlistenRef.current?.();
-      unlistenRef.current = await listen<DownloadProgress>(
+      const unlisten = await listen<DownloadProgress>(
         "update-download-progress",
-        (e) => setProgress(e.payload),
+        (e) => {
+          if (
+            requestRef.current === requestId &&
+            e.payload.requestId === requestId
+          )
+            setProgress(e.payload);
+        },
       );
+      if (requestRef.current !== requestId) {
+        unlisten();
+        return;
+      }
+      unlistenRef.current = unlisten;
       // 成功时后端会下载+安装+重启，不会返回；返回 false 表示无可用更新。
-      const updating = await invoke<boolean>("install_update_and_restart");
+      const updating = await invoke<boolean>("install_update_and_restart", {
+        requestId,
+      });
+      if (requestRef.current !== requestId) return;
+      requestRef.current = null;
       unlistenRef.current?.();
       unlistenRef.current = null;
       if (!updating) {
@@ -112,6 +134,8 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
       }
       // updating === true：应用即将重启，保持 updating 态直到进程退出。
     } catch (e) {
+      if (requestRef.current !== requestId) return;
+      requestRef.current = null;
       unlistenRef.current?.();
       unlistenRef.current = null;
       setErrorMsg(e instanceof Error ? e.message : String(e));
@@ -217,9 +241,11 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
             <div className="flex items-center justify-between text-sm">
               <span className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                {percent === null
-                  ? t("dbUpgrade.preparing", "正在准备更新…")
-                  : t("dbUpgrade.downloading", "正在下载更新…")}
+                {progress?.phase === "switchingSource"
+                  ? t("settings.updateSwitchingSource")
+                  : percent === null
+                    ? t("dbUpgrade.preparing", "正在准备更新…")
+                    : t("dbUpgrade.downloading", "正在下载更新…")}
               </span>
               {percent !== null && (
                 <span className="tabular-nums text-muted-foreground">

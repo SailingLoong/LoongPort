@@ -1,5 +1,9 @@
 #[cfg(feature = "gui")]
 pub mod app_update;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod app_update_policy;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod app_update_stage;
 pub mod application_overview;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod application_selection;

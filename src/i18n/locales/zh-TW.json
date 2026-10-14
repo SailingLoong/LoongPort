@@ -416,6 +416,13 @@
     "piDefaultProviderWarning": "Pi 的全域預設目前指向此供應商。繼續後，Pi 會嘗試其他可用模型；你可以在 Pi 中使用 /model 重新選擇，或使用 /login 登入其他供應商。"
   },
   "settings": {
+    "updateProbingSources": "正在探測下載來源…",
+    "updateSwitchingSource": "正在切換來源…",
+    "updateSourceOfficial": "官網",
+    "updateSourceGithub": "GitHub",
+    "updateSourceManifest": "清單下載來源",
+    "updateRetryOfficial": "從官網重試",
+    "updateRetryGithub": "從 GitHub 重試",
     "title": "設定",
     "general": "通用",
     "tabGeneral": "通用",

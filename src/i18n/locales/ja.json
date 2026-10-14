@@ -416,6 +416,13 @@
     "piDefaultProviderWarning": "Pi のグローバルデフォルトは現在このプロバイダーを参照しています。続行すると、Pi は別の利用可能なモデルを試します。/model で再選択するか、/login で別のプロバイダーにログインできます。"
   },
   "settings": {
+    "updateProbingSources": "ダウンロード元を確認中…",
+    "updateSwitchingSource": "ダウンロード元を切り替え中…",
+    "updateSourceOfficial": "公式サイト",
+    "updateSourceGithub": "GitHub",
+    "updateSourceManifest": "リリースの配布元",
+    "updateRetryOfficial": "公式サイトから再試行",
+    "updateRetryGithub": "GitHub から再試行",
     "title": "設定",
     "general": "一般",
     "tabGeneral": "一般",

@@ -236,6 +236,15 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     () => appVersionCache === null,
   );
   const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadPhase, setDownloadPhase] = useState<string | null>(null);
+  const [downloadSource, setDownloadSource] = useState<string | null>(null);
+  const downloadRequestRef = useRef<string | null>(null);
+  const downloadAttemptRef = useRef<{
+    id: number;
+    source: string | null;
+    downloaded: number;
+  }>({ id: 0, source: null, downloaded: 0 });
   // 手动「更新到 vX」的下载进度与速度：后端 `download_update_bytes` 逐 chunk 发
   // `update-download-progress`（DatabaseUpgrade 弹窗同款事件），这里接住换算成
   // 百分比 + 窗口速度给按钮文案 —— 转圈三十秒不知道在下载什么，是用户明确要修的。
@@ -428,7 +437,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   };
 
   // 下载中途卸载组件时摘掉进度监听（正常路径的 finally 已处理，这是兜底）。
-  useEffect(() => () => progressUnlistenRef.current?.(), []);
+  useEffect(
+    () => () => {
+      downloadRequestRef.current = null;
+      progressUnlistenRef.current?.();
+      progressUnlistenRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -548,60 +564,156 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, [t, updateInfo?.availableVersion, version]);
 
-  const handleCheckUpdate = useCallback(async () => {
-    if (hasUpdate) {
-      if (isPortable) {
+  const handleCheckUpdate = useCallback(
+    async (source?: "official" | "github") => {
+      if (hasUpdate || source) {
+        if (isPortable) {
+          try {
+            await settingsApi.checkUpdates();
+          } catch (error) {
+            console.error("[AboutSection] Portable update failed", error);
+          }
+          return;
+        }
+
+        if (downloadRequestRef.current) return;
+        setIsDownloading(true);
+        setDownloadError(null);
+        setDownloadPhase("probing");
+        setDownloadSource(null);
+        const requestId = crypto.randomUUID();
+        downloadRequestRef.current = requestId;
+        downloadAttemptRef.current = { id: 0, source: null, downloaded: 0 };
+        setDownloadProgress(null);
+        setDownloadSpeedBps(null);
+        speedSamplesRef.current = [];
         try {
-          await settingsApi.checkUpdates();
+          // 先挂进度监听再发命令（DatabaseUpgrade.startUpgrade 同款时序），漏掉的
+          // 顶多是第一两个 chunk。监听挂不上不拦更新（进度是展示性的），
+          // 窗口法算速度：保留最近 ~1.6s 的 (时刻, 字节) 样本，首尾相除 ——
+          // 瞬时 chunk 抖动被窗口抹平。
+          progressUnlistenRef.current?.();
+          try {
+            const unlisten = await listen<{
+              downloaded: number;
+              total: number | null;
+              attemptId?: number;
+              requestId?: string | null;
+              phase?: string;
+              source?: string;
+            }>("update-download-progress", (event) => {
+              if (
+                downloadRequestRef.current !== requestId ||
+                event.payload.requestId !== requestId
+              )
+                return;
+              const {
+                downloaded,
+                total,
+                attemptId = 0,
+                phase = "downloading",
+                source: activeSource = null,
+              } = event.payload;
+              const previous = downloadAttemptRef.current;
+              if (attemptId < previous.id) return;
+              if (
+                attemptId !== previous.id ||
+                activeSource !== previous.source ||
+                downloaded < previous.downloaded ||
+                phase === "switchingSource"
+              ) {
+                speedSamplesRef.current = [];
+                setDownloadSpeedBps(null);
+              }
+              downloadAttemptRef.current = {
+                id: attemptId,
+                source: activeSource,
+                downloaded,
+              };
+              setDownloadPhase(phase);
+              setDownloadSource(activeSource);
+              setDownloadProgress({ downloaded, total });
+              const samples = speedSamplesRef.current;
+              const now = performance.now();
+              samples.push({ at: now, downloaded });
+              while (samples.length > 1 && now - samples[0].at > 1600) {
+                samples.shift();
+              }
+              const first = samples[0];
+              const dtSeconds = (now - first.at) / 1000;
+              if (samples.length > 1 && dtSeconds >= 0.4) {
+                setDownloadSpeedBps(
+                  (downloaded - first.downloaded) / dtSeconds,
+                );
+              }
+            });
+            if (downloadRequestRef.current !== requestId) {
+              unlisten();
+              return;
+            }
+            progressUnlistenRef.current = unlisten;
+          } catch (listenError) {
+            console.error(
+              "[AboutSection] update progress listener unavailable",
+              listenError,
+            );
+          }
+          if (downloadRequestRef.current !== requestId) return;
+          resetDismiss();
+          const installed = await settingsApi.installUpdateAndRestart(
+            source,
+            requestId,
+          );
+          if (downloadRequestRef.current !== requestId) return;
+          if (!installed) {
+            toast.success(t("settings.upToDate"), { closeButton: true });
+          }
         } catch (error) {
-          console.error("[AboutSection] Portable update failed", error);
+          if (downloadRequestRef.current !== requestId) return;
+          console.error("[AboutSection] Update failed", error);
+          setDownloadError(
+            extractErrorMessage(error) || t("settings.updateFailed"),
+          );
+          toast.error(t("settings.updateFailed"), {
+            description: extractErrorMessage(error) || undefined,
+            closeButton: true,
+          });
+          try {
+            await settingsApi.checkUpdates();
+          } catch (fallbackError) {
+            console.error(
+              "[AboutSection] Failed to open fallback updater",
+              fallbackError,
+            );
+          }
+        } finally {
+          if (downloadRequestRef.current === requestId) {
+            progressUnlistenRef.current?.();
+            progressUnlistenRef.current = null;
+            downloadRequestRef.current = null;
+            setIsDownloading(false);
+            setDownloadPhase(null);
+            setDownloadSource(null);
+            setDownloadProgress(null);
+            setDownloadSpeedBps(null);
+          }
         }
         return;
       }
 
-      setIsDownloading(true);
-      setDownloadProgress(null);
-      setDownloadSpeedBps(null);
-      speedSamplesRef.current = [];
+      // 真的去问一次（`checkUpdate()` → 前端命令 → 后端 updater service）。
+      // 2026-08-04 之前这里走的是 `settingsApi.checkUpdates()`（只是开 Releases 页）——
+      // 那时后端更新服务有意未启用，命令必抛。现在后端服务与 updater 通道都已配好，
+      // 该问就问；**问不到才回落到开页面**，让用户至少有路可走（离线、GitHub 不可达、
+      // 或免安装版被放在只读位置都会走到这里）。
       try {
-        // 先挂进度监听再发命令（DatabaseUpgrade.startUpgrade 同款时序），漏掉的
-        // 顶多是第一两个 chunk。监听挂不上不拦更新（进度是展示性的），
-        // 窗口法算速度：保留最近 ~1.6s 的 (时刻, 字节) 样本，首尾相除 ——
-        // 瞬时 chunk 抖动被窗口抹平。
-        progressUnlistenRef.current?.();
-        try {
-          progressUnlistenRef.current = await listen<{
-            downloaded: number;
-            total: number | null;
-          }>("update-download-progress", (event) => {
-            const { downloaded, total } = event.payload;
-            setDownloadProgress({ downloaded, total });
-            const samples = speedSamplesRef.current;
-            const now = performance.now();
-            samples.push({ at: now, downloaded });
-            while (samples.length > 1 && now - samples[0].at > 1600) {
-              samples.shift();
-            }
-            const first = samples[0];
-            const dtSeconds = (now - first.at) / 1000;
-            if (samples.length > 1 && dtSeconds >= 0.4) {
-              setDownloadSpeedBps((downloaded - first.downloaded) / dtSeconds);
-            }
-          });
-        } catch (listenError) {
-          console.error(
-            "[AboutSection] update progress listener unavailable",
-            listenError,
-          );
-        }
-        resetDismiss();
-        const installed = await settingsApi.installUpdateAndRestart();
-        if (!installed) {
+        const found = await checkUpdate();
+        if (!found) {
           toast.success(t("settings.upToDate"), { closeButton: true });
         }
       } catch (error) {
-        console.error("[AboutSection] Update failed", error);
-        toast.error(t("settings.updateFailed"), {
+        console.error("[AboutSection] Update check failed", error);
+        toast.error(t("settings.checkUpdateFailed"), {
           description: extractErrorMessage(error) || undefined,
           closeButton: true,
         });
@@ -609,43 +721,15 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           await settingsApi.checkUpdates();
         } catch (fallbackError) {
           console.error(
-            "[AboutSection] Failed to open fallback updater",
+            "[AboutSection] Failed to open releases page",
             fallbackError,
           );
+          toast.error(t("settings.checkUpdateFailed"));
         }
-      } finally {
-        progressUnlistenRef.current?.();
-        progressUnlistenRef.current = null;
-        setIsDownloading(false);
-        setDownloadProgress(null);
-        setDownloadSpeedBps(null);
       }
-      return;
-    }
-
-    // 真的去问一次（`checkUpdate()` → 前端命令 → 后端 updater service）。
-    // 2026-08-04 之前这里走的是 `settingsApi.checkUpdates()`（只是开 Releases 页）——
-    // 那时后端更新服务有意未启用，命令必抛。现在后端服务与 updater 通道都已配好，
-    // 该问就问；**问不到才回落到开页面**，让用户至少有路可走（离线、GitHub 不可达、
-    // 或免安装版被放在只读位置都会走到这里）。
-    try {
-      const found = await checkUpdate();
-      if (!found) {
-        toast.success(t("settings.upToDate"), { closeButton: true });
-      }
-    } catch (error) {
-      console.error("[AboutSection] Update check failed", error);
-      try {
-        await settingsApi.checkUpdates();
-      } catch (fallbackError) {
-        console.error(
-          "[AboutSection] Failed to open releases page",
-          fallbackError,
-        );
-        toast.error(t("settings.checkUpdateFailed"));
-      }
-    }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+    },
+    [checkUpdate, hasUpdate, isPortable, resetDismiss, t],
+  );
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -991,6 +1075,20 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const downloadStatusText = (() => {
     if (!isDownloading) return null;
     const parts: string[] = [];
+    if (downloadPhase === "probing")
+      parts.push(t("settings.updateProbingSources"));
+    if (downloadPhase === "switchingSource")
+      parts.push(t("settings.updateSwitchingSource"));
+    if (downloadSource)
+      parts.push(
+        t(
+          downloadSource === "official"
+            ? "settings.updateSourceOfficial"
+            : downloadSource === "github"
+              ? "settings.updateSourceGithub"
+              : "settings.updateSourceManifest",
+        ),
+      );
     if (downloadProgress) {
       if (downloadProgress.total && downloadProgress.total > 0) {
         parts.push(
@@ -1117,7 +1215,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               <Button
                 type="button"
                 size="sm"
-                onClick={handleCheckUpdate}
+                onClick={() => void handleCheckUpdate()}
                 disabled={isChecking || isDownloading}
                 className="h-8 gap-1.5 text-xs"
               >
@@ -1153,6 +1251,30 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             </div>
           </div>
         </div>
+
+        {downloadError && (
+          <div role="alert" className="space-y-2 text-sm text-destructive">
+            <p>{downloadError}</p>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isDownloading || isChecking}
+                onClick={() => void handleCheckUpdate("official")}
+              >
+                {t("settings.updateRetryOfficial")}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isDownloading || isChecking}
+                onClick={() => void handleCheckUpdate("github")}
+              >
+                {t("settings.updateRetryGithub")}
+              </Button>
+            </div>
+          </div>
+        )}
 
         {hasUpdate && updateInfo && (
           <motion.div
