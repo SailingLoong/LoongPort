@@ -3700,18 +3700,7 @@
       "cancel": "後で設定"
     },
     "star": {
-      "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
-      "dotTitle": "GitHub でスターを付けて登録ボーナスをもらう",
-      "dialogTitle": "スターを付けて ${{amount}} の登録ボーナスをもらう",
-      "dialogBody": "GitHub で LoongPort にスターを付けると、BestAPI の登録ボーナス（登録時に ${{amount}} 分のクレジット）がもらえます。",
-      "confirm": "スターを付けて受け取る",
-      "cancel": "キャンセル",
-      "grantedTitle": "ボーナス獲得 🎉",
-      "grantedBody": "リポジトリページがブラウザで開いています。スターを付けていただけると嬉しいです。",
-      "codeLabel": "プロモコード",
-      "copy": "コピー",
-      "copied": "コピーしました",
-      "registerNote": "BestAPI の登録ウィンドウが開き、プロモコードは自動入力されます。"
+      "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）"
     },
     "codexReset": {
       "label": "グローバルリセット",

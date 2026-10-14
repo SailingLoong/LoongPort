@@ -3700,18 +3700,7 @@
       "cancel": "Set up later"
     },
     "star": {
-      "buttonTitle": "GitHub repository (star it if you like it)",
-      "dotTitle": "Star on GitHub to claim your sign-up gift",
-      "dialogTitle": "Star us, get a ${{amount}} sign-up gift",
-      "dialogBody": "Star LoongPort on GitHub to receive a BestAPI sign-up gift: ${{amount}} of credit on registration.",
-      "confirm": "Star & claim",
-      "cancel": "Cancel",
-      "grantedTitle": "Gift claimed 🎉",
-      "grantedBody": "The repository page is open in your browser — a star there means a lot to LoongPort.",
-      "codeLabel": "Promo code",
-      "copy": "Copy",
-      "copied": "Copied",
-      "registerNote": "The BestAPI sign-up window is open with the promo code pre-filled."
+      "buttonTitle": "GitHub repository (star it if you like it)"
     },
     "codexReset": {
       "label": "Global reset",
