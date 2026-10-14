@@ -343,6 +343,16 @@ async fn one(
             return Ok(());
         }
     };
+    let prior_plan_ids = match super::claim::prior_plan_ids(&balance) {
+        Some(ids) => ids,
+        None => {
+            // A malformed account response must not abort the remaining accounts.
+            // Failure to persist the result still stops the round safely.
+            failure(&mut r, OfficialError::InvalidResponse);
+            record(db, p, &r).await?;
+            return Ok(());
+        }
+    };
     let raw = match client
         .request(request(p, Endpoint::Preview), &checked)
         .await
@@ -372,17 +382,7 @@ async fn one(
         .find(|plan| active_plan(&balance, &plan.id).is_none())
         .cloned();
     r.plans = plans;
-    r.prior_plan_ids = balance
-        .get("plans")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("invalidResponse")?
-        .iter()
-        .filter_map(|p| {
-            p.get("user_plan_id")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from)
-        })
-        .collect();
+    r.prior_plan_ids = prior_plan_ids;
     r.reason = None;
     let Some(plan) = plan else {
         r.status = Status::NoClaim;
@@ -483,6 +483,7 @@ fn failure(r: &mut Record, error: OfficialError) {
             OfficialError::Timeout => "timeout",
             OfficialError::Unauthorized => "loginExpired",
             OfficialError::Cancelled => "cancelled",
+            OfficialError::InvalidResponse => "invalidResponse",
             _ => "network",
         }
         .into(),
@@ -543,7 +544,7 @@ async fn round(
             }
             Err(reason) => {
                 let root = root.clone();
-                let _ = run_owned(db.clone(), move |db| {
+                let persisted = run_owned(db.clone(), move |db| {
                     let result = (|| {
                         let ctx = context(root.as_deref())?;
                         if !ids(db, &ctx)?.contains(&id) {
@@ -562,6 +563,11 @@ async fn round(
                     Ok(result)
                 })
                 .await;
+                // Continue only after the preflight result is durably saved.
+                // Both task failure and a nested storage/context error stop admission.
+                if !matches!(persisted, Ok(Ok(()))) {
+                    break;
+                }
             }
         }
     }
@@ -716,6 +722,32 @@ mod tests {
     #[cfg(unix)]
     use super::super::{core::OAuthFamily, native::tests::native_document_with_context};
     use super::*;
+    #[test]
+    fn invalid_balance_failure_is_persisted_without_erasing_the_prior_snapshot() {
+        let db = Database::memory().unwrap();
+        let mut record = Record {
+            status: Status::Claimable,
+            plan_id: Some("synthetic-plan".into()),
+            prior_plan_ids: vec!["existing-plan".into()],
+            ..Record::default()
+        };
+        failure(&mut record, OfficialError::InvalidResponse);
+        let mut saved = Saved::default();
+        saved
+            .scopes
+            .entry("synthetic-context".into())
+            .or_default()
+            .records
+            .insert("account-a".into(), record);
+        save(&db, &saved).unwrap();
+        let restored = load(&db).unwrap();
+        let record = &restored.scopes["synthetic-context"].records["account-a"];
+        assert_eq!(record.status, Status::Unknown);
+        assert_eq!(record.reason.as_deref(), Some("invalidResponse"));
+        assert_eq!(record.prior_plan_ids, vec!["existing-plan"]);
+        assert!(!record.may_submit());
+    }
+
     #[test]
     fn default_auto_is_off_and_restart_keeps_encrypted_pending_results() {
         let db = Database::memory().unwrap();
