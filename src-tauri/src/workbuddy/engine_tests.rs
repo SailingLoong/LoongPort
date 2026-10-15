@@ -387,8 +387,10 @@ async fn status_returning_after_cn_midnight_cannot_mark_today_claimed() {
 
 // Unlike the single-account Fake, this script binds every response to the actual
 // selected account, so a same-UID/domain mix-up cannot pass on endpoint order alone.
+type AccountBoundResponse = (Domain, &'static str, &'static str, Endpoint, Value);
+
 struct AccountBoundFake {
-    queue: Mutex<VecDeque<(Domain, &'static str, &'static str, Endpoint, Value)>>,
+    queue: Mutex<VecDeque<AccountBoundResponse>>,
 }
 impl Transport for AccountBoundFake {
     fn request<'a>(
@@ -446,7 +448,7 @@ fn account_isolation_responses(
     uid: &'static str,
     token: &'static str,
     balance: f64,
-) -> Vec<(Domain, &'static str, &'static str, Endpoint, Value)> {
+) -> Vec<AccountBoundResponse> {
     let mut responses = resource(balance);
     responses.push(status(false));
     responses
