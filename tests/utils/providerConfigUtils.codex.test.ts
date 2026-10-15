@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parse as parseToml } from "smol-toml";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
@@ -125,56 +126,146 @@ describe("Codex TOML utils", () => {
     expect(extractCodexBaseUrl(output)).toBe("https://api.example.com/v1");
   });
 
-  it("recovers a single misplaced base_url from another section", () => {
-    const input = [
-      'model_provider = "custom"',
-      'model = "gpt-5.4"',
-      "",
-      "[model_providers.custom]",
-      'name = "custom"',
-      'wire_api = "responses"',
-      "",
-      "[profiles.default]",
-      'approval_policy = "never"',
-      'base_url = "https://wrong.example/v1"',
-      "",
-    ].join("\n");
+  it("finds the active provider table when its header quotes the key", () => {
+    for (const header of [
+      '[model_providers."custom"]',
+      "[model_providers.'custom']",
+      "[ model_providers . custom ]",
+      '["model_providers".custom]',
+    ]) {
+      const input = [
+        'model_provider = "custom"',
+        "",
+        header,
+        'name = "custom"',
+        'wire_api = "responses"',
+        "",
+        "[features]",
+        "",
+      ].join("\n");
 
-    expect(extractCodexBaseUrl(input)).toBe("https://wrong.example/v1");
+      const output = setCodexBaseUrl(input, "https://relay.example/v1");
 
-    const output = setCodexBaseUrl(input, "https://fixed.example/v1");
-
-    expect(output).toContain(
-      '[model_providers.custom]\nname = "custom"\nwire_api = "responses"\nbase_url = "https://fixed.example/v1"',
-    );
-    expect(output).not.toContain("https://wrong.example/v1");
-    expect(output.match(/base_url\s*=/g)).toHaveLength(1);
+      const parsed = parseToml(output) as Record<string, any>;
+      expect(parsed.model_providers.custom, header).toEqual({
+        name: "custom",
+        wire_api: "responses",
+        base_url: "https://relay.example/v1",
+      });
+      expect(output.split(/^\s*\[/m), header).toHaveLength(3);
+      expect(extractCodexBaseUrl(output), header).toBe(
+        "https://relay.example/v1",
+      );
+      expect(
+        extractCodexBaseUrl(setCodexBaseUrl(output, "")),
+        header,
+      ).toBeUndefined();
+    }
   });
 
-  it("does not treat mcp_servers base_url as provider base_url", () => {
+  it("writes base_url into a quoted provider table whose id needs quoting", () => {
     const input = [
-      'model_provider = "azure"',
-      'model = "gpt-4"',
+      'model_provider = "my.relay"',
       "",
-      "[model_providers.azure]",
-      'name = "Azure OpenAI"',
-      'wire_api = "responses"',
-      "",
-      "[mcp_servers.my_server]",
-      'base_url = "http://localhost:8080"',
+      '[model_providers."my.relay"]',
+      'name = "my.relay"',
       "",
     ].join("\n");
 
-    expect(extractCodexBaseUrl(input)).toBeUndefined();
+    const output = setCodexBaseUrl(input, "https://relay.example/v1");
 
-    const output = setCodexBaseUrl(input, "https://new.azure/v1");
+    const parsed = parseToml(output) as Record<string, any>;
+    expect(Object.keys(parsed.model_providers)).toEqual(["my.relay"]);
+    expect(parsed.model_providers["my.relay"].base_url).toBe(
+      "https://relay.example/v1",
+    );
+  });
 
-    expect(output).toContain(
-      '[model_providers.azure]\nname = "Azure OpenAI"\nwire_api = "responses"\nbase_url = "https://new.azure/v1"',
-    );
-    expect(output).toContain(
-      '[mcp_servers.my_server]\nbase_url = "http://localhost:8080"',
-    );
+  it("updates the bearer token in a provider table whose header quotes the key", () => {
+    const input = [
+      'model_provider = "custom"',
+      "",
+      '[model_providers."custom"]',
+      'name = "custom"',
+      'experimental_bearer_token = "old"',
+      "",
+    ].join("\n");
+
+    const output = updateCodexExperimentalBearerToken(input, "new");
+
+    expect(extractCodexExperimentalBearerToken(output)).toBe("new");
+    expect(
+      (parseToml(output) as Record<string, any>).model_providers.custom
+        .experimental_bearer_token,
+    ).toBe("new");
+  });
+
+  it("skips provider tables quoted inside a multi-line string", () => {
+    for (const delimiter of ['"""', "'''"]) {
+      const instructions = [
+        "Example:",
+        '[model_providers."custom"]',
+        'base_url = "https://example.invalid/v1"',
+        'experimental_bearer_token = "example-token"',
+        "",
+      ].join("\n");
+      const input = [
+        'model_provider = "custom"',
+        `developer_instructions = ${delimiter}`,
+        `${instructions}${delimiter}`,
+        "",
+        "[model_providers.custom]",
+        'name = "custom"',
+        'base_url = "https://old.invalid/v1"',
+        'experimental_bearer_token = "old-token"',
+        "",
+      ].join("\n");
+
+      expect(extractCodexBaseUrl(input), delimiter).toBe(
+        "https://old.invalid/v1",
+      );
+      expect(extractCodexExperimentalBearerToken(input), delimiter).toBe(
+        "old-token",
+      );
+
+      const output = updateCodexExperimentalBearerToken(
+        setCodexBaseUrl(input, "https://new.invalid/v1"),
+        "new-token",
+      );
+
+      const parsed = parseToml(output) as Record<string, any>;
+      expect(parsed.developer_instructions, delimiter).toBe(instructions);
+      expect(parsed.model_providers.custom, delimiter).toEqual({
+        name: "custom",
+        base_url: "https://new.invalid/v1",
+        experimental_bearer_token: "new-token",
+      });
+    }
+  });
+
+  it("never redefines a custom table the line scan cannot see", () => {
+    for (const input of [
+      'model = "m"\n\n[model_providers.custom] # mine\nname = "custom"\nwire_api = "responses"\n',
+      'model = "m"\nmodel_providers = { custom = { name = "custom", wire_api = "responses" } }\n',
+      'model = "m"\n\n[model_providers]\ncustom = { name = "custom", wire_api = "responses" }\n',
+    ]) {
+      const output = setCodexBaseUrl(input, "https://r.example/v1");
+      const parsed = parseToml(output) as Record<string, any>;
+      expect(parsed.model_providers.custom.wire_api, input).toBe("responses");
+      expect(extractCodexBaseUrl(output), input).toBe("https://r.example/v1");
+    }
+  });
+
+  it("keeps assignment-like lines inside a multi-line string", () => {
+    const instructions =
+      'line one\nmodel_provider = example\nwire_api = "chat"\n';
+    const input = `model = "m"\nbase_instructions = """\n${instructions}"""\n`;
+
+    const output = setCodexBaseUrl(input, "https://r.example/v1");
+
+    const parsed = parseToml(output) as Record<string, any>;
+    expect(parsed.base_instructions).toBe(instructions);
+    expect(parsed.base_url).toBe("https://r.example/v1");
   });
 
   it("reads model only from the top-level config", () => {
