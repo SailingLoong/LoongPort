@@ -28,8 +28,6 @@ import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
   settingsApi,
-  starRewardApi,
-  type StarRewardOffer,
   PROFILE_APPLIED,
   S3_SYNC_STATUS_UPDATED,
   UNIVERSAL_PROVIDER_SYNCED,
@@ -97,7 +95,6 @@ import { UsagePage } from "@/components/usage/UsagePage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
 import { AddHubPage, type AddHubTab } from "@/components/relay/AddHubPage";
-import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
@@ -544,76 +541,6 @@ function App() {
       );
     },
   );
-
-  // ===== 「点 Star 领注册礼」：状态统一收在 App（红点 / 弹窗 / 事件三处共用）=====
-
-  const [starRewardOffer, setStarRewardOffer] =
-    useState<StarRewardOffer | null>(null);
-  // `null` = 还没读到（读失败也归这里：读不到就不亮红点，不在顶栏挂一颗
-  // 点不掉的假红点 —— 与本仓一次性标志的既有降级方向一致）。
-  const [starRewardActive, setStarRewardActive] = useState<boolean | null>(
-    null,
-  );
-  const [starRewardBusy, setStarRewardBusy] = useState(false);
-  // 已领取是 durable 事实（settings 持久化），事件守卫只认它 —— 不能认
-  // `starRewardActive`：后者在首启时由挂载检查按「当时缓存有没有活动」定值，
-  // 新装机缓存 5 秒后才落盘，挂载时几乎必然是 false，若拿它当守卫会把几秒
-  // 后到来的合法引导事件整个吞掉。
-  const starRewardClaimedRef = useRef(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    settingsApi
-      .get()
-      .then((settings) => {
-        if (cancelled) return;
-        starRewardClaimedRef.current = settings.starRewardClaimed === true;
-        // 红点 =「礼还没领」，只认 durable 的 claimed —— 不再叠加
-        // configured（那是对「活动在不在」的瞬时缓存读：新装机缓存未落盘时
-        // 会把红点错误熄灭，而用户要求红点在领取前常亮）。活动真下线时点击
-        // 回落「直接开仓库」（offer 返回 null），见 handleGitHubStarClick。
-        setStarRewardActive(settings.starRewardClaimed !== true);
-      })
-      .catch(() => {
-        // 读不到设置就熄：不在顶栏挂一颗状态不明的红点（既有降级方向）。
-        if (!cancelled) setStarRewardActive(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（纯本地读缓存）弹窗；否则现状开仓库。
-   * （2026-09-06 起这是 Star 礼的唯一入口 —— 首导入成功后的主动弹窗事件已删，
-   * 用户刚接入站点时还没有使用感，此刻弹点赞礼只会被打断。） */
-  const handleGitHubStarClick = useCallback(async () => {
-    if (starRewardActive !== true) {
-      await settingsApi.openExternal(GITHUB_REPO);
-      return;
-    }
-    setStarRewardBusy(true);
-    try {
-      // null = 活动刚下线（远端配置无 star_reward）—— 按现状开仓库，
-      // 不弹一个兑现不了的 offer。
-      const offer = (await starRewardApi.offer()) ?? null;
-      if (offer) {
-        setStarRewardOffer(offer);
-      } else {
-        await settingsApi.openExternal(GITHUB_REPO);
-      }
-    } catch {
-      await settingsApi.openExternal(GITHUB_REPO).catch(() => {});
-    } finally {
-      setStarRewardBusy(false);
-    }
-  }, [starRewardActive]);
-
-  /** 弹窗「领取」点击时刻：熄红点（领没领成功都熄；取消/叉不触发）。
-   * 持久化的熄灭靠发码时的 markClaimed，这里只是会话内立即生效。 */
-  const handleStarRewardClaimed = useCallback(() => {
-    starRewardClaimedRef.current = true;
-    setStarRewardActive(false);
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1399,9 +1326,7 @@ function App() {
               }}
             />
             <GitHubStarButton
-              showDot={starRewardActive === true}
-              busy={starRewardBusy}
-              onClick={() => void handleGitHubStarClick()}
+              onClick={() => void settingsApi.openExternal(GITHUB_REPO)}
             />
           </>
         }
@@ -1855,16 +1780,6 @@ function App() {
       {/* 模型对齐告警横幅：客户端模型 ≠ 档位已选模型（实际计费模型）时常驻
           告知 + 一键出口。状态机在组件内，这里只挂一行；无不符时零存在感。 */}
       <ModelMismatchBanner />
-
-      {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
-          这里只持开关（offer 在即弹）。 */}
-      {starRewardOffer && (
-        <StarRewardDialog
-          offer={starRewardOffer}
-          onClose={() => setStarRewardOffer(null)}
-          onClaimed={handleStarRewardClaimed}
-        />
-      )}
 
       {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
           持有全部状态（弹不弹、切哪个），这里只挂一行 —— 与上面那个同一个模式。 */}

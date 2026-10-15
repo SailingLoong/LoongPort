@@ -130,6 +130,30 @@ mod tests {
         assert_eq!(client.0.calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
+    async fn cancellation_after_response_discards_result_without_retry() {
+        let client = Client(Fake {
+            calls: AtomicUsize::new(0),
+            response: Mutex::new(Some(Ok(OfficialResponse {
+                status: 200,
+                body: zeroize::Zeroizing::new(br#"{"code":0,"data":{}}"#.to_vec()),
+            }))),
+        });
+        let checks = AtomicUsize::new(0);
+        let check = || {
+            if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(OfficialError::Cancelled)
+            }
+        };
+        assert_eq!(
+            client.request(req(), &check).await.unwrap_err(),
+            OfficialError::Cancelled
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        assert_eq!(client.0.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
     async fn timeout_is_single_attempt_and_secret_response_is_redacted() {
         let fake = Fake {
             calls: AtomicUsize::new(0),
@@ -158,12 +182,16 @@ mod tests {
 
 #[cfg(feature = "gui")]
 pub(crate) struct Http {
+    #[cfg(feature = "test-hooks")]
+    script: Option<std::sync::Arc<super::claim_runtime::test_support::Script>>,
     client: reqwest::Client,
 }
 #[cfg(feature = "gui")]
 impl Http {
     pub fn new() -> Result<Self, OfficialError> {
         Ok(Self {
+            #[cfg(feature = "test-hooks")]
+            script: super::claim_runtime::test_support::current(),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
@@ -177,6 +205,10 @@ impl Http {
 #[cfg(feature = "gui")]
 impl Transport for Http {
     fn send(&self, request: Request) -> TransportFuture<'_> {
+        #[cfg(feature = "test-hooks")]
+        if let Some(script) = &self.script {
+            return script.send(request);
+        }
         Box::pin(async move {
             let path = match request.endpoint {
                 Endpoint::Preview => "zcode-plan/billing/preview",

@@ -1,15 +1,177 @@
 import { describe, expect, it } from "vitest";
+import { parse as parseToml } from "smol-toml";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
   extractCodexModelName,
   extractCodexTopLevelInt,
+  extractCodexWireApi,
   removeCodexTopLevelField,
   setCodexBaseUrl,
   setCodexModelName,
   setCodexTopLevelInt,
+  setCodexWireApi,
   updateCodexExperimentalBearerToken,
 } from "@/utils/providerConfigUtils";
+import { providerNeedsRouting } from "@/utils/providerCapabilities";
+
+describe("Codex provider table comments", () => {
+  it.each([
+    " # active gateway",
+    "#active gateway",
+    "\t# active gateway",
+    " # quote \"double\", 'single', # hash and [brackets]",
+  ])(
+    "reads the active gateway below an annotated table header %j",
+    (comment) => {
+      const input = [
+        'model_provider = "custom"',
+        "[model_providers.backup]",
+        'base_url = "https://backup.example/v1"',
+        'wire_api = "responses"',
+        `[model_providers.custom]${comment}`,
+        'base_url = "https://gateway.example/anthropic"',
+        'wire_api = "anthropic"',
+      ].join("\n");
+
+      expect(parseToml(input).model_provider).toBe("custom");
+      expect(extractCodexBaseUrl(input)).toBe(
+        "https://gateway.example/anthropic",
+      );
+      expect(extractCodexWireApi(input)).toBe("anthropic");
+    },
+  );
+
+  it.each(["https://updated.example/v1", ""])(
+    "changes only the active base URL to %j and preserves the annotated backup",
+    (baseUrl) => {
+      const input = [
+        'model_provider = "custom"',
+        "[model_providers.custom]",
+        'base_url = "https://gateway.example/v1"',
+        'wire_api = "responses"',
+        "[model_providers.backup] # retained gateway",
+        'base_url = "https://backup.example/v1"',
+        'wire_api = "chat"',
+      ].join("\n");
+      const before = parseToml(input) as any;
+
+      const output = setCodexBaseUrl(input, baseUrl);
+      const after = parseToml(output) as any;
+
+      expect(after.model_providers.custom.base_url).toBe(baseUrl || undefined);
+      expect(after.model_providers.backup).toEqual(
+        before.model_providers.backup,
+      );
+      expect(output).toContain("[model_providers.backup] # retained gateway");
+    },
+  );
+
+  it("updates the wire API in an annotated active table without redefining it", () => {
+    const input = [
+      'model_provider = "custom"',
+      "[model_providers.backup]",
+      'wire_api = "chat"',
+      "[model_providers.custom] # active gateway",
+      'wire_api = "anthropic"',
+    ].join("\r\n");
+
+    const output = setCodexWireApi(input, "responses");
+    const parsed = parseToml(output) as any;
+
+    expect(parsed.model_providers.custom.wire_api).toBe("responses");
+    expect(parsed.model_providers.backup.wire_api).toBe("chat");
+    expect(output).toContain("[model_providers.custom] # active gateway");
+  });
+
+  it.each([
+    ["base_url", extractCodexBaseUrl],
+    ["wire_api", extractCodexWireApi],
+    ["experimental_bearer_token", extractCodexExperimentalBearerToken],
+  ] as const)(
+    "does not borrow %s from an annotated backup",
+    (_field, extract) => {
+      const input = [
+        'model_provider = "custom"',
+        "[model_providers.custom]",
+        'name = "Active"',
+        "[model_providers.backup] # unrelated gateway",
+        'base_url = "https://backup.example/v1"',
+        'wire_api = "chat"',
+        'experimental_bearer_token = "synthetic-backup-token"',
+      ].join("\n");
+
+      expect(extract(input)).toBeUndefined();
+    },
+  );
+
+  it("does not update a token belonging to an annotated backup table", () => {
+    const input = [
+      'model_provider = "custom"',
+      "[model_providers.custom]",
+      'name = "Active"',
+      "[model_providers.backup] # unrelated gateway",
+      'experimental_bearer_token = "synthetic-backup-token"',
+    ].join("\n");
+
+    expect(
+      updateCodexExperimentalBearerToken(input, "synthetic-new-token"),
+    ).toBe(input);
+  });
+
+  it("inserts a missing active base URL before an annotated MCP table", () => {
+    const input = [
+      'model_provider = "custom"',
+      "[model_providers.custom]",
+      'wire_api = "responses"',
+      '  \t[mcp_servers.local] # "independent" # endpoint',
+      'base_url = "https://mcp.example/transport"',
+    ].join("\n");
+    const before = parseToml(input) as any;
+
+    const output = setCodexBaseUrl(input, "https://gateway.example/v1");
+    const after = parseToml(output) as any;
+
+    expect(after.model_providers.custom.base_url).toBe(
+      "https://gateway.example/v1",
+    );
+    expect(after.mcp_servers).toEqual(before.mcp_servers);
+  });
+
+  it.each(["anthropic", "chat_completions", "responses"])(
+    "keeps the routing decision for an annotated %s gateway",
+    (wireApi) => {
+      const config = [
+        'model_provider = "custom"',
+        "[model_providers.backup]",
+        'wire_api = "responses"',
+        "[model_providers.custom] # active gateway",
+        `wire_api = "${wireApi}"`,
+      ].join("\n");
+
+      expect(
+        providerNeedsRouting("codex", {
+          id: "custom-gateway",
+          name: "Gateway",
+          settingsConfig: { auth: {}, config },
+        }),
+      ).toBe(wireApi !== "responses");
+    },
+  );
+
+  it("does not treat a model under an annotated profile as a top-level model", () => {
+    const input = [
+      'model_provider = "custom"',
+      "[profiles.backup] # independent profile",
+      'model = "backup-model"',
+    ].join("\n");
+
+    expect(extractCodexModelName(input)).toBeUndefined();
+    const parsed = parseToml(setCodexModelName(input, "active-model")) as any;
+    expect(parsed.model).toBe("active-model");
+    expect(parsed.profiles.backup.model).toBe("backup-model");
+  });
+});
 
 describe("Codex TOML utils", () => {
   it("removes base_url line when set to empty", () => {

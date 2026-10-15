@@ -74,7 +74,7 @@ describe("AboutSection", () => {
     );
   });
 
-  it("keeps the Releases fallback when a manual check rejects", async () => {
+  it("keeps the official download fallback when a manual check rejects", async () => {
     const checkError = new Error("network offline");
     const consoleError = vi
       .spyOn(console, "error")
@@ -111,7 +111,14 @@ describe("AboutSection manual update download progress", () => {
       }) as unknown as typeof event.listen,
     );
     const emit = (payload: { downloaded: number; total: number | null }) =>
-      handler?.({ payload });
+      handler?.({
+        payload: {
+          ...payload,
+          requestId: vi
+            .mocked(settings.settingsApi.installUpdateAndRestart)
+            .mock.calls.at(-1)?.[1],
+        },
+      } as never);
     let now = 0;
     const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
 
@@ -130,6 +137,10 @@ describe("AboutSection manual update download progress", () => {
       name: /settings.updateTo/,
     });
     fireEvent.click(download);
+
+    await waitFor(() =>
+      expect(settings.settingsApi.installUpdateAndRestart).toHaveBeenCalled(),
+    );
 
     await act(async () => {
       emit?.({ downloaded: 0, total: 10 * 1024 * 1024 });
@@ -150,5 +161,139 @@ describe("AboutSection manual update download progress", () => {
     expect(status.className).toContain("tabular-nums");
 
     nowSpy.mockRestore();
+  });
+
+  it("releases the busy button after a failed download and offers an explicit source retry", async () => {
+    const { settingsApi } = await import("@/lib/api");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.value = {
+      ...mocks.value,
+      hasUpdate: true,
+      updateInfo: { availableVersion: "9.9.9" } as never,
+      error: null,
+    };
+    vi.mocked(settingsApi.installUpdateAndRestart)
+      .mockReset()
+      .mockRejectedValueOnce(new Error("download stalled"))
+      .mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    render(<AboutSection isPortable={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /settings.updateTo/ }),
+    );
+
+    const retry = await screen.findByRole("button", {
+      name: "settings.updateRetryOfficial",
+    });
+    await waitFor(() => expect(retry).toBeEnabled());
+    expect(screen.getByRole("alert")).toHaveTextContent("download stalled");
+    expect(
+      screen.queryByRole("button", { name: /settings.updating/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(settingsApi.installUpdateAndRestart).toHaveBeenLastCalledWith(
+        "official",
+        expect.any(String),
+      ),
+    );
+  });
+
+  it("resets speed when the same source switches transport and ignores an old request", async () => {
+    const { settingsApi } = await import("@/lib/api");
+    const { listen } = await import("@tauri-apps/api/event");
+    let handler:
+      ((event: { payload: Record<string, unknown> }) => void) | undefined;
+    vi.mocked(listen).mockImplementation((async (
+      _name: string,
+      callback: never,
+    ) => {
+      handler = callback;
+      return () => {};
+    }) as unknown as typeof listen);
+    vi.mocked(settingsApi.installUpdateAndRestart)
+      .mockReset()
+      .mockImplementation(() => new Promise<boolean>(() => {}));
+    mocks.value = {
+      ...mocks.value,
+      hasUpdate: true,
+      updateInfo: { availableVersion: "9.9.9" } as never,
+      error: null,
+    };
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    render(<AboutSection isPortable={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /settings.updateTo/ }),
+    );
+    await waitFor(() =>
+      expect(settingsApi.installUpdateAndRestart).toHaveBeenCalled(),
+    );
+    const requestId = vi.mocked(settingsApi.installUpdateAndRestart).mock
+      .calls[0][1];
+    const emit = (
+      downloaded: number,
+      phase = "downloading",
+      request = requestId,
+    ) =>
+      handler?.({
+        payload: {
+          requestId: request,
+          attemptId: 7,
+          source: "official",
+          downloaded,
+          total: 10 * 1024 * 1024,
+          phase,
+        },
+      });
+    await act(async () => {
+      emit(0);
+    });
+    now = 500;
+    await act(async () => {
+      emit(2 * 1024 * 1024);
+    });
+    expect(screen.getByText(/4\.0 MB\/s/)).toBeInTheDocument();
+    await act(async () => {
+      emit(0, "switchingSource");
+    });
+    expect(
+      screen.getByText(/settings.updateSwitchingSource/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/MB\/s/)).not.toBeInTheDocument();
+    await act(async () => {
+      emit(9 * 1024 * 1024, "downloading", "old-request");
+    });
+    expect(screen.queryByText(/90%/)).not.toBeInTheDocument();
+  });
+
+  it("cleans up a late progress subscription after unmount without starting installation", async () => {
+    const { settingsApi } = await import("@/lib/api");
+    const { listen } = await import("@tauri-apps/api/event");
+    const cleanup = vi.fn();
+    let resolveListen!: (unlisten: () => void) => void;
+    vi.mocked(listen).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveListen = resolve;
+        }),
+    );
+    vi.mocked(settingsApi.installUpdateAndRestart).mockReset();
+    mocks.value = {
+      ...mocks.value,
+      hasUpdate: true,
+      updateInfo: { availableVersion: "9.9.9" } as never,
+      error: null,
+    };
+    const { unmount } = render(<AboutSection isPortable={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /settings.updateTo/ }),
+    );
+    await waitFor(() => expect(resolveListen).toBeDefined());
+    unmount();
+    await act(async () => {
+      resolveListen(cleanup);
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(settingsApi.installUpdateAndRestart).not.toHaveBeenCalled();
   });
 });
