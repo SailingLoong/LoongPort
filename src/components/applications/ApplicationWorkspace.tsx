@@ -1,4 +1,5 @@
 import { toast } from "sonner";
+import { BindVendorSource } from "./BindVendorSource";
 import {
   useEffect,
   useImperativeHandle,
@@ -807,6 +808,10 @@ export function ApplicationWorkspace({
             {t("applications.addService")}
           </Button>
         </header>
+        <BindVendorSource
+          appId={appId}
+          disabled={orderBusy || Boolean(routing.writeBlocked)}
+        />
         <div className="flex flex-wrap items-center gap-3">
           {chainEditing && (
             <Button

@@ -4000,6 +4000,18 @@
     }
   },
   "applications": {
+    "bindSource": {
+      "open": "绑定已有来源",
+      "source": "已有来源",
+      "add": "添加引用",
+      "busy": "正在检查…",
+      "hint": "仅添加未启用的引用，不会启用或切换应用。凭据、套餐与额度仍归属来源账号。",
+      "confirmed": "引用已添加，请另行启用或选择。",
+      "failed": "未能添加引用，可以手动重试。",
+      "unknown": "结果尚未确认，请先检查已保存的引用。",
+      "check": "检查已保存引用",
+      "empty": "暂无可绑定的供应商来源。"
+    },
     "originalRequestUnresolved": "原应用请求的结果尚未确认。检查结果不会再次应用更改。",
     "recheckOriginalRequest": "检查原请求结果",
     "startNewRequest": "重新复核新应用",
