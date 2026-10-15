@@ -142,7 +142,8 @@ export interface UsageResult {
   error?: string;
 }
 
-export type AuthBindingSource = "provider_config" | "managed_account";
+export type AuthBindingSource =
+  "provider_config" | "managed_account" | "vendor_api_key";
 
 export interface AuthBinding {
   source: AuthBindingSource;

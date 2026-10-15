@@ -58,6 +58,14 @@ impl ProviderRouter {
         }
     }
 
+    pub(crate) fn resolve_vendor_auth(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<Provider, AppError> {
+        self.db.resolve_vendor_auth(app, provider)
+    }
+
     pub fn record_attempt(&self, app_type: &str, provider_id: &str, success: bool) {
         if let Err(error) = self
             .db

@@ -18,6 +18,17 @@ pub async fn get_service_sources(
     get_service_sources_impl(state.inner())
 }
 
+/// Attach a known vendor source only; selection remains a separate reviewed operation.
+#[tauri::command]
+pub async fn bind_vendor_service_source(
+    state: tauri::State<'_, AppState>,
+    source_id: String,
+    app: AppType,
+) -> Result<bool, String> {
+    crate::services::vendor_source_binding::bind_vendor_source(&state.db, &source_id, &app)
+        .map_err(|error| error.to_string())
+}
+
 fn get_service_sources_impl(state: &AppState) -> Result<Vec<ServiceSource>, String> {
     let relay_accounts = {
         let conn = state.db.conn.lock().map_err(|error| error.to_string())?;

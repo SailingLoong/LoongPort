@@ -21,6 +21,7 @@ pub mod models_dev;
 pub mod omo;
 #[cfg(any(feature = "gui", test))]
 pub mod service_sources;
+pub mod vendor_source_binding;
 pub use crate::database::order_profiles;
 pub mod pi_prompt_files;
 pub(crate) mod pi_state;

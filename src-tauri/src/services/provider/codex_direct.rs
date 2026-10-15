@@ -263,9 +263,12 @@ struct RowFacts {
 }
 
 fn row_facts(db: &Database) -> Result<RowFacts, AppError> {
-    Ok(row_facts_from_providers(
-        db.get_all_providers(app())?.values(),
-    ))
+    let rows = db
+        .get_all_providers(app())?
+        .into_values()
+        .filter_map(|provider| db.resolve_vendor_auth(&AppType::Codex, &provider).ok())
+        .collect::<Vec<_>>();
+    Ok(row_facts_from_providers(rows.iter()))
 }
 
 fn row_facts_from_providers<'a>(providers: impl Iterator<Item = &'a Provider>) -> RowFacts {
@@ -377,6 +380,24 @@ fn plan_with_sources(
     provider: &Provider,
     readonly: bool,
 ) -> Result<Planned, AppError> {
+    let resolved = db.resolve_vendor_auth(&AppType::Codex, provider)?;
+    let provider = &resolved;
+    let resolved_owner = owner
+        .provider()
+        .map(|provider| db.resolve_vendor_auth(&AppType::Codex, provider))
+        .transpose()?;
+    let owner = match owner {
+        Owner::Provider(_) => resolved_owner
+            .as_ref()
+            .map(Owner::Provider)
+            .unwrap_or(Owner::None),
+        Owner::Contract { contract, .. } => Owner::Contract {
+            contract,
+            route: resolved_owner.as_ref(),
+        },
+        Owner::None => Owner::None,
+    };
+    let owner = &owner;
     let projection = project_for_write(provider)?;
     let unify = crate::settings::unify_codex_session_history();
     let endpoint = if is_official(provider) && !unify {
