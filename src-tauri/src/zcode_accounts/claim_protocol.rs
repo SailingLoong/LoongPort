@@ -130,6 +130,30 @@ mod tests {
         assert_eq!(client.0.calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
+    async fn cancellation_after_response_discards_result_without_retry() {
+        let client = Client(Fake {
+            calls: AtomicUsize::new(0),
+            response: Mutex::new(Some(Ok(OfficialResponse {
+                status: 200,
+                body: zeroize::Zeroizing::new(br#"{"code":0,"data":{}}"#.to_vec()),
+            }))),
+        });
+        let checks = AtomicUsize::new(0);
+        let check = || {
+            if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(OfficialError::Cancelled)
+            }
+        };
+        assert_eq!(
+            client.request(req(), &check).await.unwrap_err(),
+            OfficialError::Cancelled
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        assert_eq!(client.0.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
     async fn timeout_is_single_attempt_and_secret_response_is_redacted() {
         let fake = Fake {
             calls: AtomicUsize::new(0),
