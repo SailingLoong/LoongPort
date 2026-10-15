@@ -434,7 +434,9 @@ export const hasTomlCommonConfigSnippet = (
 
 // ========== Codex base_url utils ==========
 
-const TOML_SECTION_HEADER_PATTERN = /^\s*\[([^\]\r\n]+)\]\s*$/;
+// Table comments do not change scope; otherwise editing one gateway can consume
+// assignments from the next annotated provider or profile table. Keep CRLF valid.
+const TOML_SECTION_HEADER_PATTERN = /^\s*\[([^\]\r\n]+)\]\s*(?:#.*)?\s*$/;
 const TOML_BASE_URL_PATTERN =
   /^\s*base_url\s*=\s*(?:"((?:\\.|[^"\\\r\n])*)"|'([^'\r\n]*)')\s*(?:#.*)?$/;
 const TOML_EXPERIMENTAL_BEARER_TOKEN_PATTERN =
@@ -484,6 +486,32 @@ const finalizeTomlText = (lines: string[]): string =>
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^\n+/, "");
 
+const tomlSectionKey = (key: string): string =>
+  /^[A-Za-z0-9_-]+$/.test(key) ? key : tomlBasicString(key);
+
+// Reuse the TOML parser for header identity while preserving the original lines.
+// Joining raw key values would confuse a quoted "vendor.name" with nested keys.
+const getTomlSectionName = (line: string): string | undefined => {
+  if (!line.trimStart().startsWith("[")) return undefined;
+  try {
+    let table: unknown = parseToml(line);
+    const keys: string[] = [];
+    while (isPlainObject(table)) {
+      const entries = Object.entries(table);
+      if (entries.length === 0) {
+        return keys.length > 0 ? keys.map(tomlSectionKey).join(".") : undefined;
+      }
+      if (entries.length !== 1) break;
+      const [key, child] = entries[0];
+      keys.push(key);
+      table = child;
+    }
+  } catch {
+    // Keep the existing line-scan recovery while the user edits invalid TOML.
+  }
+  return line.match(TOML_SECTION_HEADER_PATTERN)?.[1];
+};
+
 const getTomlSectionRange = (
   lines: string[],
   sectionName: string,
@@ -491,13 +519,13 @@ const getTomlSectionRange = (
   let headerLineIndex = -1;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(TOML_SECTION_HEADER_PATTERN);
-    if (!match) {
+    const currentSectionName = getTomlSectionName(lines[index]);
+    if (currentSectionName === undefined) {
       continue;
     }
 
     if (headerLineIndex === -1) {
-      if (match[1] === sectionName) {
+      if (currentSectionName === sectionName) {
         headerLineIndex = index;
       }
       continue;
@@ -522,8 +550,8 @@ const getTomlSectionRange = (
 };
 
 const getTopLevelEndIndex = (lines: string[]): number => {
-  const firstSectionIndex = lines.findIndex((line) =>
-    TOML_SECTION_HEADER_PATTERN.test(line),
+  const firstSectionIndex = lines.findIndex(
+    (line) => getTomlSectionName(line) !== undefined,
   );
   return firstSectionIndex === -1 ? lines.length : firstSectionIndex;
 };
@@ -599,7 +627,9 @@ const getCodexProviderSectionName = (
   configText: string,
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
-  return providerName ? `model_providers.${providerName}` : undefined;
+  return providerName
+    ? `model_providers.${tomlSectionKey(providerName)}`
+    : undefined;
 };
 
 const isCustomCodexModelProviderId = (providerName: string): boolean => {
@@ -612,7 +642,7 @@ const getCodexCustomProviderSectionName = (
 ): string | undefined => {
   const providerName = getCodexModelProviderName(configText);
   return providerName && isCustomCodexModelProviderId(providerName)
-    ? `model_providers.${providerName}`
+    ? `model_providers.${tomlSectionKey(providerName)}`
     : undefined;
 };
 
@@ -681,9 +711,9 @@ const findTomlAssignments = (
   let currentSectionName: string | undefined;
 
   lines.forEach((line, index) => {
-    const sectionMatch = line.match(TOML_SECTION_HEADER_PATTERN);
-    if (sectionMatch) {
-      currentSectionName = sectionMatch[1];
+    const sectionName = getTomlSectionName(line);
+    if (sectionName !== undefined) {
+      currentSectionName = sectionName;
       return;
     }
 
