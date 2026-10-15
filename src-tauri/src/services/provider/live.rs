@@ -781,7 +781,7 @@ pub(crate) fn build_effective_provider_for_live_with_codex_oauth_manager(
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
     apply_codex_official_auth(app_type, &mut effective_provider, Some(codex_oauth_manager))?;
-    Ok(effective_provider)
+    db.resolve_vendor_auth(app_type, &effective_provider)
 }
 
 fn apply_codex_official_auth(

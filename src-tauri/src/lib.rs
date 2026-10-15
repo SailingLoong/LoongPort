@@ -1781,6 +1781,7 @@ pub fn run() {
             commands::get_providers,
             commands::get_application_overview,
             commands::get_service_sources,
+            commands::bind_vendor_service_source,
             commands::preset_referral_urls,
             commands::get_current_provider,
             commands::add_provider,
