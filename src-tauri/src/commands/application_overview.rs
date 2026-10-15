@@ -1,4 +1,5 @@
 //! Safe application configuration summaries built from existing presentation owners.
+use crate::services::service_sources::SourceAccountReference as AccountReference;
 use crate::{app_config::AppType, services::provider::ProviderPresentation, store::AppState};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -36,12 +37,6 @@ pub enum ConfigurationSource {
     Official,
     Relay,
     Custom,
-}
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum AccountReference {
-    Relay { id: i64 },
-    Vendor { id: i64 },
 }
 #[derive(Debug, Serialize)]
 #[serde(
@@ -97,7 +92,7 @@ pub async fn get_application_overview(
     Ok(overview)
 }
 
-fn application_overview(
+pub(crate) fn application_overview(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<ApplicationOverview, String> {

@@ -3284,6 +3284,12 @@
     "refresh": "刷新"
   },
   "loongport": {
+    "sources": {
+      "title": "共享来源",
+      "description": "同一来源的现有应用配置。选择应用，继续切换来源或模型。",
+      "empty": "此账号暂无已配置的共享来源。",
+      "loadFailed": "无法读取来源的应用关联，请重试。"
+    },
     "refreshAll": "更新全部中转站与官方 API 的账号信息、额度、分组倍率和接入配置",
     "addEntry": {
       "title": "添加",

@@ -201,6 +201,7 @@ export const handlers = [
       });
     },
   ),
+  http.post(`${TAURI_ENDPOINT}/get_service_sources`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/service_onboarding_status`, () =>
     success({ shouldPrompt: false, completed: true, plazaVisible: false }),
   ),

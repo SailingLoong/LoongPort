@@ -7,6 +7,8 @@ pub use announcements::*;
 mod application_routing;
 pub use application_routing::*;
 
+mod service_sources;
+pub use service_sources::*;
 mod application_overview;
 pub use application_overview::*;
 mod auth;
