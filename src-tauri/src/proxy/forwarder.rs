@@ -710,7 +710,9 @@ impl RequestForwarder {
                 Err(e) => {
                     // Explicit access/safety refusals are terminal before any request
                     // rectification, model downgrade or account fallback is attempted.
-                    if is_explicit_upstream_denial(&e) {
+                    if super::providers::workbuddy_acp::enabled(provider)
+                        || is_explicit_upstream_denial(&e)
+                    {
                         self.router
                             .release_permit_neutral(
                                 &provider.id,
@@ -1383,6 +1385,13 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        if super::providers::workbuddy_acp::enabled(provider) {
+            return super::providers::workbuddy_acp::forward(
+                app_type, method, provider, endpoint, body,
+            )
+            .await
+            .map(|response| (response, None, None));
+        }
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
@@ -3034,6 +3043,9 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        if super::providers::workbuddy_acp::enabled(provider) {
+            return ErrorCategory::NonRetryable;
+        }
         // Authentication belongs to the Codex client for an official route.
         // Every retry would reuse the selected account's inbound Authorization
         // header against another card, so no official-route error may fail over.
