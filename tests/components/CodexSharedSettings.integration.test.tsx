@@ -214,9 +214,13 @@ describe("U05 actual editor and IPC adapter recovery", () => {
       expect(views().map((view) => view.state.doc.toString())).toEqual(
         texts(edited),
       );
-      expect(
-        views().every((view) => !view.state.facet(EditorState.readOnly)),
-      ).toBe(true);
+      await waitFor(() => {
+        const editors = views();
+        expect(editors).toHaveLength(texts(edited).length);
+        expect(
+          editors.every((view) => !view.state.facet(EditorState.readOnly)),
+        ).toBe(true);
+      });
       expect(
         screen.getByRole("button", { name: "codexSharedSettings.preview" }),
       ).toBeDisabled();
