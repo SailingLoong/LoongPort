@@ -259,8 +259,17 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
 /// 具体编排见 services/app_update.rs：检查时后台预下载的产物优先被消费，
 /// 「点升级」在预下载就绪时无需网络、无需现场下载。
 #[tauri::command]
-pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
-    crate::services::app_update::install_staged_or_download_and_restart(&app).await
+pub async fn install_update_and_restart(
+    app: AppHandle,
+    source: Option<String>,
+    request_id: Option<String>,
+) -> Result<bool, String> {
+    crate::services::app_update::install_staged_or_download_and_restart(
+        &app,
+        source.as_deref(),
+        request_id,
+    )
+    .await
 }
 
 /// 检查是否有可用的应用更新，返回可用的新版本号（无更新时返回 None）。

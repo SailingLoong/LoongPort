@@ -77,14 +77,18 @@ export function ApplicationChangeConfirmDialog({
               {t("applications.reviewChanged")}
             </p>
           )}
-          <p className="text-sm">
-            {t("applications.orderProfiles")}:{" "}
-            {review.change.order?.profileName}
-          </p>
-          {list("applications.appliedOrder", review.appliedIds)}
-          {list(
-            "applications.proposedOrder",
-            review.change.order?.providerIds ?? [],
+          {review.change.order && (
+            <>
+              <p className="text-sm">
+                {t("applications.orderProfiles")}:{" "}
+                {review.change.order?.profileName}
+              </p>
+              {list("applications.appliedOrder", review.appliedIds)}
+              {list(
+                "applications.proposedOrder",
+                review.change.order?.providerIds ?? [],
+              )}
+            </>
           )}
           <section className="space-y-2 text-sm">
             <h3 className="font-medium">

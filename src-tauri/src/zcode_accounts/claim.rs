@@ -81,6 +81,22 @@ pub(crate) fn preview(body: &Value) -> Result<Vec<Plan>, &'static str> {
     plans.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
     Ok(plans)
 }
+
+pub(crate) fn prior_plan_ids(balance: &Value) -> Option<Vec<String>> {
+    Some(
+        balance
+            .get("plans")?
+            .as_array()?
+            .iter()
+            .filter_map(|plan| {
+                plan.get("user_plan_id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .collect(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum Status {

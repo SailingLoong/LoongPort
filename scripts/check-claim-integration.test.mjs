@@ -65,3 +65,43 @@ test("explicit exit and restart close claim admission before asynchronous cleanu
 test("failed Windows update explains that claim admission requires a restart", () => {
   assert.ok(read("src-tauri/src/services/app_update.rs").includes("套餐领取已暂停至重启"));
 });
+
+test("invalid account balance is recorded without aborting the remaining claim queue", () => {
+  const source = read("src-tauri/src/zcode_accounts/claim_runtime.rs");
+  const start = source.indexOf("let prior_plan_ids = match super::claim::prior_plan_ids(&balance)");
+  assert.ok(start > 0, "balance shape must be validated before selecting or submitting a plan");
+  const guarded = source.slice(start, source.indexOf("let raw = match client", start));
+  assert.match(guarded, /failure\(&mut r, OfficialError::InvalidResponse\)/);
+  assert.match(guarded, /record\(db, p, &r\)\.await\?/);
+  assert.match(guarded, /return Ok\(\(\)\)/);
+  assert.match(source, /r\.prior_plan_ids = prior_plan_ids;/);
+  assert.doesNotMatch(source, /\.ok_or\("invalidResponse"\)\?/);
+});
+
+test("claim round still stops on cancellation or failure to preserve a result", () => {
+  const source = read("src-tauri/src/zcode_accounts/claim_runtime.rs");
+  const round = source.slice(source.indexOf("async fn round("), source.indexOf("pub(crate) fn shutdown()"));
+  assert.match(round, /if lease\.cancelled\(\)\s*\{\s*break;/);
+  assert.match(round, /if one\([\s\S]*?\.await\s*\.is_err\(\)\s*\{\s*break;/);
+});
+
+test("uncertain claim recovery returns before balance validation and any new POST", () => {
+  const source = read("src-tauri/src/zcode_accounts/claim_runtime.rs");
+  const one = source.slice(source.indexOf("async fn one("), source.indexOf("fn failure("));
+  const pending = one.indexOf("if r.status == Status::ResultPending");
+  const recoveryEnd = one.indexOf("let balance = match balance", pending);
+  const validation = one.indexOf("let prior_plan_ids = match");
+  const submit = one.indexOf("r.mark_submitted()");
+  assert.ok(pending > 0 && recoveryEnd > pending && validation > recoveryEnd && submit > validation);
+  assert.match(one.slice(pending, recoveryEnd), /r\.reconcile\(&balance\)/);
+  assert.match(one.slice(pending, recoveryEnd), /record\(db, p, &r\)\.await\?;\s*return Ok\(\(\)\)/);
+});
+
+test("preflight persistence must succeed at both result layers before another account is admitted", () => {
+  const source = read("src-tauri/src/zcode_accounts/claim_runtime.rs");
+  const round = source.slice(source.indexOf("async fn round("), source.indexOf("pub(crate) fn shutdown()"));
+  const preflight = round.slice(round.indexOf("Err(reason) =>"));
+  assert.match(preflight, /let persisted = run_owned\(/);
+  assert.match(preflight, /save\(db, &saved\)/);
+  assert.match(preflight, /if !matches!\(persisted, Ok\(Ok\(\(\)\)\)\)\s*\{\s*break;/);
+});

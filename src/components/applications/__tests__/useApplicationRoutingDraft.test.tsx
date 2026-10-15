@@ -251,3 +251,30 @@ it("keeps a newer draft when the submitted intent completes", async () => {
   expect(result.current.stagedIds).toEqual(["a"]);
   expect(result.current.modelFilter).toEqual("model-d");
 });
+
+it("preserves staged order and filters when a selection-only request completes", async () => {
+  const apply = vi.fn().mockResolvedValue({
+    status: "switched",
+    providerName: "Synthetic",
+    warnings: [],
+    chatgptWasRunning: false,
+    chatgptRelaunched: false,
+  });
+  const { result } = renderHook(() => useApplicationRoutingDraft(apply));
+  act(() => {
+    result.current.load("Travel", ["b", "a"]);
+    result.current.setSearch("Synthetic");
+    result.current.setAccountFilter("relay:1");
+    result.current.setModelFilter("staged-model");
+  });
+  await act(async () => {
+    await result.current.submit({ selection: { providerId: "b" } });
+  });
+  // Workspace calls this for the backend's completed original-request receipt.
+  act(() => result.current.discardSubmitted());
+  expect(result.current.stagedIds).toEqual(["b", "a"]);
+  expect(result.current.profileName).toBe("Travel");
+  expect(result.current.search).toBe("Synthetic");
+  expect(result.current.accountFilter).toBe("relay:1");
+  expect(result.current.modelFilter).toBe("staged-model");
+});
