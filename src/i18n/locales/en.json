@@ -416,6 +416,13 @@
     "piDefaultProviderWarning": "Pi's global default currently points to this provider. If you continue, Pi will try another available model; use /model to choose one or /login to sign in to another provider."
   },
   "settings": {
+    "updateProbingSources": "Checking download sources…",
+    "updateSwitchingSource": "Switching download source…",
+    "updateSourceOfficial": "Official site",
+    "updateSourceGithub": "GitHub",
+    "updateSourceManifest": "Release source",
+    "updateRetryOfficial": "Retry from official site",
+    "updateRetryGithub": "Retry from GitHub",
     "title": "Settings",
     "general": "General",
     "tabGeneral": "General",
