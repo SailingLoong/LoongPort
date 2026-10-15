@@ -68,6 +68,7 @@ import {
   type ApplicationChangeReview,
 } from "./ApplicationChangeConfirmDialog";
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
+import { ApplicationInlineSelection } from "./ApplicationInlineSelection";
 import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
 
 /** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
@@ -522,6 +523,41 @@ export function ApplicationWorkspace({
     }
   };
   const discardOrder = draft.discard;
+  const reviewSelection = async (
+    selection: NonNullable<ApplicationChangeReview["change"]["selection"]>,
+  ) => {
+    if (pendingReview.current || mutationBusy) return;
+    const facts = renderedReviewFacts;
+    let current = true;
+    const next: ApplicationChangeReview = {
+      change: { selection },
+      appliedIds,
+      configurations,
+      currentProviderId: currentConfig?.providerId,
+      currentModel,
+      isCurrent: () => {
+        current =
+          current &&
+          latestReviewContext.current === reviewContext &&
+          readReviewFacts() === facts;
+        return current;
+      },
+    };
+    pendingReview.current = next;
+    try {
+      await routing.prepareRequest(next.change);
+      if (pendingReview.current !== next) return;
+      if (!next.isCurrent()) {
+        cancelReview();
+        toast.warning(t("applications.reviewChanged"));
+        return;
+      }
+      setReview(next);
+    } catch {
+      cancelReview();
+      toast.error(t("applications.updateFailed"));
+    }
+  };
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
     if (sort?.key !== key) {
@@ -658,6 +694,19 @@ export function ApplicationWorkspace({
     : undefined;
   return (
     <div className="space-y-5">
+      {isProxyAppId(appId) && !model.data?.isAdditive && (
+        <ApplicationInlineSelection
+          key={appId}
+          configurations={configurations}
+          tiers={tiers}
+          currentProviderId={currentConfig?.providerId}
+          currentModel={currentModel}
+          disabled={mutationBusy || Boolean(review)}
+          onReview={(selection) => {
+            void reviewSelection(selection);
+          }}
+        />
+      )}
       <section className="space-y-4" aria-labelledby={`tiers-${appId}`}>
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>

@@ -81,7 +81,8 @@ export function useApplicationRoutingDraft(
       return;
     }
     const generation = lifecycle.current;
-    submittedIntent.current = intent.current;
+    // Selection-only requests do not consume the separately staged order/filter intent.
+    submittedIntent.current = change.order ? intent.current : null;
     pending.current = true;
     setSubmitting(true);
     try {
