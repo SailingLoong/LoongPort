@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   routing: {} as any,
   select: vi.fn(),
   apply: vi.fn(),
+  prepareRequest: vi.fn(),
   setOrder: vi.fn(),
   setFailover: vi.fn(),
   blockTier: vi.fn(),
@@ -58,6 +59,7 @@ vi.mock("../useApplicationRouting", () => ({
     busy: false,
     setOrder: state.setOrder,
     apply: state.apply,
+    prepareRequest: state.prepareRequest,
     setFailover: state.setFailover,
     blockTier: state.blockTier,
   }),
@@ -181,6 +183,7 @@ const reviewAndConfirm = async () => {
 describe("failover order staging", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    state.prepareRequest.mockResolvedValue(undefined);
     queryClient = new QueryClient();
     state.setOrder.mockResolvedValue(undefined);
     state.apply.mockResolvedValue({
@@ -237,6 +240,77 @@ describe("failover order staging", () => {
         },
       ],
     };
+  });
+
+  it("reviews an inline source/model selection without changing the failover order", async () => {
+    state.routing.tiers[1].models = ["synthetic-model"];
+    renderWorkspace();
+    await waitFor(() =>
+      expect(screen.getByLabelText("applications.source")).toBeEnabled(),
+    );
+    await userEvent.click(screen.getByLabelText("applications.source"));
+    await userEvent.click(screen.getByRole("option", { name: /Premium/ }));
+    await userEvent.click(
+      screen.getByLabelText(
+        "applications.currentConfiguration · applications.modelFilter",
+      ),
+    );
+    await userEvent.click(
+      screen.getByRole("option", { name: "synthetic-model" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.reviewChanges" }),
+    );
+    const change = { selection: { providerId: "b", model: "synthetic-model" } };
+    expect(state.prepareRequest).toHaveBeenCalledWith(change);
+    expect(state.apply).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", {
+      name: "applications.reviewChanges",
+    });
+    expect(
+      within(dialog).queryByText("applications.proposedOrder"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    );
+    await waitFor(() =>
+      expect(state.apply).toHaveBeenCalledWith(change, undefined),
+    );
+    expect(state.setOrder).not.toHaveBeenCalled();
+    expect(state.select).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an inline review when its bound model directory changes", async () => {
+    state.routing.tiers[1].models = ["synthetic-model"];
+    const view = renderWorkspace();
+    await waitFor(() =>
+      expect(screen.getByLabelText("applications.source")).toBeEnabled(),
+    );
+    await userEvent.click(screen.getByLabelText("applications.source"));
+    await userEvent.click(screen.getByRole("option", { name: /Premium/ }));
+    await userEvent.click(
+      screen.getByLabelText(
+        "applications.currentConfiguration · applications.modelFilter",
+      ),
+    );
+    await userEvent.click(
+      screen.getByRole("option", { name: "synthetic-model" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.reviewChanges" }),
+    );
+    state.routing = {
+      ...state.routing,
+      tiers: state.routing.tiers.map((tier: any) => ({ ...tier, models: [] })),
+    };
+    rerenderWorkspace(view);
+    const dialog = screen.getByRole("dialog", {
+      name: "applications.reviewChanges",
+    });
+    expect(
+      within(dialog).getByRole("button", { name: "common.confirm" }),
+    ).toBeDisabled();
+    expect(state.apply).not.toHaveBeenCalled();
   });
 
   it("reviews the concrete applied order before writing and keeps the draft on cancel", async () => {
