@@ -4004,6 +4004,18 @@
     }
   },
   "applications": {
+    "bindSource": {
+      "open": "Bind existing source",
+      "source": "Existing source",
+      "add": "Add reference",
+      "busy": "Checking…",
+      "hint": "Adds an inactive reference only. This does not enable or switch the App. Credentials, plans and quotas remain with the source account.",
+      "confirmed": "Reference added. Enable or select it separately.",
+      "failed": "Could not add the reference. You can explicitly retry.",
+      "unknown": "The result is unknown. Check the saved reference before trying another write.",
+      "check": "Check saved reference",
+      "empty": "No unbound vendor sources available."
+    },
     "originalRequestUnresolved": "The result of the original application is not confirmed. Checking it does not apply changes again.",
     "recheckOriginalRequest": "Check original result",
     "startNewRequest": "Review a new application",

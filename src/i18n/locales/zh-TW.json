@@ -4005,6 +4005,18 @@
     }
   },
   "applications": {
+    "bindSource": {
+      "open": "綁定既有來源",
+      "source": "既有來源",
+      "add": "新增引用",
+      "busy": "正在檢查…",
+      "hint": "僅新增未啟用的引用，不會啟用或切換應用程式。憑證、方案與額度仍歸屬來源帳號。",
+      "confirmed": "引用已新增，請另行啟用或選擇。",
+      "failed": "無法新增引用，可以手動重試。",
+      "unknown": "結果尚未確認，請先檢查已儲存的引用。",
+      "check": "檢查已儲存引用",
+      "empty": "暫無可綁定的供應商來源。"
+    },
     "originalRequestUnresolved": "原套用請求的結果尚未確認。檢查結果不會再次套用變更。",
     "recheckOriginalRequest": "檢查原請求結果",
     "startNewRequest": "重新複核新套用",
