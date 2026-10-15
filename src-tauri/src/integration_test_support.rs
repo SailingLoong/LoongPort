@@ -126,3 +126,9 @@ pub fn source17_state(
 pub fn verify_normal_upgrade_startup(case: &str) {
     crate::secrets::startup::verify_normal_upgrade_startup(case);
 }
+
+/// Run the isolated real-Wry claim fault suite; no renderer command exposes it.
+#[cfg(all(feature = "test-hooks", feature = "gui", target_os = "macos"))]
+pub async fn verify_zcode_claim_native(app: tauri::AppHandle) {
+    crate::zcode_accounts::claim_runtime::test_support::verify(app).await;
+}

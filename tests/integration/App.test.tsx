@@ -19,15 +19,18 @@ import type {
   ApplicationRoutingRequest,
 } from "@/lib/api/applicationRouting";
 import {
+  GITHUB_REPO,
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
 } from "@/config/constants";
 import {
+  getSettings,
   getProviders,
   resetProviderState,
   setCurrentProviderId,
   setLiveProviderIds,
   setProviders,
+  setSettings,
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
@@ -413,6 +416,57 @@ describe("App integration with MSW", () => {
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
+
+  it.each([false, true])(
+    "opens only GitHub with claimed=%s even when the legacy reward offer remains available",
+    async (starRewardClaimed) => {
+      setSettings({ starRewardClaimed });
+      const openExternal = vi.fn();
+      const offer = vi.fn();
+      const rewardAction = vi.fn();
+      server.use(
+        http.post("http://tauri.local/open_external", async ({ request }) => {
+          openExternal(await request.json());
+          return HttpResponse.json(true);
+        }),
+        http.post("http://tauri.local/star_reward_offer", () => {
+          offer();
+          return HttpResponse.json({ promoCode: "LOONGPORT5", amountUsd: 5 });
+        }),
+        ...[
+          "star_reward_mark_claimed",
+          "star_reward_auto_star",
+          "onboarding_open_register_window",
+        ].map((command) =>
+          http.post(`http://tauri.local/${command}`, () => {
+            rewardAction(command);
+            return HttpResponse.json(null);
+          }),
+        ),
+      );
+
+      renderApp();
+      await screen.findByTestId("provider-list");
+      const button = screen.getByRole("button", {
+        name: "loongport.star.buttonTitle",
+      });
+      expect(button.querySelector(".bg-red-500")).toBeNull();
+      await userEvent.click(button);
+
+      await waitFor(() =>
+        expect(openExternal).toHaveBeenCalledExactlyOnceWith({
+          url: GITHUB_REPO,
+        }),
+      );
+      expect(offer).not.toHaveBeenCalled();
+      expect(rewardAction).not.toHaveBeenCalled();
+      expect(screen.queryByText("LOONGPORT5")).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "loongport.star.confirm" }),
+      ).not.toBeInTheDocument();
+      expect(getSettings().starRewardClaimed).toBe(starRewardClaimed);
+    },
+  );
 
   async function openSharedDraft(app: "codex" | "claude" | "gemini" = "codex") {
     workspaceHarness.real = true;

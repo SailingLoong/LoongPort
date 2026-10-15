@@ -416,6 +416,13 @@
     "piDefaultProviderWarning": "Pi のグローバルデフォルトは現在このプロバイダーを参照しています。続行すると、Pi は別の利用可能なモデルを試します。/model で再選択するか、/login で別のプロバイダーにログインできます。"
   },
   "settings": {
+    "updateProbingSources": "ダウンロード元を確認中…",
+    "updateSwitchingSource": "ダウンロード元を切り替え中…",
+    "updateSourceOfficial": "公式サイト",
+    "updateSourceGithub": "GitHub",
+    "updateSourceManifest": "リリースの配布元",
+    "updateRetryOfficial": "公式サイトから再試行",
+    "updateRetryGithub": "GitHub から再試行",
     "title": "設定",
     "general": "一般",
     "tabGeneral": "一般",
@@ -3706,18 +3713,7 @@
       "cancel": "後で設定"
     },
     "star": {
-      "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
-      "dotTitle": "GitHub でスターを付けて登録ボーナスをもらう",
-      "dialogTitle": "スターを付けて ${{amount}} の登録ボーナスをもらう",
-      "dialogBody": "GitHub で LoongPort にスターを付けると、BestAPI の登録ボーナス（登録時に ${{amount}} 分のクレジット）がもらえます。",
-      "confirm": "スターを付けて受け取る",
-      "cancel": "キャンセル",
-      "grantedTitle": "ボーナス獲得 🎉",
-      "grantedBody": "リポジトリページがブラウザで開いています。スターを付けていただけると嬉しいです。",
-      "codeLabel": "プロモコード",
-      "copy": "コピー",
-      "copied": "コピーしました",
-      "registerNote": "BestAPI の登録ウィンドウが開き、プロモコードは自動入力されます。"
+      "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）"
     },
     "codexReset": {
       "label": "グローバルリセット",

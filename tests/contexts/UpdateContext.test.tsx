@@ -48,6 +48,7 @@ function UpdateState({
       <span>{update.updateInfo?.availableVersion ?? "no update"}</span>
       <span>{update.isDismissed ? "dismissed" : "not dismissed"}</span>
       <span>{update.error ?? "no error"}</span>
+      <span>{update.isChecking ? "checking" : "idle"}</span>
       <button
         type="button"
         onClick={() => {
@@ -250,6 +251,35 @@ describe("UpdateProvider", () => {
       "检查更新失败:",
       "network offline",
     );
+  });
+
+  it("returns to idle after a bounded check error and accepts an explicit retry", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    updaterMocks.checkForUpdate
+      .mockRejectedValueOnce("check timed out")
+      .mockResolvedValueOnce(available);
+    let result: Promise<boolean> | undefined;
+    renderProvider((pending) => {
+      result = pending;
+    });
+    await act(async () => {});
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Check for updates" }),
+      );
+      await expect(result).rejects.toBe("check timed out");
+    });
+    expect(screen.getByText("idle")).toBeInTheDocument();
+    expect(screen.getByText("check timed out")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Check for updates" }),
+      );
+      await expect(result).resolves.toBe(true);
+    });
+    expect(screen.getByText("idle")).toBeInTheDocument();
+    expect(screen.getByText("no error")).toBeInTheDocument();
+    expect(screen.getByText("3.25.0")).toBeInTheDocument();
   });
 
   it("handles listener registration rejection", async () => {

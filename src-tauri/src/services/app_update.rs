@@ -4,247 +4,133 @@ use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::error::AppError;
 
-const APP_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-/// 启动闸门拉清单的超时：有意短于常规检查——闸门跑在启动关键路径上，
-/// 拿不到清单就放弃本次自动安装（保留预下载产物，下次启动再试），
-/// 不能让一次网络故障把开窗卡住半分钟。
-const STARTUP_PENDING_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+use super::app_update_policy::{self as policy, CheckFailure, DownloadFailure};
+use super::app_update_stage::{DownloadTicket, PrestageAction, ReadyUpdate};
 
-fn app_update_check_timeout() -> Duration {
-    APP_UPDATE_CHECK_TIMEOUT
+pub type AppUpdateStage = super::app_update_stage::UpdateStage<Update>;
+
+/// Keep channel selection pinned while the bounded race is in flight. Each
+/// updater gets one endpoint, avoiding the plugin's serial endpoint loop.
+fn channel_endpoints(app: &AppHandle, beta: bool) -> Result<Vec<tauri::Url>, String> {
+    if beta {
+        return Ok(vec![tauri::Url::parse(
+            crate::config::UPDATE_BETA_MANIFEST_URL,
+        )
+        .map_err(|e| e.to_string())?]);
+    }
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|value| value.get("endpoints"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "更新端点配置缺失".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "更新端点配置无效".to_string())
+                .and_then(|url| tauri::Url::parse(url).map_err(|e| e.to_string()))
+        })
+        .collect()
 }
 
-/// 按用户设置构建更新器：开启「接收测试版更新」时检测端点换到 beta 通道。
-///
-/// 所有 `check()` 路径（手动检测、安装流程、启动闸门）都必须经它构建更新器：
-/// 端点选择分叉的实害是「一处看到 beta、另一处按 stable 判定」——预下载产物
-/// 被启动闸门误判丢弃、或点升级时按 stable 查不到刚看到的版本而空转。
 fn channel_updater(
     app: &AppHandle,
-    timeout: Option<Duration>,
+    endpoint: tauri::Url,
+    timeout: Duration,
     direct: bool,
 ) -> Result<tauri_plugin_updater::Updater, tauri_plugin_updater::Error> {
-    let mut builder = app.updater_builder();
-    if let Some(timeout) = timeout {
-        builder = builder.timeout(timeout);
-    }
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![endpoint])?
+        .timeout(timeout);
     if direct {
         builder = builder.no_proxy();
-    }
-    if crate::settings::get_settings().receive_beta_updates {
-        // 编译期常量，parse 失败只可能是笔误——当场炸好过静默回落 stable。
-        let url = tauri::Url::parse(crate::config::UPDATE_BETA_MANIFEST_URL)
-            .expect("beta 通道清单 URL 常量必须合法");
-        builder = builder.endpoints(vec![url])?;
     }
     builder.build()
 }
 
-/// 检查更新：系统代理优先（尊重用户意图），**连接层失败自动改直连重试一次**。
-///
-/// 为什么必须有这一层（2026-09-16 allen-windows 实测根因）：核心用户几乎人手
-/// 本地代理（Clash 系），节点抖动是常态；更新检查一旦碰上坏节点就
-/// `error sending request` 整体失败，普通用户无从自救——而更新清单与下载
-/// 走的 loongport.dev 大陆直连本来就是通的。直连重试只救连接层故障；
-/// HTTP 404 / 签名失败等业务错误不重试。
-///
-/// 下载沿用检查时的通道（`Update` 绑定构造它的 updater 客户端）：代理在
-/// 检查后、下载中坏掉的失败由下一次检查的回退自愈（预下载周期重试 /
-/// 用户重点一次升级按钮）。
-async fn check_update_with_proxy_fallback(
-    app: &AppHandle,
-    timeout: Option<Duration>,
-) -> Result<Option<tauri_plugin_updater::Update>, tauri_plugin_updater::Error> {
-    let updater = channel_updater(app, timeout, false)?;
-    match updater.check().await {
-        Ok(update) => Ok(update),
-        Err(error) if is_connection_failure(&error) => {
-            log::warn!("更新检查走系统代理失败，改用直连重试: {error}");
-            channel_updater(app, timeout, true)?.check().await
-        }
-        Err(error) => Err(error),
-    }
+fn version_at_least(version: &str, minimum: Option<&str>) -> bool {
+    let Ok(version) = semver::Version::parse(version) else {
+        return false;
+    };
+    minimum.is_none_or(|minimum| {
+        semver::Version::parse(minimum).is_ok_and(|minimum| version >= minimum)
+    })
 }
 
-/// 连接层故障判据：reqwest 的连接/超时/发送类错误（DNS 失败也归入连接类）。
-fn is_connection_failure(error: &tauri_plugin_updater::Error) -> bool {
-    match error {
-        tauri_plugin_updater::Error::Reqwest(error) => {
-            error.is_connect() || error.is_timeout() || error.is_request()
+async fn check_update_with_proxy_fallback(
+    app: &AppHandle,
+    budget: Duration,
+    minimum: Option<&str>,
+) -> Result<Option<Update>, String> {
+    let beta = crate::settings::get_settings().receive_beta_updates;
+    let endpoints = channel_endpoints(app, beta)?;
+    let mut checks = Vec::new();
+    for (index, endpoint) in endpoints.into_iter().enumerate() {
+        for direct in [false, true] {
+            let endpoint = endpoint.clone();
+            let delay = policy::CHECK_HEDGE_DELAY * (index as u32 * 2 + u32::from(direct));
+            checks.push((delay, async move {
+                let update = channel_updater(app, endpoint, budget, direct)
+                    .map_err(|e| e.to_string())?
+                    .check()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                match &update {
+                    Some(update) if policy::is_withdrawn_version(&update.version) => {
+                        return Err("该更新已撤回，请检查更新版本".to_string())
+                    }
+                    Some(update) if !version_at_least(&update.version, minimum) => {
+                        return Err("清单版本低于已发现的更新，保留已有更新并重试".to_string())
+                    }
+                    Some(update)
+                        if !beta
+                            && semver::Version::parse(&update.version)
+                                .is_ok_and(|v| !v.pre.is_empty()) =>
+                    {
+                        return Err("稳定通道返回了测试版更新".to_string())
+                    }
+                    None if minimum.is_some() => {
+                        return Err("清单未确认已有更新，保留预下载产物并重试".to_string())
+                    }
+                    _ => {}
+                }
+                Ok(update)
+            }));
         }
-        _ => false,
     }
+    let result = policy::race_update_checks(checks, budget, |a, b| {
+        semver::Version::parse(&a.version).ok() > semver::Version::parse(&b.version).ok()
+    })
+    .await
+    .map_err(|error| match error {
+        CheckFailure::TimedOut => "更新检查超时或结果不完整，请重试或从官网下载".to_string(),
+        CheckFailure::NoCandidates => "没有可用的更新端点".to_string(),
+        CheckFailure::Failed(errors) => format!("无法确认更新，请重试：{}", errors.join("；")),
+    })?;
+    if beta != crate::settings::get_settings().receive_beta_updates {
+        return Err("更新通道已改变，请重新检查".to_string());
+    }
+    Ok(result)
 }
 
 /// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
 /// 前端只在安装弹窗打开时监听；后台预下载发出的同名事件无人监听，无副作用。
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateDownloadProgress {
+    attempt_id: u64,
+    request_id: Option<String>,
+    phase: &'static str,
+    source: &'static str,
     downloaded: u64,
     total: Option<u64>,
-}
-
-/// 预下载状态机的纯决策：给定当前暂存版本与最新检查结果，该做什么。
-/// 与 I/O 分离以便单测（`Update` 无法在测试中构造）。
-#[derive(Debug, PartialEq, Eq)]
-enum PrestageAction {
-    /// 无可用更新：丢弃暂存（含其文件）
-    DropStaged,
-    /// 同版本已在下载/已就绪：保留
-    Keep,
-    /// 需要开始（或换版本重下）：`Start`
-    Start,
-    /// 本来就没有暂存也没有更新
-    Nothing,
-}
-
-fn prestage_action(staged: Option<&str>, available: Option<&str>) -> PrestageAction {
-    match (staged, available) {
-        (None, None) => PrestageAction::Nothing,
-        (Some(_), None) => PrestageAction::DropStaged,
-        (None, Some(_)) => PrestageAction::Start,
-        (Some(staged), Some(available)) => {
-            if staged == available {
-                PrestageAction::Keep
-            } else {
-                PrestageAction::Start
-            }
-        }
-    }
-}
-
-/// `set_ready` 的发布守卫：只有当前 Downloading 槽位仍属于同版本时才允许发布。
-/// 后到的旧版本任务完成（已被更新版本取代）不得覆盖新状态。
-fn should_publish_ready(current: &StageInner, version: &str) -> bool {
-    matches!(current, StageInner::Downloading { version: v, .. } if v == version)
-}
-
-/// 已就绪的预下载产物：`Update` 对象 + 安装包落盘路径。
-struct ReadyUpdate {
-    update: Update,
-    installer: std::path::PathBuf,
-}
-
-enum StageInner {
-    Idle,
-    Downloading {
-        version: String,
-        /// 预下载任务完成信号的接收端；安装命令取走以续接在途下载
-        /// （oneshot 完成态被锁存，先创建后等待不存在注册竞态）。
-        done: Option<oneshot::Receiver<()>>,
-    },
-    Ready {
-        version: String,
-        ready: Box<ReadyUpdate>,
-    },
-}
-
-impl StageInner {
-    fn staged_version(&self) -> Option<&str> {
-        match self {
-            StageInner::Idle => None,
-            StageInner::Downloading { version, .. } | StageInner::Ready { version, .. } => {
-                Some(version)
-            }
-        }
-    }
-}
-
-/// 跨命令持有的应用更新预下载状态。
-/// `check` 发现新版本时后台预下载到磁盘；`install` 优先消费已就绪的产物，
-/// 让「点升级」无需现场下载（离线也能装）。
-pub struct AppUpdateStage {
-    inner: std::sync::Mutex<StageInner>,
-}
-
-impl AppUpdateStage {
-    pub fn new() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(StageInner::Idle),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, StageInner> {
-        // 状态机临界区无 panic 路径；中毒也按原值继续，避免预下载状态卡死安装。
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// 决定是否需要（重新）预下载，并在需要时同步占用 Downloading 槽位，
-    /// 把完成信号交给调用方随预下载任务持有。决策与占位在同一临界区内，
-    /// 并发检查不会双起任务。
-    fn begin_if_needed(
-        &self,
-        available: Option<&str>,
-    ) -> (PrestageAction, Option<oneshot::Sender<()>>) {
-        let mut inner = self.lock();
-        let action = prestage_action(inner.staged_version(), available);
-        match action {
-            PrestageAction::DropStaged => {
-                if let StageInner::Ready { ready, .. } = &*inner {
-                    let _ = std::fs::remove_file(&ready.installer);
-                }
-                *inner = StageInner::Idle;
-                (action, None)
-            }
-            PrestageAction::Start => {
-                if let StageInner::Ready { ready, .. } = &*inner {
-                    let _ = std::fs::remove_file(&ready.installer);
-                }
-                let (done_tx, done_rx) = oneshot::channel();
-                *inner = StageInner::Downloading {
-                    version: available
-                        .expect("Start implies an available version")
-                        .to_string(),
-                    done: Some(done_rx),
-                };
-                (action, Some(done_tx))
-            }
-            PrestageAction::Keep | PrestageAction::Nothing => (action, None),
-        }
-    }
-
-    fn set_ready(&self, version: String, ready: Box<ReadyUpdate>) {
-        let mut inner = self.lock();
-        if should_publish_ready(&inner, &version) {
-            *inner = StageInner::Ready { version, ready };
-        } else {
-            // 一个已被更新版本取代的预下载任务后到完成：不发布（否则会把
-            // 更新的 Downloading/Ready 顶掉，点升级时装到被取代的旧版），
-            // 并清掉刚写盘的过期产物。
-            let _ = std::fs::remove_file(&ready.installer);
-        }
-    }
-
-    /// 预下载失败：只在仍处于同版本 Downloading 时退回 Idle（不覆盖新版本就绪态）。
-    fn set_failed(&self, version: &str) {
-        let mut inner = self.lock();
-        if matches!(&*inner, StageInner::Downloading { version: v, .. } if v == version) {
-            *inner = StageInner::Idle;
-        }
-    }
-
-    fn take_ready(&self) -> Option<Box<ReadyUpdate>> {
-        let mut inner = self.lock();
-        match std::mem::replace(&mut *inner, StageInner::Idle) {
-            StageInner::Ready { ready, .. } => Some(ready),
-            other => {
-                *inner = other;
-                None
-            }
-        }
-    }
-
-    fn take_downloading_done(&self) -> Option<oneshot::Receiver<()>> {
-        let mut inner = self.lock();
-        match &mut *inner {
-            StageInner::Downloading { done, .. } => done.take(),
-            _ => None,
-        }
-    }
 }
 
 /// 预下载安装包落盘目录（应用缓存目录下的自有子目录）。产物跨会话保留，
@@ -310,6 +196,23 @@ fn list_staged_installers(dir: &std::path::Path) -> Vec<(String, std::path::Path
         .collect()
 }
 
+fn seed_staged_version_floor(app: &AppHandle) {
+    let beta = crate::settings::get_settings().receive_beta_updates;
+    let stage = app.state::<AppUpdateStage>();
+    stage.align_channel(beta);
+    let Some(dir) = staged_update_dir(app) else {
+        return;
+    };
+    let artifacts = list_staged_installers(&dir);
+    if let Some(version) = policy::staged_version_floor(
+        artifacts.iter().map(|(version, _)| version.as_str()),
+        &app.package_info().version.to_string(),
+        beta,
+    ) {
+        let _ = stage.remember_version(&version);
+    }
+}
+
 /// 从 tauri.conf.json 的插件配置读 updater 公钥（与插件同一份配置，不复制）。
 fn updater_pubkey(app: &AppHandle) -> Option<String> {
     app.config()
@@ -327,6 +230,8 @@ fn verify_installer_signature(
     bytes: &[u8],
     release_signature: &str,
     pub_key: &str,
+    version: &str,
+    require_signed_version: bool,
 ) -> Result<(), String> {
     let decode = |value: &str, what: &str| {
         base64::engine::general_purpose::STANDARD
@@ -341,7 +246,8 @@ fn verify_installer_signature(
         .map_err(|e| format!("更新签名解析失败: {e}"))?;
     public_key
         .verify(bytes, &signature, true)
-        .map_err(|e| format!("更新签名校验失败: {e}"))
+        .map_err(|e| format!("更新签名校验失败: {e}"))?;
+    policy::verify_signed_version(signature.trusted_comment(), version, require_signed_version)
 }
 
 /// 启动闸门：应用上个会话预下载好的更新。
@@ -378,16 +284,23 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
     if staged_files.is_empty() {
         return;
     }
+    seed_staged_version_floor(app);
+    let minimum = app.state::<AppUpdateStage>().minimum_version();
     let dismissed = crate::settings::get_settings().dismissed_update_version;
 
-    let offered =
-        match check_update_with_proxy_fallback(app, Some(STARTUP_PENDING_CHECK_TIMEOUT)).await {
-            Ok(update) => update,
-            Err(e) => {
-                log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
-                return;
-            }
-        };
+    let offered = match check_update_with_proxy_fallback(
+        app,
+        policy::STARTUP_CHECK_BUDGET,
+        minimum.as_deref(),
+    )
+    .await
+    {
+        Ok(update) => update,
+        Err(e) => {
+            log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
+            return;
+        }
+    };
     let offered_version = offered.as_ref().map(|update| update.version.as_str());
 
     let mut install_candidate: Option<std::path::PathBuf> = None;
@@ -421,7 +334,13 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
         log::error!("tauri.conf.json 缺 updater pubkey，无法重验预下载产物，跳过自动安装");
         return;
     };
-    if let Err(e) = verify_installer_signature(&bytes, &update.signature, &pubkey) {
+    if let Err(e) = verify_installer_signature(
+        &bytes,
+        &update.signature,
+        &pubkey,
+        &update.version,
+        require_signed_version(app),
+    ) {
         log::warn!("预下载安装包验签失败（疑似损坏/被篡改），删除后继续正常启动: {e}");
         let _ = std::fs::remove_file(&installer);
         return;
@@ -436,78 +355,269 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
     }
 }
 
-/// `check` 之后调用：按最新检查结果（重新）安排后台预下载。
-/// 便携版不能原地升级，跳过（否则纯浪费后台流量）。
-fn schedule_prestage(app: &AppHandle, available: Option<Update>) {
-    if crate::commands::portable_mode_enabled() {
-        return;
-    }
+fn require_signed_version(app: &AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|value| value.get("requireSignedVersion"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The check identity and staged transition are committed by one state lock.
+fn schedule_prestage(app: &AppHandle, check: u64, available: Option<Update>) -> Result<(), String> {
     let stage = app.state::<AppUpdateStage>();
-    let (action, done_tx) =
-        stage.begin_if_needed(available.as_ref().map(|update| update.version.as_str()));
+    if crate::commands::portable_mode_enabled() {
+        return stage.remember_for_check(
+            check,
+            available.as_ref().map(|update| update.version.as_str()),
+        );
+    }
+    let (action, ticket) = stage.begin_for_check(
+        check,
+        available.as_ref().map(|update| update.version.as_str()),
+    )?;
     if action == PrestageAction::Start {
-        let update = available.expect("Start implies an owned Update");
+        let update = available.expect("Start has an Update");
+        let ticket = ticket.expect("Start has an attempt");
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            prestage_download(app, update, done_tx).await;
+            prestage_download(app, update, ticket).await;
         });
     }
+    Ok(())
 }
 
-async fn prestage_download(app: AppHandle, update: Update, done_tx: Option<oneshot::Sender<()>>) {
+async fn prestage_download(app: AppHandle, update: Update, mut ticket: DownloadTicket) {
+    let id = ticket.id;
     let version = update.version.clone();
-    let Some(dir) = staged_update_dir(&app) else {
-        app.state::<AppUpdateStage>().set_failed(&version);
-        return;
-    };
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        log::warn!("创建预下载目录失败 {}: {e}", dir.display());
-        app.state::<AppUpdateStage>().set_failed(&version);
-        return;
-    }
-    let installer = dir.join(format!("{version}.installer"));
-    log::info!("后台预下载应用更新: {version}");
-    match download_update_bytes(&app, &update).await {
-        Ok(bytes) => match tokio::fs::write(&installer, &bytes).await {
-            Ok(()) => {
-                log::info!("应用更新预下载完成: {version}（{} 字节）", bytes.len());
-                app.state::<AppUpdateStage>()
-                    .set_ready(version, Box::new(ReadyUpdate { update, installer }));
+    let result = async {
+        let dir = staged_update_dir(&app).ok_or_else(|| "无法读取更新缓存目录".to_string())?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("创建更新缓存目录失败: {e}"))?;
+        // Old and new same-version tasks never write the same partial path.
+        let temporary = dir.join(format!("{version}.{id}.partial"));
+        let bytes = tokio::select! {
+            biased;
+            _ = &mut ticket.cancel => return Err("预下载已被较新的更新取代".to_string()),
+            result = download_update_bytes(&app, &update, id, None) => result?,
+        };
+        if let Err(error) = tokio::fs::write(&temporary, bytes).await {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(format!("保存预下载更新失败: {error}"));
+        }
+        let ready = ReadyUpdate {
+            update,
+            installer: temporary.clone(),
+        };
+        let published = app.state::<AppUpdateStage>().set_ready(
+            id,
+            ready,
+            dir.join(format!("{version}.installer")),
+        );
+        match published {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("预下载已被较新的更新取代".to_string()),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(temporary).await;
+                Err(error)
             }
-            Err(e) => {
-                log::warn!("预下载安装包写盘失败 {}: {e}", installer.display());
-                app.state::<AppUpdateStage>().set_failed(&version);
-            }
-        },
-        Err(e) => {
-            log::warn!("后台预下载失败（点击升级时将现场重下）: {e}");
-            app.state::<AppUpdateStage>().set_failed(&version);
         }
     }
-    // 无论成败都释放等待中的安装命令（drop 等价于发送）。
-    drop(done_tx);
+    .await;
+    if let Err(error) = &result {
+        log::warn!("后台预下载结束: {error}");
+        app.state::<AppUpdateStage>().set_failed(id);
+    }
+    if let Some(done) = ticket.done.take() {
+        let _ = done.send(result);
+    }
 }
 
-/// 下载更新字节并向前端发 `update-download-progress` 事件（弹窗打开时才有监听者）。
-async fn download_update_bytes(app: &AppHandle, update: &Update) -> Result<Vec<u8>, String> {
-    let progress_handle = app.clone();
-    let mut downloaded: u64 = 0;
-    update
-        .download(
-            move |chunk_len, content_len| {
-                downloaded = downloaded.saturating_add(chunk_len as u64);
-                let _ = progress_handle.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        downloaded,
-                        total: content_len,
-                    },
-                );
+fn emit_download_progress(
+    app: &AppHandle,
+    id: u64,
+    phase: &'static str,
+    source: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+) {
+    if let Some(request_id) = app.state::<AppUpdateStage>().progress_request(id) {
+        let _ = app.emit(
+            "update-download-progress",
+            UpdateDownloadProgress {
+                attempt_id: id,
+                request_id,
+                phase,
+                source,
+                downloaded,
+                total,
+            },
+        );
+    }
+}
+
+async fn probe_download_route(
+    update: &Update,
+    route: &policy::DownloadRoute,
+) -> (policy::ProbeResult, Duration) {
+    let started = tokio::time::Instant::now();
+    let probe = async {
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+        if route.direct {
+            builder = builder.no_proxy();
+        } else if let Some(proxy) = &update.proxy {
+            builder = builder.proxy(reqwest::Proxy::all(proxy.as_str()).ok()?);
+        }
+        let response = builder
+            .build()
+            .ok()?
+            .get(&route.url)
+            .headers(update.headers.clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .ok()?;
+        let status = response.status().as_u16();
+        // Never read the body, including when a server ignores Range with 200.
+        drop(response);
+        Some(status)
+    };
+    let status = tokio::time::timeout(Duration::from_secs(5), probe)
+        .await
+        .ok()
+        .flatten();
+    (
+        policy::probe_result(route.source == "official", status),
+        started.elapsed(),
+    )
+}
+
+fn download_routes(
+    update: &Update,
+    preferred: Option<&str>,
+) -> Result<Vec<policy::DownloadRoute>, String> {
+    let urls = if let Some((official, github)) =
+        policy::trusted_asset_pair(update.download_url.as_str(), &update.version)
+    {
+        vec![(official, "official"), (github, "github")]
+    } else {
+        if preferred.is_some() {
+            return Err("这个安装包没有已验证的替代下载源".into());
+        }
+        vec![(update.download_url.to_string(), "manifest")]
+    };
+    Ok(urls
+        .into_iter()
+        .flat_map(|(url, source)| {
+            [update.no_proxy, !update.no_proxy]
+                .into_iter()
+                .map(move |direct| policy::DownloadRoute {
+                    url: url.clone(),
+                    source,
+                    direct,
+                })
+        })
+        .collect())
+}
+
+/// Download only one full package at a time. All retries retain the Update's
+/// original target, version, signature, public key and plugin verification.
+async fn download_update_bytes(
+    app: &AppHandle,
+    update: &Update,
+    id: u64,
+    preferred: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if policy::is_withdrawn_version(&update.version) {
+        return Err("该版本已撤回，请检查更新版本".into());
+    }
+    let deadline = tokio::time::Instant::now() + policy::DOWNLOAD_TOTAL_BUDGET;
+    let stage = app.state::<AppUpdateStage>();
+    let _download = tokio::time::timeout_at(deadline, stage.download.lock())
+        .await
+        .map_err(|_| "等待现有更新下载超时，请重试".to_string())?;
+    emit_download_progress(app, id, "probing", "official", 0, None);
+    let routes = download_routes(update, preferred)?;
+    let probes = tokio::time::timeout_at(
+        deadline,
+        futures::future::join_all(routes.into_iter().map(|route| async move {
+            let (result, latency) = probe_download_route(update, &route).await;
+            (route, result, latency)
+        })),
+    )
+    .await
+    .map_err(|_| "更新下载已达总时限，请换源重试或从官网下载".to_string())?;
+    let routes = policy::rank_download_routes(probes, preferred).map_err(str::to_string)?;
+    let mut failures = Vec::new();
+    for (index, route) in routes.into_iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("更新下载已达总时限，请换源重试或从官网下载".into());
+        }
+        emit_download_progress(
+            app,
+            id,
+            if index == 0 {
+                "downloading"
+            } else {
+                "switchingSource"
+            },
+            route.source,
+            0,
+            None,
+        );
+        let mut candidate = update.clone();
+        candidate.download_url = tauri::Url::parse(&route.url).map_err(|e| e.to_string())?;
+        candidate.no_proxy = route.direct;
+        candidate.timeout = Some(remaining);
+        let (progress, receiver) = watch::channel(0_u64);
+        let mut downloaded = 0_u64;
+        let download = candidate.download(
+            |length, total| {
+                downloaded = downloaded.saturating_add(length as u64);
+                progress.send_replace(downloaded);
+                emit_download_progress(app, id, "downloading", route.source, downloaded, total);
             },
             || {},
-        )
-        .await
-        .map_err(|e| format!("下载更新失败: {e}"))
+        );
+        match policy::bounded_download(download, receiver, policy::DOWNLOAD_IDLE_BUDGET, remaining)
+            .await
+        {
+            Ok(bytes) => return Ok(bytes),
+            Err(DownloadFailure::TimedOut) => {
+                return Err("更新下载已达总时限，请换源重试或从官网下载".into())
+            }
+            Err(DownloadFailure::Stalled) => {
+                failures.push(format!("{}：60秒无下载进展", route.source))
+            }
+            Err(DownloadFailure::Operation(error)) => {
+                // Updater 2.13.2 exposes HTTP status only in this typed Network
+                // variant. Match its exact generated 410 message, never an
+                // arbitrary error substring, and never bypass a withdrawal.
+                let withdrawn = matches!(&error, tauri_plugin_updater::Error::Network(message)
+                    if message == &format!("Download request failed with status: {}", reqwest::StatusCode::GONE));
+                if withdrawn {
+                    return Err("该版本已撤回，请检查更新版本".into());
+                }
+                if !matches!(
+                    &error,
+                    tauri_plugin_updater::Error::Reqwest(_)
+                        | tauri_plugin_updater::Error::Network(_)
+                ) {
+                    return Err(format!("更新校验或下载失败，未安装：{error}"));
+                }
+                failures.push(format!("{}：{error}", route.source));
+            }
+        }
+        // The previous full download future was dropped before the next starts.
+    }
+    Err(format!(
+        "所有下载路径均失败，请手动换源重试或从官网下载：{}",
+        failures.join("；")
+    ))
 }
 
 /// 执行安装并按平台收尾。Windows 的安装器会替换并退出当前进程；
@@ -517,6 +627,20 @@ async fn install_bytes_and_restart(
     update: Update,
     bytes: Vec<u8>,
 ) -> Result<bool, String> {
+    if policy::is_withdrawn_version(&update.version) {
+        return Err("该版本已撤回，请检查更新版本".into());
+    }
+    if !crate::settings::get_settings().receive_beta_updates
+        && semver::Version::parse(&update.version).is_ok_and(|version| !version.pre.is_empty())
+    {
+        return Err("已关闭测试版更新，未安装这份测试版，请重新检查".into());
+    }
+    if !version_at_least(
+        &update.version,
+        app.state::<AppUpdateStage>().minimum_version().as_deref(),
+    ) {
+        return Err("已发现更高版本，未安装较旧的更新，请重试".into());
+    }
     log::info!("开始安装应用更新: {}", update.version);
 
     #[cfg(target_os = "windows")]
@@ -557,44 +681,98 @@ async fn install_bytes_and_restart(
 
 /// 「点升级」的统一入口：已预下载则瞬装（无需网络），在途则续接进度，
 /// 都没有则回退为现场「检查+下载+安装」。
-pub async fn install_staged_or_download_and_restart(app: &AppHandle) -> Result<bool, String> {
+pub async fn install_staged_or_download_and_restart(
+    app: &AppHandle,
+    preferred: Option<&str>,
+    request_id: Option<String>,
+) -> Result<bool, String> {
+    if crate::commands::portable_mode_enabled() {
+        return Err("便携版请从官网下载新版本后手动更新".into());
+    }
+    if preferred.is_some_and(|source| source != "official" && source != "github") {
+        return Err("未知的更新下载源".into());
+    }
     let stage = app.state::<AppUpdateStage>();
-
+    let _install = stage
+        .install
+        .try_lock()
+        .map_err(|_| "已有更新安装任务，请等待当前任务结束".to_string())?;
+    seed_staged_version_floor(app);
+    let minimum = stage.minimum_version();
     if let Some(ready) = stage.take_ready() {
         if let Some(outcome) = install_ready_update(app, ready).await {
             return outcome;
         }
     }
-
-    if let Some(done) = stage.take_downloading_done() {
-        // 续接后台下载；预下载任务无论成败都会关闭通道。
-        let _ = done.await;
+    if let Some(waiting) = stage.take_downloading_done() {
+        let _foreground = stage.foreground(waiting.id);
+        stage.set_progress_request(request_id.clone());
+        if preferred.is_some() {
+            // An explicit source retry replaces, rather than races, the old full
+            // transfer. The matching cancellation token stops its owned future.
+            stage.set_failed(waiting.id);
+        }
+        let wait_budget = if preferred.is_some() {
+            Duration::from_secs(5)
+        } else {
+            policy::DOWNLOAD_TOTAL_BUDGET + Duration::from_secs(5)
+        };
+        let completed = tokio::time::timeout(wait_budget, waiting.done).await;
+        match completed {
+            Err(_) => {
+                stage.set_failed(waiting.id);
+                return Err("等待预下载超时，任务已取消，请重试".into());
+            }
+            Ok(Err(_)) if preferred.is_none() => {
+                stage.set_failed(waiting.id);
+                return Err("预下载已中止，请重试".into());
+            }
+            Ok(Ok(Err(error))) if preferred.is_none() => return Err(error),
+            _ => {}
+        }
         if let Some(ready) = stage.take_ready() {
             if let Some(outcome) = install_ready_update(app, ready).await {
                 return outcome;
             }
         }
-        // 预下载失败/产物不可读 → 继续走全量流程。
     }
-
-    let Some(update) = check_update_with_proxy_fallback(app, None)
-        .await
-        .map_err(|e| format!("检查更新失败: {e}"))?
+    let Some(update) =
+        check_update_with_proxy_fallback(app, policy::CHECK_BUDGET, minimum.as_deref()).await?
     else {
         return Ok(false);
     };
-    log::info!("开始下载应用更新: {}", update.version);
-    let bytes = download_update_bytes(app, &update).await?;
+    stage.remember_version(&update.version)?;
+    let id = stage.next_id();
+    let _foreground = stage.foreground(id);
+    stage.set_progress_request(request_id);
+    let bytes = download_update_bytes(app, &update, id, preferred).await?;
     install_bytes_and_restart(app, update, bytes).await
 }
 
 /// 消费就绪的预下载产物：先读后删；读失败返回 None 让调用方退回全量流程。
 async fn install_ready_update(
     app: &AppHandle,
-    ready: Box<ReadyUpdate>,
+    ready: Box<ReadyUpdate<Update>>,
 ) -> Option<Result<bool, String>> {
     match tokio::fs::read(&ready.installer).await {
         Ok(bytes) => {
+            if policy::is_withdrawn_version(&ready.update.version) {
+                let _ = std::fs::remove_file(&ready.installer);
+                return Some(Err("该版本已撤回，请检查更新版本".into()));
+            }
+            let Some(pubkey) = updater_pubkey(app) else {
+                return Some(Err("更新公钥缺失，无法验证缓存安装包".into()));
+            };
+            if let Err(error) = verify_installer_signature(
+                &bytes,
+                &ready.update.signature,
+                &pubkey,
+                &ready.update.version,
+                require_signed_version(app),
+            ) {
+                let _ = std::fs::remove_file(&ready.installer);
+                return Some(Err(error));
+            }
             let _ = std::fs::remove_file(&ready.installer);
             Some(install_bytes_and_restart(app, ready.update, bytes).await)
         }
@@ -640,14 +818,18 @@ impl AppUpdateCheckResult {
 }
 
 pub async fn check(app: &tauri::AppHandle) -> Result<AppUpdateCheckResult, AppError> {
-    let update = check_update_with_proxy_fallback(app, Some(app_update_check_timeout()))
+    let stage = app.state::<AppUpdateStage>();
+    seed_staged_version_floor(app);
+    let check = stage.begin_check();
+    let minimum = stage.minimum_version();
+    let update = check_update_with_proxy_fallback(app, policy::CHECK_BUDGET, minimum.as_deref())
         .await
         .map_err(|error| AppError::Message(format!("检查更新失败: {error}")))?;
 
     let Some(update) = update else {
         // 检查不到更新也走一次 reconcile：应用跨版本运行期间，暂存的旧版
         // 产物应当被丢弃（例如 latest.json 撤回后）。
-        schedule_prestage(app, None);
+        schedule_prestage(app, check, None).map_err(AppError::Message)?;
         return Ok(AppUpdateCheckResult::UpToDate);
     };
 
@@ -666,32 +848,13 @@ pub async fn check(app: &tauri::AppHandle) -> Result<AppUpdateCheckResult, AppEr
     );
     // 检查到新版本：克隆信息字段后，把 `Update` 对象交给预下载流水线
     //（点升级时直接消费，无需现场重新检查+下载）。
-    schedule_prestage(app, Some(update));
+    schedule_prestage(app, check, Some(update)).map_err(AppError::Message)?;
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        app_update_check_timeout, pending_update_action, prestage_action, should_publish_ready,
-        AppUpdateCheckResult, PendingUpdateAction, PrestageAction, StageInner,
-    };
-    use std::time::Duration;
-
-    #[test]
-    fn prestage_action_matrix() {
-        use PrestageAction::*;
-        // 无暂存、无更新：什么都不做。
-        assert_eq!(prestage_action(None, None), Nothing);
-        // 有暂存、无更新（latest.json 撤回/误报）：丢弃暂存。
-        assert_eq!(prestage_action(Some("6.8.3"), None), DropStaged);
-        // 无暂存、有更新：开始预下载。
-        assert_eq!(prestage_action(None, Some("6.8.3")), Start);
-        // 同版本在下载/已就绪：保留，不重复下载。
-        assert_eq!(prestage_action(Some("6.8.3"), Some("6.8.3")), Keep);
-        // 应用跨版本运行，来了更新的版本：换目标重新预下载。
-        assert_eq!(prestage_action(Some("6.8.3"), Some("6.8.4")), Start);
-    }
+    use super::{pending_update_action, AppUpdateCheckResult, PendingUpdateAction};
 
     #[test]
     fn pending_update_action_matrix() {
@@ -724,26 +887,6 @@ mod tests {
             pending_update_action(Some("6.18.1"), Some("6.18.2"), None),
             Drop
         );
-    }
-
-    #[test]
-    fn stale_prestage_completion_never_supersedes_newer_state() {
-        use tokio::sync::oneshot;
-
-        let downloading = |version: &str| StageInner::Downloading {
-            version: version.to_string(),
-            done: Some(oneshot::channel().1),
-        };
-        // 只有仍处于同版本 Downloading 时才发布就绪。
-        assert!(should_publish_ready(&downloading("6.9.0"), "6.9.0"));
-        // 后到的旧版本完成不得覆盖更新版本的下载，也不得在 Idle（更新消失）时发布。
-        assert!(!should_publish_ready(&downloading("6.9.1"), "6.9.0"));
-        assert!(!should_publish_ready(&StageInner::Idle, "6.9.0"));
-    }
-
-    #[test]
-    fn update_checks_use_the_backend_request_timeout_policy() {
-        assert_eq!(app_update_check_timeout(), Duration::from_secs(30));
     }
 
     #[test]

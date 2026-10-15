@@ -132,3 +132,76 @@ fn captcha_webview_cannot_invoke_workbuddy_commands() {
         assert!(allowed_command("main", command));
     }
 }
+
+// Rebuilt on 2026-10-14 from the fix's behavior contract.
+// These are NEW tests, not the missing original e4049620... candidate bytes.
+
+#[test]
+fn rebuilt_prior_snapshot_rejects_absent_and_non_array_plans() {
+    for balance in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"plans":null}),
+        json!({"plans":{}}),
+        json!({"plans":"invalid"}),
+        json!({"plans":42}),
+    ] {
+        assert_eq!(prior_plan_ids(&balance), None, "{balance}");
+    }
+}
+
+#[test]
+fn rebuilt_empty_prior_snapshot_is_valid() {
+    assert_eq!(prior_plan_ids(&json!({"plans":[]})), Some(vec![]));
+}
+
+#[test]
+fn rebuilt_prior_snapshot_preserves_all_valid_string_ids_in_order() {
+    let balance = json!({"plans":[{"user_plan_id":"old-a"}, {"user_plan_id":"old-b"},
+        {"user_plan_id":"old-a"}]});
+    assert_eq!(
+        prior_plan_ids(&balance),
+        Some(vec!["old-a".into(), "old-b".into(), "old-a".into()])
+    );
+}
+
+#[test]
+fn rebuilt_prior_snapshot_keeps_original_field_and_filter_semantics() {
+    let balance = json!({"plans":[null, 1, {}, {"user_plan_id":null}, {"user_plan_id":3},
+        {"userPlanId":"camel-only"}, {"user_plan_id":"old"}]});
+    assert_eq!(prior_plan_ids(&balance), Some(vec!["old".into()]));
+}
+
+#[test]
+fn rebuilt_malformed_balance_never_releases_durable_pending_record() {
+    for balance in [
+        json!(null),
+        json!({}),
+        json!({"plans":null}),
+        json!({"plans":{}}),
+    ] {
+        let mut record = claimable();
+        record.prior_plan_ids = vec!["old".into()];
+        record.mark_submitted();
+        let mut restored: Record =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        restored.reconcile(&balance);
+        assert_eq!(restored.status, Status::ResultPending);
+        assert_eq!(restored.plan_id.as_deref(), Some("plan"));
+        assert_eq!(restored.prior_plan_ids, vec!["old"]);
+        assert!(!restored.may_submit());
+    }
+}
+
+#[test]
+fn rebuilt_prior_snapshot_prevents_old_plan_from_confirming_new_claim() {
+    let mut record = claimable();
+    record.prior_plan_ids = prior_plan_ids(&json!({"plans":[{"user_plan_id":"old"}]})).unwrap();
+    record.mark_submitted();
+    record.reconcile(&json!({"plans":[{"plan_id":"plan","user_plan_id":"old","status":"active"}]}));
+    assert_eq!(record.status, Status::ResultPending);
+    record.reconcile(&json!({"plans":[{"plan_id":"plan","user_plan_id":"new","status":"active"}]}));
+    assert_eq!(record.status, Status::Claimed);
+    assert!(!record.may_submit());
+}
