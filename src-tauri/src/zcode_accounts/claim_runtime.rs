@@ -1,12 +1,13 @@
 //! Vault-owned serial claims. Adapted queue behavior from pjpv/zcode-switch
 //! f34225686dfef05d84c256a56f868719248f15ff (MIT, licenses/zcode-switch-MIT.txt).
+#[cfg(not(feature = "test-hooks"))]
+use super::runtime::run_owned;
 use super::{
     claim::{Record, Status},
     claim_protocol::{CaptchaConfig, Client, Endpoint, Http, Request},
     claim_queue::{Jobs, Lease},
     library_context::LibraryContext,
     official::{OfficialError, SecretValue, StartJwt},
-    runtime::run_owned,
     transaction::VaultAccountStore,
 };
 use crate::database::Database;
@@ -18,6 +19,21 @@ use std::{
     time::Duration,
 };
 use tauri::{Emitter, Manager};
+#[cfg(feature = "test-hooks")]
+async fn run_owned<T: Send + 'static>(
+    db: Arc<Database>,
+    operation: impl FnOnce(&Database) -> Result<T, super::runtime::RuntimeError> + Send + 'static,
+) -> Result<T, super::runtime::RuntimeError> {
+    let scope = test_support::current();
+    if let Some(scope) = &scope {
+        scope.assert_db(&db);
+    }
+    super::runtime::run_owned(db, move |db| match scope {
+        Some(scope) => test_support::sync_scope(scope, || operation(db)),
+        None => operation(db),
+    })
+    .await
+}
 const SETTING: &str = "zcode_claim_v1";
 pub(crate) const INTERVAL: Duration = Duration::from_secs(600);
 fn jobs() -> &'static Jobs {
@@ -63,6 +79,10 @@ fn save(db: &Database, saved: &Saved) -> Result<(), &'static str> {
     db.set_setting(SETTING, &raw).map_err(|_| "locked")
 }
 fn context(root: Option<&std::path::Path>) -> Result<LibraryContext, &'static str> {
+    #[cfg(feature = "test-hooks")]
+    if let Some(scope) = test_support::current() {
+        return Ok(scope.context(root));
+    }
     super::native_context::library_context(root).map_err(|_| "unavailable")
 }
 fn ids(db: &Database, ctx: &LibraryContext) -> Result<BTreeSet<String>, &'static str> {
@@ -163,6 +183,8 @@ async fn prepare(
 ) -> Result<Prepared, &'static str> {
     run_owned(db, move |db| {
         let result = (|| {
+            #[cfg(feature = "test-hooks")]
+            test_support::prepared(&id);
             let ctx = context(root.as_deref())?;
             let vault = db.secret_session().read().map_err(|_| "locked")?;
             let store = VaultAccountStore::new(db.secret_session().root(), &vault)
@@ -178,8 +200,16 @@ async fn prepare(
                 .ok_or("changed")?;
             let jwt =
                 super::session_checks::claim_jwt(&native, snapshot).map_err(|_| "loginExpired")?;
+            #[cfg(not(feature = "test-hooks"))]
             let version = super::native_context::library_app_version(ctx.data_root())
                 .ok_or("appVersionUnknown")?;
+            #[cfg(feature = "test-hooks")]
+            let version = if test_support::current().is_some() {
+                Some("3.11.2".into())
+            } else {
+                super::native_context::library_app_version(ctx.data_root())
+            }
+            .ok_or("appVersionUnknown")?;
             let meta = vault.metadata();
             Ok(Prepared {
                 ctx,
@@ -249,7 +279,16 @@ async fn write_record(
             let mut saved = load(db)?;
             let scope = saved.scopes.entry(ctx_id).or_default();
             scope.data_root = root;
+            #[cfg(feature = "test-hooks")]
+            let saved_id = id.clone();
             scope.records.insert(id, record);
+            #[cfg(feature = "test-hooks")]
+            {
+                save(db, &saved)?;
+                test_support::persisted(&saved_id);
+                Ok(())
+            }
+            #[cfg(not(feature = "test-hooks"))]
             save(db, &saved)
         })();
         Ok(result)
@@ -509,7 +548,7 @@ pub(crate) async fn start(
     if selected.iter().any(|id| !current.records.contains_key(id)) {
         return Err("changed");
     }
-    tauri::async_runtime::spawn(round(
+    let task = round(
         app,
         db,
         Some(ctx.data_root().into()),
@@ -517,7 +556,10 @@ pub(crate) async fn start(
         preview_only,
         false,
         lease,
-    ));
+    );
+    #[cfg(feature = "test-hooks")]
+    let task = test_support::scoped_round(task);
+    tauri::async_runtime::spawn(task);
     Ok(current)
 }
 async fn round(
@@ -545,6 +587,8 @@ async fn round(
             Err(reason) => {
                 let root = root.clone();
                 let persisted = run_owned(db.clone(), move |db| {
+                    #[cfg(feature = "test-hooks")]
+                    test_support::preflight_worker();
                     let result = (|| {
                         let ctx = context(root.as_deref())?;
                         if !ids(db, &ctx)?.contains(&id) {
@@ -558,11 +602,18 @@ async fn round(
                             .entry(id)
                             .or_default()
                             .preflight_failed(reason);
+                        #[cfg(feature = "test-hooks")]
+                        test_support::preflight_save()?;
                         save(db, &saved)
                     })();
                     Ok(result)
                 })
                 .await;
+                #[cfg(feature = "test-hooks")]
+                test_support::preflight_result(
+                    persisted.is_err(),
+                    matches!(&persisted, Ok(Err(_))),
+                );
                 // Continue only after the preflight result is durably saved.
                 // Both task failure and a nested storage/context error stop admission.
                 if !matches!(persisted, Ok(Ok(()))) {
@@ -883,3 +934,7 @@ mod tests {
         assert_eq!(INTERVAL, Duration::from_secs(600));
     }
 }
+
+#[cfg(feature = "test-hooks")]
+#[path = "claim_runtime_test_support.rs"]
+pub(crate) mod test_support;
