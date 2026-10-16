@@ -229,7 +229,10 @@ mod tests {
         json!({"binding":{"accountId":"account","sessionId":"session","turnId":"turn"},"prompt":"fixture","options":{"auth":{"type":"accessToken","accessToken":"synthetic:pat"}}})
     }
     async fn next(host: &mut QoderHost) -> Result<Option<Value>, HostError> {
-        tokio::time::timeout(Duration::from_secs(5), host.next_event())
+        // Includes starting an external Node process. Windows CI can cold-start
+        // several fixtures together while the full Rust suite is still busy.
+        // Keep a finite test deadline without imposing a 5s startup contract.
+        tokio::time::timeout(Duration::from_secs(30), host.next_event())
             .await
             .expect("worker timeout")
     }
