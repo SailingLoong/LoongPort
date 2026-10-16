@@ -263,9 +263,12 @@ struct RowFacts {
 }
 
 fn row_facts(db: &Database) -> Result<RowFacts, AppError> {
-    Ok(row_facts_from_providers(
-        db.get_all_providers(app())?.values(),
-    ))
+    let rows = db
+        .get_all_providers(app())?
+        .into_values()
+        .filter_map(|provider| db.resolve_vendor_auth(&AppType::Codex, &provider).ok())
+        .collect::<Vec<_>>();
+    Ok(row_facts_from_providers(rows.iter()))
 }
 
 fn row_facts_from_providers<'a>(providers: impl Iterator<Item = &'a Provider>) -> RowFacts {
@@ -377,6 +380,24 @@ fn plan_with_sources(
     provider: &Provider,
     readonly: bool,
 ) -> Result<Planned, AppError> {
+    let resolved = db.resolve_vendor_auth(&AppType::Codex, provider)?;
+    let provider = &resolved;
+    let resolved_owner = owner
+        .provider()
+        .map(|provider| db.resolve_vendor_auth(&AppType::Codex, provider))
+        .transpose()?;
+    let owner = match owner {
+        Owner::Provider(_) => resolved_owner
+            .as_ref()
+            .map(Owner::Provider)
+            .unwrap_or(Owner::None),
+        Owner::Contract { contract, .. } => Owner::Contract {
+            contract,
+            route: resolved_owner.as_ref(),
+        },
+        Owner::None => Owner::None,
+    };
+    let owner = &owner;
     let projection = project_for_write(provider)?;
     let unify = crate::settings::unify_codex_session_history();
     let endpoint = if is_official(provider) && !unify {
@@ -576,7 +597,24 @@ fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
         };
         planned.stamp = None;
     } else {
-        planned.config.route = RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false));
+        // The proxy owns URL/auth; the planned route owns compaction preferences.
+        // Preserve the OpenAI-name compatibility toggle and explicit overrides,
+        // including "unsupported", without forwarding other upstream fields.
+        let mut proxy_table = proxy_route_table(ROUTE_ID, base_url, false);
+        if let RouteWrite::Custom(table) = &planned.config.route {
+            if table.get("name").and_then(Item::as_str) == Some("OpenAI") {
+                proxy_table.insert("name", toml_edit::value("OpenAI"));
+            }
+            if let Some(compaction) = table
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get("remote_compaction"))
+            {
+                let mut capabilities = Table::new();
+                capabilities.insert("remote_compaction", compaction.clone());
+                proxy_table.insert("capabilities", Item::Table(capabilities));
+            }
+        }
+        planned.config.route = RouteWrite::Custom(proxy_table);
         planned.stamp = Some(RouteAuth::Bearer);
         planned.keep_native = true;
     }

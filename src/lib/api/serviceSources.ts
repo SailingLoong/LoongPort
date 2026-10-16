@@ -21,4 +21,7 @@ export interface ServiceSource {
 
 export const serviceSourcesApi = {
   list: () => invoke<ServiceSource[]>("get_service_sources"),
+  /** Record one inactive binding. Activation remains a separate reviewed operation. */
+  bindVendor: (sourceId: string, app: "claude" | "codex") =>
+    invoke<boolean>("bind_vendor_service_source", { sourceId, app }),
 };

@@ -384,3 +384,178 @@ async fn status_returning_after_cn_midnight_cannot_mark_today_claimed() {
         assert!(!f.inner.calls.lock().unwrap().contains(&Endpoint::Claim));
     }
 }
+
+// Unlike the single-account Fake, this script binds every response to the actual
+// selected account, so a same-UID/domain mix-up cannot pass on endpoint order alone.
+type AccountBoundResponse = (Domain, &'static str, &'static str, Endpoint, Value);
+
+struct AccountBoundFake {
+    queue: Mutex<VecDeque<AccountBoundResponse>>,
+}
+impl Transport for AccountBoundFake {
+    fn request<'a>(
+        &'a self,
+        endpoint: Endpoint,
+        account: Option<&'a Account>,
+        state: Option<&'a str>,
+        _now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+        Box::pin(async move {
+            assert_ne!(endpoint, Endpoint::Claim, "refresh cannot claim rewards");
+            assert!(state.is_none());
+            let (domain, uid, token, expected, value) = self
+                .queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected account request");
+            let selected = account.expect("refresh requires the selected account");
+            assert_eq!(selected.domain, domain);
+            assert_eq!(selected.uid, uid);
+            assert_eq!(selected.token, token);
+            assert_eq!(endpoint, expected);
+            Ok(value)
+        })
+    }
+}
+fn account_isolation_fixture() -> (std::sync::Arc<SecretSession>, Vec<String>) {
+    let session = SecretSession::ephemeral().unwrap();
+    let binding = store::binding(&session).unwrap();
+    let rows: Vec<_> = [
+        (Domain::CodeBuddy, "same-uid", "SYNTHETIC_CODE_A"),
+        (Domain::WorkBuddy, "same-uid", "SYNTHETIC_WORK_B"),
+        (Domain::CodeBuddy, "other-uid", "SYNTHETIC_CODE_C"),
+    ]
+    .into_iter()
+    .map(|(domain, uid, token)| {
+        SavedAccount::new(Account {
+            domain,
+            uid: uid.into(),
+            label: "Synthetic account".into(),
+            token: token.into(),
+        })
+    })
+    .collect();
+    let ids = rows
+        .iter()
+        .map(|r| r.account.id(&binding.vault_id))
+        .collect();
+    store::save(&session, &binding, rows).unwrap();
+    (session, ids)
+}
+fn account_isolation_responses(
+    domain: Domain,
+    uid: &'static str,
+    token: &'static str,
+    balance: f64,
+) -> Vec<AccountBoundResponse> {
+    let mut responses = resource(balance);
+    responses.push(status(false));
+    responses
+        .into_iter()
+        .map(|(endpoint, result)| (domain, uid, token, endpoint, result.unwrap()))
+        .collect()
+}
+#[tokio::test]
+async fn account_isolation_refresh_selects_domain_and_preserves_other_accounts() {
+    let (session, ids) = account_isolation_fixture();
+    assert_ne!(ids[0], ids[1]);
+    let binding = store::binding(&session).unwrap();
+    let before = store::load(&session, &binding).unwrap();
+    let transport = AccountBoundFake {
+        queue: Mutex::new(
+            account_isolation_responses(Domain::WorkBuddy, "same-uid", "SYNTHETIC_WORK_B", 23.0)
+                .into(),
+        ),
+    };
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let view = engine.refresh(&ids[1]).await.unwrap();
+    assert_eq!(view.id, ids[1]);
+    assert_eq!(view.credits.total_remaining, Some(23.0));
+    assert_eq!(view.claim_state, ClaimState::Available);
+    assert!(transport.queue.lock().unwrap().is_empty());
+    let after = store::load(&session, &binding).unwrap();
+    for index in [0, 2] {
+        assert_eq!(
+            serde_json::to_value(&after[index]).unwrap(),
+            serde_json::to_value(&before[index]).unwrap()
+        );
+    }
+    assert_eq!(after[1].account.token, before[1].account.token);
+    let dto = serde_json::to_string(&view).unwrap();
+    assert!(!dto.contains("SYNTHETIC_") && !dto.contains("same-uid"));
+}
+#[tokio::test]
+async fn account_isolation_refresh_all_routes_each_account_without_merging_same_uid() {
+    let (session, ids) = account_isolation_fixture();
+    let mut responses =
+        account_isolation_responses(Domain::CodeBuddy, "same-uid", "SYNTHETIC_CODE_A", 11.0);
+    responses.extend(account_isolation_responses(
+        Domain::WorkBuddy,
+        "same-uid",
+        "SYNTHETIC_WORK_B",
+        22.0,
+    ));
+    responses.extend(account_isolation_responses(
+        Domain::CodeBuddy,
+        "other-uid",
+        "SYNTHETIC_CODE_C",
+        33.0,
+    ));
+    let transport = AccountBoundFake {
+        queue: Mutex::new(responses.into()),
+    };
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let views = engine.refresh_all().await.unwrap();
+    assert_eq!(views.len(), 3);
+    assert_eq!(views.iter().map(|v| v.id.clone()).collect::<Vec<_>>(), ids);
+    assert_eq!(
+        views
+            .iter()
+            .map(|v| v.credits.total_remaining)
+            .collect::<Vec<_>>(),
+        vec![Some(11.0), Some(22.0), Some(33.0)]
+    );
+    assert!(views.iter().all(|v| v.claim_state == ClaimState::Available));
+    assert!(transport.queue.lock().unwrap().is_empty());
+    let stored = store::load(&session, &store::binding(&session).unwrap()).unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(
+        stored
+            .iter()
+            .map(|r| r.credits.total_remaining)
+            .collect::<Vec<_>>(),
+        vec![Some(11.0), Some(22.0), Some(33.0)]
+    );
+    let raw = std::fs::read(session.root().join(store::FILE)).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains("SYNTHETIC_"));
+}
+#[tokio::test]
+async fn account_isolation_foreign_vault_id_is_rejected_before_any_request_or_write() {
+    let (_foreign_session, foreign_ids) = account_isolation_fixture();
+    let (session, ids) = account_isolation_fixture();
+    assert_ne!(foreign_ids[1], ids[1]);
+    let path = session.root().join(store::FILE);
+    let before = std::fs::read(&path).unwrap();
+    let transport = AccountBoundFake {
+        queue: Mutex::new(VecDeque::new()),
+    };
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert_eq!(
+        engine.refresh(&foreign_ids[1]).await.unwrap_err(),
+        Failure::UnsupportedContext
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

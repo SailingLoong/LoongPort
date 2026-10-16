@@ -1383,6 +1383,14 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        // Re-read the account owner at the output boundary, including cached routes.
+        let resolved = self
+            .router
+            .resolve_vendor_auth(app_type, provider)
+            .map_err(|_| {
+                ProxyError::AuthError("Service source authentication unavailable".into())
+            })?;
+        let provider = &resolved;
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
