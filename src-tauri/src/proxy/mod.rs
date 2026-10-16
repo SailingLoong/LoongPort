@@ -31,6 +31,9 @@ pub mod model_alignment;
 pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;
+pub mod qoder_host;
+pub mod qoder_http;
+pub mod qoder_runtime;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod response_processor;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
