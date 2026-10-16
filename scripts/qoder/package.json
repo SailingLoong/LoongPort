@@ -8,7 +8,7 @@
   },
   "exports": "./task-entry.mjs",
   "scripts": {
-    "test": "node --test ../../tests/qoder-runtime/*.test.mjs"
+    "test": "node --test ../../tests/qoder-runtime/*.node-test.mjs"
   },
   "peerDependencies": {
     "@qoder-ai/qoder-agent-sdk": "1.0.53"
