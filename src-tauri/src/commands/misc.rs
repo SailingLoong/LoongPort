@@ -3208,6 +3208,17 @@ fn locate_default_tool(
     }
 }
 
+/// Reuse the normal CLI discovery paths and bounded login-shell lookup for
+/// the backend-owned Qoder interpreter. No caller-controlled tool name.
+pub(crate) fn locate_node_runtime() -> Result<std::path::PathBuf, String> {
+    locate_default_tool(
+        "node",
+        CommandDeadline::from_timeout(Some(std::time::Duration::from_secs(3))),
+    )?
+    .canonicalize()
+    .map_err(|_| "Node executable is unavailable".to_string())
+}
+
 fn apply_extra_env(cmd: &mut std::process::Command, extra_env: &[(&str, String)]) {
     for (key, value) in extra_env {
         cmd.env(key, value);
