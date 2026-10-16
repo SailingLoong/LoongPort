@@ -1126,3 +1126,5 @@ async fn passive_anomaly_lands_and_surfaces() {
     assert_eq!(reports.len(), 1, "干净流量不落库，异常报告不被干净流量稀释");
     fx.server.stop().await.expect("stop server");
 }
+
+mod openrouter_main_entry_tests;
