@@ -48,6 +48,49 @@ fn proof(
     )
 }
 
+#[test]
+#[serial_test::serial]
+fn bound_codex_proof_preserves_direct_remote_compaction_preferences() {
+    let _home = TestHome::new().unwrap();
+    let vault = VaultContext::generate().unwrap();
+    let settings = crate::settings::AppSettings::default();
+    for name in ["OpenAI", "Relay"] {
+        for capability in [None, Some("v2"), Some("unsupported")] {
+            let mut row = row();
+            let suffix = capability
+                .map(|value| format!("capabilities = {{ remote_compaction = '{value}' }}\n"))
+                .unwrap_or_default();
+            row.settings_config["config"] = json!(format!(
+                "{}{suffix}",
+                row.settings_config["config"]
+                    .as_str()
+                    .unwrap()
+                    .replace("name = 'Synthetic'", &format!("name = '{name}'"))
+            ));
+            let config = format!(
+                "{}{suffix}",
+                config().replace("name = 'Synthetic'", &format!("name = '{name}'"))
+            );
+            assert_eq!(
+                proof(&row, &settings, &vault, pre(&config, None)),
+                Some(true),
+                "{name}/{capability:?}"
+            );
+            if let Some(capability) = capability {
+                assert_eq!(
+                    proof(
+                        &row,
+                        &settings,
+                        &vault,
+                        pre(&config.replace(capability, "changed"), None)
+                    ),
+                    Some(false)
+                );
+            }
+        }
+    }
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn bound_codex_proof_checks_route_auth_and_catalog_without_discovery() {

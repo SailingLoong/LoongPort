@@ -969,6 +969,280 @@ fn editing_proxy_route_and_direct_row_follow_distinct_applied_owners() {
     assert_eq!(live["unowned"]["keep"], true);
 }
 
+#[cfg(test)]
+fn codex_compaction_row(mut row: Provider, name: &str, capability: Option<&str>) -> Provider {
+    let mut doc: toml_edit::DocumentMut = row.settings_config["config"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let table = &mut doc["model_providers"]["synthetic"];
+    table["name"] = toml_edit::value(name);
+    table["env_key"] = toml_edit::value("SYNTHETIC_UPSTREAM_KEY");
+    table["experimental_bearer_token"] = toml_edit::value("synthetic-upstream-bearer");
+    table["http_headers"]["Authorization"] = toml_edit::value("Bearer synthetic-header");
+    table["env_http_headers"]["X-Upstream"] = toml_edit::value("SYNTHETIC_HEADER");
+    table["auth"]["command"] = toml_edit::value("synthetic-auth-command");
+    table["capabilities"] = toml_edit::Item::Table(toml_edit::Table::new());
+    table["capabilities"]["external_web_access"] = toml_edit::value(false);
+    if let Some(capability) = capability {
+        table["capabilities"]["remote_compaction"] = toml_edit::value(capability);
+    }
+    row.settings_config["config"] = json!(doc.to_string());
+    row
+}
+
+#[cfg(test)]
+fn assert_codex_proxy_compaction(path: &std::path::Path, name: &str, capability: Option<&str>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    assert_eq!(doc["model_provider"].as_str(), Some("custom"));
+    let table = &doc["model_providers"]["custom"];
+    assert_eq!(
+        table["name"].as_str(),
+        Some(if name == "OpenAI" { "OpenAI" } else { "custom" })
+    );
+    assert_eq!(
+        table
+            .get("capabilities")
+            .and_then(|item| item.get("remote_compaction"))
+            .and_then(toml_edit::Item::as_str),
+        capability
+    );
+    assert_eq!(
+        table
+            .get("capabilities")
+            .and_then(toml_edit::Item::as_table_like)
+            .map(|t| t.len()),
+        capability.map(|_| 1)
+    );
+    assert!(table["base_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("http://127.0.0.1:"));
+    assert_eq!(
+        table["experimental_bearer_token"].as_str(),
+        Some(crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER)
+    );
+    for key in ["env_key", "http_headers", "env_http_headers", "auth"] {
+        assert!(
+            table.get(key).is_none(),
+            "upstream {key} escaped into proxy"
+        );
+    }
+    assert!(!text.contains("synthetic-upstream"));
+    assert!(!text.contains("synthetic-header"));
+}
+
+#[cfg(test)]
+fn check_codex_remote_compaction_lifecycle(capability: Option<&str>) {
+    for name in ["OpenAI", "Relay"] {
+        let mut fx = Fixture::for_app(AppType::Codex);
+        let source = fx
+            .state
+            .db
+            .get_provider_by_id("a", "codex")
+            .unwrap()
+            .unwrap();
+        let source = codex_compaction_row(source, name, capability);
+        fx.state.db.save_provider("codex", &source).unwrap();
+        let native = read_current(&crate::codex_config::get_codex_auth_path()).unwrap();
+        fx.runtime
+            .block_on(fx.state.proxy_service.set_takeover_for_app("codex", true))
+            .unwrap();
+        assert_codex_proxy_compaction(&fx.path, name, capability);
+
+        // A changed source must replace the preference on the active route.
+        let updated_capability = if capability == Some("v2") {
+            Some("unsupported")
+        } else {
+            Some("v2")
+        };
+        let updated = codex_compaction_row(source.clone(), name, updated_capability);
+        ProviderService::update(&fx.state, AppType::Codex, None, updated).unwrap();
+        assert_codex_proxy_compaction(&fx.path, name, updated_capability);
+
+        fx.runtime
+            .block_on(fx.state.proxy_service.stop_with_restore_keep_state())
+            .unwrap();
+        fx.state = AppState::new(fx.state.db.clone()).unwrap();
+        fx.runtime
+            .block_on(fx.state.proxy_service.recover_from_crash())
+            .unwrap();
+        assert_codex_proxy_compaction(&fx.path, name, updated_capability);
+
+        // Updating the same source to no preference clears its old projection.
+        let cleared = codex_compaction_row(source.clone(), "Relay", None);
+        ProviderService::update(&fx.state, AppType::Codex, None, cleared).unwrap();
+        assert_codex_proxy_compaction(&fx.path, "Relay", None);
+        ProviderService::update(&fx.state, AppType::Codex, None, source).unwrap();
+        assert_codex_proxy_compaction(&fx.path, name, capability);
+        fx.runtime
+            .block_on(fx.state.proxy_service.switch_proxy_target("codex", "b"))
+            .unwrap();
+        assert_codex_proxy_compaction(&fx.path, "Synthetic", None);
+        assert_eq!(
+            read_current(&crate::codex_config::get_codex_auth_path()).unwrap(),
+            native
+        );
+        assert_eq!(
+            fx.state
+                .db
+                .get_current_provider("codex")
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        fx.runtime
+            .block_on(fx.state.proxy_service.set_takeover_for_app("codex", false))
+            .unwrap();
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_remote_compaction_default_survives_proxy_lifecycle() {
+    check_codex_remote_compaction_lifecycle(None);
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_remote_compaction_v2_survives_proxy_lifecycle() {
+    check_codex_remote_compaction_lifecycle(Some("v2"));
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_remote_compaction_unsupported_survives_proxy_lifecycle() {
+    check_codex_remote_compaction_lifecycle(Some("unsupported"));
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_remote_compaction_catalog_preview_matches_actual_selection() {
+    use crate::services::{application_selection as selection, provider::codex_direct};
+    use codex_direct::{CatalogChoice, CatalogDecision, Owner, Target};
+    for name in ["OpenAI", "Relay", "openai", " OpenAI "] {
+        for capability in [None, Some("v2"), Some("unsupported")] {
+            let fx = Fixture::for_app(AppType::Codex);
+            let row = fx
+                .state
+                .db
+                .get_provider_by_id("b", "codex")
+                .unwrap()
+                .unwrap();
+            let mut row = codex_compaction_row(row, name, capability);
+            row.settings_config["modelCatalog"] =
+                json!({"models":[{"model":"model-b","contextWindow":32768}]});
+            fx.state.db.save_provider("codex", &row).unwrap();
+            fx.runtime
+                .block_on(fx.state.proxy_service.set_takeover_for_app("codex", true))
+                .unwrap();
+            let external = fx.path.parent().unwrap().join("synthetic-external.json");
+            std::fs::write(&external, b"external untouched").unwrap();
+            let text = std::fs::read_to_string(&fx.path).unwrap();
+            std::fs::write(
+                &fx.path,
+                format!("model_catalog_json='synthetic-external.json'\n{text}"),
+            )
+            .unwrap();
+            let catalog =
+                super::controller::preview_catalog_selection(&fx.state.proxy_service, &row, None)
+                    .unwrap()
+                    .unwrap();
+            let decision = CatalogDecision {
+                choice: CatalogChoice::Manage,
+                revision: catalog.revision,
+            };
+            let mode = super::current::validate_known_mode(
+                &DeviceStore::for_device(),
+                &fx.state.db.secret_session().read().unwrap(),
+                &AppType::Codex,
+            )
+            .unwrap();
+            let previous = fx
+                .state
+                .db
+                .get_provider_by_id("a", "codex")
+                .unwrap()
+                .unwrap();
+            let owner = Owner::Contract {
+                contract: mode.contract.as_ref().unwrap(),
+                route: Some(&previous),
+            };
+            let doc: toml_edit::DocumentMut =
+                std::fs::read_to_string(&fx.path).unwrap().parse().unwrap();
+            let base_url = doc["model_providers"]["custom"]["base_url"]
+                .as_str()
+                .unwrap();
+            let before = codex_direct::files()
+                .iter()
+                .map(|f| read_current(&f.path).unwrap())
+                .collect::<Vec<_>>();
+            let journal = std::fs::read(DeviceStore::for_device().state_path()).unwrap();
+            let database =
+                crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap();
+            let (preview, _, _, _, _, _, _) = codex_direct::plan_editor_save(
+                &fx.state.proxy_service,
+                &owner,
+                Target::Proxy {
+                    route: &row,
+                    base_url,
+                },
+                state::PendingTarget {
+                    state: Some(mode.clone()),
+                    ..Default::default()
+                },
+                "d15d3030-1000-4000-8000-0000000000ca",
+                Some(&decision),
+            )
+            .unwrap();
+            assert_eq!(
+                codex_direct::files()
+                    .iter()
+                    .map(|f| read_current(&f.path).unwrap())
+                    .collect::<Vec<_>>(),
+                before
+            );
+            assert_eq!(
+                std::fs::read(DeviceStore::for_device().state_path()).unwrap(),
+                journal
+            );
+            assert_eq!(
+                crate::Database::content_digest(&fx.state.db.conn.lock().unwrap()).unwrap(),
+                database
+            );
+            selection::select_with_commit_with_catalog(
+                &fx.state,
+                &AppType::Codex,
+                &selection::TierSelection {
+                    provider_id: "b".into(),
+                    model: None,
+                },
+                None,
+                Some(&decision),
+            )
+            .unwrap();
+            for index in [1, 2] {
+                let expected = match &preview[index].1.then {
+                    crate::live::patch::WholeFile::Write(bytes) => Some(bytes.clone()),
+                    crate::live::patch::WholeFile::Delete => None,
+                };
+                assert_eq!(
+                    read_current(&preview[index].0.path).unwrap(),
+                    expected,
+                    "preview/actual file {index}: {name}/{capability:?}"
+                );
+            }
+            assert_codex_proxy_compaction(&fx.path, name, capability);
+            assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
+            fx.runtime
+                .block_on(fx.state.proxy_service.set_takeover_for_app("codex", false))
+                .unwrap();
+        }
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify_all_apps() -> Result<(), AppError> {
     editing_proxy_route_and_direct_row_follow_distinct_applied_owners();

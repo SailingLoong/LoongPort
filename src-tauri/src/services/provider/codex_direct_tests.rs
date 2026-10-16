@@ -216,6 +216,91 @@ fn codex_service_preserves_native_auth_and_unowned_text() {
     fixture.assert_current("a");
 }
 
+#[test]
+#[serial_test::serial]
+fn codex_remote_compaction_direct_route_preserves_inline_preferences() {
+    for name in ["OpenAI", "Relay"] {
+        for capability in [None, Some("v2"), Some("unsupported")] {
+            let fixture = Fixture::new();
+            let mut row = fixture
+                .state
+                .db
+                .get_provider_by_id("b", "codex")
+                .unwrap()
+                .unwrap();
+            let capabilities = capability
+                .map(|value| format!(", remote_compaction = '{value}'"))
+                .unwrap_or_default();
+            row.settings_config["config"] = json!(format!(
+                "model = 'model-b'\nmodel_provider = 'synthetic'\n[model_providers.synthetic]\nname = '{name}'\nbase_url = 'https://b.example.invalid/v1'\nwire_api = 'responses'\ncapabilities = {{ external_web_access = false{capabilities} }}\n"
+            ));
+            fixture.state.db.save_provider("codex", &row).unwrap();
+            ProviderService::switch(&fixture.state, AppType::Codex, "b").unwrap();
+            let doc: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .parse()
+                .unwrap();
+            let route = &doc["model_providers"]["custom"];
+            assert_eq!(route["name"].as_str(), Some(name));
+            assert_eq!(
+                route["base_url"].as_str(),
+                Some("https://b.example.invalid/v1")
+            );
+            assert_eq!(
+                route["experimental_bearer_token"].as_str(),
+                Some("synthetic-key-b")
+            );
+            assert_eq!(
+                route["capabilities"]["external_web_access"].as_bool(),
+                Some(false)
+            );
+            assert_eq!(
+                route["capabilities"]
+                    .get("remote_compaction")
+                    .and_then(toml_edit::Item::as_str),
+                capability
+            );
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(
+                    fixture
+                        .state
+                        .proxy_service
+                        .set_takeover_for_app("codex", true),
+                )
+                .unwrap();
+            let doc: toml_edit::DocumentMut = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .parse()
+                .unwrap();
+            let route = &doc["model_providers"]["custom"];
+            assert_eq!(
+                route["name"].as_str(),
+                Some(if name == "OpenAI" { "OpenAI" } else { "custom" })
+            );
+            assert_eq!(
+                route
+                    .get("capabilities")
+                    .and_then(|item| item.get("remote_compaction"))
+                    .and_then(toml_edit::Item::as_str),
+                capability
+            );
+            assert!(route
+                .get("capabilities")
+                .and_then(|item| item.get("external_web_access"))
+                .is_none());
+            runtime
+                .block_on(
+                    fixture
+                        .state
+                        .proxy_service
+                        .set_takeover_for_app("codex", false),
+                )
+                .unwrap();
+        }
+    }
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn codex_native_login_roundtrip_honors_preserve_off_and_auth_placement() {
