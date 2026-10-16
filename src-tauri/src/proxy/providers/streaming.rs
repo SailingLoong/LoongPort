@@ -172,7 +172,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        'upstream: while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
@@ -182,8 +182,20 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                             continue;
                         }
 
-                        for l in line.lines() {
-                            if let Some(data) = strip_sse_field(l, "data") {
+                        let is_error_event = line.lines().filter_map(|l| strip_sse_field(l, "event")).next_back() == Some("error");
+                        let mut data_lines = line.lines().filter_map(|l| strip_sse_field(l, "data"));
+                        let data = data_lines.next().map(|first| {
+                            std::iter::once(first).chain(data_lines).collect::<Vec<_>>().join("\n")
+                        });
+                        let is_error_payload = data.as_deref().and_then(|d| serde_json::from_str::<Value>(d).ok())
+                            .is_some_and(|v| v.get("error").is_some_and(|error| !error.is_null()));
+                        if is_error_event || is_error_payload {
+                            stream_ended_with_error = true;
+                            let event = json!({"type":"error","error":{"type":"stream_error","message":"Upstream SSE error"}});
+                            yield Ok(Bytes::from(format!("event: error\ndata: {}\n\n", event)));
+                            break 'upstream;
+                        }
+                        if let Some(data) = data.as_deref() {
                                 if data.trim() == "[DONE]" {
                                     log::debug!("[Claude/OpenRouter] <<< OpenAI SSE: [DONE]");
 
@@ -660,8 +672,10 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             pending_message_delta = Some((stop_reason, usage_json));
                                         }
                                     }
+                                } else {
+                                    yield Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Malformed upstream chat stream chunk"));
+                                    return;
                                 }
-                            }
                         }
                     }
                 }
