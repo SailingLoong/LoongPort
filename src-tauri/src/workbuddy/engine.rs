@@ -119,6 +119,12 @@ impl<T: Transport> Engine<'_, T> {
             credits.total_remaining,
             attempt.expected,
         );
+        if result == ClaimState::Unconfirmed && state == ClaimState::NeedsVerification {
+            // A failed authorization read does not resolve the prior submission.
+            row.claim_state = ClaimState::NeedsVerification;
+            row.credited = None;
+            return;
+        }
         row.claim_state = result;
         row.credited = credited;
         if matches!(

@@ -57,6 +57,7 @@ struct AppCapture {
     view: UpgradeAppReview,
     files: Vec<ReviewedInput>,
     catalog_references: std::collections::BTreeSet<std::path::PathBuf>,
+    codex_catalog_source: Option<String>,
     identity: inspection::DatabaseIdentity,
     flags: (bool, bool),
     finalized_revision: Option<String>,
@@ -64,6 +65,15 @@ struct AppCapture {
     native_pending: Option<crate::mode::state::Pending>,
     listener_running_revision: Option<String>,
     recovery_facts: RecoveryFacts,
+}
+
+fn verify_codex_catalog_source(expected: Option<&str>) -> Result<(), AppError> {
+    if let Some(expected) = expected {
+        if crate::codex_config::codex_model_catalog_readonly_source_revision()? != expected {
+            return Err(source_changed());
+        }
+    }
+    Ok(())
 }
 
 /// Only the original target's own fields may change during replay. This is a
@@ -889,6 +899,7 @@ impl AuthenticatedUpgrade {
                 for file in &captured.files {
                     file.verify()?;
                 }
+                verify_codex_catalog_source(captured.codex_catalog_source.as_deref())?;
                 Ok(())
             };
             let verify_cleanup = |live: &crate::mode::state::LiveState| {
@@ -1109,6 +1120,7 @@ impl AuthenticatedUpgrade {
                           current: &crate::mode::state::Pending,
                           live: Option<&crate::mode::state::LiveState>| {
                 verify_identity(&state.db, vault)?;
+                verify_codex_catalog_source(captured.codex_catalog_source.as_deref())?;
                 verify_listener()?;
                 if current.op != pending.op || current.target != pending.target {
                     return Err(source_changed());
@@ -1279,6 +1291,7 @@ impl AuthenticatedUpgrade {
                 for file in &captured.files {
                     file.verify()?;
                 }
+                verify_codex_catalog_source(captured.codex_catalog_source.as_deref())?;
                 Ok(())
             };
             let after = || {
@@ -1520,6 +1533,7 @@ fn capture_app_with_state(
     // never turns a resolver error or symlink into an external-owner claim.
     let mut codex_catalog_inputs = std::collections::BTreeMap::new();
     let mut catalog_references = std::collections::BTreeSet::new();
+    let mut codex_catalog_source: Option<String> = None;
     if *app == AppType::Codex {
         if let Some(text) = bound
             .get(&crate::codex_config::get_codex_config_path())
@@ -1532,6 +1546,15 @@ fn capture_app_with_state(
                         row, text,
                     );
                 if let Some(captured) = &captured {
+                    if let Some(source) = captured.generated_source() {
+                        if codex_catalog_source
+                            .as_deref()
+                            .is_some_and(|previous| previous != source)
+                        {
+                            return Err(source_changed());
+                        }
+                        codex_catalog_source = Some(source.to_owned());
+                    }
                     for (path, revision) in captured.references() {
                         catalog_references.insert(path.clone());
                         if let Some(existing) = files.iter().find(|input| input.path == *path) {
@@ -1837,6 +1860,7 @@ fn capture_app_with_state(
                 &order,
                 projected_listener,
                 &managed_revision,
+                &codex_catalog_source,
             ))
             .map_err(|source| AppError::JsonSerialize { source })?,
         );
@@ -1879,6 +1903,7 @@ fn capture_app_with_state(
     for file in &files {
         file.verify()?;
     }
+    verify_codex_catalog_source(codex_catalog_source.as_deref())?;
     inspection::verify_unchanged(&path, &db_revision)?;
     let provider_digests = rows
         .iter()
@@ -1946,6 +1971,7 @@ fn capture_app_with_state(
         },
         files,
         catalog_references,
+        codex_catalog_source,
         identity,
         flags,
         finalized_revision,

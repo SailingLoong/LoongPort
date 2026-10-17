@@ -4399,6 +4399,10 @@ fn u03_native_admission_rejects_same_path_database_replacement_with_old_connecti
     drop(replacement);
     let before = snapshot(f.home.path());
     assert!(
+        crate::mode::operation::uses_upstream4_schema(&state.db).is_err(),
+        "classification must reject the old same-path connection itself"
+    );
+    assert!(
         crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, &AppType::Claude)
             .is_err(),
         "same-path same-Vault replacement cannot authorize the old connection"
@@ -5873,9 +5877,30 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
         Ok(())
     })
     .unwrap();
+    let after = snapshot(f.home.path());
+    let changed_paths: std::collections::BTreeSet<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .collect();
+    let changed_bytes: Vec<_> = changed_paths
+        .iter()
+        .map(|path| {
+            let old = before.get(*path).map(Vec::as_slice).unwrap_or_default();
+            let new = after.get(*path).map(Vec::as_slice).unwrap_or_default();
+            let offsets: Vec<_> = old
+                .iter()
+                .zip(new.iter())
+                .enumerate()
+                .filter_map(|(index, (a, b))| (a != b).then_some(index))
+                .take(32)
+                .collect();
+            (path, old.len(), new.len(), offsets)
+        })
+        .collect();
     assert!(
-        snapshot(f.home.path()) == before,
-        "lost response retry must not write again"
+        after == before,
+        "lost response retry must not write again (path, lengths, offsets): {changed_bytes:?}"
     );
     assert!(
         crate::settings::read_upgrade_completion_with_vault(&session, &session.read().unwrap())
@@ -6165,4 +6190,154 @@ fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
                 .sync_paused
         );
     }
+}
+
+#[test]
+#[serial_test::serial]
+fn native_historical_schema_classification_requires_authenticated_publication() {
+    for case in [
+        "published",
+        "missing",
+        "corrupt",
+        "unpublished",
+        "target25",
+        "forged25",
+        "future",
+        "wrong_root",
+    ] {
+        let f = Fixture::new();
+        publish_resume_fixture(&f);
+        let path = f.device.root().join(checkpoint::FILE);
+        match case {
+            "missing" => std::fs::remove_file(&path).unwrap(),
+            "corrupt" => std::fs::write(&path, b"synthetic-corrupt-checkpoint").unwrap(),
+            "unpublished" | "target25" | "forged25" => {
+                let file =
+                    crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE).unwrap();
+                let plain = file
+                    .decode(&f.vault, &std::fs::read(&path).unwrap())
+                    .unwrap();
+                let mut value: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+                match case {
+                    "unpublished" => value["published_database"] = serde_json::Value::Null,
+                    "target25" => value["target_versions"]["loongport"] = serde_json::json!(25),
+                    "forged25" => {
+                        value["source_versions"]["loongport"] = serde_json::json!(25);
+                        value["target_versions"]["loongport"] = serde_json::json!(25);
+                    }
+                    _ => unreachable!(),
+                }
+                std::fs::write(
+                    &path,
+                    file.encode(&f.vault, &serde_json::to_vec(&value).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+        let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        if case == "future" {
+            conn.execute(
+                "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
+            )
+            .unwrap();
+        }
+        let root = if case == "wrong_root" {
+            f.root.join("synthetic-other-root")
+        } else {
+            f.root.clone()
+        };
+        let db = Database::from_connection(
+            conn,
+            session::SecretSession::from_context(root, f.vault.clone()),
+        );
+        let before = snapshot(f.home.path());
+        let result = crate::mode::operation::uses_upstream4_schema(&db);
+        if case == "published" {
+            assert!(result.unwrap(), "{case}");
+        } else {
+            assert!(result.is_err(), "{case} must fail closed");
+        }
+        assert_eq!(snapshot(f.home.path()), before, "{case} must be read-only");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn native_archive_publication_readback_failure_retains_authenticated_recovery() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let f = Fixture::new();
+    let id = publish_resume_fixture(&f);
+    let inspected = inspect(&f.root, &f.device).unwrap();
+    let review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let session = review.session_for_test();
+    crate::settings::unlock_settings(session.clone()).unwrap();
+    let db = Database::init_with_secrets(session.clone()).unwrap();
+    let denied = Arc::new(AtomicBool::new(false));
+    let observed = denied.clone();
+    db.conn
+        .lock()
+        .unwrap()
+        .authorizer(Some(move |context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name: "paperclip_run_bindings",
+                ..
+            } => {
+                observed.store(true, Ordering::SeqCst);
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+    assert!(checkpoint::archive_and_release(
+        &db,
+        &f.device,
+        &session.read().unwrap(),
+        &id,
+        &mut |_| Ok(())
+    )
+    .is_err());
+    assert!(
+        denied.load(Ordering::SeqCst),
+        "must reach the installed v25 readback"
+    );
+    assert_eq!(
+        database::loongport_schema::read_stored_version(&db.conn.lock().unwrap()).unwrap(),
+        database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+    );
+    let archived_path = f.device.root().join("upgrade-completed.json");
+    let archived = std::fs::read(&archived_path).unwrap();
+    checkpoint::restored_archive_files(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    // A retry still authenticates the installed image; it cannot skip the readback.
+    assert!(checkpoint::archive_and_release(
+        &db,
+        &f.device,
+        &session.read().unwrap(),
+        &id,
+        &mut |_| Ok(())
+    )
+    .is_err());
+    db.conn
+        .lock()
+        .unwrap()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&archived_path).unwrap(), archived);
+    let before = snapshot(f.home.path());
+    checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(snapshot(f.home.path()), before);
 }

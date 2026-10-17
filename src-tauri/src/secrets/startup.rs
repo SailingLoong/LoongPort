@@ -272,6 +272,10 @@ impl StartupCoordinator {
                 super::upgrade::checkpoint::read_completed_result(&state.db, &device, &vault)
                     .map_err(super::error::public_code)?
             {
+                state
+                    .db
+                    .verify_released_checkpoint_schema(&device, &vault)
+                    .map_err(super::error::public_code)?;
                 let mut view = super::upgrade::StartupUpgradeView::blocked("completed");
                 view.checkpoint_id = Some(record.checkpoint_id);
                 view.archive_retained = true;
@@ -341,6 +345,10 @@ impl StartupCoordinator {
                 if record.is_none_or(|record| record.checkpoint_id != id) {
                     return Err("upgrade.source_changed".into());
                 }
+                state
+                    .db
+                    .migrate_released_checkpoint_schema(&device, &vault)
+                    .map_err(super::error::public_code)?;
             }
         } else {
             let vault = state.db.secrets.read().map_err(super::error::public_code)?;
@@ -350,6 +358,10 @@ impl StartupCoordinator {
             if record.is_none_or(|record| record.checkpoint_id != id) {
                 return Err("upgrade.source_changed".into());
             }
+            state
+                .db
+                .migrate_released_checkpoint_schema(&device, &vault)
+                .map_err(super::error::public_code)?;
         }
         *inspection =
             super::upgrade::inspect(&self.root, &device).map_err(super::error::public_code)?;
@@ -972,6 +984,10 @@ pub(crate) async fn get_upgrade_sync_resume_review(
         else {
             return Ok(None);
         };
+        state
+            .db
+            .verify_released_checkpoint_schema(&device, &vault)
+            .map_err(super::error::public_code)?;
         let review = crate::settings::review_upgrade_sync_with_vault(&state.db.secrets, &vault)
             .map_err(super::error::public_code)?;
         if review
@@ -1006,6 +1022,10 @@ pub(crate) async fn confirm_upgrade_sync_resume(
         if record.is_none_or(|record| record.checkpoint_id != expected_checkpoint_id) {
             return Err("upgrade.source_changed".into());
         }
+        state
+            .db
+            .verify_released_checkpoint_schema(&device, &vault)
+            .map_err(super::error::public_code)?;
         match choice {
             UpgradeSyncChoice::IndependentConfig | UpgradeSyncChoice::CompatibleDevices => {}
         }
@@ -1799,6 +1819,208 @@ mod upgrade_handoff_tests {
         );
         assert!(!socket_root.path().join("owner.sock").exists());
         assert_eq!(std::fs::read(checkpoint_path).unwrap(), checkpoint_before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_completion_retry_revalidates_published_database_before_reporting_success() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let f = Fixture::with_schema(None, false, 24);
+        let id = f.coordinator.upgrade_view().unwrap().checkpoint_id.unwrap();
+        let mut runtime = None;
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                crate::secrets::migration::prepare_files(&session, false)
+                    .map_err(|e| e.to_string())?;
+                crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+                let db = Arc::new(
+                    Database::init_with_secrets(session.clone()).map_err(|e| e.to_string())?,
+                );
+                let copilot = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let xai = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let state = crate::store::AppState::new(db).map_err(|e| e.to_string())?;
+                state
+                    .proxy_service
+                    .set_managed_auth(copilot, xai)
+                    .map_err(|e| e.to_string())?;
+                session.complete_migration().map_err(|e| e.to_string())?;
+                runtime = Some(state);
+                Ok(())
+            })
+            .unwrap();
+        let runtime = runtime.unwrap();
+        runtime
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "paperclip_run_bindings",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
+        assert!(f
+            .coordinator
+            .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+            .is_err());
+        assert!(!f.device.root().join(checkpoint::FILE).exists());
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&runtime.db.conn.lock().unwrap())
+                .unwrap(),
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        );
+        let before = snapshot(f.home.path());
+        assert!(
+            f.coordinator
+                .upgrade_view_with_state(Some(&runtime))
+                .is_err(),
+            "view must not report unverified publication completed"
+        );
+        assert!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .is_err(),
+            "explicit retry must repeat installed-image authentication"
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        runtime
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        assert_eq!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_completion_retries_released_v24_without_migrating_in_view() {
+        let f = Fixture::with_schema(None, false, 24);
+        let id = f.coordinator.upgrade_view().unwrap().checkpoint_id.unwrap();
+        let mut runtime = None;
+        f.coordinator
+            .run_upgrade_attempt(&f.token, |session| {
+                crate::secrets::migration::prepare_files(&session, false)
+                    .map_err(|e| e.to_string())?;
+                crate::settings::unlock_settings(session.clone()).map_err(|e| e.to_string())?;
+                let db = Arc::new(
+                    Database::init_with_secrets(session.clone()).map_err(|e| e.to_string())?,
+                );
+                let copilot = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let xai = Arc::new(tokio::sync::RwLock::new(
+                    crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())
+                        .map_err(|e| e.to_string())?,
+                ));
+                let state = crate::store::AppState::new(db).map_err(|e| e.to_string())?;
+                state
+                    .proxy_service
+                    .set_managed_auth(copilot, xai)
+                    .map_err(|e| e.to_string())?;
+                session.complete_migration().map_err(|e| e.to_string())?;
+                runtime = Some(state);
+                Ok(())
+            })
+            .unwrap();
+        let runtime = runtime.unwrap();
+        assert!(checkpoint::archive_and_release(
+            &runtime.db,
+            &f.device,
+            &runtime.db.secrets.read().unwrap(),
+            &id,
+            &mut |boundary| {
+                if matches!(boundary, checkpoint::CompletionBoundary::BeforeRelease) {
+                    return Err(crate::error::AppError::Config(
+                        "synthetic-before-release".into(),
+                    ));
+                }
+                Ok(())
+            }
+        )
+        .is_err());
+        // Crash after the authenticated archive is published and active proof is
+        // removed, but before schema publication; the original archive remains.
+        std::fs::remove_file(f.device.root().join(checkpoint::FILE)).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&runtime.db.conn.lock().unwrap())
+                .unwrap(),
+            24
+        );
+        let before = snapshot(f.home.path());
+        assert!(f
+            .coordinator
+            .upgrade_view_with_state(Some(&runtime))
+            .is_err());
+        assert_eq!(
+            snapshot(f.home.path()),
+            before,
+            "the view cannot migrate the released image"
+        );
+        assert_eq!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&runtime.db.conn.lock().unwrap())
+                .unwrap(),
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        );
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            f.coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(snapshot(f.home.path()), before);
+        #[cfg(unix)]
+        {
+            let path = f.coordinator.root.join(crate::config::DB_FILE_NAME);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::rename(&path, path.with_extension("old-inode")).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            let before = snapshot(f.home.path());
+            assert!(f
+                .coordinator
+                .upgrade_view_with_state(Some(&runtime))
+                .is_err());
+            assert!(f
+                .coordinator
+                .complete_upgrade_checkpoint(&f.token, &id, &runtime)
+                .is_err());
+            assert_eq!(snapshot(f.home.path()), before);
+        }
     }
 
     #[test]

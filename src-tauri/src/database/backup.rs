@@ -946,11 +946,14 @@ impl Database {
         crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
         let backup_file_guard = lock_backup_file_operations()?;
         let mut current = lock_conn!(self.conn);
+        self.verify_released_connection_identity(&current)?;
         super::vault::preflight_connection(&current)?;
         super::vault::check_identity(&current, vault)?;
         crate::secrets::inventory::validate_database(&current, vault)?;
         let version = super::loongport_schema::read_stored_version(&current)?;
         if version == super::loongport_schema::LOONGPORT_SCHEMA_VERSION {
+            self.verify_released_connection_identity(&current)?;
+            crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
             return Ok(());
         }
         if version != 24 {
@@ -968,9 +971,55 @@ impl Database {
             &[],
         )?;
         crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+        self.verify_released_connection_identity(&current)?;
         self.invalidate_pricing_observations()?;
-        let backup = Backup::new(&working, &mut current)?;
-        Self::complete_backup(&backup, "Publish native binding schema")
+        {
+            let backup = Backup::new(&working, &mut current)?;
+            Self::complete_backup(&backup, "Publish native binding schema")?;
+        }
+        // Publication is complete only after reading the installed image through
+        // its original connection. Besides authenticating the actual result, this
+        // establishes its WAL read mark before a lost-response retry can observe it.
+        Self::verify_published_native_schema(&current, vault)?;
+        self.verify_released_connection_identity(&current)?;
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)
+    }
+
+    /// Read-only acceptance of the installed image, separate from explicit recovery.
+    pub(crate) fn verify_released_checkpoint_schema(
+        &self,
+        device: &crate::live::engine::DeviceStore,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+        let current = lock_conn!(self.conn);
+        Self::verify_published_native_schema(&current, vault)?;
+        self.verify_released_connection_identity(&current)?;
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)
+    }
+
+    fn verify_released_connection_identity(&self, current: &Connection) -> Result<(), AppError> {
+        if Self::get_user_version(current)? != super::UPSTREAM4_SCHEMA_VERSION {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        let path = self.secrets.root().join(crate::config::DB_FILE_NAME);
+        let identity = super::inspection::file_revision(&path)?.primary_identity()?;
+        super::inspection::verify_connection_primary_identity(current, &identity)
+    }
+
+    fn verify_published_native_schema(
+        current: &Connection,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        super::vault::preflight_connection(current)?;
+        super::vault::check_identity(current, vault)?;
+        crate::secrets::inventory::validate_database(current, vault)?;
+        if super::loongport_schema::read_stored_version(current)?
+            != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        Ok(())
     }
 
     fn backup_database_file_locked(
@@ -1895,8 +1944,12 @@ mod tests {
     #[test]
     fn paperclip_native_released_checkpoint_migrates_same_database_only_after_release(
     ) -> Result<(), AppError> {
-        let db = Database::memory()?;
         let dir = crate::secrets::testing::tempdir().unwrap();
+        let store = crate::secrets::testing::MemoryKeyStore::default();
+        let session =
+            crate::secrets::session::SecretSession::open(&dir.path().join("root"), &store, None)?;
+        let db = Database::init_with_secrets(session)?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
         let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
         crate::config_file_io::ensure_private_directory(device.root())?;
         let checkpoint = device

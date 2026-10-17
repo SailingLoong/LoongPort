@@ -1636,7 +1636,12 @@ mod adoption_tests {
             (17, 20, 24, false),
             (20, 17, 24, false),
             (20, 21, 24, false),
-            (20, 20, 25, false),
+            (
+                20,
+                20,
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1,
+                false,
+            ),
             (21, 20, 24, false),
             (20, 20, 24, true),
         ] {
@@ -1797,7 +1802,7 @@ mod adoption_tests {
             assert_eq!(Database::get_user_version(&conn).unwrap(), version);
             assert_eq!(
                 crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
-                24
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
             );
             if version == 20 {
                 let cursor: (i64, i64, i64, i64, String) = conn.query_row("SELECT last_modified,last_line_offset,last_synced_at,last_byte_offset,last_tail_fingerprint FROM session_log_sync WHERE file_path='synthetic-local-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();

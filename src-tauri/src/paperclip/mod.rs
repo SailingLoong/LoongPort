@@ -470,8 +470,21 @@ pub(crate) mod tests {
     pub(crate) fn private_root() -> tempfile::TempDir {
         tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
             .unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_fixture_root_is_physical_private_and_inspectable() {
+        let root = private_root();
+        assert_eq!(root.path(), root.path().canonicalize().unwrap());
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let device = crate::live::engine::DeviceStore::at(root.path().join("device"));
+        crate::secrets::upgrade::inspect(root.path(), &device).unwrap();
     }
 
     #[test]
