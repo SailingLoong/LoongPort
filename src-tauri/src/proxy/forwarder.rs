@@ -446,11 +446,12 @@ impl RequestForwarder {
     ) -> Option<ForwardError> {
         // Provider 错误：本家上游/网络确实出问题，下一家 provider 可能可用 → 继续故障转移。
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
-        let is_provider_error = match &retry_err {
-            ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => true,
-            ProxyError::UpstreamError { status, .. } => *status >= 500,
-            _ => false,
-        };
+        let is_provider_error = !is_explicit_upstream_denial(&retry_err)
+            && match &retry_err {
+                ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => true,
+                ProxyError::UpstreamError { status, .. } => *status >= 500,
+                _ => false,
+            };
 
         if is_provider_error {
             self.router
@@ -562,6 +563,11 @@ impl RequestForwarder {
             provider: None,
         })?;
         let app_type_str = app_type.as_str();
+        // One request owns this intent across all providers and rectifier retries.
+        let mut free_only = body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(crate::services::model_fetch::is_reserved_free_model);
 
         if providers.is_empty() {
             return Err(ForwardError {
@@ -585,6 +591,9 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商
         for provider in providers.iter() {
+            // Preserve this candidate's explicit intent even when admission or
+            // configuration fails before final request preparation.
+            free_only |= super::free_models::configured(&provider.settings_config);
             // 同账号已被致命失败拉黑：跳过（不占尝试次数，也不动熔断器）
             if provider
                 .failover_account_key()
@@ -688,6 +697,7 @@ impl RequestForwarder {
                     &headers,
                     &extensions,
                     adapter.as_ref(),
+                    &mut free_only,
                 )
                 .await
             {
@@ -707,6 +717,31 @@ impl RequestForwarder {
                     return Ok(result);
                 }
                 Err(e) => {
+                    // Explicit access/safety refusals are terminal before any request
+                    // rectification, model downgrade or account fallback is attempted.
+                    if super::providers::workbuddy_acp::enabled(provider)
+                        || is_explicit_upstream_denial(&e)
+                    {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
+                        let mut status = self.status.write().await;
+                        status.failed_requests += 1;
+                        status.last_error = Some(e.to_string());
+                        if status.total_requests > 0 {
+                            status.success_rate = (status.success_requests as f32
+                                / status.total_requests as f32)
+                                * 100.0;
+                        }
+                        return Err(ForwardError {
+                            error: e,
+                            provider: Some(provider.clone()),
+                        });
+                    }
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
@@ -750,6 +785,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -825,6 +861,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -933,6 +970,7 @@ impl RequestForwarder {
                                         &headers,
                                         &extensions,
                                         adapter.as_ref(),
+                                        &mut free_only,
                                     )
                                     .await
                                 {
@@ -1090,6 +1128,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -1336,10 +1375,11 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        free_only: &mut bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         let result = self
             .forward_attempt(
-                app_type, method, provider, endpoint, body, headers, extensions, adapter,
+                app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
             )
             .await;
         self.router
@@ -1358,6 +1398,7 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        free_only: &mut bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // Re-read the account owner at the output boundary, including cached routes.
         let resolved = self
@@ -1367,6 +1408,22 @@ impl RequestForwarder {
                 ProxyError::AuthError("Service source authentication unavailable".into())
             })?;
         let provider = &resolved;
+        if super::providers::workbuddy_acp::enabled(provider) {
+            // ACP has no verified free-price route. Preserve the request's
+            // free-only policy before opening its session transport.
+            super::free_models::enforce(
+                free_only,
+                body,
+                body,
+                "",
+                super::free_models::configured(&provider.settings_config),
+            )?;
+            return super::providers::workbuddy_acp::forward(
+                app_type, method, provider, endpoint, body,
+            )
+            .await
+            .map(|response| (response, None, None));
+        }
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
@@ -1946,6 +2003,13 @@ impl RequestForwarder {
                 }
             }
         }
+        super::free_models::enforce(
+            free_only,
+            body,
+            &filtered_body,
+            &base_url,
+            super::free_models::configured(&provider.settings_config),
+        )?;
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
             .get("model")
@@ -3018,6 +3082,9 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        if super::providers::workbuddy_acp::enabled(provider) {
+            return ErrorCategory::NonRetryable;
+        }
         // Authentication belongs to the Codex client for an official route.
         // Every retry would reuse the selected account's inbound Authorization
         // header against another card, so no official-route error may fail over.
@@ -3034,6 +3101,7 @@ impl RequestForwarder {
         }
 
         match error {
+            error if is_explicit_upstream_denial(error) => ErrorCategory::NonRetryable,
             // 网络和上游错误：都应该尝试下一个供应商
             ProxyError::Timeout(_) => ErrorCategory::Retryable,
             ProxyError::ForwardFailed(_) => ErrorCategory::Retryable,
@@ -3065,6 +3133,37 @@ impl RequestForwarder {
             _ => ErrorCategory::NonRetryable,
         }
     }
+}
+
+/// Only structured, exact denial categories establish this boundary. Message text
+/// is intentionally ignored: technical failures can quote policy/permission words.
+/// This does not classify successful HTTP responses or opaque error envelopes.
+fn is_explicit_upstream_denial(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError {
+        body: Some(body), ..
+    } = error
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(error) = value.get("error").and_then(Value::as_object) else {
+        return false;
+    };
+    ["type", "code"].into_iter().any(|field| {
+        matches!(
+            error.get(field).and_then(Value::as_str),
+            Some(
+                "permission_error"
+                    | "permission_denied"
+                    | "access_denied"
+                    | "safety_error"
+                    | "content_policy_violation"
+                    | "content_filter"
+            )
+        )
+    })
 }
 
 /// 从 ProxyError 中提取错误消息
@@ -4146,6 +4245,7 @@ mod tests {
                     &headers,
                     &Extensions::new(),
                     &adapter,
+                    &mut false,
                 )
                 .await;
             let first = source.received();
@@ -4228,6 +4328,7 @@ mod tests {
                     &headers,
                     &Extensions::new(),
                     &adapter,
+                    &mut false,
                 )
                 .await;
             assert!(result.is_ok());
@@ -4244,6 +4345,46 @@ mod tests {
                 "fake-gateway-canary"
             );
         }
+    }
+
+    #[test]
+    fn denial_boundary_matches_only_exact_structured_categories() {
+        for marker in [
+            "permission_error",
+            "permission_denied",
+            "access_denied",
+            "safety_error",
+            "content_policy_violation",
+            "content_filter",
+        ] {
+            for field in ["type", "code"] {
+                let mut error = serde_json::Map::new();
+                error.insert(field.into(), json!(marker));
+                assert!(is_explicit_upstream_denial(&ProxyError::UpstreamError {
+                    status: 429,
+                    body: Some(json!({"error":error}).to_string()),
+                }));
+            }
+        }
+        for body in [
+            r#"{"error":{"type":"rate_limit_error","message":"permission_denied safety_error"}}"#,
+            r#"{"error":{"type":"insufficient_quota"}}"#,
+            r#"{"error":{"code":403}}"#,
+            r#"{"error":{"type":"not_permission_error"}}"#,
+            r#"{"error":"safety_error"}"#,
+            "not json",
+        ] {
+            assert!(
+                !is_explicit_upstream_denial(&ProxyError::UpstreamError {
+                    status: 403,
+                    body: Some(body.into()),
+                }),
+                "{body}"
+            );
+        }
+        assert!(!is_explicit_upstream_denial(&ProxyError::AuthError(
+            "permission_denied".into()
+        )));
     }
 
     #[test]

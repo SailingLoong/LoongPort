@@ -36,8 +36,18 @@ fn number(value: &Value, snake: &str, camel: &str) -> Option<f64> {
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && *n >= 0.)
 }
+// The official billing client accepts integer codes and digit-only strings.
+pub(crate) fn response_code(body: &Value) -> Option<i64> {
+    let code = body.get("code")?;
+    code.as_i64().or_else(|| {
+        code.as_str()
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?
+            .parse()
+            .ok()
+    })
+}
 pub(crate) fn preview(body: &Value) -> Result<Vec<Plan>, &'static str> {
-    if body.get("code").and_then(Value::as_i64) != Some(0) {
+    if response_code(body) != Some(0) {
         return Err("rejected");
     }
     let raw = body
@@ -159,9 +169,9 @@ impl Record {
         self.reason = Some("confirmResult".into());
     }
     pub fn apply_reply(&mut self, body: &Value) {
-        let code = body.get("code").and_then(Value::as_i64);
+        let code = response_code(body);
         self.status = match code {
-            Some(0) => Status::Claimed,
+            Some(0) if body.pointer("/data/plan").is_some_and(Value::is_object) => Status::Claimed,
             Some(1003) => Status::Claimed,
             Some(1001 | 1002 | 1004 | 1005 | 3001) => Status::NoClaim,
             Some(3007) => Status::VerificationRequired,

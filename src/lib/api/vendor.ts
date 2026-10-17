@@ -35,7 +35,7 @@ export interface VendorAccountRow {
   canDelete: boolean;
   /**
    * 这一行展开出的接入变体（plan）。单 plan 厂商恒一个元素（DeepSeek / BigModel），
-   * opencode 是 Zen + Go 两个 —— 同 app 下互斥可切，形状对齐 relay 的档位。
+   * opencode 是 Zen / Go / Free —— 同 app 下互斥可切，形状对齐 relay 的档位。
    *
    * 按 plan 算的事实（providerId / isCurrent / userEdited / can*）全在这里；
    * 行级只剩账号级事实（登录态 / key / 删除资格）。
@@ -46,7 +46,7 @@ export interface VendorAccountRow {
 export interface VendorPlanInfo {
   /** plan 稳定标识（= provider id 哈希里的段）。传给 `vendorApi.switch` 的 `plan`。 */
   planId: string;
-  /** 展示名（`opencode Zen` / `opencode Go`）。服务端给定，不翻译。 */
+  /** 展示名（`opencode Zen` / `opencode Go` / `opencode Free`）。服务端给定，不翻译。 */
   planName: string;
   /**
    * 这个 plan 那六条 provider 记录的 id（六个平台共用一个）。

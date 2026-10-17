@@ -39,6 +39,7 @@ pub mod transform_codex_responses_namespace;
 pub mod transform_codex_responses_xai_sanitize;
 pub mod transform_gemini;
 pub mod transform_responses;
+pub(crate) mod workbuddy_acp;
 pub mod xai_oauth_auth;
 
 use crate::app_config::AppType;

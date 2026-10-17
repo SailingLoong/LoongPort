@@ -850,7 +850,9 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                             for event in state.finalize() {
                                 yield Ok(event);
                             }
-                            continue;
+                            // [DONE] is terminal; do not read or emit anything after the
+                            // finalized terminal event（上游 #8281）。
+                            return;
                         }
 
                         let chunk: Value = match serde_json::from_str(&data) {

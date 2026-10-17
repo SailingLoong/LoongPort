@@ -7786,7 +7786,7 @@ impl ProviderService {
         let Some(mut settings) = live_settings else {
             return Ok(database_settings);
         };
-        live::restore_stored_model_catalog(&mut settings, &database_settings);
+        live::restore_stored_local_settings(&mut settings, &database_settings);
         if matches!(app_type, AppType::Codex) {
             // live auth.json 是单槽共享文件；编辑表单的 key 槽位以 provider
             // 自己的 bearer 为准（上游 #6534，收敛在后端命令层做）。

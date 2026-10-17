@@ -55,6 +55,9 @@ const FLAGSHIP: &str = "glm-5.2";
 /// 便宜档。
 const TURBO: &str = "glm-5-turbo";
 
+/// Official free text models: docs.bigmodel.cn/cn/guide/start/model-overview.
+pub(crate) const FREE_TEXT_MODELS: [&str; 2] = ["glm-4.7-flash", "glm-4.5-flash"];
+
 // ─────────────────────── 会话凭据（auth_token 列的形态） ───────────────────────
 
 /// 调用 key/余额 API 所需的三件套，序列化成 JSON 存进 `auth_token` 列。

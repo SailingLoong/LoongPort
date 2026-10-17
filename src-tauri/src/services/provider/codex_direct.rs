@@ -597,7 +597,24 @@ fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
         };
         planned.stamp = None;
     } else {
-        planned.config.route = RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false));
+        // The proxy owns URL/auth; the planned route owns compaction preferences.
+        // Preserve the OpenAI-name compatibility toggle and explicit overrides,
+        // including "unsupported", without forwarding other upstream fields.
+        let mut proxy_table = proxy_route_table(ROUTE_ID, base_url, false);
+        if let RouteWrite::Custom(table) = &planned.config.route {
+            if table.get("name").and_then(Item::as_str) == Some("OpenAI") {
+                proxy_table.insert("name", toml_edit::value("OpenAI"));
+            }
+            if let Some(compaction) = table
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get("remote_compaction"))
+            {
+                let mut capabilities = Table::new();
+                capabilities.insert("remote_compaction", compaction.clone());
+                proxy_table.insert("capabilities", Item::Table(capabilities));
+            }
+        }
+        planned.config.route = RouteWrite::Custom(proxy_table);
         planned.stamp = Some(RouteAuth::Bearer);
         planned.keep_native = true;
     }

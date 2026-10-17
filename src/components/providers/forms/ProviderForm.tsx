@@ -1526,8 +1526,13 @@ function ProviderFormFull({
           ? {}
           : JSON.parse(codexAuth);
         const codexConfigForSave = codexConfig ?? "";
+        // This local policy is absent from the native TOML projection. Preserve
+        // it on edit, together with the free plan's configured wire protocol.
+        const storedFreeOnly = initialData?.settingsConfig?.freeOnly;
         let normalizedCodexConfig =
-          category !== "official" && codexConfigForSave.trim()
+          category !== "official" &&
+          storedFreeOnly !== true &&
+          codexConfigForSave.trim()
             ? setCodexWireApi(codexConfigForSave, "responses")
             : codexConfigForSave;
         // 模型映射与「路由接管」解耦：对所有非官方供应商，填了就持久化
@@ -1556,7 +1561,11 @@ function ProviderFormFull({
           auth: unknown;
           config: string;
           modelCatalog?: { models: CodexCatalogModel[] };
+          freeOnly?: boolean;
         };
+        if (typeof storedFreeOnly === "boolean") {
+          configObj.freeOnly = storedFreeOnly;
+        }
         if (normalizedCatalogModels.length > 0) {
           configObj.modelCatalog = { models: normalizedCatalogModels };
         }

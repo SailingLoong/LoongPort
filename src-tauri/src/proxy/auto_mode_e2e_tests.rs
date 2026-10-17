@@ -20,6 +20,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
+mod pooled_minimax_tests;
+mod workbuddy_acp_tests;
+
 /// 可编程 mock 上游：默认 200，可翻成 500 模拟故障；记录命中数与鉴权头。
 /// `foreign` 开关让 mock 回 OpenAI 形状（模拟换芯转发，供被动监控 E2E）；
 /// `stream` 开关回 Anthropic SSE 形状（供流式首字/用量链路 E2E）；
@@ -28,11 +31,14 @@ use tokio::sync::RwLock;
 struct MockUpstreamState {
     hits: Arc<AtomicUsize>,
     status: Arc<RwLock<u16>>,
+    response_override: Arc<RwLock<Option<Value>>>,
     auth_header: Arc<RwLock<Option<String>>>,
+    api_key_header: Arc<RwLock<Option<String>>>,
     model: Arc<RwLock<Option<String>>>,
     uri: Arc<RwLock<String>>,
     foreign: Arc<RwLock<bool>>,
     stream: Arc<RwLock<bool>>,
+    interrupt_stream: Arc<RwLock<bool>>,
     delay_ms: Arc<std::sync::atomic::AtomicU64>,
     marker: &'static str,
 }
@@ -47,11 +53,14 @@ impl MockUpstream {
         let state = MockUpstreamState {
             hits: Arc::new(AtomicUsize::new(0)),
             status: Arc::new(RwLock::new(200)),
+            response_override: Arc::new(RwLock::new(None)),
             auth_header: Arc::new(RwLock::new(None)),
+            api_key_header: Arc::new(RwLock::new(None)),
             model: Arc::new(RwLock::new(None)),
             uri: Arc::new(RwLock::new(String::new())),
             foreign: Arc::new(RwLock::new(false)),
             stream: Arc::new(RwLock::new(false)),
+            interrupt_stream: Arc::new(RwLock::new(false)),
             delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             marker,
         };
@@ -118,11 +127,18 @@ async fn handle_mock(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    *state.api_key_header.write().await = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let delay_ms = state.delay_ms.load(std::sync::atomic::Ordering::SeqCst);
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
     let status = *state.status.read().await;
+    if let Some(body) = state.response_override.read().await.clone() {
+        return (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
+    }
     if status == 200 {
         if *state.stream.read().await {
             // Anthropic SSE 形状：message_start 立即到（首字锚点），usage 在
@@ -152,10 +168,25 @@ async fn handle_mock(
                 }),
                 json!({ "type": "message_stop" }),
             );
+            let body = if *state.interrupt_stream.read().await {
+                use futures::StreamExt;
+                // Deliver observable output before failing the transport body.
+                let prefix = sse.split("event: message_delta").next().unwrap().to_owned();
+                axum::body::Body::from_stream(
+                    futures::stream::once(async move { Ok::<_, std::io::Error>(prefix) }).chain(
+                        futures::stream::once(async {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            Err::<String, _>(std::io::Error::other("synthetic stream interruption"))
+                        }),
+                    ),
+                )
+            } else {
+                axum::body::Body::from(sse)
+            };
             return axum::http::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/event-stream")
-                .body(axum::body::Body::from(sse))
+                .body(body)
                 .expect("build sse response");
         }
         if *state.foreign.read().await {
@@ -264,6 +295,10 @@ impl E2eFixture {
     /// 两个托管档位（便宜 0.5 / 贵 2.0，均无单价 → 组内按倍率比），
     /// 故障转移开、熔断 1 次失败即开且冷却 0（每条请求都能立即探测恢复）。
     async fn new() -> Self {
+        Self::with_minimax_keys(false).await
+    }
+
+    async fn with_minimax_keys(minimax: bool) -> Self {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("init db"));
         crate::settings::unlock_settings_for_test(db.secrets.clone())
@@ -272,20 +307,33 @@ impl E2eFixture {
         let cheap = MockUpstream::spawn("served-by-cheap").await;
         let expensive = MockUpstream::spawn("served-by-expensive").await;
 
-        let cheap_id = crate::relay::managed::provider_id_for("https://cheap.example", Some(1), 11);
-        let expensive_id =
-            crate::relay::managed::provider_id_for("https://expensive.example", Some(1), 22);
+        let (cheap_id, expensive_id) = if minimax {
+            (
+                "minimax-synthetic-key-a".to_string(),
+                "minimax-synthetic-key-b".to_string(),
+            )
+        } else {
+            (
+                crate::relay::managed::provider_id_for("https://cheap.example", Some(1), 11),
+                crate::relay::managed::provider_id_for("https://expensive.example", Some(1), 22),
+            )
+        };
 
         let tier_provider = |id: &str, name: &str, mock: &MockUpstream, token: &str| {
+            let mut env = json!({
+                "ANTHROPIC_BASE_URL": mock.base_url(),
+                "ANTHROPIC_AUTH_TOKEN": token,
+            });
+            if minimax {
+                // Existing MiniMax Anthropic preset shape; replace only the origin
+                // with loopback and use disposable keys, never a real provider.
+                env["ANTHROPIC_BASE_URL"] = json!(format!("{}/anthropic", mock.base_url()));
+                env["ANTHROPIC_MODEL"] = json!("MiniMax-M2.7");
+            }
             Provider::with_id(
                 id.to_string(),
                 name.to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_BASE_URL": mock.base_url(),
-                        "ANTHROPIC_AUTH_TOKEN": token,
-                    }
-                }),
+                json!({ "env": env }),
                 None,
             )
         };
@@ -416,6 +464,10 @@ async fn response_text(resp: reqwest::Response) -> String {
 
 /// 走真实代理端口的 Claude 流式请求（SSE）。
 async fn send_streaming_message(port: u16, session: &str) -> reqwest::Response {
+    send_streaming_model_message(port, session, "claude-e2e").await
+}
+
+async fn send_streaming_model_message(port: u16, session: &str, model: &str) -> reqwest::Response {
     reqwest::Client::builder()
         .no_proxy()
         .build()
@@ -425,7 +477,7 @@ async fn send_streaming_message(port: u16, session: &str) -> reqwest::Response {
         .header("anthropic-version", "2023-06-01")
         .header("x-claude-code-session-id", session)
         .json(&json!({
-            "model": "claude-e2e",
+            "model": model,
             "max_tokens": 16,
             "stream": true,
             "messages": [{ "role": "user", "content": "hi" }],
@@ -1126,3 +1178,5 @@ async fn passive_anomaly_lands_and_surfaces() {
     assert_eq!(reports.len(), 1, "干净流量不落库，异常报告不被干净流量稀释");
     fx.server.stop().await.expect("stop server");
 }
+
+mod openrouter_main_entry_tests;
