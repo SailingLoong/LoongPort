@@ -1574,6 +1574,16 @@ impl ProxyService {
         let was_taken_over =
             crate::proxy::application_routing::takeover_enabled(&self.db, app.as_str())
                 .map_err(|error| error.to_string())?;
+        // Revoke captured candidates before changing fallback permission. The
+        // original app lock serializes route capture; before_send rejects this
+        // identity without undoing or replaying any already admitted send.
+        if crate::proxy::application_routing::failover_enabled(&self.db, app.as_str())
+            .map_err(|error| error.to_string())?
+            != enabled
+        {
+            self.invalidate_app_requests(app.as_str())
+                .map_err(|error| error.to_string())?;
+        }
         if enabled {
             if let Err(error) = self.set_takeover_for_app_inner(&app, true).await {
                 if modern {
@@ -5092,6 +5102,188 @@ mod tests {
             23456
         );
         assert_app_proxy_configs_unchanged(&db, &configs).await;
+    }
+
+    async fn failover_binding_fixture() -> (
+        Arc<ProxyService>,
+        crate::paperclip::RouteBinding,
+        Vec<Provider>,
+        Value,
+    ) {
+        let db = Arc::new(Database::memory().unwrap());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        for (id, account, balance) in [("first", 1, 0.0), ("second", 2, 10.0)] {
+            let mut provider = Provider::with_id(id.into(), id.into(), json!({}), None);
+            provider.website_url = Some("https://synthetic.invalid".into());
+            provider.meta = Some(ProviderMeta {
+                loongport_account_id: Some(account),
+                ..Default::default()
+            });
+            db.save_provider("codex", &provider).unwrap();
+            crate::relay::balance::upsert_site_balance(
+                &db,
+                &(provider.website_url.clone().unwrap(), account),
+                (
+                    Some(balance),
+                    crate::paperclip::execution::now_ms().unwrap() / 1000,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("codex", "first").unwrap();
+        let ids = vec!["first".into(), "second".into()];
+        crate::proxy::application_routing::set_order(&db, "codex", &ids).unwrap();
+        db.conn.lock().unwrap().execute("UPDATE proxy_config SET enabled=1,auto_failover_enabled=1,pricing_model_source='request',default_cost_multiplier='1' WHERE app_type='codex'", []).unwrap();
+        let source = json!({"openai":{"models":{"gpt-4.1":{"name":"GPT 4.1","cost":{"input":2,"output":8,"cache_read":0.5,"cache_write":2}}}}});
+        crate::services::models_dev::sync_pricing_for_test(db.clone(), &source.to_string())
+            .await
+            .unwrap();
+        let candidates = crate::proxy::provider_router::ProviderRouter::new(db.clone())
+            .select_providers("codex")
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        let route = crate::paperclip::RouteBinding::for_test(
+            db,
+            &service,
+            crate::paperclip::tests::task(),
+            ids,
+        )
+        .unwrap();
+        let body = json!({"model":"gpt-4.1","input":[{"role":"user","content":[{"type":"input_text","text":"synthetic request"}]}],"stream":false,"store":false,"max_output_tokens":32});
+        (service, route, candidates, body)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failover_disable_revokes_unsent_binding_before_backup_account() {
+        let _home = TempHome::new();
+        let (service, route, candidates, body) = failover_binding_fixture().await;
+        let other_identity = service.request_identity("claude").unwrap();
+        let before = {
+            let conn = service.db.conn.lock().unwrap();
+            crate::paperclip::snapshot::snapshot_on_connection(
+                &conn,
+                "codex",
+                "test-owner",
+                route.identity.fingerprint(),
+            )
+            .unwrap()
+        };
+        let error = route
+            .before_send(&service, "codex", &candidates[0], &body)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("balance_insufficient"),
+            "{error}"
+        );
+        assert!(!route.has_sent());
+
+        service.set_failover_for_app("codex", false).await.unwrap();
+
+        let result = route.before_send(&service, "codex", &candidates[1], &body);
+        assert!(
+            matches!(&result, Err(error) if error.to_string().contains("identity_changed")),
+            "disabled failover must reject the previously selected backup: {result:?}"
+        );
+        assert!(!route.has_sent());
+        assert!(route.evidence().is_err());
+        assert!(route.check_route(&service, "codex", &candidates).is_err());
+        assert!(!service
+            .request_identity_is_current("codex", Some(&route.identity))
+            .unwrap());
+        assert!(service
+            .request_identity_is_current("claude", Some(&other_identity))
+            .unwrap());
+        assert_eq!(
+            crate::proxy::application_routing::chain_ids(&service.db, "codex").unwrap(),
+            ["first", "second"]
+        );
+        let current_identity = service.request_identity("codex").unwrap();
+        let after = {
+            let conn = service.db.conn.lock().unwrap();
+            crate::paperclip::snapshot::snapshot_on_connection(
+                &conn,
+                "codex",
+                "test-owner",
+                current_identity.fingerprint(),
+            )
+            .unwrap()
+        };
+        assert_ne!(before["revision"], after["revision"]);
+        let fresh_candidates =
+            crate::proxy::provider_router::ProviderRouter::new(service.db.clone())
+                .select_providers("codex")
+                .await
+                .unwrap();
+        assert_eq!(fresh_candidates.len(), 1);
+        assert_eq!(fresh_candidates[0].id, "first");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failover_disable_waits_for_app_lock_and_preserves_sent_claim() {
+        use std::{future::Future, task::Poll};
+
+        let _home = TempHome::new();
+        let (service, route, candidates, body) = failover_binding_fixture().await;
+        let guard = service.lock_switch_for_app("codex").await;
+        let disable = service.set_failover_for_app("codex", false);
+        tokio::pin!(disable);
+        // Poll the real setter into the held app lock; no scheduling sleeps.
+        futures::future::poll_fn(|cx| {
+            assert!(matches!(disable.as_mut().poll(cx), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        assert!(crate::proxy::application_routing::failover_enabled(&service.db, "codex").unwrap());
+        assert!(service
+            .request_identity_is_current("codex", Some(&route.identity))
+            .unwrap());
+        // Admission wins this ordering. Changing intent later cannot undo or
+        // replay this existing send claim, including via a cloned binding.
+        route
+            .before_send(&service, "codex", &candidates[1], &body)
+            .unwrap();
+        drop(guard);
+        disable.await.unwrap();
+
+        assert!(route.has_sent());
+        assert_eq!(route.evidence().unwrap().provider_id, "second");
+        assert!(!service
+            .request_identity_is_current("codex", Some(&route.identity))
+            .unwrap());
+        assert!(route
+            .clone()
+            .before_send(&service, "codex", &candidates[1], &body)
+            .is_err());
+        assert!(route.has_sent());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failover_disable_unchanged_preserves_current_identity() {
+        let _home = TempHome::new();
+        let (service, _, _, _) = failover_binding_fixture().await;
+        service.set_failover_for_app("codex", false).await.unwrap();
+        let identity = service.request_identity("codex").unwrap();
+        let other_identity = service.request_identity("claude").unwrap();
+
+        service.set_failover_for_app("codex", false).await.unwrap();
+
+        assert!(service
+            .request_identity_is_current("codex", Some(&identity))
+            .unwrap());
+        assert!(service
+            .request_identity_is_current("claude", Some(&other_identity))
+            .unwrap());
     }
 
     #[tokio::test]
