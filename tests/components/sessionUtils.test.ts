@@ -4,6 +4,7 @@ import {
   formatSessionMessagePreview,
   groupSessionsByProviderAndDirectory,
   shouldHideCodexMessageFromToc,
+  getSessionDirectoryGroupKey,
 } from "@/components/sessions/utils";
 import type { SessionMeta } from "@/types";
 
@@ -220,5 +221,38 @@ describe("session utils", () => {
     expect(
       groups[0].directories[0].sessions.map((session) => session.sessionId),
     ).toEqual(["newest", "oldest"]);
+  });
+});
+
+describe("getSessionDirectoryGroupKey Windows case folding", () => {
+  it("merges drive-letter case and slash variants", () => {
+    expect(getSessionDirectoryGroupKey("p1", "D:\\demo")).toBe(
+      getSessionDirectoryGroupKey("p1", "d:/demo/"),
+    );
+    expect(getSessionDirectoryGroupKey("p1", "D:\\demo\\")).toBe(
+      getSessionDirectoryGroupKey("p1", "D:\\demo"),
+    );
+  });
+
+  it("keeps POSIX paths case-sensitive", () => {
+    expect(getSessionDirectoryGroupKey("p1", "/home/user/demo")).not.toBe(
+      getSessionDirectoryGroupKey("p1", "/Home/User/Demo"),
+    );
+    // 尾分隔符仍合并
+    expect(getSessionDirectoryGroupKey("p1", "/home/user/demo/")).toBe(
+      getSessionDirectoryGroupKey("p1", "/home/user/demo"),
+    );
+  });
+
+  it("folds UNC paths case-insensitively", () => {
+    expect(getSessionDirectoryGroupKey("p1", "\\\\Server\\Share\\X")).toBe(
+      getSessionDirectoryGroupKey("p1", "\\\\server\\share\\x"),
+    );
+  });
+
+  it("unknown dir still uses the sentinel", () => {
+    expect(getSessionDirectoryGroupKey("p1", null)).toBe(
+      "p1:__unknown_project_dir__",
+    );
   });
 });
