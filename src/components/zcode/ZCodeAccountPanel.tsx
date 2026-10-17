@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   readZCodeSourcePreference,
   saveZCodeSourcePreference,
@@ -458,11 +464,14 @@ export function ZCodeAccountPanel({
     setNotice(null);
     setNeedsReview(false);
   };
-  useLayoutEffect(() => {
+  const invalidateCurrentIdentity = useCallback(() => {
     identityEpoch.current += 1;
     identityInFlight.current = false;
     setCurrentIdentity(null);
     setIdentityReading(false);
+  }, []);
+  useLayoutEffect(() => {
+    invalidateCurrentIdentity();
     return () => {
       identityEpoch.current += 1;
       identityInFlight.current = false;
@@ -472,24 +481,19 @@ export function ZCodeAccountPanel({
     source.dataRoot,
     source.keyMode,
     context?.contextRevision,
+    invalidateCurrentIdentity,
   ]);
   useEffect(() => {
-    const invalidate = () => {
-      identityEpoch.current += 1;
-      identityInFlight.current = false;
-      setCurrentIdentity(null);
-      setIdentityReading(false);
-    };
     const visibility = () => {
-      if (document.visibilityState !== "visible") invalidate();
+      if (document.visibilityState !== "visible") invalidateCurrentIdentity();
     };
-    window.addEventListener("blur", invalidate);
+    window.addEventListener("blur", invalidateCurrentIdentity);
     document.addEventListener("visibilitychange", visibility);
     return () => {
-      window.removeEventListener("blur", invalidate);
+      window.removeEventListener("blur", invalidateCurrentIdentity);
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, []);
+  }, [invalidateCurrentIdentity]);
   const readCurrentIdentity = async () => {
     if (!context || locked || identityInFlight.current) return;
     const epoch = ++identityEpoch.current;
@@ -740,6 +744,8 @@ export function ZCodeAccountPanel({
           );
           break;
         case "switch":
+          // The previous observation is stale even if the switch reply is lost.
+          invalidateCurrentIdentity();
           result = await zcodeAccountsApi.switch(
             selected.source,
             selected.contextRevision!,

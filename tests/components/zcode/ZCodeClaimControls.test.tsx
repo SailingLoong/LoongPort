@@ -207,6 +207,163 @@ it("keeps backend claim results when an older polling read completes later", asy
   }
 });
 
+it("ignores an older polling failure after a newer operation succeeds", async () => {
+  vi.useFakeTimers();
+  try {
+    const { act } = await import("@testing-library/react");
+    let rejectRead!: (reason: Error) => void;
+    const oldRead = new Promise<ClaimState>((_, reject) => {
+      rejectRead = reject;
+    });
+    vi.mocked(zcodeClaimApi.state)
+      .mockResolvedValueOnce(state)
+      .mockReturnValueOnce(oldRead);
+    render(<ZCodeClaimControls profiles={profiles} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByLabelText("Select Account A"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Check selected" }));
+    await act(async () => {});
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await act(async () => {
+      rejectRead(new Error("synthetic stale read failure"));
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(["success", "failure"] as const)(
+  "keeps the command result when a read started during it ends in %s",
+  async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const { act } = await import("@testing-library/react");
+      let resolveOperation!: (value: ClaimState) => void;
+      let resolveRead!: (value: ClaimState) => void;
+      let rejectRead!: (reason: Error) => void;
+      vi.mocked(zcodeClaimApi.start).mockReturnValueOnce(
+        new Promise<ClaimState>((resolve) => {
+          resolveOperation = resolve;
+        }),
+      );
+      vi.mocked(zcodeClaimApi.state)
+        .mockResolvedValueOnce(state)
+        .mockReturnValueOnce(
+          new Promise<ClaimState>((resolve, reject) => {
+            resolveRead = resolve;
+            rejectRead = reject;
+          }),
+        );
+      render(<ZCodeClaimControls profiles={profiles} />);
+      await act(async () => {});
+      fireEvent.click(screen.getByLabelText("Select Account A"));
+      fireEvent.click(screen.getByRole("button", { name: "Check selected" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      await act(async () => {
+        resolveOperation({ ...state, busy: true });
+      });
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+      await act(async () => {
+        if (outcome === "success") resolveRead(state);
+        else rejectRead(new Error("synthetic stale read failure"));
+      });
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(
+        screen.queryByRole("button", { name: "Cancel" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Check selected" }),
+      ).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("keeps a command failure when a read started during it later succeeds", async () => {
+  vi.useFakeTimers();
+  try {
+    const { act } = await import("@testing-library/react");
+    let rejectOperation!: (reason: Error) => void;
+    let resolveRead!: (value: ClaimState) => void;
+    vi.mocked(zcodeClaimApi.start).mockReturnValueOnce(
+      new Promise<ClaimState>((_, reject) => {
+        rejectOperation = reject;
+      }),
+    );
+    vi.mocked(zcodeClaimApi.state)
+      .mockResolvedValueOnce(state)
+      .mockReturnValueOnce(
+        new Promise<ClaimState>((resolve) => {
+          resolveRead = resolve;
+        }),
+      );
+    render(<ZCodeClaimControls profiles={profiles} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByLabelText("Select Account A"));
+    fireEvent.click(screen.getByRole("button", { name: "Check selected" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    await act(async () => {
+      rejectOperation(new Error("synthetic command failure"));
+    });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () => {
+      resolveRead(state);
+    });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("clears a polling failure when the pending command later succeeds", async () => {
+  vi.useFakeTimers();
+  try {
+    const { act } = await import("@testing-library/react");
+    let resolveOperation!: (value: ClaimState) => void;
+    vi.mocked(zcodeClaimApi.start).mockReturnValueOnce(
+      new Promise<ClaimState>((resolve) => {
+        resolveOperation = resolve;
+      }),
+    );
+    vi.mocked(zcodeClaimApi.state)
+      .mockResolvedValueOnce(state)
+      .mockRejectedValueOnce(new Error("synthetic polling failure"))
+      .mockReturnValueOnce(new Promise<ClaimState>(() => {}));
+    render(<ZCodeClaimControls profiles={profiles} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByLabelText("Select Account A"));
+    fireEvent.click(screen.getByRole("button", { name: "Check selected" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () => {
+      resolveOperation({ ...state, busy: true });
+    });
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it.each([
   ["openOfficialClient", "Open official ZCode, then check again"],
   ["notDue", "Plan is still valid; check after expiry"],
