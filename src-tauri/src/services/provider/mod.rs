@@ -669,7 +669,6 @@ mod tests {
         original_local_app_data: Option<String>,
         original_userprofile: Option<String>,
         original_test_home: Option<String>,
-        #[cfg(target_os = "linux")]
         original_xdg_config_home: Option<std::ffi::OsString>,
     }
 
@@ -681,7 +680,6 @@ mod tests {
             let original_local_app_data = env::var("LOCALAPPDATA").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
             let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-            #[cfg(target_os = "linux")]
             let original_xdg_config_home = env::var_os("XDG_CONFIG_HOME");
 
             env::set_var("HOME", dir.path());
@@ -689,8 +687,7 @@ mod tests {
             env::set_var("LOCALAPPDATA", dir.path().join("AppData").join("Local"));
             env::set_var("USERPROFILE", dir.path());
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-            // Claude Desktop Linux paths follow XDG_CONFIG_HOME; pin them under the temp home.
-            #[cfg(target_os = "linux")]
+            // OpenCode follows XDG_CONFIG_HOME on every host; isolate it with the home.
             env::remove_var("XDG_CONFIG_HOME");
 
             Self {
@@ -700,7 +697,6 @@ mod tests {
                 original_local_app_data,
                 original_userprofile,
                 original_test_home,
-                #[cfg(target_os = "linux")]
                 original_xdg_config_home,
             }
         }
@@ -731,7 +727,6 @@ mod tests {
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
 
-            #[cfg(target_os = "linux")]
             {
                 match &self.original_xdg_config_home {
                     Some(value) => env::set_var("XDG_CONFIG_HOME", value),
@@ -776,29 +771,54 @@ mod tests {
 
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
         let _guard = test_guard();
-        let temp = crate::secrets::testing::tempdir().expect("tempdir");
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-
+        let home = TempHome::new();
         let db = Arc::new(Database::memory().expect("in-memory database"));
         crate::settings::unlock_settings_for_test(db.secrets.clone())
             .expect("unlock isolated settings");
         let state = AppState::new(db).unwrap();
-        let result = test(&state, temp.path());
-
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        let result = test(&state, home.dir.path());
+        drop(home);
         crate::settings::reload_settings().expect("restore settings after test");
-
         result
+    }
+
+    #[test]
+    #[serial]
+    fn test_home_restores_inherited_xdg_after_return_and_panic() {
+        let outer = TempHome::new();
+        let inherited = outer.dir.path().join("synthetic-host-config");
+        env::set_var("XDG_CONFIG_HOME", &inherited);
+        let old_home = env::var_os("HOME");
+        let old_test_home = env::var_os("CC_SWITCH_TEST_HOME");
+        with_test_home(|_, home| {
+            assert!(env::var_os("XDG_CONFIG_HOME").is_none());
+            assert_eq!(
+                crate::opencode_config::get_opencode_dir(),
+                home.join(".config/opencode")
+            );
+        });
+        assert_eq!(
+            env::var_os("XDG_CONFIG_HOME"),
+            Some(inherited.clone().into_os_string())
+        );
+        let failure = std::panic::catch_unwind(|| {
+            with_test_home(|_, _| {
+                assert!(env::var_os("XDG_CONFIG_HOME").is_none());
+                panic!("synthetic fixture panic");
+            })
+        })
+        .unwrap_err();
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"synthetic fixture panic")
+        );
+        assert_eq!(
+            env::var_os("XDG_CONFIG_HOME"),
+            Some(inherited.into_os_string())
+        );
+        assert_eq!(env::var_os("HOME"), old_home);
+        assert_eq!(env::var_os("CC_SWITCH_TEST_HOME"), old_test_home);
+        crate::settings::reload_settings().unwrap();
     }
 
     fn codex_settings(base_url: &str, api_key: &str) -> Value {
