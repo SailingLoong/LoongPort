@@ -1042,11 +1042,15 @@ fn strip_injected_kimi_for_coding_context_defaults(settings: &mut Value, provide
     }
 }
 
-/// Native settings are a lossy projection of the stored model mappings.
-/// Use this when reading that projection for editing or switch-away backfill.
-pub(super) fn restore_stored_model_catalog(settings: &mut Value, stored: &Value) {
-    if let (Some(catalog), Some(target)) = (stored.get("modelCatalog"), settings.as_object_mut()) {
-        target.insert("modelCatalog".to_string(), catalog.clone());
+/// Native settings omit local catalogs and routing policy. Restore only these
+/// stored facts when reading that projection for editing or switch-away backfill.
+pub(super) fn restore_stored_local_settings(settings: &mut Value, stored: &Value) {
+    if let Some(target) = settings.as_object_mut() {
+        for key in ["modelCatalog", "freeOnly"] {
+            if let Some(value) = stored.get(key) {
+                target.insert(key.to_owned(), value.clone());
+            }
+        }
     }
 }
 
@@ -1055,7 +1059,7 @@ fn restore_live_settings_for_provider_backfill(
     provider: &Provider,
     mut live_settings: Value,
 ) -> Value {
-    restore_stored_model_catalog(&mut live_settings, &provider.settings_config);
+    restore_stored_local_settings(&mut live_settings, &provider.settings_config);
     if matches!(app_type, AppType::Claude) {
         let mut settings = live_settings;
         strip_injected_codex_oauth_context_defaults(&mut settings, provider);
@@ -3553,6 +3557,36 @@ base_url = "https://a.example/v1"
                 app.as_str()
             );
             assert_eq!(result.pointer("/env/USER_SETTING"), Some(&json!("keep")));
+        }
+    }
+
+    #[test]
+    fn free_only_policy_survives_native_edit_and_switch_backfill() {
+        for enabled in [true, false] {
+            let provider = Provider::with_id(
+                "synthetic-free".into(),
+                "Synthetic".into(),
+                json!({"freeOnly":enabled,"auth":{"OPENAI_API_KEY":"SYNTHETIC"},"config":"model = \"alias\"\n","modelCatalog":{"models":[{"model":"alias"}]}}),
+                None,
+            );
+            let native =
+                json!({"auth":{"OPENAI_API_KEY":"SYNTHETIC"},"config":"model = \"alias\"\n"});
+            let mut edit = native.clone();
+            restore_stored_local_settings(&mut edit, &provider.settings_config);
+            assert_eq!(
+                edit["freeOnly"], enabled,
+                "edit seed must retain the stored policy"
+            );
+            let restored =
+                restore_live_settings_for_provider_backfill(&AppType::Codex, &provider, native);
+            assert_eq!(
+                restored["freeOnly"], enabled,
+                "switch backfill must retain the stored policy"
+            );
+            assert_eq!(
+                restored["modelCatalog"],
+                provider.settings_config["modelCatalog"]
+            );
         }
     }
 

@@ -554,6 +554,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qoder_chat_route_rejects_free_intent_before_launching_worker() {
+        use tower::ServiceExt;
+        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("worker-started");
+        let worker = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker,
+            format!(
+                "import {{ writeFileSync }} from 'node:fs'; writeFileSync({}, 'started');",
+                serde_json::to_string(&marker).unwrap()
+            ),
+        )
+        .unwrap();
+        let runtime = super::super::qoder_host::HostConfig {
+            node: std::env::var_os("QODER_HOST_NODE")
+                .unwrap_or_else(|| "node".into())
+                .into(),
+            worker,
+            sdk_root: None,
+        };
+        let mut failures = Vec::new();
+        for free_only in [false, true] {
+            let db = Arc::new(Database::memory().unwrap());
+            let mut provider = Provider::with_id(
+                "qoder-free-policy-fixture".into(),
+                "Qoder free policy fixture".into(),
+                // An HTTP free origin cannot certify the separate SDK transport.
+                json!({"freeOnly":free_only,"base_url":"https://openrouter.ai/api/v1","auth":{"OPENAI_API_KEY":"synthetic:never-used"}}),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("qoder_sdk".into()),
+                ..Default::default()
+            });
+            db.save_provider("codex", &provider).unwrap();
+            db.set_current_provider("codex", &provider.id).unwrap();
+            let proxy = ProxyServer::new(
+                ProxyConfig::default(),
+                db,
+                #[cfg(feature = "gui")]
+                None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+            );
+            let router = proxy.build_router().layer(axum::Extension(runtime.clone()));
+            let models: Vec<&str> = if free_only {
+                vec!["fixture"]
+            } else {
+                ["openrouter/free", "vendor/model:free"]
+                    .into_iter()
+                    .chain(crate::vendor::opencode::FREE_CHAT_MODELS.iter().copied())
+                    .collect()
+            };
+            for model in models {
+                for stream in [false, true] {
+                    let body = json!({"model":model,"stream":stream,"messages":[{"role":"user","content":"synthetic, never sent"}]});
+                    let request = axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap();
+                    let response = router.clone().oneshot(request).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                    if status != StatusCode::BAD_REQUEST
+                        || !value["error"]["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("Free-only route unavailable"))
+                    {
+                        failures.push(format!(
+                            "freeOnly={free_only}, model={model}, stream={stream}: {status}, {}",
+                            String::from_utf8_lossy(&bytes)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "worker launched: {}; {}",
+            marker.exists(),
+            failures.join("\n")
+        );
+        assert!(
+            !marker.exists(),
+            "free requests must not launch the SDK worker"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires official SDK/runtime provisioned in isolated application data root"]
     async fn qoder_real_runtime_http_admission_ignores_payload_paths() {
         use tower::ServiceExt;

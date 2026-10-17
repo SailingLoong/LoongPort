@@ -563,6 +563,11 @@ impl RequestForwarder {
             provider: None,
         })?;
         let app_type_str = app_type.as_str();
+        // One request owns this intent across all providers and rectifier retries.
+        let mut free_only = body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(crate::services::model_fetch::is_reserved_free_model);
 
         if providers.is_empty() {
             return Err(ForwardError {
@@ -586,6 +591,9 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商
         for provider in providers.iter() {
+            // Preserve this candidate's explicit intent even when admission or
+            // configuration fails before final request preparation.
+            free_only |= super::free_models::configured(&provider.settings_config);
             // 同账号已被致命失败拉黑：跳过（不占尝试次数，也不动熔断器）
             if provider
                 .failover_account_key()
@@ -689,6 +697,7 @@ impl RequestForwarder {
                     &headers,
                     &extensions,
                     adapter.as_ref(),
+                    &mut free_only,
                 )
                 .await
             {
@@ -774,6 +783,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -849,6 +859,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -957,6 +968,7 @@ impl RequestForwarder {
                                         &headers,
                                         &extensions,
                                         adapter.as_ref(),
+                                        &mut free_only,
                                     )
                                     .await
                                 {
@@ -1114,6 +1126,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    &mut free_only,
                                 )
                                 .await
                             {
@@ -1360,10 +1373,11 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        free_only: &mut bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         let result = self
             .forward_attempt(
-                app_type, method, provider, endpoint, body, headers, extensions, adapter,
+                app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
             )
             .await;
         self.router
@@ -1382,6 +1396,7 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        free_only: &mut bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // Re-read the account owner at the output boundary, including cached routes.
         let resolved = self
@@ -1970,6 +1985,13 @@ impl RequestForwarder {
                 }
             }
         }
+        super::free_models::enforce(
+            free_only,
+            body,
+            &filtered_body,
+            &base_url,
+            super::free_models::configured(&provider.settings_config),
+        )?;
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
             .get("model")
@@ -4202,6 +4224,7 @@ mod tests {
                     &headers,
                     &Extensions::new(),
                     &adapter,
+                    &mut false,
                 )
                 .await;
             let first = source.received();
@@ -4284,6 +4307,7 @@ mod tests {
                     &headers,
                     &Extensions::new(),
                     &adapter,
+                    &mut false,
                 )
                 .await;
             assert!(result.is_ok());

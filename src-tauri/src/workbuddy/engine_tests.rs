@@ -559,3 +559,309 @@ async fn account_isolation_foreign_vault_id_is_rejected_before_any_request_or_wr
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+type BatchResponse = (
+    Domain,
+    &'static str,
+    &'static str,
+    Endpoint,
+    Result<Value, Failure>,
+);
+struct BatchFake {
+    queue: Mutex<VecDeque<BatchResponse>>,
+    calls: Mutex<Vec<(Domain, String, Endpoint)>>,
+    block_claim: std::sync::atomic::AtomicBool,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+impl BatchFake {
+    fn new(queue: Vec<BatchResponse>, block: bool) -> Self {
+        Self {
+            queue: Mutex::new(queue.into()),
+            calls: Mutex::new(vec![]),
+            block_claim: std::sync::atomic::AtomicBool::new(block),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+impl Transport for BatchFake {
+    fn request<'a>(
+        &'a self,
+        endpoint: Endpoint,
+        account: Option<&'a Account>,
+        _state: Option<&'a str>,
+        _now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+        Box::pin(async move {
+            let selected = account.expect("claim requires an account");
+            let (domain, uid, token, expected, result) = self
+                .queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected batch request");
+            assert_eq!(selected.domain, domain);
+            assert_eq!(selected.uid, uid);
+            assert_eq!(selected.token, token);
+            assert_eq!(endpoint, expected);
+            self.calls
+                .lock()
+                .unwrap()
+                .push((domain, uid.into(), endpoint));
+            if endpoint == Endpoint::Claim
+                && self
+                    .block_claim
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            result
+        })
+    }
+}
+fn batch_claim_responses(
+    domain: Domain,
+    uid: &'static str,
+    token: &'static str,
+    balance: f64,
+) -> Vec<BatchResponse> {
+    let mut queue = vec![status(false)];
+    queue.extend(resource(balance));
+    queue.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
+    queue.push(status(true));
+    queue.extend(resource(balance + 20.0));
+    queue
+        .into_iter()
+        .map(|(e, result)| (domain, uid, token, e, result))
+        .collect()
+}
+fn batch_a() -> Vec<BatchResponse> {
+    batch_claim_responses(Domain::CodeBuddy, "same-uid", "SYNTHETIC_CODE_A", 10.0)
+}
+fn batch_b() -> Vec<BatchResponse> {
+    batch_claim_responses(Domain::WorkBuddy, "same-uid", "SYNTHETIC_WORK_B", 20.0)
+}
+fn batch_c() -> Vec<BatchResponse> {
+    batch_claim_responses(Domain::CodeBuddy, "other-uid", "SYNTHETIC_CODE_C", 30.0)
+}
+
+#[tokio::test]
+async fn batch_claims_only_backend_eligible_accounts_once_and_keeps_credentials_isolated() {
+    for skipped in [
+        ClaimState::Claimed,
+        ClaimState::AlreadyClaimed,
+        ClaimState::Unavailable,
+        ClaimState::NeedsVerification,
+    ] {
+        let (session, ids) = account_isolation_fixture();
+        let binding = store::binding(&session).unwrap();
+        let mut rows = store::load(&session, &binding).unwrap();
+        rows[1].claim_day = today(NOW);
+        rows[1].claim_state = skipped;
+        store::save(&session, &binding, rows).unwrap();
+        let mut queue = batch_a();
+        queue.extend(batch_c());
+        let transport = BatchFake::new(queue, false);
+        let engine = Engine {
+            session: &session,
+            transport: &transport,
+            clock: &super::clock::FixedClock(NOW),
+        };
+        let results = engine.claim_all().await.unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.account.id.clone())
+                .collect::<Vec<_>>(),
+            vec![ids[0].clone(), ids[2].clone()]
+        );
+        assert!(results.iter().all(|r| r.error.is_none()
+            && r.account.claim_state == ClaimState::Claimed
+            && r.account.credited == Some(20.0)));
+        assert!(engine.claim_all().await.unwrap().is_empty());
+        assert!(transport.queue.lock().unwrap().is_empty());
+        let dto = serde_json::to_string(&results).unwrap();
+        assert!(!dto.contains("SYNTHETIC_") && !dto.contains("same-uid"));
+    }
+}
+
+#[tokio::test]
+async fn batch_verification_failure_does_not_submit_or_stop_other_accounts() {
+    let (session, ids) = account_isolation_fixture();
+    let mut queue = vec![(
+        Domain::CodeBuddy,
+        "same-uid",
+        "SYNTHETIC_CODE_A",
+        Endpoint::Status,
+        Err(Failure::NeedsVerification),
+    )];
+    queue.extend(batch_b());
+    queue.push((
+        Domain::CodeBuddy,
+        "other-uid",
+        "SYNTHETIC_CODE_C",
+        Endpoint::Status,
+        Ok(json!({"code":1002})),
+    ));
+    let transport = BatchFake::new(queue, false);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let results = engine.claim_all().await.unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| r.account.id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(
+        results[0].account.claim_state,
+        ClaimState::NeedsVerification
+    );
+    assert_eq!(results[1].account.claim_state, ClaimState::Claimed);
+    assert_eq!(results[2].account.claim_state, ClaimState::Unavailable);
+    assert_eq!(
+        transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.2 == Endpoint::Claim)
+            .count(),
+        1
+    );
+    assert!(engine.claim_all().await.unwrap().is_empty());
+    assert!(transport.queue.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn batch_cancellation_keeps_pending_and_next_explicit_batch_reconciles_before_retry() {
+    let (session, ids) = account_isolation_fixture();
+    let mut initial = batch_a();
+    initial.truncate(5);
+    let blocked = BatchFake::new(initial, true);
+    let engine = Engine {
+        session: &session,
+        transport: &blocked,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut operation = Box::pin(engine.claim_all());
+    tokio::select! { _ = &mut operation => panic!("batch must be in flight"), _ = blocked.started.notified() => {} }
+    assert!(matches!(engine.claim_all().await, Err(Failure::Busy)));
+    assert!(matches!(engine.claim(&ids[0]).await, Err(Failure::Busy)));
+    drop(operation);
+    let binding = store::binding(&session).unwrap();
+    assert!(store::load(&session, &binding).unwrap()[0]
+        .pending
+        .is_some());
+    let mut recovery = vec![status(false)];
+    recovery.extend(resource(10.0));
+    let mut queue: Vec<_> = recovery
+        .into_iter()
+        .map(|(e, r)| (Domain::CodeBuddy, "same-uid", "SYNTHETIC_CODE_A", e, r))
+        .collect();
+    queue.extend(batch_b());
+    queue.extend(batch_c());
+    queue.extend(batch_a());
+    let transport = BatchFake::new(queue, false);
+    let restarted = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let results = restarted.claim_all().await.unwrap();
+    assert_eq!(results[0].account.claim_state, ClaimState::Available);
+    assert!(results[0].error.is_none());
+    assert!(!transport
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.0 == Domain::CodeBuddy && c.1 == "same-uid" && c.2 == Endpoint::Claim));
+    let retried = restarted.claim_all().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].account.id, ids[0]);
+    assert_eq!(retried[0].account.claim_state, ClaimState::Claimed);
+    assert!(transport.queue.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn batch_busy_account_is_reported_while_other_accounts_finish_and_next_batch_recovers() {
+    let (session, ids) = account_isolation_fixture();
+    let mut queue = batch_a();
+    queue.extend(batch_c());
+    queue.extend(batch_b());
+    let transport = BatchFake::new(queue, true);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut batch = Box::pin(engine.claim_all());
+    tokio::select! { _ = &mut batch => panic!("batch must be in flight"), _ = transport.started.notified() => {} }
+    let mut manual = Box::pin(engine.claim(&ids[1]));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(manual.as_mut().poll(&mut context).is_pending());
+    transport.release.notify_one();
+    assert!(batch.as_mut().poll(&mut context).is_pending());
+    drop(manual);
+    let results = batch.await.unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[1].error, Some(Failure::Busy));
+    assert_eq!(results[1].account.id, ids[1]);
+    assert_eq!(results[0].account.claim_state, ClaimState::Claimed);
+    assert_eq!(results[2].account.claim_state, ClaimState::Claimed);
+    let retry = engine.claim_all().await.unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].account.id, ids[1]);
+    assert_eq!(retry[0].account.claim_state, ClaimState::Claimed);
+    assert!(transport.queue.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn batch_crossing_cn_midnight_stops_before_claiming_remaining_accounts() {
+    let (session, _) = account_isolation_fixture();
+    let before = 1_800_028_799_000;
+    let clock = MovingClock(std::sync::atomic::AtomicI64::new(before));
+    let transport = CrossMidnight {
+        inner: Fake::new(vec![status(false)]),
+        clock: &clock,
+        change_at: Endpoint::Status,
+        to: before + 2000,
+    };
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &clock,
+    };
+    let results = engine.claim_all().await.unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].account.claim_state, ClaimState::Unconfirmed);
+    assert!(results[1..]
+        .iter()
+        .all(|r| r.error == Some(Failure::Unconfirmed)));
+    assert!(!transport
+        .inner
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&Endpoint::Claim));
+}
+
+#[tokio::test]
+async fn batch_empty_vault_has_no_network_effects() {
+    let session = SecretSession::ephemeral().unwrap();
+    let transport = Fake::new(vec![]);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert!(engine.claim_all().await.unwrap().is_empty());
+    assert!(transport.calls.lock().unwrap().is_empty());
+}

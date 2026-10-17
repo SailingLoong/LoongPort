@@ -64,7 +64,7 @@ fn template(
     let (base, model) = vendor::config_for(vendor, plan.id_segment, app).ok_or_else(invalid)?;
     let style = vendor::plan_style(vendor, plan.id_segment);
     let catalog = vendor::catalog_models(vendor, plan.id_segment);
-    let settings = provider_config::settings_config_with_roles_and_models(
+    let mut settings = provider_config::settings_config_with_roles_and_models(
         app,
         "",
         plan.display_name,
@@ -75,6 +75,7 @@ fn template(
         style,
     )
     .ok_or_else(invalid)?;
+    vendor::apply_plan_policy(vendor, plan.id_segment, &mut settings);
     let mut provider = Provider::with_id(
         vendor::provision::provider_id_for(plan.id_segment, account),
         plan.display_name.into(),
@@ -718,6 +719,18 @@ mod tests {
             for plan in vendor::plans(vendor) {
                 let source = template(vendor, account, plan, &AppType::Codex).unwrap();
                 db.save_provider("codex", &source).unwrap();
+                if vendor::is_free_plan(vendor, plan.id_segment) {
+                    // Chat-only plans must not gain an unverified Messages binding.
+                    assert!(
+                        vendor::config_for(vendor, plan.id_segment, &AppType::Claude).is_none()
+                    );
+                    assert!(bind_vendor_source(&db, &source.id, &AppType::Claude).is_err());
+                    assert!(db
+                        .get_provider_by_id(&source.id, "claude")
+                        .unwrap()
+                        .is_none());
+                    continue;
+                }
                 assert!(bind_vendor_source(&db, &source.id, &AppType::Claude).unwrap());
                 let row = db
                     .get_provider_by_id(&source.id, "claude")

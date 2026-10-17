@@ -406,7 +406,7 @@ async fn one(
     let plans = match super::claim::preview(&raw) {
         Ok(plans) => plans,
         Err(_) => {
-            if raw.get("code").and_then(serde_json::Value::as_i64) == Some(401) {
+            if matches!(super::claim::response_code(&raw), Some(401 | 403)) {
                 r.status = Status::LoginExpired;
             } else {
                 r.status = Status::Unknown;
@@ -450,65 +450,106 @@ async fn one(
     if preview_only {
         return Ok(());
     }
-    let cfg = match client
-        .request(request(p, Endpoint::Config), &checked)
-        .await
-        .and_then(|value| super::claim_protocol::captcha_config(&value))
-    {
-        Ok(cfg) if cfg.enabled => cfg,
-        Err(OfficialError::Unauthorized) => {
-            r.status = Status::LoginExpired;
-            r.reason = Some("loginExpired".into());
-            record(db, p, &r).await?;
-            return Ok(());
-        }
-        _ => {
-            r.status = Status::VerificationRequired;
-            r.reason = Some("captchaUnavailable".into());
-            record(db, p, &r).await?;
-            return Ok(());
-        }
-    };
-    let input = await_captcha(app, db.clone(), p, lease, automatic, cfg).await;
-    let (param, region) = match input {
-        Ok(input) => input,
-        Err(_) => {
-            r.status = if lease.cancelled() {
-                Status::Cancelled
-            } else {
-                Status::VerificationRequired
-            };
-            record(db, p, &r).await?;
-            return Ok(());
-        }
-    };
-    checked().map_err(|_| "cancelled")?;
-    // Publish before the only POST. Failure to save prevents sending the request.
-    r.mark_submitted();
-    record(db.clone(), p, &r).await?;
     let mut req = request(p, Endpoint::Claim);
     req.plan = r.plan_id.clone();
-    req.captcha = Some(param);
-    req.region = Some(region);
-    match client.request(req, &checked).await {
-        Ok(reply) => r.apply_reply(&reply),
-        Err(OfficialError::Unauthorized) => r.status = Status::LoginExpired,
-        Err(_) => {
-            r.status = Status::ResultPending;
-            r.reason = Some("confirmResult".into());
-        }
-    }
-    if r.status == Status::ResultPending {
-        if let Ok(value) = client
-            .request(request(p, Endpoint::Balance), &checked)
-            .await
-            .and_then(data)
-        {
-            r.reconcile(&value);
-        }
-    }
-    record(db, p, &r).await
+    submit_claim(
+        &client,
+        req,
+        &mut r,
+        &checked,
+        |r| {
+            let db = db.clone();
+            async move { record(db, p, &r).await }
+        },
+        |cfg| {
+            let db = db.clone();
+            async move { await_captcha(app, db, p, lease, automatic, cfg).await }
+        },
+    )
+    .await
 }
+
+// The official client sends no verification headers by default. A confirmed
+// 3007 rejection alone admits the existing human verification path, once.
+async fn submit_claim<T, P, PF, C, CF>(
+    client: &Client<T>,
+    mut req: Request,
+    r: &mut Record,
+    checked: &super::official::RequestCheck<'_>,
+    mut persist: P,
+    mut captcha: C,
+) -> Result<(), &'static str>
+where
+    T: super::claim_protocol::Transport,
+    P: FnMut(Record) -> PF,
+    PF: std::future::Future<Output = Result<(), &'static str>> + Send,
+    C: FnMut(CaptchaConfig) -> CF,
+    CF: std::future::Future<Output = Result<(SecretValue, String), &'static str>> + Send,
+{
+    if !r.may_submit() {
+        return Err("confirmResult");
+    }
+    let mut read = req.clone();
+    read.plan = None;
+    read.captcha = None;
+    read.region = None;
+    for attempt in 0..2 {
+        checked().map_err(|_| "cancelled")?;
+        r.mark_submitted();
+        // Failure to durably publish pending prevents either POST.
+        persist(r.clone()).await?;
+        match client.request(req.clone(), checked).await {
+            Ok(reply) => r.apply_reply(&reply),
+            Err(OfficialError::Unauthorized) => r.status = Status::LoginExpired,
+            Err(_) => {
+                r.status = Status::ResultPending;
+                r.reason = Some("confirmResult".into());
+            }
+        }
+        if r.status == Status::VerificationRequired && attempt == 0 {
+            persist(r.clone()).await?;
+            read.endpoint = Endpoint::Config;
+            let cfg = match client
+                .request(read.clone(), checked)
+                .await
+                .and_then(|v| super::claim_protocol::captcha_config(&v))
+            {
+                Ok(cfg) if cfg.enabled => cfg,
+                Err(OfficialError::Unauthorized) => {
+                    r.status = Status::LoginExpired;
+                    r.reason = Some("loginExpired".into());
+                    return persist(r.clone()).await;
+                }
+                _ => {
+                    r.reason = Some("captchaUnavailable".into());
+                    return persist(r.clone()).await;
+                }
+            };
+            match captcha(cfg).await {
+                Ok((param, region)) => {
+                    req.captcha = Some(param);
+                    req.region = Some(region);
+                }
+                Err(_) => {
+                    if checked().is_err() {
+                        r.status = Status::Cancelled;
+                    }
+                    return persist(r.clone()).await;
+                }
+            }
+            continue;
+        }
+        if r.status == Status::ResultPending {
+            read.endpoint = Endpoint::Balance;
+            if let Ok(balance) = client.request(read.clone(), checked).await.and_then(data) {
+                r.reconcile(&balance);
+            }
+        }
+        return persist(r.clone()).await;
+    }
+    unreachable!("the verified attempt always returns")
+}
+
 fn failure(r: &mut Record, error: OfficialError) {
     r.status = if error == OfficialError::Unauthorized {
         Status::LoginExpired
@@ -934,6 +975,10 @@ mod tests {
         assert_eq!(INTERVAL, Duration::from_secs(600));
     }
 }
+
+#[cfg(test)]
+#[path = "claim_optional_tests.rs"]
+mod optional_tests;
 
 #[cfg(feature = "test-hooks")]
 #[path = "claim_runtime_test_support.rs"]

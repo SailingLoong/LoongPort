@@ -1,6 +1,79 @@
 //! Current-main actual HTTP ingress; synthetic loopback only.
 use super::*;
 use futures::StreamExt;
+#[tokio::test]
+#[serial]
+async fn later_free_candidate_does_not_reclassify_an_unrelated_paid_request() {
+    let fx = E2eFixture::new().await;
+    let mut provider = fx
+        .db
+        .get_provider_by_id(&fx.expensive_id, "claude")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["freeOnly"] = json!(true);
+    fx.db.save_provider("claude", &provider).unwrap();
+    let response = send_model_message(fx.port, "synthetic-paid-first", "alias").await;
+    let status = response.status();
+    let _ = response.bytes().await;
+    fx.server.stop().await.unwrap();
+    assert!(status.is_success());
+    assert_eq!(fx.cheap.hits(), 1);
+    assert_eq!(fx.expensive.hits(), 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn free_review_configured_intent_survives_an_early_config_failure() {
+    let fx = E2eFixture::new().await;
+    let mut provider = fx
+        .db
+        .get_provider_by_id(&fx.cheap_id, "claude")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["freeOnly"] = json!(true);
+    provider.settings_config["env"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ANTHROPIC_BASE_URL");
+    fx.db.save_provider("claude", &provider).unwrap();
+    let response = send_model_message(fx.port, "synthetic-free-early", "alias").await;
+    let status = response.status();
+    let _ = response.bytes().await;
+    fx.server.stop().await.unwrap();
+    assert_eq!(fx.cheap.hits(), 0);
+    assert_eq!(
+        fx.expensive.hits(),
+        0,
+        "configured free request reached paid fallback after a config failure"
+    );
+    assert!(!status.is_success());
+}
+
+#[tokio::test]
+#[serial]
+async fn free_model_intent_never_reaches_a_paid_or_unverified_fallback() {
+    let fx = E2eFixture::new().await;
+    let response = reqwest::Client::builder().no_proxy().build().unwrap()
+        .post(format!("http://127.0.0.1:{}/v1/messages",fx.port))
+        .header("x-api-key","synthetic-client")
+        .header("anthropic-version","2023-06-01")
+        .json(&json!({"model":"openrouter/free","max_tokens":16,"messages":[{"role":"user","content":"synthetic"}]}))
+        .send().await.unwrap();
+    let status = response.status();
+    let _ = response.bytes().await;
+    fx.server.stop().await.unwrap();
+    assert_eq!(
+        fx.cheap.hits(),
+        0,
+        "free request reached an unverified paid provider"
+    );
+    assert_eq!(
+        fx.expensive.hits(),
+        0,
+        "free request fell back to a paid provider"
+    );
+    assert!(!status.is_success());
+}
 
 async fn collect(response: reqwest::Response) -> String {
     let mut stream = response.bytes_stream();

@@ -327,6 +327,7 @@ fn frontend_commands_and_claim_states_match_backend_contract() {
         "refresh_workbuddy_account",
         "refresh_all_workbuddy_accounts",
         "claim_workbuddy_today",
+        "claim_all_workbuddy_today",
         "begin_workbuddy_authorization",
         "finish_workbuddy_authorization",
     ] {
@@ -343,5 +344,15 @@ fn frontend_commands_and_claim_states_match_backend_contract() {
         ClaimState::NeedsVerification,
     ] {
         assert!(api.contains(&serde_json::to_string(&state).unwrap()));
+    }
+    for error in [
+        super::model::Failure::Unconfirmed,
+        super::model::Failure::NeedsVerification,
+        super::model::Failure::UnsupportedContext,
+        super::model::Failure::StorageUnavailable,
+        super::model::Failure::Busy,
+        super::model::Failure::ExpiredAuthorization,
+    ] {
+        assert!(api.contains(&serde_json::to_string(&error).unwrap()));
     }
 }

@@ -26,10 +26,12 @@ export function ModelDropdown({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [freeOnly, setFreeOnly] = useState(false);
 
   // Group models by vendor; missing ownedBy falls back to "Other"
   const grouped: Record<string, FetchedModel[]> = {};
   for (const model of models) {
+    if (freeOnly && model.isFree !== true) continue;
     const vendor = model.ownedBy || "Other";
     if (!grouped[vendor]) grouped[vendor] = [];
     grouped[vendor].push(model);
@@ -66,6 +68,17 @@ export function ModelDropdown({
               defaultValue: "Search models...",
             })}
           />
+          {(freeOnly || models.some((model) => model.isFree != null)) && (
+            <Button
+              variant={freeOnly ? "secondary" : "ghost"}
+              size="sm"
+              aria-pressed={freeOnly}
+              className="m-1"
+              onClick={() => setFreeOnly((selected) => !selected)}
+            >
+              {t("providerForm.freeOnly")}
+            </Button>
+          )}
           <CommandList className="max-h-64">
             <CommandEmpty>
               {t("providerForm.searchModelEmpty", {
@@ -87,6 +100,11 @@ export function ModelDropdown({
                     }}
                   >
                     {m.id}
+                    {m.isFree === true && (
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        {t("providerForm.freeModel")}
+                      </span>
+                    )}
                   </CommandItem>
                 ))}
               </CommandGroup>
