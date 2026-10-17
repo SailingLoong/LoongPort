@@ -18,6 +18,9 @@ impl Fixture {
         Database::create_tables_on_conn(&conn).unwrap();
         Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         database::loongport_schema::apply(&conn).unwrap();
+        // This fixture represents the deployed authenticated v24 source, before
+        // native task bindings existed. The current-v25 cases are separate.
+        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
         database::vault::stamp(&conn, &vault).unwrap();
         conn.execute(
             "INSERT INTO settings(key,value) VALUES ('synthetic-upgrade','checkpoint-canary')",
@@ -471,10 +474,20 @@ fn source17_runtime_keeps_legacy_owner_without_forcing_upgrade() {
 
 #[test]
 #[serial_test::serial]
-fn source17_database_prepare_preserves_the_existing_schema() {
+fn source17_database_prepare_preserves_current_loongport_schema() {
     let _home = crate::secrets::testing::TestHome::new().unwrap();
     let f = Fixture::new();
     let path = f.root.join(crate::config::DB_FILE_NAME);
+    // This is the no-op current-schema preparation regression. Historical v24
+    // migration and active-v24 checkpoint immutability have separate tests.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        database::loongport_schema::apply(&conn).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            25
+        );
+    }
     let before = super::review_tests::snapshot(f._temporary.path());
     let connection = database::vault::prepare(&path, &f.vault).unwrap();
     assert_eq!(Database::get_user_version(&connection).unwrap(), 17);

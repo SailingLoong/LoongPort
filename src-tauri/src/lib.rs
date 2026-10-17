@@ -34,6 +34,7 @@ pub mod integration_test_support;
 mod lightweight;
 #[cfg(all(target_os = "linux", feature = "gui"))]
 mod linux_fix;
+pub(crate) mod paperclip;
 // Dormant upstream primitives: remove the scoped allowance when verified
 // live/mode integration supplies runtime consumers. Do not add writer calls here.
 #[allow(dead_code)]
@@ -2349,6 +2350,8 @@ pub fn run() {
                 //   - 100ms 落盘等待：重启前的 DB 写入均为命令驱动、此刻已完成，
                 //     与所有 Tauri 应用默认重启路径的行为一致，无需额外等待
                 ExitRequestAction::DeferToTauriRestart => {
+                    #[cfg(unix)]
+                    secrets::startup::paperclip_ready::stop_for_app(app_handle);
                     log::info!("收到重启请求 (code={code:?})，交由 Tauri 默认重启流程 re-exec");
                     return;
                 }
@@ -2486,6 +2489,8 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(unix)]
+    secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
@@ -2896,6 +2901,8 @@ pub fn destroy_single_instance_lock(app_handle: &tauri::AppHandle) {
 /// 图标，而 macOS 的 NSStatusItem 操作要求主线程；`set_visible(false)` 走
 /// `run_item_main_thread` 代理，跨线程安全（见 `remove_tray_icon_before_exit`）。
 pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
+    #[cfg(unix)]
+    secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);

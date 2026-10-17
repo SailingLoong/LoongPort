@@ -27,6 +27,7 @@ use super::{
     ProxyError,
 };
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
+use crate::paperclip::execution::RouteBinding;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
@@ -363,6 +364,25 @@ impl RequestForwarder {
         self
     }
 
+    /// Runs at each actual transport boundary, after all body overrides. The
+    /// binding owns admission and the atomic send opportunity; the forwarder
+    /// neither estimates cost nor creates a second request policy.
+    fn before_budgeted_send(
+        &self,
+        extensions: &Extensions,
+        app_type: &AppType,
+        provider: &Provider,
+        final_body: &Value,
+    ) -> Result<(), ProxyError> {
+        if let Some(binding) = extensions.get::<RouteBinding>() {
+            let service = self.service_owner.upgrade().ok_or_else(|| {
+                ProxyError::ConfigError("paperclip.request_owner_unavailable".into())
+            })?;
+            binding.before_send(&service, app_type.as_str(), provider, final_body)?;
+        }
+        Ok(())
+    }
+
     async fn record_success_result(
         &self,
         provider_id: &str,
@@ -576,6 +596,20 @@ impl RequestForwarder {
             });
         }
 
+        let budget_binding = extensions.get::<RouteBinding>();
+        if let Some(binding) = budget_binding {
+            let service = self.service_owner.upgrade().ok_or_else(|| ForwardError {
+                error: ProxyError::ConfigError("paperclip.request_owner_unavailable".into()),
+                provider: None,
+            })?;
+            binding
+                .check_route(&service, app_type_str, &providers)
+                .map_err(|error| ForwardError {
+                    error,
+                    provider: None,
+                })?;
+        }
+
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
@@ -717,9 +751,36 @@ impl RequestForwarder {
                     return Ok(result);
                 }
                 Err(e) => {
+                    let e = if budget_binding.is_some() {
+                        budget_safe_error(e)
+                    } else {
+                        e
+                    };
+                    if budget_binding
+                        .is_some_and(|binding| budget_allows_next_candidate(binding.has_sent(), &e))
+                    {
+                        // The original applied chain may skip a provably unsent,
+                        // unaffordable candidate. It consumed no send opportunity
+                        // or retry allowance, and is not an upstream failure.
+                        attempted_providers -= 1;
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
+                        last_error = Some(e);
+                        last_provider = Some(provider.clone());
+                        continue;
+                    }
                     // Explicit access/safety refusals are terminal before any request
                     // rectification, model downgrade or account fallback is attempted.
-                    if super::providers::workbuddy_acp::enabled(provider)
+                    // A budgeted attempt is terminal too: no HTTP error, timeout,
+                    // malformed success, or partial result establishes free failure.
+                    // Stop before media/tool/signature rectification can resend.
+                    if budget_binding.is_some()
+                        || super::providers::workbuddy_acp::enabled(provider)
                         || is_explicit_upstream_denial(&e)
                     {
                         self.router
@@ -1320,7 +1381,7 @@ impl RequestForwarder {
             }
         }
 
-        if attempted_providers == 0 {
+        if attempted_providers == 0 && last_error.is_none() {
             // providers 列表非空，但全部被熔断器拒绝（典型：HalfOpen 探测名额被占用）
             {
                 let mut status = self.status.write().await;
@@ -1382,8 +1443,15 @@ impl RequestForwarder {
                 app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
             )
             .await;
-        self.router
-            .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
+        // Pre-send budget admission is not a real provider attempt. Ordinary
+        // requests retain the original accounting behavior.
+        if extensions
+            .get::<RouteBinding>()
+            .is_none_or(RouteBinding::has_sent)
+        {
+            self.router
+                .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
+        }
         result
     }
 
@@ -1400,6 +1468,12 @@ impl RequestForwarder {
         adapter: &dyn ProviderAdapter,
         free_only: &mut bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        let budget_binding = extensions.get::<RouteBinding>();
+        if budget_binding.is_some_and(RouteBinding::has_sent) {
+            return Err(ProxyError::ConfigError(
+                "paperclip.automatic_retry_blocked".into(),
+            ));
+        }
         // Re-read the account owner at the output boundary, including cached routes.
         let resolved = self
             .router
@@ -1408,6 +1482,11 @@ impl RequestForwarder {
                 ProxyError::AuthError("Service source authentication unavailable".into())
             })?;
         let provider = &resolved;
+        if budget_binding.is_some() {
+            // Reject alternate transports before OAuth refresh, ACP session
+            // creation, or format-conversion work can perform network activity.
+            ensure_budgeted_native_path(app_type, method, provider, endpoint, body, headers)?;
+        }
         if super::providers::workbuddy_acp::enabled(provider) {
             // ACP has no verified free-price route. Preserve the request's
             // free-only policy before opening its session transport.
@@ -1442,6 +1521,11 @@ impl RequestForwarder {
             .and_then(|m| m.provider_type.as_deref())
             == Some("github_copilot")
             || base_url.contains("githubcopilot.com");
+        if budget_binding.is_some() && is_copilot {
+            return Err(ProxyError::ConfigError(
+                "paperclip.native_path_unsupported".into(),
+            ));
+        }
 
         // Codex upstream conversion mode — computed early because the [1m]-suffix strip
         // below must be skipped on the Anthropic path (the marker has to survive to
@@ -2645,6 +2729,24 @@ impl RequestForwarder {
             is_copilot,
         );
 
+        if budget_binding.is_some() {
+            // Check the actual filtered body and headers, including final local
+            // overrides, rather than relying on the inbound request's shape.
+            ensure_budgeted_native_path(
+                app_type,
+                method,
+                provider,
+                &effective_endpoint,
+                &filtered_body,
+                &ordered_headers,
+            )?;
+            if needs_transform {
+                return Err(ProxyError::ConfigError(
+                    "paperclip.native_path_unsupported".into(),
+                ));
+            }
+        }
+
         // 发送请求
         let response = if is_socks_proxy || !preserve_exact_header_case {
             // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
@@ -2652,8 +2754,12 @@ impl RequestForwarder {
             log::debug!(
                 "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
             );
-            let client =
-                super::http_client::get_authenticated().map_err(ProxyError::ForwardFailed)?;
+            let client = if budget_binding.is_some() {
+                super::http_client::get_budgeted_authenticated()
+            } else {
+                super::http_client::get_authenticated()
+            }
+            .map_err(ProxyError::ForwardFailed)?;
             let mut request = client.request(method.clone(), &url);
             if request_is_streaming {
                 // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
@@ -2665,6 +2771,7 @@ impl RequestForwarder {
             for (key, value) in &ordered_headers {
                 request = request.header(key, value);
             }
+            self.before_budgeted_send(extensions, app_type, provider, &filtered_body)?;
             let send = request.body(body_bytes).send();
             let send_result = if request_is_streaming {
                 let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
@@ -2691,6 +2798,7 @@ impl RequestForwarder {
             let uri: http::Uri = url.parse().map_err(|e| {
                 ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
             })?;
+            self.before_budgeted_send(extensions, app_type, provider, &filtered_body)?;
             super::hyper_client::send_request(
                 uri,
                 &target_for_log,
@@ -2719,10 +2827,12 @@ impl RequestForwarder {
                 response = self
                     .validate_codex_anthropic_success_response(response)
                     .await?;
-            } else if matches!(
-                resolved_claude_api_format.as_deref(),
-                Some("openai_responses")
-            ) {
+            } else if budget_binding.is_none()
+                && matches!(
+                    resolved_claude_api_format.as_deref(),
+                    Some("openai_responses")
+                )
+            {
                 if !request_is_streaming || response.is_json() {
                     // Claude→Responses gateways can also return a semantic failure in an
                     // HTTP 2xx Response object. Validate buffered/JSON bodies inside the
@@ -3133,6 +3243,71 @@ impl RequestForwarder {
             _ => ErrorCategory::NonRetryable,
         }
     }
+}
+
+/// Only this local preflight result establishes that the next already-applied
+/// candidate can be tried without a preceding outbound request. Remote 402/429
+/// responses and error text never establish that work was free.
+// Bounded native requests never persist upstream error bodies in the original
+// status/usage error owners. Ordinary requests retain their existing diagnostics.
+fn budget_safe_error(error: ProxyError) -> ProxyError {
+    match error {
+        ProxyError::UpstreamError { status, .. } => {
+            ProxyError::UpstreamError { status, body: None }
+        }
+        ProxyError::ConfigError(code)
+            if code.strip_prefix("paperclip.").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            }) =>
+        {
+            ProxyError::ConfigError(code)
+        }
+        _ => ProxyError::ConfigError("paperclip.upstream_unresolved".into()),
+    }
+}
+
+fn budget_allows_next_candidate(has_sent: bool, error: &ProxyError) -> bool {
+    !has_sent
+        && matches!(error, ProxyError::ConfigError(code) if code == "paperclip.balance_insufficient")
+}
+
+/// The first budgeted slice uses the original Codex native Responses path only.
+/// Other transports need their own verified send and usage boundaries before
+/// they can consume a Paperclip binding.
+fn ensure_budgeted_native_path(
+    app_type: &AppType,
+    method: &http::Method,
+    provider: &Provider,
+    endpoint: &str,
+    body: &Value,
+    headers: &http::HeaderMap,
+) -> Result<(), ProxyError> {
+    if !matches!(app_type, AppType::Codex)
+        || method != http::Method::POST
+        || !matches!(
+            split_endpoint_and_query(endpoint).0,
+            "/responses" | "/v1/responses"
+        )
+        || body
+            .get("stream")
+            .is_some_and(|stream| stream.as_bool() != Some(false))
+        || is_streaming_request(endpoint, body, headers)
+        || headers.get_all(http::header::ACCEPT).iter().any(|accept| {
+            accept
+                .to_str()
+                .is_ok_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+        })
+        || provider.uses_managed_account_auth()
+        || super::providers::is_codex_official_provider(provider)
+        || super::providers::workbuddy_acp::enabled(provider)
+        || super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+        || super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
+    {
+        return Err(ProxyError::ConfigError(
+            "paperclip.native_path_unsupported".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Only structured, exact denial categories establish this boundary. Message text
@@ -4189,6 +4364,184 @@ mod tests {
             max_attempts: 1,
             model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         }
+    }
+
+    #[test]
+    fn budget_candidate_skip_requires_exact_unsent_balance_rejection() {
+        let insufficient = ProxyError::ConfigError("paperclip.balance_insufficient".into());
+        assert!(budget_allows_next_candidate(false, &insufficient));
+        assert!(!budget_allows_next_candidate(true, &insufficient));
+
+        for error in [
+            ProxyError::ConfigError("paperclip.balance_unavailable".into()),
+            ProxyError::ConfigError("paperclip.balance_insufficient: unknown".into()),
+            ProxyError::ConfigError("paperclip.price_stale".into()),
+            ProxyError::ConfigError("paperclip.budget_exceeded".into()),
+            ProxyError::Timeout("synthetic timeout".into()),
+            ProxyError::ForwardFailed("synthetic protocol NACK".into()),
+            ProxyError::UpstreamError {
+                status: 402,
+                body: Some("paperclip.balance_insufficient".into()),
+            },
+            ProxyError::UpstreamError {
+                status: 429,
+                body: Some("insufficient balance".into()),
+            },
+            image_unsupported_error(),
+        ] {
+            assert!(!budget_allows_next_candidate(false, &error));
+            assert!(!budget_allows_next_candidate(true, &error));
+        }
+    }
+
+    #[test]
+    fn paperclip_budget_errors_remove_provider_echoed_bodies_before_logging() {
+        for error in [
+            ProxyError::UpstreamError {
+                status: 402,
+                body: Some("private task echo".into()),
+            },
+            ProxyError::TransformError("private response echo".into()),
+            ProxyError::ConfigError("paperclip.private task echo".into()),
+        ] {
+            let safe = budget_safe_error(error).to_string();
+            assert!(!safe.contains("private"));
+            assert!(!safe.contains("echo"));
+        }
+        assert!(budget_safe_error(ProxyError::ConfigError(
+            "paperclip.balance_insufficient".into()
+        ))
+        .to_string()
+        .contains("balance_insufficient"));
+    }
+
+    #[test]
+    fn ordinary_request_send_gate_does_not_require_a_paperclip_owner() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        assert!(forwarder
+            .before_budgeted_send(
+                &Extensions::new(),
+                &AppType::Claude,
+                &test_provider_with_type(None),
+                &json!({}),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn budget_native_path_rejects_unsupported_transports_before_send() {
+        let provider = test_provider_with_type(None);
+        let body = json!({"model": "synthetic-model", "stream": false});
+        let headers = HeaderMap::new();
+        let check = ensure_budgeted_native_path;
+        for endpoint in ["/responses", "/v1/responses?synthetic=true"] {
+            assert!(check(
+                &AppType::Codex,
+                &http::Method::POST,
+                &provider,
+                endpoint,
+                &body,
+                &headers
+            )
+            .is_ok());
+        }
+        for endpoint in [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses/compact",
+        ] {
+            assert!(check(
+                &AppType::Codex,
+                &http::Method::POST,
+                &provider,
+                endpoint,
+                &body,
+                &headers
+            )
+            .is_err());
+        }
+        for app in [AppType::Claude, AppType::Gemini, AppType::GrokBuild] {
+            assert!(check(
+                &app,
+                &http::Method::POST,
+                &provider,
+                "/v1/responses",
+                &body,
+                &headers
+            )
+            .is_err());
+        }
+        assert!(check(
+            &AppType::Codex,
+            &http::Method::GET,
+            &provider,
+            "/v1/responses",
+            &body,
+            &headers
+        )
+        .is_err());
+        for provider_type in ["codex_oauth", "xai_oauth", "github_copilot"] {
+            assert!(check(
+                &AppType::Codex,
+                &http::Method::POST,
+                &test_provider_with_type(Some(provider_type)),
+                "/v1/responses",
+                &body,
+                &headers
+            )
+            .is_err());
+        }
+        let mut workbuddy = provider.clone();
+        workbuddy.settings_config = json!({"workbuddy_acp": {}});
+        assert!(check(
+            &AppType::Codex,
+            &http::Method::POST,
+            &workbuddy,
+            "/v1/responses",
+            &body,
+            &headers
+        )
+        .is_err());
+        for api_format in ["chat", "anthropic"] {
+            let mut converted = provider.clone();
+            converted.meta = Some(crate::provider::ProviderMeta {
+                api_format: Some(api_format.into()),
+                ..Default::default()
+            });
+            assert!(check(
+                &AppType::Codex,
+                &http::Method::POST,
+                &converted,
+                "/v1/responses",
+                &body,
+                &headers
+            )
+            .is_err());
+        }
+        for stream_value in [json!(true), json!("true"), json!(1), Value::Null] {
+            let stream = json!({"model": "synthetic-model", "stream": stream_value});
+            assert!(check(
+                &AppType::Codex,
+                &http::Method::POST,
+                &provider,
+                "/v1/responses",
+                &stream,
+                &headers
+            )
+            .is_err());
+        }
+        let mut sse_headers = headers.clone();
+        sse_headers.append(ACCEPT, HeaderValue::from_static("application/json"));
+        sse_headers.append(ACCEPT, HeaderValue::from_static("Text/Event-Stream"));
+        assert!(check(
+            &AppType::Codex,
+            &http::Method::POST,
+            &provider,
+            "/v1/responses",
+            &body,
+            &sse_headers
+        )
+        .is_err());
     }
 
     #[tokio::test]

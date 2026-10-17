@@ -30,6 +30,9 @@ impl Fixture {
         Database::create_tables_on_conn(&conn).unwrap();
         Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         database::loongport_schema::apply(&conn).unwrap();
+        // This fixture represents the deployed authenticated v24 source, before
+        // native task bindings existed. The current-v25 cases are separate.
+        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
         database::vault::stamp(&conn, &vault).unwrap();
         drop(conn);
         if complete {

@@ -133,11 +133,10 @@ impl AuthenticatedUpgrade {
             return Err(source_changed());
         };
         if !stable.is_database_resume_candidate()
-            && stable.source_versions
-                != Some(SchemaVersions {
-                    upstream: database::UPSTREAM4_SOURCE_SCHEMA_VERSION,
-                    loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
-                })
+            && !stable.source_versions.is_some_and(|source| {
+                source.upstream == database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+                    && checkpoint::supports_loongport_version(source.loongport)
+            })
         {
             return Err(AppError::Config("upgrade.unsupported_source".into()));
         }
@@ -592,6 +591,9 @@ impl AuthenticatedUpgrade {
             let mut view = StartupUpgradeView::blocked("database_verified");
             if let UpgradeInspection::Stable(stable) = inspected {
                 view.source_versions = stable.source_versions;
+                if let Some(source) = stable.source_versions {
+                    view.target_versions.loongport = source.loongport;
+                }
             }
             view.checkpoint_present = true;
             view.checkpoint_id = Some(id.clone());
@@ -607,6 +609,9 @@ impl AuthenticatedUpgrade {
             });
             if let UpgradeInspection::Stable(stable) = inspected {
                 view.source_versions = stable.source_versions;
+                if let Some(source) = stable.source_versions {
+                    view.target_versions.loongport = source.loongport;
+                }
             }
             view.review_token = Some(self.token.clone());
             if !cancellation.completed {

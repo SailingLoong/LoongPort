@@ -13,6 +13,19 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
 pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The one historical checkpoint identity and the current identity. This is
+/// only an admission bound; manifest/database checks still require exact equality.
+pub(crate) fn supports_loongport_version(version: i32) -> bool {
+    matches!(version, 24 | 25)
+}
+
+fn legacy_archive_source_versions() -> SchemaVersions {
+    SchemaVersions {
+        upstream: database::UPSTREAM4_SOURCE_SCHEMA_VERSION,
+        loongport: 24,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CapturedFile {
@@ -142,8 +155,7 @@ impl Manifest {
             || self.device != device.root()
             || self.metadata != *vault.metadata()
             || self.source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
-            || self.source_versions.loongport
-                != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || !supports_loongport_version(self.source_versions.loongport)
             || self.target_versions.upstream != database::UPSTREAM4_SCHEMA_VERSION
             || self.target_versions.loongport != self.source_versions.loongport
         {
@@ -193,6 +205,7 @@ impl Manifest {
         let conn = image(&bytes, &self.root, &self.device)?;
         database::vault::check_identity(&conn, vault)?;
         crate::secrets::inventory::validate_database(&conn, vault)?;
+        database::vault::preflight_connection(&conn)?;
         if Database::get_user_version(&conn)? != self.source_versions.upstream
             || database::loongport_schema::read_stored_version(&conn)?
                 != self.source_versions.loongport
@@ -244,7 +257,7 @@ pub(super) fn create_with_hook(
     };
     let source_versions = stable.source_versions.ok_or_else(invalid)?;
     if source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
-        || source_versions.loongport != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        || !supports_loongport_version(source_versions.loongport)
     {
         return Err(invalid());
     }
@@ -275,7 +288,7 @@ pub(super) fn create_with_hook(
         source_versions,
         target_versions: SchemaVersions {
             upstream: database::UPSTREAM4_SCHEMA_VERSION,
-            loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+            loongport: source_versions.loongport,
         },
         database_revision: captured.revision,
         database: STANDARD.encode(&*captured.image.serialize(rusqlite::MAIN_DB)?),
@@ -540,7 +553,7 @@ pub(crate) fn validate_publication_payload(
     device: &DeviceStore,
     vault: &VaultContext,
     bytes: &[u8],
-) -> Result<(String, String), AppError> {
+) -> Result<(String, String, SchemaVersions), AppError> {
     let plaintext = descriptor()?.decode(vault, bytes)?;
     let manifest: Manifest = serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
     let target = manifest.published_database.as_ref().ok_or_else(invalid)?;
@@ -553,7 +566,11 @@ pub(crate) fn validate_publication_payload(
     for file in &manifest.files {
         file.verify()?;
     }
-    Ok((manifest.database_digest.clone(), target.clone()))
+    Ok((
+        manifest.database_digest.clone(),
+        target.clone(),
+        manifest.target_versions,
+    ))
 }
 
 /// DB-complete/app-not-started recognition only. This is not global completion,
@@ -578,7 +595,7 @@ pub(super) fn published_database_id(
         manifest.database(vault)?;
         return Ok(None);
     }
-    let (_, target) = validate_publication_payload(root, device, vault, &bytes)?;
+    let (_, target, _) = validate_publication_payload(root, device, vault, &bytes)?;
     verify_current_database(root, vault, manifest.target_versions, Some(&target))?;
     Ok(Some(manifest.id.clone()))
 }
@@ -593,6 +610,7 @@ fn verify_current_database(
     let captured = inspection::capture(&path)?.ok_or_else(invalid)?;
     database::vault::check_identity(&captured.image, vault)?;
     crate::secrets::inventory::validate_database(&captured.image, vault)?;
+    database::vault::preflight_connection(&captured.image)?;
     if Database::get_user_version(&captured.image)? != versions.upstream
         || database::loongport_schema::read_stored_version(&captured.image)? != versions.loongport
     {
@@ -655,6 +673,10 @@ struct CompletionArchive {
     device: PathBuf,
     database_backup: String,
     database_digest: String,
+    // Original format-1 archives predate this field and exclusively used 17/24.
+    // New archives carry the authenticated source tuple, never the current constant.
+    #[serde(default = "legacy_archive_source_versions")]
+    source_versions: SchemaVersions,
     files: Vec<ArchivedFile>,
 }
 #[derive(Serialize, Deserialize)]
@@ -712,6 +734,8 @@ fn read_archive(
             .as_deref()
             != Some(id)
         || archive.database_backup != format!("upgrade_{id}.db")
+        || archive.source_versions.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        || !supports_loongport_version(archive.source_versions.loongport)
     {
         return Err(invalid());
     }
@@ -761,9 +785,10 @@ pub(crate) fn archived_database(
         .map_err(crate::secrets::inventory::secret_error)?;
     database::vault::check_identity(&captured.image, &source)?;
     crate::secrets::inventory::validate_database(&captured.image, &source)?;
-    if Database::get_user_version(&captured.image)? != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
+    database::vault::preflight_connection(&captured.image)?;
+    if Database::get_user_version(&captured.image)? != archive.source_versions.upstream
         || database::loongport_schema::read_stored_version(&captured.image)?
-            != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            != archive.source_versions.loongport
     {
         return Err(invalid());
     }
@@ -871,7 +896,7 @@ pub(crate) fn archive_and_release(
             return Err(changed());
         }
         inspection::verify_unchanged(&active_path, &revision)?;
-        return Ok(());
+        return db.migrate_released_checkpoint_schema(device, vault);
     };
     if verified_database_id(root, device, vault)?.as_deref() != Some(id) {
         return Err(changed());
@@ -932,6 +957,7 @@ pub(crate) fn archive_and_release(
             database_digest: crate::secrets::inventory::upgrade_archive_content_digest(
                 &source, vault,
             )?,
+            source_versions: manifest.source_versions,
             files,
         };
         let plain = Zeroizing::new(serde_json::to_vec(&archive).map_err(|_| invalid())?);
@@ -943,7 +969,12 @@ pub(crate) fn archive_and_release(
             .map_err(|e| AppError::io(&archived, e))?
         {
             Some(existing) => {
-                if *archive_descriptor()?.decode(vault, &existing)? != *plain {
+                let decoded = archive_descriptor()?.decode(vault, &existing)?;
+                let recorded: CompletionArchive =
+                    serde_json::from_slice(&decoded).map_err(|_| invalid())?;
+                // Normalize only the historical absent version field in memory.
+                // The authenticated archive itself remains byte-for-byte untouched.
+                if serde_json::to_vec(&recorded).map_err(|_| invalid())? != *plain {
                     return Err(changed());
                 }
             }
@@ -966,5 +997,147 @@ pub(crate) fn archive_and_release(
         return Err(changed());
     }
     restored_archive_files(root, device, vault, id)?;
-    Ok(())
+    db.migrate_released_checkpoint_schema(device, vault)
+}
+
+#[cfg(test)]
+mod paperclip_schema_lifecycle_tests {
+    use super::*;
+
+    fn historical_source() -> super::super::checkpoint_tests::Fixture {
+        let fixture = super::super::checkpoint_tests::Fixture::new();
+        let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        fixture
+    }
+
+    fn write_archive(
+        fixture: &super::super::checkpoint_tests::Fixture,
+        version: i32,
+        recorded_version: Option<i32>,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = fixture.root.join(crate::config::DB_FILE_NAME);
+        let conn = Connection::open(&path).unwrap();
+        if version == 25 {
+            conn.execute_batch("CREATE TABLE paperclip_run_bindings(owner TEXT NOT NULL,app TEXT NOT NULL,company TEXT NOT NULL,run TEXT NOT NULL,scope TEXT NOT NULL,binding TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('bound','accepted','completed','failed','unknown')),receipt TEXT,PRIMARY KEY(owner,app,company,run)); UPDATE loongport_schema_version SET version=25 WHERE id=1;").unwrap();
+        }
+        let digest =
+            crate::secrets::inventory::upgrade_archive_content_digest(&conn, &fixture.vault)
+                .unwrap();
+        drop(conn);
+        let backups = fixture.root.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::copy(&path, backups.join(format!("upgrade_{id}.db"))).unwrap();
+        let mut archive = serde_json::json!({"format":1,"id":id,"root":fixture.root,"device":fixture.device.root(),"database_backup":format!("upgrade_{id}.db"),"database_digest":digest,"files":[]});
+        if let Some(version) = recorded_version {
+            archive["source_versions"] = serde_json::json!({"upstream":17,"loongport":version});
+        }
+        let ciphertext = archive_descriptor()
+            .unwrap()
+            .encode(&fixture.vault, &serde_json::to_vec(&archive).unwrap())
+            .unwrap();
+        crate::config_file_io::ensure_private_directory(fixture.device.root()).unwrap();
+        crate::config_file_io::write_durable(&archive_path(&fixture.device), &ciphertext).unwrap();
+        id
+    }
+
+    #[test]
+    fn paperclip_native_v25_checkpoint_preserves_recorded_identity() {
+        let f = historical_source();
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        database::loongport_schema::apply(&source).unwrap();
+        drop(source);
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            25
+        );
+        let bytes = std::fs::read(path(&f.device)).unwrap();
+        let decoded = descriptor().unwrap().decode(&f.vault, &bytes).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        manifest["target_versions"]["loongport"] = serde_json::json!(24);
+        let ciphertext = descriptor()
+            .unwrap()
+            .encode(&f.vault, &serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        crate::config_file_io::write_durable(&path(&f.device), &ciphertext).unwrap();
+        assert!(stage(&f.root, &f.device, &f.vault, &id).is_err());
+    }
+
+    #[test]
+    fn paperclip_native_v24_checkpoint_keeps_original_schema_and_digest() {
+        let f = historical_source();
+        let before = std::fs::read(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let checkpoint = std::fs::read(path(&f.device)).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            24
+        );
+        assert!(!Database::table_exists(&staged, "paperclip_run_bindings").unwrap());
+        assert_eq!(
+            std::fs::read(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(path(&f.device)).unwrap(), checkpoint);
+        assert!(ensure_sync_admitted(&f.device).is_err());
+    }
+
+    #[test]
+    fn paperclip_native_v24_completed_archive_migrates_only_authenticated_working_copy() {
+        let f = historical_source();
+        let id = write_archive(&f, 24, None);
+        let backup = f.root.join("backups").join(format!("upgrade_{id}.db"));
+        let before = std::fs::read(&backup).unwrap();
+        let original = archived_database(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&original).unwrap(),
+            24
+        );
+        let mut working = Connection::open_in_memory().unwrap();
+        database::vault::copy(&original, &mut working).unwrap();
+        database::vault::upgrade_staging_for_target(
+            &working,
+            &f.vault,
+            database::UPSTREAM4_SOURCE_SCHEMA_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&working).unwrap(),
+            25
+        );
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&original).unwrap(),
+            24
+        );
+        assert_eq!(std::fs::read(&backup).unwrap(), before);
+        archived_database(&f.root, &f.device, &f.vault, &id).unwrap();
+    }
+
+    #[test]
+    fn paperclip_native_completed_archive_requires_exact_recorded_version() {
+        let f = historical_source();
+        let id = write_archive(&f, 25, Some(25));
+        let original = archived_database(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&original).unwrap(),
+            25
+        );
+        let bytes = std::fs::read(archive_path(&f.device)).unwrap();
+        let decoded = archive_descriptor()
+            .unwrap()
+            .decode(&f.vault, &bytes)
+            .unwrap();
+        let mut archive: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        archive["source_versions"]["loongport"] = serde_json::json!(24);
+        let ciphertext = archive_descriptor()
+            .unwrap()
+            .encode(&f.vault, &serde_json::to_vec(&archive).unwrap())
+            .unwrap();
+        crate::config_file_io::write_durable(&archive_path(&f.device), &ciphertext).unwrap();
+        assert!(archived_database(&f.root, &f.device, &f.vault, &id).is_err());
+    }
 }

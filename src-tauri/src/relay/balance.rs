@@ -364,13 +364,24 @@ pub fn cached_site_balance(
     key: &SiteAccountKey,
 ) -> Option<SiteBalanceEntry> {
     let conn = db.conn.lock().ok()?;
+    cached_site_balance_on(&conn, key).ok().flatten()
+}
+
+/// Original cache read without acquiring another connection. Unknown and SQL
+/// failure remain distinct at budget admission; this never refreshes the cache.
+pub(crate) fn cached_site_balance_on(
+    conn: &rusqlite::Connection,
+    key: &SiteAccountKey,
+) -> Result<Option<SiteBalanceEntry>, crate::error::AppError> {
+    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT balance_usd, fetched_at FROM site_balance_cache
          WHERE site_origin = ?1 AND account_id = ?2",
         rusqlite::params![key.0, key.1],
         |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, i64>(1)?)),
     )
-    .ok()
+    .optional()
+    .map_err(crate::error::AppError::from)
 }
 
 /// 从缓存条目拼行级展示结果（正/负缓存同一入口）。

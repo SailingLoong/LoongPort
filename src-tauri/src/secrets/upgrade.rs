@@ -189,6 +189,11 @@ impl UpgradeInspection {
         };
         let mut view = StartupUpgradeView::blocked("not_applicable");
         view.source_versions = stable.source_versions;
+        if let Some(source) = stable.source_versions {
+            if checkpoint::supports_loongport_version(source.loongport) {
+                view.target_versions.loongport = source.loongport;
+            }
+        }
         if stable.future_version().is_some() && !stable.is_database_resume_candidate() {
             // Preserve existing newer-binary precedence: do not parse a vault
             // format the current binary cannot understand.
@@ -222,7 +227,7 @@ impl UpgradeInspection {
             return Ok(view);
         }
         if source.upstream != database::UPSTREAM4_SOURCE_SCHEMA_VERSION
-            || source.loongport != database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || !checkpoint::supports_loongport_version(source.loongport)
         {
             view.status = "unsupported_source";
             return Ok(view);
@@ -298,15 +303,13 @@ impl UpgradeInspection {
 
 impl StableInspection {
     fn is_database_resume_candidate(&self) -> bool {
-        self.source_versions
-            == Some(SchemaVersions {
-                upstream: database::UPSTREAM4_SCHEMA_VERSION,
-                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
-            })
-            && self
-                .device_files
-                .iter()
-                .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
+        self.source_versions.is_some_and(|source| {
+            source.upstream == database::UPSTREAM4_SCHEMA_VERSION
+                && checkpoint::supports_loongport_version(source.loongport)
+        }) && self
+            .device_files
+            .iter()
+            .any(|(file, _, _)| file.relative_path() == Path::new(checkpoint::FILE))
     }
 
     /// Keep the original checkpoint binding while letting each app own its
@@ -525,12 +528,10 @@ pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspec
     };
     // An older binary must still present its existing newer-database recovery.
     if result.future_version().is_some() {
-        if result.source_versions
-            != Some(SchemaVersions {
-                upstream: database::UPSTREAM4_SCHEMA_VERSION,
-                loongport: database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
-            })
-        {
+        if !result.source_versions.is_some_and(|source| {
+            source.upstream == database::UPSTREAM4_SCHEMA_VERSION
+                && checkpoint::supports_loongport_version(source.loongport)
+        }) {
             return Ok(UpgradeInspection::Stable(Box::new(result)));
         }
         let Some(bytes) = checkpoint::resume_candidate_bytes(device)? else {

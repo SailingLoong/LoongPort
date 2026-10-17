@@ -390,7 +390,12 @@ impl Drop for CodexAuthFileTransaction {
 /// Nonpersistent authority to commit a request's automatic route change.
 /// The app's existing mode lifecycle owns invalidation; the response may finish.
 #[derive(Clone)]
-pub(crate) struct RequestIdentity(Arc<()>);
+pub(crate) struct RequestIdentity(Arc<str>);
+impl RequestIdentity {
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.0
+    }
+}
 
 pub struct ProxyService {
     db: Arc<Database>,
@@ -405,7 +410,7 @@ pub struct ProxyService {
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
     takeover_lock: Arc<tokio::sync::Mutex<()>>,
-    request_identities: std::sync::Mutex<std::collections::HashMap<String, Arc<()>>>,
+    request_identities: std::sync::Mutex<std::collections::HashMap<String, Arc<str>>>,
     /// 被动模型监控入口（从 ModelVerificationCoordinator 单向流入，随 server 组装传下去）
     passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     /// 模型对齐告警状态（owner 在代理域；命令层读取、转发层随 server 组装共享）。
@@ -494,7 +499,7 @@ impl ProxyService {
         Ok(RequestIdentity(
             identities
                 .entry(app.into())
-                .or_insert_with(|| Arc::new(()))
+                .or_insert_with(|| Arc::from(uuid::Uuid::new_v4().to_string()))
                 .clone(),
         ))
     }
@@ -4711,6 +4716,60 @@ impl ProxyService {
             log::info!("已重置 Provider {provider_id} (app: {app_type}) 的熔断器");
         }
         Ok(())
+    }
+}
+
+impl ProxyService {
+    #[cfg(any(unix, test))]
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn paperclip_responses(
+        &self,
+        request: axum::extract::Request,
+    ) -> Result<axum::response::Response, crate::error::AppError> {
+        use tower::ServiceExt;
+        let router = self
+            .server
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| crate::error::AppError::Config("paperclip.runtime_unavailable".into()))?
+            .paperclip_router();
+        router
+            .oneshot(request)
+            .await
+            .map_err(|_| crate::error::AppError::Config("paperclip.response_unavailable".into()))
+    }
+    #[cfg(any(unix, test))]
+    #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
+    pub(crate) async fn paperclip_responses(
+        &self,
+        _request: axum::extract::Request,
+    ) -> Result<axum::response::Response, crate::error::AppError> {
+        Err(crate::error::AppError::Config(
+            "paperclip.runtime_unavailable".into(),
+        ))
+    }
+    #[cfg(all(test, any(feature = "gui", feature = "test-hooks")))]
+    pub(crate) async fn paperclip_install_original_test_server(&self, enable_logging: bool) {
+        let mut slot = self.server.write().await;
+        assert!(slot.is_none());
+        let config = crate::proxy::types::ProxyConfig {
+            listen_address: "127.0.0.1".into(),
+            listen_port: 0,
+            enable_logging,
+            ..Default::default()
+        };
+        *slot = Some(
+            crate::proxy::server::ProxyServer::new(
+                config,
+                self.db.clone(),
+                #[cfg(feature = "gui")]
+                None,
+                self.passive_ingress.clone(),
+                self.model_alignment.clone(),
+            )
+            .with_service_owner(self.owner.clone()),
+        );
     }
 }
 

@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 24;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 25;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -328,6 +328,20 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 super::vault::create_schema(conn)?;
                 set_version(conn, 24)?;
             }
+            24 => {
+                // One physical migration; the upstream version belongs to its owner.
+                conn.execute_batch("SAVEPOINT paperclip_binding_migration")?;
+                let result = (|| {
+                    crate::paperclip::bindings::ensure_schema(conn)?;
+                    crate::paperclip::bindings::read_rows(conn)?;
+                    set_version(conn, 25)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch("ROLLBACK TO paperclip_binding_migration; RELEASE paperclip_binding_migration")?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE paperclip_binding_migration")?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -337,6 +351,9 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    // Installed v25 is evidence to validate, never permission to recreate a ledger.
+    crate::paperclip::bindings::validate_schema(conn)?;
+    crate::paperclip::bindings::read_rows(conn)?;
     Ok(())
 }
 
@@ -2242,6 +2259,82 @@ mod tests {
             err.to_string().contains("过新"),
             "错误里要说清是「版本过新」，实际：{err}"
         );
+    }
+
+    #[test]
+    fn paperclip_native_v24_has_one_new_binding_migration() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 24).unwrap();
+        let upstream_before: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        apply(&conn).unwrap();
+        assert_eq!(read_stored_version(&conn).unwrap(), 25);
+        assert!(table_exists(&conn, "paperclip_run_bindings").unwrap());
+        let upstream_after: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(upstream_after, upstream_before);
+        apply(&conn).unwrap();
+        assert_eq!(read_stored_version(&conn).unwrap(), 25);
+    }
+
+    #[test]
+    fn paperclip_native_invalid_v24_rows_do_not_advance_version() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 24).unwrap();
+        crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+        conn.execute("INSERT INTO paperclip_run_bindings VALUES('owner','codex','company','run','{}','{}','bound',NULL)", []).unwrap();
+        let before = crate::database::Database::content_digest(&conn).unwrap();
+        assert!(apply(&conn).is_err());
+        assert_eq!(read_stored_version(&conn).unwrap(), 24);
+        assert_eq!(
+            crate::database::Database::content_digest(&conn).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn paperclip_native_fresh_and_migrated_tables_share_exact_ddl() {
+        let fresh = crate::database::Database::memory().unwrap();
+        let migrated = mem();
+        ensure_version_table(&migrated).unwrap();
+        set_version(&migrated, 24).unwrap();
+        apply(&migrated).unwrap();
+        let ddl = |conn: &Connection| {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE name='paperclip_run_bindings'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(ddl(&fresh.conn.lock().unwrap()), ddl(&migrated));
+    }
+
+    #[test]
+    fn paperclip_native_installed_version_never_repairs_missing_table() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 25).unwrap();
+        assert!(apply(&conn).is_err());
+        assert!(!table_exists(&conn, "paperclip_run_bindings").unwrap());
+    }
+
+    #[test]
+    fn paperclip_native_rejects_wrong_phase_check_and_triggers() {
+        for ddl in [
+            "CREATE TABLE paperclip_run_bindings(owner TEXT NOT NULL,app TEXT NOT NULL,company TEXT NOT NULL,run TEXT NOT NULL,scope TEXT NOT NULL,binding TEXT NOT NULL,phase TEXT NOT NULL,receipt TEXT,PRIMARY KEY(owner,app,company,run))",
+            "CREATE TABLE paperclip_run_bindings(owner TEXT NOT NULL,app TEXT NOT NULL,company TEXT NOT NULL,run TEXT NOT NULL,scope TEXT NOT NULL,binding TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('bound','accepted','completed','failed','unknown')),receipt TEXT,PRIMARY KEY(owner,app,company,run)); CREATE TRIGGER erase_binding AFTER INSERT ON paperclip_run_bindings BEGIN DELETE FROM paperclip_run_bindings; END",
+        ] {
+            let conn = mem();
+            ensure_version_table(&conn).unwrap();
+            set_version(&conn, 25).unwrap();
+            conn.execute_batch(ddl).unwrap();
+            assert!(apply(&conn).is_err());
+        }
     }
 
     #[test]
