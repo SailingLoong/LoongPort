@@ -89,7 +89,13 @@ export function ZCodeClaimControls({
           }
         }
       } catch {
-        if (!disposed) setError(true);
+        if (
+          !disposed &&
+          generation === epoch.current &&
+          readVersion === operationVersion.current
+        ) {
+          setError(true);
+        }
       } finally {
         reading = false;
         if (!disposed && !document.hidden)
@@ -126,12 +132,18 @@ export function ZCodeClaimControls({
     try {
       const next = await operation();
       if (generation === epoch.current) {
+        // Retire reads that started while the command was still pending.
+        ++operationVersion.current;
         setState(next);
+        setError(false);
         backendBusy.current = next.busy;
         refresh.current?.();
       }
     } catch {
-      if (generation === epoch.current) setError(true);
+      if (generation === epoch.current) {
+        ++operationVersion.current;
+        setError(true);
+      }
     } finally {
       if (generation === epoch.current) {
         operationInFlight.current = false;
