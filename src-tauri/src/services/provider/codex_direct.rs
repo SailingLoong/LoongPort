@@ -1227,8 +1227,9 @@ fn bind_catalog_choice(
 /// catalog policy, content import, discovery or persistent state is created.
 pub(crate) struct NativeCatalogInputs {
     base: std::path::PathBuf,
-    row_digest: Option<String>,
+    provider_digest: String,
     live_digest: Option<String>,
+    generated_source: Option<String>,
     references: Vec<(
         std::path::PathBuf,
         crate::database::inspection::SourceRevision,
@@ -1237,16 +1238,20 @@ pub(crate) struct NativeCatalogInputs {
 
 impl NativeCatalogInputs {
     pub(crate) fn capture(provider: &Provider, live: &str) -> Option<Self> {
-        // The original planner discovers CLI/cache model sources when specs are
-        // present. Completion is read-only and cannot invent that generation.
+        let mut inputs = Self::capture_references(provider, live)?;
         if codex_has_catalog_model_specs(&provider.settings_config) {
-            return None;
+            // Reuse only the original planner's already-loaded source generation.
+            // Bind genuine cache absence too; discovery and cache writes stay out.
+            inputs.generated_source = Some(codex_model_catalog_readonly_source_revision().ok()?);
+            let path = inputs.base.join("models_cache.json");
+            let revision = crate::database::inspection::file_revision(&path).ok()?;
+            inputs.references.push((path, revision));
+            inputs.verify_references().ok()?;
         }
-        Self::capture_references(provider, live)
+        Some(inputs)
     }
 
-    // The editor separately supplies a read-only generated catalog plan. The
-    // upgrade completion entry above keeps its original discovery restriction.
+    // The editor separately binds its read-only generated plan to its request.
     fn capture_references(provider: &Provider, live: &str) -> Option<Self> {
         let row = provider
             .settings_config
@@ -1276,8 +1281,9 @@ impl NativeCatalogInputs {
         }
         Some(Self {
             base,
-            row_digest: digest(Some(row.as_bytes())),
+            provider_digest: Database::provider_update_digest(provider).ok()?,
             live_digest: digest(Some(live.as_bytes())),
+            generated_source: None,
             references,
         })
     }
@@ -1328,24 +1334,26 @@ impl NativeCatalogInputs {
             || !self.references.iter().all(|(path, revision)| {
                 crate::database::inspection::verify_unchanged(path, revision).is_ok()
             })
+            || self.generated_source.as_ref().is_some_and(|source| {
+                !codex_model_catalog_readonly_source_revision()
+                    .is_ok_and(|current| &current == source)
+            })
         {
             return Err(AppError::Conflict("codex.catalog_source_changed".into()));
         }
         Ok(())
     }
 
+    pub(crate) fn generated_source(&self) -> Option<&str> {
+        self.generated_source.as_deref()
+    }
+
     fn matches(&self, provider: &Provider, live: &str) -> bool {
-        let row = provider
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or("");
         self.base == get_codex_config_dir()
-            && self.row_digest == digest(Some(row.as_bytes()))
+            && Database::provider_update_digest(provider)
+                .is_ok_and(|current| current == self.provider_digest)
             && self.live_digest == digest(Some(live.as_bytes()))
-            && self.references.iter().all(|(path, revision)| {
-                crate::database::inspection::verify_unchanged(path, revision).is_ok()
-            })
+            && self.verify_references().is_ok()
     }
 }
 
@@ -1379,9 +1387,10 @@ pub(crate) fn native_completion_match_with_generation(
     generation: Option<&CodexLiveAuthGuard<'_>>,
     catalog_inputs: Option<&NativeCatalogInputs>,
 ) -> Option<bool> {
-    if codex_has_catalog_model_specs(&provider.settings_config)
-        || !row_auth(provider).is_object()
+    let has_specs = codex_has_catalog_model_specs(&provider.settings_config);
+    if !row_auth(provider).is_object()
         || written.is_some_and(|written| written.validate_for_app(app()).is_err())
+        || (has_specs && catalog_inputs?.generated_source().is_none())
     {
         return None;
     }
@@ -1448,13 +1457,20 @@ pub(crate) fn native_completion_match_with_generation(
     }
     let projection = project_for_write(provider).ok()?;
     let route = direct_route(&projection, settings.unify_codex_session_history, endpoint).ok()?;
-    let mut planned = plan_projected(
+    let generated = plan_codex_model_catalog_readonly(
+        &provider.settings_config,
+        &projection.catalog_input_text(),
+        crate::proxy::providers::resolve_codex_catalog_tool_profile(provider),
+        provider,
+    );
+    let mut planned = plan_catalog_result(
         &Owner::Provider(provider),
         provider,
         projection,
         route,
         facts,
-        None,
+        generated,
+        true,
     )
     .ok()?;
     // A completed original managed-to-ordinary write consumes its marker and
@@ -1498,6 +1514,13 @@ pub(crate) fn native_completion_match_with_generation(
         &inputs.config_doc,
         inputs.files[1].path.parent()?,
     );
+    if planned
+        .catalog
+        .as_deref()
+        .is_some_and(|expected| inputs.pre[2].as_deref() != Some(expected))
+    {
+        return Some(false);
+    }
     let actual = text.parse::<toml::Table>().ok()?;
     let mut after = inputs.config_doc.clone();
     planned
