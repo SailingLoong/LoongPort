@@ -112,7 +112,9 @@ async fn receive_chat_bytes(wire: &'static str, chunk_size: Option<usize>) -> St
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = axum::Router::new().fallback(move || async move {
-        // Separate network chunks so a later rejection cannot swallow prior text.
+        // Pace rejection cases so a later rejection cannot swallow prior text.
+        // Byte fragments retain HTTP/1 chunked frame boundaries without sleeps;
+        // per-byte timers can exhaust collect()'s deadline on Windows.
         let blocks: Vec<Vec<u8>> = match chunk_size {
             Some(size) => wire
                 .as_bytes()
@@ -126,12 +128,9 @@ async fn receive_chat_bytes(wire: &'static str, chunk_size: Option<usize>) -> St
                 .collect(),
         };
         let stream = futures::stream::iter(blocks).then(move |block| async move {
-            tokio::time::sleep(std::time::Duration::from_millis(if chunk_size.is_some() {
-                1
-            } else {
-                50
-            }))
-            .await;
+            if chunk_size.is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             Ok::<_, std::io::Error>(block)
         });
         (
