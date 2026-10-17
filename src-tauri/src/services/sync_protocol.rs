@@ -842,13 +842,19 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn encrypted_sync_foreign_source_is_rejected_before_skill_archive_work() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         let db = crate::database::Database::memory().unwrap();
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
         db.set_setting("local-sentinel", "unchanged").unwrap();
         let sql = db.export_sql_string().unwrap();
         let manifest = manifest_with(PROTOCOL_FORMAT, PROTOCOL_VERSION, Some(DB_COMPAT_VERSION));
         let error = apply_snapshot(&db, &manifest, sql.as_bytes(), b"invalid archive").unwrap_err();
-        assert!(error.to_string().contains("sync.vault_adoption_required"));
+        assert!(
+            error.to_string().contains("sync.vault_adoption_required"),
+            "unexpected sync rejection: {error}"
+        );
         assert_eq!(
             db.get_setting("local-sentinel").unwrap().as_deref(),
             Some("unchanged")

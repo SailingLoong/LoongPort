@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 mod pooled_minimax_tests;
+mod workbuddy_acp_tests;
 
 /// 可编程 mock 上游：默认 200，可翻成 500 模拟故障；记录命中数与鉴权头。
 /// `foreign` 开关让 mock 回 OpenAI 形状（模拟换芯转发，供被动监控 E2E）；
