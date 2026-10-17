@@ -83,10 +83,10 @@ impl LiveNow {
                 route,
             })
         } else {
-            Ok(Self::Direct(current::direct_provider(
-                service.database(),
-                app,
-            )?))
+            let direct = current::direct_provider(service.database(), app)?
+                .map(|provider| service.database().resolve_vendor_auth(app, &provider))
+                .transpose()?;
+            Ok(Self::Direct(direct))
         }
     }
     fn claude_owner(&self) -> Option<ClaudeProjection> {
@@ -296,6 +296,10 @@ fn write_direct_with_catalog(
             catalog,
         );
     }
+    let resolved = direct
+        .map(|p| service.database().resolve_vendor_auth(app, p))
+        .transpose()?;
+    let direct = resolved.as_ref();
     let write = AppWrite::begin_mode(service, app)?;
     match app {
         AppType::Claude => {
@@ -1012,6 +1016,9 @@ pub(crate) fn plan_row_save_with_generation(
     let changed = crate::relay::provider_config::selected_model(app, &previous.settings_config)
         != crate::relay::provider_config::selected_model(app, &provider.settings_config);
     let (before, in_use, mut target) = save_row_target(service, app, previous, provider, changed)?;
+    // SavedRow above stays reference-only; only file projections receive credentials.
+    let resolved = service.database().resolve_vendor_auth(app, provider)?;
+    let provider = &resolved;
     let live_state = {
         let vault = service.database().secret_session().read()?;
         state::load_app(&DeviceStore::for_device(), &vault, app.as_str())?

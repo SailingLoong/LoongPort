@@ -480,12 +480,20 @@ impl Database {
 
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
+        let stored_settings = if crate::services::vendor_source_binding::is_reference(provider) {
+            let app = app_type
+                .parse::<crate::app_config::AppType>()
+                .map_err(|_| AppError::Config("source.invalid_app".into()))?;
+            crate::services::vendor_source_binding::strip_key(&app, provider)?
+        } else {
+            provider.settings_config.clone()
+        };
         let settings = seal_db(
             vault,
             "providers",
             "settings_config",
             &[&provider.id, app_type],
-            &serde_json::to_string(&provider.settings_config)
+            &serde_json::to_string(&stored_settings)
                 .map_err(|e| AppError::Database(e.to_string()))?,
         )?;
         let meta = seal_db(
@@ -603,6 +611,8 @@ impl Database {
     ) -> Result<serde_json::Value, AppError> {
         let mut provider = provider.clone();
         provider.in_failover_queue = false;
+        provider.settings_config =
+            crate::services::vendor_source_binding::inventory_settings(&provider)?;
         let mut meta = provider.meta.take().unwrap_or_default();
         meta.custom_endpoints.clear();
         provider.meta = Some(meta);
@@ -818,6 +828,21 @@ impl Database {
     ) -> Result<(), AppError> {
         let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
+        let mut updated = Provider::with_id(
+            provider_id.into(),
+            String::new(),
+            settings_config.clone(),
+            None,
+        );
+        updated.meta = Self::get_provider_meta_on_connection(&conn, &vault, provider_id, app_type)?;
+        let stored_settings = if crate::services::vendor_source_binding::is_reference(&updated) {
+            let app = app_type
+                .parse::<crate::app_config::AppType>()
+                .map_err(|_| AppError::Config("source.invalid_app".into()))?;
+            crate::services::vendor_source_binding::strip_key(&app, &updated)?
+        } else {
+            updated.settings_config
+        };
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![
@@ -826,7 +851,7 @@ impl Database {
                     "providers",
                     "settings_config",
                     &[provider_id, app_type],
-                    &serde_json::to_string(settings_config)
+                    &serde_json::to_string(&stored_settings)
                         .map_err(|e| AppError::Database(e.to_string()))?
                 )?,
                 provider_id,

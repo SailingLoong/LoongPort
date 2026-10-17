@@ -489,6 +489,115 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::Mutex;
 
+    /// Full product router/RequestContext/auth boundary. Run with an isolated
+    /// CC_SWITCH_TEST_HOME; this test never needs an SDK or a real account.
+    #[tokio::test]
+    async fn qoder_chat_route_uses_selected_provider_auth_and_preserves_history() {
+        use tower::ServiceExt;
+        assert!(
+            std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
+            "isolated test home required"
+        );
+        let db = Arc::new(Database::memory().unwrap());
+        let mut provider = Provider::with_id(
+            "qoder-account".into(),
+            "Qoder fixture".into(),
+            json!({"auth":{"OPENAI_API_KEY":"synthetic:pat"}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("qoder_sdk".into()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", &provider.id).unwrap();
+        let proxy = ProxyServer::new(
+            ProxyConfig::default(),
+            db,
+            #[cfg(feature = "gui")]
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+        );
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let runtime = super::super::qoder_host::HostConfig {
+            node: std::env::var_os("QODER_HOST_NODE")
+                .unwrap_or_else(|| "node".into())
+                .into(),
+            worker: root.join("tests/qoder-runtime/fixtures/http-context.mjs"),
+            sdk_root: None,
+        };
+        let router = proxy.build_router().layer(axum::Extension(runtime));
+        let body = json!({"model":"fixture","stream":false,"options":{"auth":"untrusted"},"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"prior"},{"role":"user","content":"second"}]});
+        for _ in 0..2 {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer ignored-client-token")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                value["choices"][0]["message"]["content"],
+                "history-and-auth-ok"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires official SDK/runtime provisioned in isolated application data root"]
+    async fn qoder_real_runtime_http_admission_ignores_payload_paths() {
+        use tower::ServiceExt;
+        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+        let db = Arc::new(Database::memory().unwrap());
+        let mut provider = Provider::with_id(
+            "qoder-runtime-fixture".into(),
+            "Qoder runtime fixture".into(),
+            json!({"auth":{"OPENAI_API_KEY":"synthetic:never-used"}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("qoder_sdk".into()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", &provider.id).unwrap();
+        let proxy = ProxyServer::new(
+            ProxyConfig::default(),
+            db,
+            #[cfg(feature = "gui")]
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+        );
+        // Admission loads the real fixed SDK/runtime; unsupported tools then
+        // reject the request before query(), so no account or model is used.
+        let body = json!({"model":"fixture","tools":[],"messages":[{"role":"user","content":"never sent"}],"nodePath":"/invalid-http-node","sdkRoot":"/invalid-http-sdk","options":{"sdkRoot":"/invalid-option-sdk","transport":"untrusted"}});
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = proxy.build_router().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+        assert_eq!(value["error"]["code"], "unsupported_qoder_input");
+    }
+
     #[derive(Debug)]
     struct CapturedRequest {
         path_and_query: String,

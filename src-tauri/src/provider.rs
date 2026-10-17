@@ -375,6 +375,8 @@ pub enum AuthBindingSource {
     /// 从 provider 自身配置读取认证信息（默认）
     #[default]
     ProviderConfig,
+    /// Reference a vendor account-owned API key; never store a per-app copy.
+    VendorApiKey,
     /// 使用托管账号认证（如 GitHub Copilot OAuth）
     ManagedAccount,
 }

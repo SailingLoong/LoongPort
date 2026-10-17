@@ -1385,6 +1385,14 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        // Re-read the account owner at the output boundary, including cached routes.
+        let resolved = self
+            .router
+            .resolve_vendor_auth(app_type, provider)
+            .map_err(|_| {
+                ProxyError::AuthError("Service source authentication unavailable".into())
+            })?;
+        let provider = &resolved;
         if super::providers::workbuddy_acp::enabled(provider) {
             return super::providers::workbuddy_acp::forward(
                 app_type, method, provider, endpoint, body,

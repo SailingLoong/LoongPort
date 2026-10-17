@@ -914,3 +914,18 @@ it("wires the real catalog confirmation through preview-only and final routing a
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
 });
+
+it("offers an inactive binding for an unconfigured App while keeping unknown writes blocked", () => {
+  state.data.configurations = [];
+  state.routing.tiers = [];
+  state.modeState = { status: "unconfigured", canWrite: false };
+  const view = render(<ApplicationWorkspace {...props} />);
+  expect(
+    screen.getByRole("button", { name: "applications.bindSource.open" }),
+  ).toBeEnabled();
+  state.writeBlocked = true;
+  view.rerender(<ApplicationWorkspace {...props} />);
+  expect(
+    screen.getByRole("button", { name: "applications.bindSource.open" }),
+  ).toBeDisabled();
+});

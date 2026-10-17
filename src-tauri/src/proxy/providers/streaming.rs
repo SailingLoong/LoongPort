@@ -163,7 +163,6 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
         // 2) pending_message_delta: 缓存延迟到 [DONE] 发送，确保 usage 完整
         let mut has_emitted_message_delta = false;
         let mut pending_message_delta: Option<(Option<String>, Option<Value>)> = None;
-        let mut has_sent_message_stop = false;
         let mut stream_ended_with_error = false;
         let mut latest_usage: Option<Value> = None;
         let mut current_non_tool_block_type: Option<&'static str> = None;
@@ -173,7 +172,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        'upstream: while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
@@ -183,10 +182,51 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                             continue;
                         }
 
-                        for l in line.lines() {
-                            if let Some(data) = strip_sse_field(l, "data") {
+                        let is_error_event = line.lines().filter_map(|l| strip_sse_field(l, "event")).next_back() == Some("error");
+                        let mut data_lines = line.lines().filter_map(|l| strip_sse_field(l, "data"));
+                        let data = data_lines.next().map(|first| {
+                            std::iter::once(first).chain(data_lines).collect::<Vec<_>>().join("\n")
+                        });
+                        let is_error_payload = data.as_deref().and_then(|d| serde_json::from_str::<Value>(d).ok())
+                            .is_some_and(|v| v.get("error").is_some_and(|error| !error.is_null()));
+                        if is_error_event || is_error_payload {
+                            stream_ended_with_error = true;
+                            let event = json!({"type":"error","error":{"type":"stream_error","message":"Upstream SSE error"}});
+                            yield Ok(Bytes::from(format!("event: error\ndata: {}\n\n", event)));
+                            break 'upstream;
+                        }
+                        if let Some(data) = data.as_deref() {
                                 if data.trim() == "[DONE]" {
                                     log::debug!("[Claude/OpenRouter] <<< OpenAI SSE: [DONE]");
+
+                                    // 上游没发 finish_reason 就直接 [DONE] 时，开着的块
+                                    //（当前非工具块与工具块）不会经 finish 路径关闭；
+                                    // Anthropic 协议要求每个 start 都有配对 stop，
+                                    // 否则客户端 SDK 丢弃未闭合块——在终止前补齐。
+                                    if let Some(index) = current_non_tool_block_index.take() {
+                                        let event = json!({
+                                            "type": "content_block_stop",
+                                            "index": index
+                                        });
+                                        let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                            serde_json::to_string(&event).unwrap_or_default());
+                                        yield Ok(Bytes::from(sse_data));
+                                    }
+                                    if !open_tool_block_indices.is_empty() {
+                                        let mut tool_indices: Vec<u32> =
+                                            open_tool_block_indices.iter().copied().collect();
+                                        tool_indices.sort_unstable();
+                                        for index in tool_indices {
+                                            let event = json!({
+                                                "type": "content_block_stop",
+                                                "index": index
+                                            });
+                                            let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                serde_json::to_string(&event).unwrap_or_default());
+                                            yield Ok(Bytes::from(sse_data));
+                                        }
+                                        open_tool_block_indices.clear();
+                                    }
 
                                     // 流正常结束，发出缓存的 message_delta（含完整 usage）。
                                     if let Some((stop_reason, usage_json)) = pending_message_delta.take() {
@@ -202,8 +242,9 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                         serde_json::to_string(&event).unwrap_or_default());
                                     log::debug!("[Claude/OpenRouter] >>> Anthropic SSE: message_stop");
                                     yield Ok(Bytes::from(sse_data));
-                                    has_sent_message_stop = true;
-                                    continue;
+                                    // [DONE] is terminal; do not read or emit anything after
+                                    // message_stop（上游 #8281）。
+                                    return;
                                 }
 
                                 if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
@@ -631,8 +672,10 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             pending_message_delta = Some((stop_reason, usage_json));
                                         }
                                     }
+                                } else {
+                                    yield Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Malformed upstream chat stream chunk"));
+                                    return;
                                 }
-                            }
                         }
                     }
                 }
@@ -670,7 +713,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                 false
             };
 
-            if emitted_pending_message_delta && !has_sent_message_stop {
+            if emitted_pending_message_delta {
                 let event = json!({"type": "message_stop"});
                 let sse_data = format!("event: message_stop\ndata: {}\n\n",
                     serde_json::to_string(&event).unwrap_or_default());

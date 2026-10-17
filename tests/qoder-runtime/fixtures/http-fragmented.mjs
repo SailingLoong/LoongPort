@@ -1,0 +1,3 @@
+import {createInterface} from 'node:readline';
+const lines=createInterface({input:process.stdin});
+lines.once('line',line=>{const {request}=JSON.parse(line);const event=JSON.stringify({kind:'event',event:{...request.binding,type:'text_snapshot',messageId:'a',text:'fragmented'}})+'\n';process.stdout.write(event.slice(0,15));setTimeout(()=>{process.stdout.write(event.slice(15));process.stdout.write(JSON.stringify({kind:'event',event:{...request.binding,type:'terminal',status:'success'}})+'\n');process.stdout.write('{"kind":"end","cleanupFailed":false,"transportFailed":false}\n');lines.close();process.stdin.destroy();},50);});

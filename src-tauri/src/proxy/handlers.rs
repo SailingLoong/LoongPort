@@ -785,6 +785,99 @@ pub async fn handle_chat_completions(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    if ctx
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|m| m.provider_type.as_deref())
+        == Some("qoder_sdk")
+    {
+        let auth =
+            get_adapter(&AppType::Codex).and_then(|adapter| adapter.extract_auth(&ctx.provider));
+        let Some(auth) = auth else {
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":{"code":"qoder_auth_required"}})),
+            )
+                .into_response());
+        };
+        // Trusted fixture injection exists only in the Rust test build. HTTP
+        // fields/headers cannot select an executable, SDK root or runtime.
+        #[cfg(test)]
+        let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
+        #[cfg(not(test))]
+        let test_host: Option<super::qoder_host::HostConfig> = None;
+        let host = if let Some(host) = test_host {
+            host
+        } else {
+            let worker = (|| {
+                #[cfg(feature = "gui")]
+                if let Some(app) = &state.app_handle {
+                    use tauri::Manager;
+                    if let Ok(resources) = app.path().resource_dir() {
+                        let path = resources.join("qoder/worker.mjs");
+                        if path.is_file() {
+                            return Some(path);
+                        }
+                    }
+                }
+                #[cfg(debug_assertions)]
+                {
+                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../scripts/qoder/worker.mjs");
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+                None
+            })();
+            let Some(worker) = worker else {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":{"code":"qoder_runtime_unavailable"}})),
+                )
+                    .into_response());
+            };
+            let node = tokio::task::spawn_blocking(crate::commands::locate_node_runtime)
+                .await
+                .ok()
+                .and_then(Result::ok);
+            let Some(node) = node else {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":{"type":"qoder_runtime_error","code":"qoder_node_unavailable","message":"Qoder requires an available Node.js executable."}})),
+                )
+                    .into_response());
+            };
+            let root = crate::config::get_app_config_dir().join("runtimes/qoder/1.0.53");
+            match super::qoder_runtime::resolve_runtime(node, worker, root).await {
+                Ok(host) => host,
+                Err(error) => {
+                    return Ok((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":{"type":"qoder_runtime_error","code":error.code(),"message":error.message()}})),
+                    )
+                        .into_response())
+                }
+            }
+        };
+        let timeouts = ctx.streaming_timeout_config();
+        let guard = ActiveConnectionGuard::acquire(state.status.clone()).await;
+        // Account binding comes from the selected provider, never request JSON.
+        let dispatch = super::qoder_http::Dispatch {
+            host,
+            account_id: ctx.provider.id.clone(),
+            access_token: auth.api_key,
+            first_byte_timeout: timeouts.first_byte_timeout,
+            idle_timeout: timeouts.idle_timeout,
+            non_streaming_timeout: if ctx.failover_active {
+                ctx.app_config.non_streaming_timeout as u64
+            } else {
+                0
+            },
+        };
+        return Ok(super::qoder_http::handle(body, dispatch, (guard, ctx)).await);
+    }
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
