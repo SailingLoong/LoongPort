@@ -2532,9 +2532,9 @@ pub fn remove_openclaw_provider_from_live(
 ) -> Result<(), AppError> {
     use crate::openclaw_config;
 
-    // Check if OpenClaw config directory exists
-    if !openclaw_config::get_openclaw_dir().exists() {
-        log::debug!("OpenClaw config directory doesn't exist, skipping removal of '{provider_id}'");
+    // The selected file can live outside the state directory.
+    if !openclaw_config::get_openclaw_config_path().exists() {
+        log::debug!("OpenClaw config file doesn't exist, skipping removal of '{provider_id}'");
         return Ok(());
     }
 
@@ -2553,6 +2553,43 @@ mod tests {
     use serial_test::serial;
     #[cfg(unix)]
     use std::fs;
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_path_removal_uses_selected_file_when_state_directory_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
+        let state = temp.path().join("missing-state");
+        let config = temp.path().join("config/custom.json5");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{ // preserve\nmodels: {providers: {remove: {apiKey: 'synthetic'}, keep: {apiKey: 'synthetic-keep'}}}, other: 8}").unwrap();
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        remove_openclaw_provider_from_live(&env.session, "remove").unwrap();
+        let written = std::fs::read_to_string(&config).unwrap();
+        let value: serde_json::Value = json5::from_str(&written).unwrap();
+        assert!(value["models"]["providers"].get("remove").is_none());
+        assert!(value["models"]["providers"].get("keep").is_some());
+        assert_eq!(value["other"], 8);
+        assert!(written.contains("preserve"));
+        assert!(!state.exists());
+        assert!(!temp.path().join(".openclaw").exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_path_removal_of_missing_file_does_not_create_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
+        let state = temp.path().join("missing-state");
+        let config = temp.path().join("missing-config/custom.json5");
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        remove_openclaw_provider_from_live(&env.session, "absent").unwrap();
+        assert!(!config.parent().unwrap().exists());
+        assert!(!state.exists());
+        assert!(!temp.path().join(".openclaw").exists());
+    }
 
     #[cfg(unix)]
     struct TestHome {

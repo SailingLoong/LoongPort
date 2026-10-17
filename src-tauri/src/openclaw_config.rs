@@ -31,23 +31,91 @@ const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "fu
 // Path Functions
 // ============================================================================
 
-/// 获取 OpenClaw 配置目录
+/// 获取 OpenClaw 状态目录（workspace/session 等仍以此为根目录）
 ///
 /// 默认路径: `~/.openclaw/`
-/// 可通过 settings.openclaw_config_dir 覆盖
+/// LoongPort 显式目录优先，其次 OPENCLAW_STATE_DIR。
 pub fn get_openclaw_dir() -> PathBuf {
     if let Some(override_dir) = get_openclaw_override_dir() {
         return override_dir;
     }
 
-    crate::config::get_home_dir().join(".openclaw")
+    let home = openclaw_home();
+    openclaw_env_path("OPENCLAW_STATE_DIR", &home).unwrap_or_else(|| home.join(".openclaw"))
 }
 
 /// 获取 OpenClaw 配置文件路径
 ///
-/// 返回 `~/.openclaw/openclaw.json`
+/// LoongPort 显式目录优先，其次 OPENCLAW_CONFIG_PATH，最后状态目录下的 openclaw.json。
 pub fn get_openclaw_config_path() -> PathBuf {
+    if let Some(override_dir) = get_openclaw_override_dir() {
+        return override_dir.join("openclaw.json");
+    }
+    if let Some(path) = openclaw_env_path("OPENCLAW_CONFIG_PATH", &openclaw_home()) {
+        return path;
+    }
     get_openclaw_dir().join("openclaw.json")
+}
+
+/// 配置界面展示/打开的目录，仅投影实际配置文件的父目录，不改变状态目录。
+pub fn get_openclaw_config_dir() -> PathBuf {
+    let path = get_openclaw_config_path();
+    path.parent().unwrap_or(&path).to_path_buf()
+}
+
+// Match OpenClaw v2026.10.4 (383c124cc32ffee3f8e56f549b88da94d269a4af):
+// config/paths.ts resolveCanonicalConfigPath and normalization-core home-dir.ts.
+// Keep LoongPort's existing canonical default; do not add legacy config discovery.
+fn openclaw_home() -> PathBuf {
+    let home = crate::config::get_home_dir();
+    let Some(value) = std::env::var_os("OPENCLAW_HOME") else {
+        return home;
+    };
+    let value = value.to_string_lossy();
+    let value = value.trim();
+    if matches!(value, "" | "undefined" | "null") {
+        home
+    } else {
+        resolve_openclaw_user_path(value, &home)
+    }
+}
+
+fn openclaw_env_path(name: &str, home: &Path) -> Option<PathBuf> {
+    let value = std::env::var_os(name)?;
+    let value = value.to_string_lossy();
+    let value = value.trim();
+    (!value.is_empty()).then(|| resolve_openclaw_user_path(value, home))
+}
+
+fn resolve_openclaw_user_path(value: &str, home: &Path) -> PathBuf {
+    let path = if value == "~" || value.starts_with("~/") || value.starts_with("~\\") {
+        let mut expanded = home.as_os_str().to_os_string();
+        expanded.push(&value[1..]);
+        PathBuf::from(expanded)
+    } else {
+        PathBuf::from(value)
+    };
+    // Node's path.resolve is lexical: the selected path need not exist and may
+    // contain '..'. Never canonicalize (which would require files on disk).
+    let absolute = std::path::absolute(&path).unwrap_or(path);
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        use std::path::Component;
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                None | Some(Component::ParentDir) if !absolute.has_root() => {
+                    normalized.push("..");
+                }
+                _ => {}
+            },
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn default_openclaw_config_value() -> Value {
@@ -1007,7 +1075,255 @@ pub fn set_tools_config(
 }
 
 #[cfg(test)]
+pub(crate) mod path_test_support {
+    use std::{ffi::OsString, path::Path, sync::Arc};
+
+    pub(crate) struct Environment {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        settings: crate::settings::TestSettingsScope,
+        pub(crate) session: Arc<crate::SecretSession>,
+    }
+
+    impl Environment {
+        pub(crate) fn new(home: &Path) -> Self {
+            let keys = [
+                "CC_SWITCH_TEST_HOME",
+                "HOME",
+                "USERPROFILE",
+                "OPENCLAW_HOME",
+                "OPENCLAW_STATE_DIR",
+                "OPENCLAW_CONFIG_PATH",
+            ];
+            let saved = keys.map(|key| (key, std::env::var_os(key))).to_vec();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            let settings = crate::settings::TestSettingsScope::enter().unwrap();
+            let session = crate::SecretSession::from_context(
+                home.join(crate::APP_DIR_NAME),
+                crate::secrets::VaultContext::generate().unwrap(),
+            );
+            crate::settings::unlock_settings_for_test(session.clone()).unwrap();
+            Self {
+                saved,
+                settings,
+                session,
+            }
+        }
+    }
+
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            // Restore the prior runtime owner/session, not just copied settings values.
+            self.settings.restore();
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    #[serial]
+    fn openclaw_path_state_override_is_used_without_creating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        let state = temp.path().join("missing-state");
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        assert_eq!(get_openclaw_dir(), state);
+        assert_eq!(get_openclaw_config_path(), state.join("openclaw.json"));
+        assert!(!state.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_explicit_file_reads_and_writes_without_relocating_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = super::path_test_support::Environment::new(temp.path());
+        let state = temp.path().join("missing-state");
+        let config = temp.path().join("configs/custom.json5");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            "{ // keep this comment\nmodels: {providers: {kept: {apiKey: 'synthetic'}}}, other: 7}",
+        )
+        .unwrap();
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        assert!(get_providers().unwrap().contains_key("kept"));
+        set_provider(&env.session, "added", json!({"apiKey": "synthetic-new"})).unwrap();
+        let written = fs::read_to_string(&config).unwrap();
+        assert!(written.contains("keep this comment"));
+        let value: Value = json5::from_str(&written).unwrap();
+        assert_eq!(value["other"], 7);
+        assert!(value["models"]["providers"].get("kept").is_some());
+        assert!(value["models"]["providers"].get("added").is_some());
+        assert_eq!(get_openclaw_dir(), state);
+        assert!(!state.exists());
+        assert!(!temp.path().join(".openclaw").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_missing_explicit_file_does_not_use_existing_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = super::path_test_support::Environment::new(temp.path());
+        let default = temp.path().join(".openclaw/openclaw.json");
+        fs::create_dir_all(default.parent().unwrap()).unwrap();
+        let original = "{models: {providers: {home: {apiKey: 'keep'}}}}";
+        fs::write(&default, original).unwrap();
+        let selected = temp.path().join("missing/config.json");
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &selected);
+        assert_eq!(get_openclaw_config_path(), selected);
+        assert!(get_providers().unwrap().is_empty());
+        assert!(!selected.exists());
+        set_provider(&env.session, "selected", json!({"apiKey": "synthetic"})).unwrap();
+        assert!(selected.exists());
+        assert_eq!(fs::read_to_string(&default).unwrap(), original);
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_settings_override_wins_over_both_environment_selectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        let selected = temp.path().join("settings-choice");
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(selected.to_string_lossy().into_owned());
+        crate::settings::update_settings(settings).unwrap();
+        std::env::set_var("OPENCLAW_STATE_DIR", temp.path().join("other-state"));
+        std::env::set_var("OPENCLAW_CONFIG_PATH", temp.path().join("other/file.json"));
+        assert_eq!(get_openclaw_dir(), selected);
+        assert_eq!(get_openclaw_config_path(), selected.join("openclaw.json"));
+        assert!(!selected.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_blank_selectors_keep_default_behavior() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        for value in ["", " \t\n "] {
+            std::env::set_var("OPENCLAW_STATE_DIR", value);
+            std::env::set_var("OPENCLAW_CONFIG_PATH", value);
+            assert_eq!(get_openclaw_dir(), temp.path().join(".openclaw"));
+            assert_eq!(
+                get_openclaw_config_path(),
+                temp.path().join(".openclaw/openclaw.json")
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_relative_selectors_resolve_against_cwd_not_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_var("OPENCLAW_STATE_DIR", "  relative/../state  ");
+        std::env::set_var("OPENCLAW_CONFIG_PATH", "  configs/../selected.json  ");
+        assert_eq!(get_openclaw_dir(), cwd.join("state"));
+        assert_eq!(get_openclaw_config_path(), cwd.join("selected.json"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_tilde_selectors_use_openclaw_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        let effective_home = temp.path().join("effective-home");
+        std::env::set_var("OPENCLAW_HOME", &effective_home);
+        std::env::set_var("OPENCLAW_STATE_DIR", " ~/state ");
+        std::env::set_var("OPENCLAW_CONFIG_PATH", " ~/config.json5 ");
+        assert_eq!(get_openclaw_dir(), effective_home.join("state"));
+        assert_eq!(
+            get_openclaw_config_path(),
+            effective_home.join("config.json5")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_home_override_and_literal_tilde_forms_match_upstream() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = super::path_test_support::Environment::new(temp.path());
+        for ignored in ["", "  ", "undefined", " null "] {
+            std::env::set_var("OPENCLAW_HOME", ignored);
+            assert_eq!(get_openclaw_dir(), temp.path().join(".openclaw"));
+        }
+        std::env::set_var("OPENCLAW_HOME", " ~/effective/../home ");
+        let home = temp.path().join("home");
+        assert_eq!(get_openclaw_dir(), home.join(".openclaw"));
+        std::env::set_var("OPENCLAW_CONFIG_PATH", "~");
+        assert_eq!(get_openclaw_config_path(), home);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", "~someone/config.json");
+        assert_eq!(
+            get_openclaw_config_path(),
+            std::env::current_dir()
+                .unwrap()
+                .join("~someone/config.json")
+        );
+        std::env::set_var("OPENCLAW_CONFIG_PATH", "~\\config.json");
+        #[cfg(unix)]
+        {
+            let mut expected = home.into_os_string();
+            expected.push("\\config.json");
+            assert_eq!(get_openclaw_config_path(), PathBuf::from(expected));
+        }
+        #[cfg(windows)]
+        assert_eq!(get_openclaw_config_path(), home.join("config.json"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_path_fixture_restores_prior_settings_owner_and_environment() {
+        let outer = tempfile::tempdir().unwrap();
+        let _outer_env = super::path_test_support::Environment::new(outer.path());
+        let choice = outer.path().join("selected");
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(choice.to_string_lossy().into_owned());
+        crate::settings::update_settings(settings).unwrap();
+        std::env::set_var("OPENCLAW_STATE_DIR", "outer-state");
+        let inner = tempfile::tempdir().unwrap();
+        let inner_settings;
+        let inner_bytes;
+        {
+            let _inner_env = super::path_test_support::Environment::new(inner.path());
+            assert!(crate::settings::get_settings()
+                .openclaw_config_dir
+                .is_none());
+            assert_eq!(get_openclaw_dir(), inner.path().join(".openclaw"));
+            let mut settings = crate::settings::get_settings();
+            settings.openclaw_config_dir =
+                Some(inner.path().join("inner").to_string_lossy().into_owned());
+            crate::settings::update_settings(settings).unwrap();
+            inner_settings = crate::settings::settings_path();
+            inner_bytes = fs::read(&inner_settings).unwrap();
+        }
+        assert_eq!(std::env::var("OPENCLAW_STATE_DIR").unwrap(), "outer-state");
+        assert_eq!(get_openclaw_dir(), choice);
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(get_openclaw_dir(), choice);
+        let new_choice = outer.path().join("updated");
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(new_choice.to_string_lossy().into_owned());
+        crate::settings::update_settings(settings).unwrap();
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(get_openclaw_dir(), new_choice);
+        assert_eq!(fs::read(inner_settings).unwrap(), inner_bytes);
+        assert!(fs::read_to_string(crate::settings::settings_path())
+            .unwrap()
+            .contains("updated"));
+    }
+
     #[test]
     #[serial]
     fn encrypted_backup_restore_writes_plaintext_to_the_live_config() {
@@ -1067,20 +1383,8 @@ mod tests {
         fs::create_dir_all(&openclaw_dir).unwrap();
         let config_path = openclaw_dir.join("openclaw.json");
         fs::write(&config_path, source).unwrap();
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        let result = test(&config_path);
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        result
+        let _env = super::path_test_support::Environment::new(temp.path());
+        test(&config_path)
     }
 
     #[test]
