@@ -1182,6 +1182,8 @@
     "openReleaseNotesFailed": "開啟更新日誌失敗："
   },
   "providerForm": {
+    "freeOnly": "僅免費",
+    "freeModel": "免費",
     "supplierName": "供應商名稱",
     "supplierNameRequired": "供應商名稱 *",
     "supplierNamePlaceholder": "例如：Anthropic 官方",
@@ -4688,6 +4690,11 @@
     "add": "新增 WorkBuddy 帳號",
     "refreshAll": "全部重新整理",
     "claim": "簽到領取今日積分",
+    "claimAll": "領取全部適用帳號",
+    "claimingAll": "正在批次領取…",
+    "claimResults": "領取結果",
+    "claimNone": "目前沒有可領取的適用帳號。",
+    "claimFailed": "這次操作未完成，可重新整理此帳號狀態後再試。",
     "total": "總餘量",
     "expiry": "最近到期",
     "updated": "更新時間",

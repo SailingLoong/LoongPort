@@ -1181,6 +1181,8 @@
     "openReleaseNotesFailed": "リリースノートを開けませんでした:"
   },
   "providerForm": {
+    "freeOnly": "無料のみ",
+    "freeModel": "無料",
     "supplierName": "プロバイダー名",
     "supplierNameRequired": "プロバイダー名 *",
     "supplierNamePlaceholder": "例: Anthropic Official",
@@ -4687,6 +4689,11 @@
     "add": "WorkBuddy アカウントを追加",
     "refreshAll": "すべて更新",
     "claim": "今日のチェックインポイントを受け取る",
+    "claimAll": "対象アカウントすべてで受け取る",
+    "claimingAll": "ポイントを受け取り中…",
+    "claimResults": "受け取り結果",
+    "claimNone": "受け取り対象のアカウントはありません。",
+    "claimFailed": "完了できませんでした。このアカウントの状態を更新して再試行してください。",
     "total": "残りポイント",
     "expiry": "次の有効期限",
     "updated": "更新日時",

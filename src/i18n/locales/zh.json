@@ -1181,6 +1181,8 @@
     "openReleaseNotesFailed": "打开更新日志失败:"
   },
   "providerForm": {
+    "freeOnly": "仅免费",
+    "freeModel": "免费",
     "supplierName": "供应商名称",
     "supplierNameRequired": "供应商名称 *",
     "supplierNamePlaceholder": "例如：Anthropic 官方",
@@ -4687,6 +4689,11 @@
     "add": "添加 WorkBuddy 账号",
     "refreshAll": "刷新全部",
     "claim": "签到领取今日积分",
+    "claimAll": "领取全部适用账号",
+    "claimingAll": "正在批量领取…",
+    "claimResults": "领取结果",
+    "claimNone": "当前没有可领取的适用账号。",
+    "claimFailed": "本次操作未完成，可刷新该账号状态后重试。",
     "total": "总余量",
     "expiry": "最近到期",
     "updated": "更新时间",

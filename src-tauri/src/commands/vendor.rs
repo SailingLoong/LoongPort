@@ -951,13 +951,8 @@ async fn provision_impl(
                 }
                 None => defaults.clone(),
             };
-            // 存量行补模型目录（只增不覆盖）：目录版本之前的行没有 modelCatalog，
-            // 而省心模式的偏好过滤会把无目录档位静默排除 —— 刷新密钥时顺手补齐。
-            if settings_config.get("modelCatalog").is_none() {
-                if let Some(catalog) = defaults.get("modelCatalog") {
-                    settings_config["modelCatalog"] = catalog.clone();
-                }
-            }
+            provision::refresh_model_catalog(vendor, &mut settings_config, defaults);
+            crate::vendor::apply_plan_policy(vendor, bundle.plan.id_segment, &mut settings_config);
 
             let provider = Provider {
                 id: provider_id.clone(),
@@ -1129,17 +1124,20 @@ fn vendor_reset_plan_config_impl(
     // ⚠️ **`roles` 与生成风格必须与生成时同一份 plan**，否则「恢复默认」写出的
     // 配置与 `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」
     // （Go 档的鉴权字段再走 Bearer 就是静默 401）。
-    let defaults = crate::relay::provider_config::settings_config_with_roles_and_models(
+    let free_catalog = crate::vendor::is_free_plan(vendor, plan.id_segment)
+        .then(|| crate::vendor::catalog_models(vendor, plan.id_segment));
+    let mut defaults = crate::relay::provider_config::settings_config_with_roles_and_models(
         &app_type,
         &api_key,
         &existing.name,
         &base_url,
         &model,
         provision::claude_roles_for(vendor, plan.id_segment, &app_type),
-        None,
+        free_catalog.as_deref(),
         crate::vendor::plan_style(vendor, plan.id_segment),
     )
     .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
+    crate::vendor::apply_plan_policy(vendor, plan.id_segment, &mut defaults);
 
     let restored = Provider {
         settings_config: defaults,
@@ -1916,7 +1914,7 @@ mod tests {
     /// 前端渲染档位子行、switch 带 planId，全靠这份清单；id 对不上则「当前在用」
     /// 高亮与切换命令各算各的。
     #[test]
-    fn opencode_dto_lists_both_plans_with_derived_ids() {
+    fn opencode_dto_lists_all_plans_with_derived_ids() {
         let row = creds::VendorRow {
             id: 1,
             vendor_id: "opencode".to_string(),
@@ -1929,9 +1927,10 @@ mod tests {
         };
         let dto = VendorAccountRow::from(row);
         assert_eq!(dto.vendor_name, "opencode", "账号行头用厂商家族名");
-        assert_eq!(dto.plans.len(), 2, "Zen + Go");
+        assert_eq!(dto.plans.len(), 3, "Zen + Go + Free");
         assert_eq!(dto.plans[0].plan_name, "opencode Zen");
         assert_eq!(dto.plans[1].plan_name, "opencode Go");
+        assert_eq!(dto.plans[2].plan_name, "opencode Free");
         for plan in &dto.plans {
             assert_eq!(
                 plan.provider_id,
@@ -2238,6 +2237,93 @@ mod tests {
             )
         })
         .expect("种 opencode 行")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn opencode_free_shared_entry_refreshes_locally_and_restores_its_policy() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let state = mem_state();
+        let row_id = seed_opencode_row(&state);
+        with_conn(&state, |conn, vault| {
+            creds::set_api_key(conn, vault, row_id, "SYNTHETIC_ONE_KEY")
+        })
+        .unwrap();
+        let provisioned = provision_impl(&state, row_id).await.unwrap();
+        assert!(
+            !provisioned.key_created,
+            "existing key must avoid remote provisioning"
+        );
+        let source = provision::provider_id_for("opencode-free", "wrk_x");
+        let row = with_conn(&state, |conn, vault| creds::get(conn, vault, row_id))
+            .unwrap()
+            .unwrap();
+        let dto = vendor_account_for_app(&state, row.clone(), &AppType::Codex);
+        assert!(
+            dto.plans
+                .iter()
+                .find(|plan| plan.plan_id == "opencode-free")
+                .unwrap()
+                .can_switch
+        );
+        let unsupported = vendor_account_for_app(&state, row, &AppType::Claude);
+        assert!(
+            !unsupported
+                .plans
+                .iter()
+                .find(|plan| plan.plan_id == "opencode-free")
+                .unwrap()
+                .can_switch
+        );
+        let mut provider = state
+            .db
+            .get_provider_by_id(&source, "codex")
+            .unwrap()
+            .unwrap();
+        provider.settings_config["config"] = serde_json::json!(provider.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .replace("glm-5.3-flash-free", "deepseek-v4.1-flash-free"));
+        provider
+            .settings_config
+            .as_object_mut()
+            .unwrap()
+            .remove("freeOnly");
+        state.db.save_provider("codex", &provider).unwrap();
+        provision_impl(&state, row_id).await.unwrap();
+        let refreshed = state
+            .db
+            .get_provider_by_id(&source, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.settings_config["freeOnly"], true);
+        assert_eq!(
+            crate::relay::provider_config::extract_model(&refreshed.settings_config).as_deref(),
+            Some("deepseek-v4.1-flash-free")
+        );
+        vendor_reset_plan_config_impl(&state, &source, "codex").unwrap();
+        let restored = state
+            .db
+            .get_provider_by_id(&source, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.settings_config["freeOnly"], true);
+        assert_eq!(
+            restored.settings_config["modelCatalog"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            crate::vendor::opencode::FREE_CHAT_MODELS.len()
+        );
+        assert_eq!(
+            crate::relay::provider_config::extract_api_key(
+                &restored.settings_config,
+                &AppType::Codex
+            )
+            .as_deref(),
+            Some("SYNTHETIC_ONE_KEY")
+        );
+        assert!(state.db.get_current_provider("codex").unwrap().is_none());
     }
 
     fn opencode_provider_ids() -> Vec<String> {

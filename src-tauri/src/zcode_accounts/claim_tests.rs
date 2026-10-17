@@ -74,9 +74,35 @@ fn successful_or_already_claimed_reply_blocks_another_post() {
     for code in [0, 1003] {
         let mut r = claimable();
         r.mark_submitted();
-        r.apply_reply(&json!({"code":code}));
+        r.apply_reply(&json!({"code":code,"data":{"plan":{"plan_id":"plan"}}}));
         assert_eq!(r.status, Status::Claimed);
         assert!(!r.may_submit());
+    }
+}
+#[test]
+fn official_claim_code_strings_are_normalized() {
+    for (reply, expected) in [
+        (json!({"code":"3007"}), Status::VerificationRequired),
+        (json!({"code":"401"}), Status::LoginExpired),
+        (
+            json!({"code":"0","data":{"plan":{"plan_id":"plan"}}}),
+            Status::Claimed,
+        ),
+        (json!({"code":" 0"}), Status::ResultPending),
+    ] {
+        let mut r = claimable();
+        r.mark_submitted();
+        r.apply_reply(&reply);
+        assert_eq!(r.status, expected, "{reply}");
+    }
+}
+#[test]
+fn bare_success_without_a_plan_stays_uncertain() {
+    for reply in [json!({"code":0}), json!({"code":0,"data":{"plan":null}})] {
+        let mut r = claimable();
+        r.mark_submitted();
+        r.apply_reply(&reply);
+        assert_eq!(r.status, Status::ResultPending, "{reply}");
     }
 }
 #[test]

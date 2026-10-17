@@ -9,6 +9,13 @@ beforeEach(() => {
   vi.mocked(invoke).mockReset();
 });
 
+it("batch WorkBuddy claims use one explicit backend command without ZCode participation", async () => {
+  const results = [{ account: { id: "workbuddy-a" }, error: "busy" }];
+  vi.mocked(invoke).mockResolvedValueOnce(results);
+  expect(await workbuddyApi.claimAll()).toBe(results);
+  expect(vi.mocked(invoke).mock.calls).toEqual([["claim_all_workbuddy_today"]]);
+});
+
 it("keeps WorkBuddy explicit single-account claims separate from ZCode automatic participants", async () => {
   await zcodeClaimApi.setAuto("/synthetic/zcode", true, ["zcode-a"]);
   await workbuddyApi.list();

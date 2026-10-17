@@ -141,7 +141,7 @@ pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<Pla
                     .filter_map(|app| {
                         let (base_url, model) =
                             crate::vendor::config_for(vendor, plan.id_segment, app)?;
-                        let cfg =
+                        let mut cfg =
                             crate::relay::provider_config::settings_config_with_roles_and_models(
                                 app,
                                 api_key,
@@ -152,6 +152,7 @@ pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<Pla
                                 Some(catalog.as_slice()),
                                 crate::vendor::plan_style(vendor, plan.id_segment),
                             )?;
+                        crate::vendor::apply_plan_policy(vendor, plan.id_segment, &mut cfg);
                         Some((app.clone(), cfg))
                     })
                     .collect(),
@@ -160,9 +161,114 @@ pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<Pla
         .collect()
 }
 
+/// Refresh through the existing key lifecycle without replacing user choices.
+pub(crate) fn refresh_model_catalog(vendor: Vendor, settings: &mut Value, defaults: &Value) {
+    if settings.get("modelCatalog").is_none() {
+        if let Some(catalog) = defaults.get("modelCatalog") {
+            settings["modelCatalog"] = catalog.clone();
+        }
+        return;
+    }
+    if vendor != Vendor::BigModel {
+        return;
+    }
+    let Some(defaults) = defaults
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some(models) = settings
+        .pointer_mut("/modelCatalog/models")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for row in defaults {
+        let Some(id) = row.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        if crate::vendor::bigmodel::FREE_TEXT_MODELS.contains(&id)
+            && !models
+                .iter()
+                .any(|existing| existing.get("model").and_then(Value::as_str) == Some(id))
+        {
+            models.push(row.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_free_shared_plan_uses_one_account_key_and_only_documented_chat_models() {
+        let bundles = plan_rows_for(Vendor::OpenCode, "synthetic-workspace", "synthetic-one-key");
+        let free = bundles
+            .iter()
+            .find(|bundle| bundle.plan.id_segment == "opencode-free")
+            .expect("existing OpenCode account must expose the shared free plan");
+        assert_ne!(free.provider_id, bundles[0].provider_id);
+        assert_eq!(
+            free.rows.len(),
+            4,
+            "only documented Chat Completions clients"
+        );
+        for (app, settings) in &free.rows {
+            assert!(!matches!(app, AppType::Claude | AppType::ClaudeDesktop));
+            assert_eq!(settings["freeOnly"], true);
+            let text = serde_json::to_string(settings).unwrap();
+            assert!(text.contains("synthetic-one-key"));
+            assert!(text.contains("https://opencode.ai/inference/openai/v1"));
+            assert!(text.contains("glm-5.3-flash-free"));
+            for row in settings["modelCatalog"]["models"].as_array().unwrap() {
+                assert!(row["model"].as_str().unwrap().ends_with("-free"));
+            }
+            if *app == AppType::Codex {
+                assert!(settings["config"]
+                    .as_str()
+                    .unwrap()
+                    .contains("wire_api = \"chat\""));
+            }
+        }
+        assert_eq!(bundles[0].plan.id_segment, "opencode");
+        assert_eq!(bundles[1].plan.id_segment, "opencode-go");
+        assert!(bundles[..2]
+            .iter()
+            .flat_map(|bundle| &bundle.rows)
+            .all(|(_, cfg)| cfg.get("freeOnly").is_none()));
+    }
+
+    #[test]
+    fn free_review_existing_bigmodel_catalog_is_additive_and_idempotent() {
+        let defaults = plan_rows_for(Vendor::BigModel, "synthetic-account", "synthetic-key")
+            .remove(0)
+            .rows
+            .into_iter()
+            .find(|(a, _)| *a == AppType::Codex)
+            .unwrap()
+            .1;
+        let mut settings = serde_json::json!({"auth":{"OPENAI_API_KEY":"synthetic-key"},"config":"custom-endpoint-and-selection", "modelCatalog":{"custom":"preserved","models":[{"model":"custom-model","contextWindow":123},{"model":"glm-4.7-flash","contextWindow":456}]}});
+        refresh_model_catalog(Vendor::BigModel, &mut settings, &defaults);
+        let models = settings["modelCatalog"]["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .filter(|m| m["model"] == "glm-4.7-flash")
+                .count(),
+            1
+        );
+        assert!(models.iter().any(|m| m["model"] == "glm-4.5-flash"));
+        assert_eq!(models[1]["contextWindow"], 456);
+        assert_eq!(settings["config"], "custom-endpoint-and-selection");
+        assert_eq!(settings["auth"]["OPENAI_API_KEY"], "synthetic-key");
+        assert_eq!(settings["modelCatalog"]["custom"], "preserved");
+        let once = settings.clone();
+        refresh_model_catalog(Vendor::BigModel, &mut settings, &defaults);
+        assert_eq!(settings, once);
+        refresh_model_catalog(Vendor::DeepSeek, &mut settings, &defaults);
+        assert_eq!(settings, once);
+    }
 
     /// DeepSeek（单 plan 厂商）的那一个 bundle 的行 —— 旧世界 `provider_rows_for`
     /// 的等价物，存量断言全部照抄。
@@ -225,6 +331,30 @@ mod tests {
                 "目录收基础名（[1M] 是角色 env 的变体后缀）：{models:?}"
             );
         }
+    }
+
+    #[test]
+    fn bigmodel_catalog_includes_official_free_text_models_without_changing_defaults() {
+        let bundles = plan_rows_for(Vendor::BigModel, "synthetic-account", "synthetic-key");
+        assert_eq!(bundles.len(), 1);
+        let codex = bundles[0]
+            .rows
+            .iter()
+            .find(|(app, _)| *app == AppType::Codex)
+            .unwrap();
+        let models = codex.1["modelCatalog"]["models"].as_array().unwrap();
+        for model in ["glm-4.7-flash", "glm-4.5-flash"] {
+            assert_eq!(
+                models.iter().filter(|row| row["model"] == model).count(),
+                1,
+                "missing or duplicated {model}"
+            );
+        }
+        assert!(codex.1["config"].as_str().unwrap().contains("glm-5-turbo"));
+        assert_eq!(
+            bundles[0].provider_id,
+            provider_id_for("bigmodel", "synthetic-account")
+        );
     }
 
     #[test]
@@ -390,14 +520,18 @@ mod tests {
 
     /// opencode 一个账号展开成两个 bundle，各自六条记录、各自的 provider id。
     #[test]
-    fn opencode_expands_into_two_bundles_with_distinct_ids() {
+    fn opencode_expands_into_plans_with_distinct_ids() {
         let bundles = plan_rows_for(Vendor::OpenCode, "wrk_x", "sk-x");
-        assert_eq!(bundles.len(), 2, "Zen + Go");
+        assert_eq!(bundles.len(), 3, "Zen + Go + Free");
         for bundle in &bundles {
             assert_eq!(
                 bundle.rows.len(),
-                6,
-                "{} 六个平台",
+                if crate::vendor::is_free_plan(Vendor::OpenCode, bundle.plan.id_segment) {
+                    4
+                } else {
+                    6
+                },
+                "{} supported platforms",
                 bundle.plan.display_name
             );
             assert!(
