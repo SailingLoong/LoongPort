@@ -118,7 +118,7 @@ pub async fn get_config_status(
         AppType::OpenClaw => {
             let config_path = crate::openclaw_config::get_openclaw_config_path();
             let exists = config_path.exists();
-            let path = crate::openclaw_config::get_openclaw_dir()
+            let path = crate::openclaw_config::get_openclaw_config_dir()
                 .to_string_lossy()
                 .to_string();
 
@@ -164,7 +164,7 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
-        AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
+        AppType::OpenClaw => crate::openclaw_config::get_openclaw_config_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
         AppType::Pi => crate::pi_config::get_pi_agent_dir().map_err(|e| e.to_string())?,
     };
@@ -184,7 +184,7 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
-        AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
+        AppType::OpenClaw => crate::openclaw_config::get_openclaw_config_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
         AppType::Pi => crate::pi_config::get_pi_agent_dir().map_err(|e| e.to_string())?,
     };
@@ -320,6 +320,33 @@ pub async fn set_common_config_snippet(
 #[cfg(test)]
 mod tests {
     use super::validate_common_config_snippet;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn openclaw_path_config_directory_projects_selected_file_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
+        let state = temp.path().join("missing-state");
+        let config = temp.path().join("separate/config.json5");
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        assert_eq!(
+            super::get_config_dir("openclaw".into()).await.unwrap(),
+            config.parent().unwrap().to_string_lossy()
+        );
+        assert_eq!(crate::openclaw_config::get_openclaw_dir(), state);
+        assert!(!config.exists());
+        assert!(!state.exists());
+        let selected = temp.path().join("settings-choice");
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(selected.to_string_lossy().into_owned());
+        crate::settings::update_settings(settings).unwrap();
+        assert_eq!(
+            super::get_config_dir("openclaw".into()).await.unwrap(),
+            selected.to_string_lossy()
+        );
+        assert!(!selected.exists());
+    }
 
     #[test]
     fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {
