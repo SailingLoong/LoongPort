@@ -1664,6 +1664,388 @@ fn set_catalog_row(runtime: &crate::store::AppState, id: &str, pointer: &str) {
     runtime.db.get_all_providers("codex").unwrap();
 }
 
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_accepts_original_generated_catalog_without_writes() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let mut row = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] =
+        json!({"models":[{"model":"synthetic-b","contextWindow":123456}]});
+    runtime.db.save_provider("codex", &row).unwrap();
+
+    // Exercise the original five-file writer, not a substitute catalog fixture.
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    let path = crate::codex_config::get_codex_model_catalog_path();
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(catalog["models"]
+        .as_array()
+        .is_some_and(|models| !models.is_empty()));
+    runtime.db.get_all_providers("codex").unwrap();
+    let before = snapshot(f.home.path());
+    let view = review
+        .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+        .unwrap();
+    assert!(
+        view.can_complete_app,
+        "the original writer's generated catalog must satisfy U03 completion"
+    );
+    crate::codex_config::test_with_unloaded_codex_cli(|| {
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap()
+                .can_complete_app,
+            "an unloaded ProxyChat template remains unknown rather than being rediscovered"
+        );
+    });
+    assert_eq!(
+        snapshot(f.home.path()),
+        before,
+        "completion review is read-only"
+    );
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_rejects_generated_catalog_damage_and_non_file_auth() {
+    let f = Fixture::new();
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &AppType::Codex);
+    let mut row = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-b"}]});
+    runtime.db.save_provider("codex", &row).unwrap();
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    runtime.db.get_all_providers("codex").unwrap();
+    let path = crate::codex_config::get_codex_model_catalog_path();
+    let original = std::fs::read(&path).unwrap();
+    let mut altered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    altered["models"][0]["slug"] = "different-synthetic-model".into();
+    for bytes in [
+        None,
+        Some(b"not a catalog".to_vec()),
+        Some(serde_json::to_vec(&altered).unwrap()),
+    ] {
+        if let Some(bytes) = bytes {
+            std::fs::write(&path, bytes).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let before = snapshot(f.home.path());
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap()
+                .can_complete_app
+        );
+        assert_eq!(
+            snapshot(f.home.path()),
+            before,
+            "damaged output is never repaired by review"
+        );
+        std::fs::write(&path, &original).unwrap();
+    }
+    let config_path = crate::codex_config::get_codex_config_path();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    for store in ["keyring", "auto", "ephemeral"] {
+        std::fs::write(
+            &config_path,
+            format!("cli_auth_credentials_store = '{store}'\n{config}"),
+        )
+        .unwrap();
+        let before = snapshot(f.home.path());
+        assert!(
+            !review
+                .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+                .unwrap()
+                .can_complete_app
+        );
+        assert_eq!(
+            snapshot(f.home.path()),
+            before,
+            "catalog proof does not bypass auth-store ownership"
+        );
+    }
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_binds_generated_sources_even_when_output_is_unchanged() {
+    let f = Fixture::new();
+    let app = AppType::Codex;
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &app);
+    let mut row = runtime
+        .db
+        .get_provider_by_id("b", "codex")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-b"}]});
+    row.meta.get_or_insert_with(Default::default).api_format = Some("openai_responses".into());
+    runtime.db.save_provider("codex", &row).unwrap();
+    crate::services::ProviderService::switch(&runtime, app.clone(), "b").unwrap();
+    runtime.db.get_all_providers("codex").unwrap();
+    let before = snapshot(f.home.path());
+    let unloaded = crate::codex_config::test_with_unloaded_codex_cli(|| {
+        review
+            .review_app_with_state(&inspected, &token, &app, &runtime)
+            .unwrap()
+    });
+    let loaded = review
+        .review_app_with_state(&inspected, &token, &app, &runtime)
+        .unwrap();
+    assert!(unloaded.can_complete_app && loaded.can_complete_app);
+    assert_ne!(
+        unloaded.revision, loaded.revision,
+        "uninitialized and loaded-empty are distinct source generations"
+    );
+    assert!(review
+        .recover_app_with_state(&inspected, &token, &app, &unloaded.revision, &runtime)
+        .is_err());
+    assert_eq!(snapshot(f.home.path()), before);
+    let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+    let inputs =
+        crate::services::provider::codex_direct::NativeCatalogInputs::capture(&row, &live).unwrap();
+    crate::codex_config::test_with_unloaded_codex_cli(|| {
+        assert!(
+            inputs.verify_references().is_err(),
+            "a previously bound planner cannot borrow a new source generation"
+        );
+    });
+    assert!(inputs.verify_references().is_ok());
+    let cache = crate::codex_config::get_codex_config_dir().join("models_cache.json");
+    let mut previous = loaded;
+    for fetched_at in ["2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z"] {
+        std::fs::write(
+            &cache,
+            serde_json::to_vec(
+                &json!({"client_version":"1.0.0", "fetched_at":fetched_at, "models":[]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let before = snapshot(f.home.path());
+        let fresh = review
+            .review_app_with_state(&inspected, &token, &app, &runtime)
+            .unwrap();
+        assert!(
+            fresh.can_complete_app,
+            "empty cache metadata must not change the generated output"
+        );
+        assert_ne!(
+            previous.revision, fresh.revision,
+            "cache absence/content belongs to the source, not only generated bytes"
+        );
+        assert!(review
+            .recover_app_with_state(&inspected, &token, &app, &previous.revision, &runtime)
+            .is_err());
+        assert_eq!(snapshot(f.home.path()), before);
+        previous = fresh;
+    }
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_preserves_external_keep_with_unloaded_generated_template() {
+    let f = Fixture::new();
+    let app = AppType::Codex;
+    let (inspected, review, token, runtime) =
+        super::native_recovery_tests::native_runtime(&f, &app);
+    let mut row = runtime
+        .db
+        .get_provider_by_id("a", "codex")
+        .unwrap()
+        .unwrap();
+    row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-a"}]});
+    runtime.db.save_provider("codex", &row).unwrap();
+    runtime.db.get_all_providers("codex").unwrap();
+    let config_path = crate::codex_config::get_codex_config_path();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    let external = f.home.path().join("external-catalog.json");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            "model_catalog_json = {}\n{config}",
+            serde_json::to_string(&external).unwrap()
+        ),
+    )
+    .unwrap();
+    let before = snapshot(f.home.path());
+    let view = crate::codex_config::test_with_unloaded_codex_cli(|| {
+        review
+            .review_app_with_state(&inspected, &token, &app, &runtime)
+            .unwrap()
+    });
+    assert!(
+        view.can_complete_app,
+        "original Keep does not require discovery or import external content"
+    );
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(external.is_dir());
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_choice_rejects_late_memory_source_generation() {
+    for choose_mode in [false, true] {
+        let f = Fixture::new();
+        let app = AppType::Codex;
+        let (inspected, review, token, runtime) =
+            super::native_recovery_tests::native_runtime(&f, &app);
+        let mut row = runtime
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-b"}]});
+        row.meta.get_or_insert_with(Default::default).api_format = Some("openai_responses".into());
+        runtime.db.save_provider("codex", &row).unwrap();
+        crate::services::ProviderService::switch(&runtime, app.clone(), "b").unwrap();
+        if choose_mode {
+            crate::mode::state::update_app(
+                &f.device,
+                &runtime.db.secret_session().read().unwrap(),
+                "codex",
+                |entry| {
+                    entry.mode = None;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        } else {
+            runtime
+                .db
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE providers SET is_current=0 WHERE app_type='codex'",
+                    [],
+                )
+                .unwrap();
+            crate::settings::set_current_provider(&app, None).unwrap();
+        }
+        runtime.db.get_all_providers("codex").unwrap();
+        let boundary = if choose_mode {
+            "upgrade:mode_target"
+        } else {
+            "upgrade:provider_target"
+        };
+        let (result, seen) = crate::codex_config::test_with_unloaded_codex_cli(|| {
+            let view = review
+                .review_app_with_state(&inspected, &token, &app, &runtime)
+                .unwrap();
+            assert!(if choose_mode {
+                view.can_choose_mode
+            } else {
+                view.can_choose_provider
+            });
+            let home = f.home.path().to_path_buf();
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let captured = seen.clone();
+            // Both source generations produce the same NativeResponses catalog.
+            // Only the bound loaded-source identity can reject this late change.
+            crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |at| {
+                if at == boundary && captured.borrow().is_none() {
+                    crate::codex_config::test_set_codex_cli_loaded(true);
+                    *captured.borrow_mut() = Some(snapshot(&home));
+                }
+            })));
+            let result = if choose_mode {
+                review.select_mode(
+                    &inspected,
+                    &token,
+                    &app,
+                    &view.revision,
+                    &super::super::UpgradeModeChoice {
+                        mode: crate::mode::state::Mode::Direct,
+                        proxy_route: None,
+                    },
+                    &runtime,
+                )
+            } else {
+                review.select_provider(&inspected, &token, &app, &view.revision, "b", &runtime)
+            };
+            crate::mode::operation::failpoint::on_boundary(None);
+            (result, seen)
+        });
+        assert!(
+            result.is_err(),
+            "late source generation must stop the original choice at {boundary}"
+        );
+        assert_eq!(
+            snapshot(f.home.path()),
+            *seen.borrow().as_ref().unwrap(),
+            "no pointer/mode write after source drift"
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn codex_catalog_completion_recovery_rejects_generated_cache_drift_at_write_boundary() {
+    for boundary in ["recover:begin", "recover:target"] {
+        let f = Fixture::new();
+        let app = AppType::Codex;
+        let (inspected, review, token, runtime) =
+            super::native_recovery_tests::native_runtime(&f, &app);
+        let mut row = runtime
+            .db
+            .get_provider_by_id("b", "codex")
+            .unwrap()
+            .unwrap();
+        row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-b"}]});
+        runtime.db.save_provider("codex", &row).unwrap();
+        crate::mode::operation::failpoint::crash_at(Some("published:1"));
+        let interrupted = crate::services::ProviderService::switch(&runtime, app.clone(), "b");
+        crate::mode::operation::failpoint::crash_at(None);
+        assert!(interrupted.is_err());
+        let view = review
+            .review_app_with_state(&inspected, &token, &app, &runtime)
+            .unwrap();
+        assert!(view.can_recover_operation);
+        let cache = crate::codex_config::get_codex_config_dir().join("models_cache.json");
+        let home = f.home.path().to_path_buf();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let captured = seen.clone();
+        crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |at| {
+            if at == boundary && captured.borrow().is_none() {
+                std::fs::write(&cache, b"synthetic late source change").unwrap();
+                *captured.borrow_mut() = Some(snapshot(&home));
+            }
+        })));
+        let result =
+            review.recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime);
+        crate::mode::operation::failpoint::on_boundary(None);
+        assert!(
+            result.is_err(),
+            "generated cache drift must stop replay at {boundary}"
+        );
+        assert_eq!(
+            snapshot(f.home.path()),
+            *seen.borrow().as_ref().unwrap(),
+            "no writes after source drift"
+        );
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
+    }
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn codex_catalog_completion_accepts_original_removed_row_pointer() {
@@ -2031,6 +2413,7 @@ fn codex_catalog_completion_keeps_original_managed_generation_boundary() {
         .get_provider_by_id("managed", "codex")
         .unwrap()
         .unwrap();
+    let original_row = row.clone();
     row.settings_config["modelCatalog"] = json!({"models":[{"model":"synthetic-model"}]});
     runtime.db.save_provider("codex", &row).unwrap();
     let before = snapshot(f.home.path());
@@ -2043,8 +2426,32 @@ fn codex_catalog_completion_keeps_original_managed_generation_boundary() {
     assert_eq!(
         snapshot(f.home.path()),
         before,
-        "discovery-dependent model specs remain unknown"
+        "unwritten model specs do not prove an absent generated catalog"
     );
+    // Edit the inactive row through the existing flow; a mismatched active row
+    // correctly cannot start another ordinary write under this checkpoint.
+    runtime.db.save_provider("codex", &original_row).unwrap();
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "b").unwrap();
+    runtime.db.save_provider("codex", &row).unwrap();
+    crate::services::ProviderService::switch(&runtime, AppType::Codex, "managed").unwrap();
+    runtime.db.get_all_providers("codex").unwrap();
+    let before = snapshot(f.home.path());
+    assert!(
+        !review
+            .review_app(&inspected, &token, &AppType::Codex)
+            .unwrap()
+            .can_complete_app,
+        "generated catalog proof cannot replace the managed auth generation"
+    );
+    assert!(
+        review
+            .review_app_with_state(&inspected, &token, &AppType::Codex, &runtime)
+            .unwrap()
+            .can_complete_app,
+        "the original managed writer's generated catalog is accepted with its manager generation"
+    );
+    assert_eq!(snapshot(f.home.path()), before);
+    assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
 }
 
 #[cfg_attr(test, test)]
@@ -2236,8 +2643,8 @@ fn codex_catalog_completion_preserves_original_catalog_journal_writes() {
         .unwrap();
     assert_eq!(recovered.has_pending_operation, Some(false));
     assert!(
-        !recovered.can_complete_app,
-        "generated specs still need their discovery-generation proof"
+        recovered.can_complete_app,
+        "original journal output is proven against its bound generated sources"
     );
     assert!(
         std::fs::read(&path).unwrap() != old,
@@ -2249,6 +2656,6 @@ fn codex_catalog_completion_preserves_original_catalog_journal_writes() {
             .as_deref(),
         Some("b")
     );
-    assert!(crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &app).is_err());
+    drop(crate::mode::operation::AppWrite::begin_mode(&runtime.proxy_service, &app).unwrap());
     assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
 }
