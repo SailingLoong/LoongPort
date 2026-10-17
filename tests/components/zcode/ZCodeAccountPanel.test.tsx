@@ -735,6 +735,119 @@ describe("ZCode saved accounts", () => {
     expect(screen.queryByText(/stale-native/)).not.toBeInTheDocument();
     expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
   });
+  it("clears a pre-switch native identity without optimistically selecting the target", async () => {
+    vi.mocked(zcodeAccountsApi.readCurrentIdentity).mockResolvedValue({
+      contextRevision: context.contextRevision,
+      id: "opaque-before-switch",
+      label: "Previous native account",
+      family: "zai",
+      readAt: 1_800_000_000_000,
+    });
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read current native identity" }),
+    );
+    await screen.findByText(/Current native account: Previous native account/);
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch saved account" },
+      ),
+    );
+    confirm("Switch to this account");
+    await screen.findByText(
+      `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
+    );
+    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Current native account:/),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledExactlyOnceWith(
+      source,
+      context.contextRevision,
+      "opaque-zai",
+      catalog.revision,
+    );
+  });
+  it("ignores a pre-switch native identity read that returns after switching", async () => {
+    let finish!: (
+      value: Awaited<ReturnType<typeof zcodeAccountsApi.readCurrentIdentity>>,
+    ) => void;
+    vi.mocked(zcodeAccountsApi.readCurrentIdentity).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read current native identity" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch saved account" },
+      ),
+    );
+    confirm("Switch to this account");
+    await screen.findByText(
+      `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
+    );
+    await act(async () =>
+      finish({
+        contextRevision: context.contextRevision,
+        id: "opaque-before-switch",
+        label: "Late pre-switch account",
+        family: "zai",
+        readAt: 1_800_000_000_000,
+      }),
+    );
+    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Late pre-switch account/),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Read current native identity" }),
+      ).toBeEnabled(),
+    );
+  });
+  it("keeps a pre-switch native identity invalid when the switch result is uncertain", async () => {
+    vi.mocked(zcodeAccountsApi.switch).mockRejectedValueOnce({
+      code: "zcode.account.committed_result_unknown",
+      remedy: "queryOriginal",
+      committed: true,
+    });
+    mount();
+    await inspect();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read current native identity" }),
+    );
+    await screen.findByText(/Current native account: p…/);
+    expect(
+      screen.getByText("Current native identity at last explicit read"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch saved account" },
+      ),
+    );
+    confirm("Switch to this account");
+    await screen.findByRole("alert");
+    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Current native account:/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Current native identity at last explicit read"),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  });
   it("allows an imported row only when the backend grants activation", async () => {
     vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
       ...catalog,
