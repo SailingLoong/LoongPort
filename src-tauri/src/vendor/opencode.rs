@@ -40,11 +40,11 @@
 //! OpenAI 兼容 `/zen/v1/chat/completions` 与 Responses `/zen/v1/responses`（base
 //! 取 `/zen/v1`）。
 //!
-//! ## 两个接入变体（[`Plan`]）
+//! ## 接入变体（[`Plan`]）
 //!
 //! opencode 的账号有两套接入端点共享同一把 key：Zen（按量计费全量目录）与
 //! Go（订阅制精选开源模型，`/zen/go` 下）。账号层（登录窗、cookie、key 认领）
-//! 两档完全同一套 —— 差异只在配置展开层，见 [`Plan`] 的文档。
+//! 另有只选官方免费变体的 Free plan；账号层沿用同一套，差异只在配置展开层。
 
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +78,25 @@ pub const GO_API_ORIGIN: &str = "https://opencode.ai/zen/go/v1";
 /// Go 套餐的 Anthropic 兼容层（`/zen/go/v1/messages` ⇒ SDK base 取 `/zen/go`；
 /// 该网关只认 x-api-key，见 [`Plan::style`]）。
 pub const GO_ANTHROPIC_ORIGIN: &str = "https://opencode.ai/zen/go";
+
+/// Official Chat Completions free variants (2026-10-16). Availability is temporary.
+/// https://opencode.ai/v2/docs/console/models/
+/// Excludes paid IDs, the non-variant Big Pickle ID, and other wire protocols.
+pub(crate) const FREE_CHAT_MODELS: &[&str] = &[
+    "glm-5.3-flash-free",
+    "deepseek-v4.1-flash-free",
+    "space-bunny-free",
+    "beam-free",
+    "ll-alpha-free",
+    "longcat-2.5-preview-free",
+    "exo-free",
+    "mimo-v2.6-flash-free",
+    "mimo-v2.5-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "nemotron-3.5-super-vl-free",
+];
+pub(crate) const FREE_API_ORIGIN: &str = "https://opencode.ai/inference/openai/v1";
 
 /// 会话 cookie 名（console `useSession({ name: "auth" })`，HttpOnly）。
 const SESSION_COOKIE_NAME: &str = "auth";
@@ -495,14 +514,16 @@ pub enum Plan {
     Zen,
     /// Go 订阅（`/zen/go`、`/zen/go/v1`），网关只认 x-api-key。
     Go,
+    /// Temporary free variants, sharing this workspace's existing key.
+    Free,
 }
 
 impl Plan {
-    /// 全部 plan，数组序即展示序（Zen 在前：不订阅也能用）。
-    pub const ALL: [Plan; 2] = [Plan::Zen, Plan::Go];
+    /// 全部 plan，数组序即展示序；既有 Zen / Go 的顺序保持稳定。
+    pub const ALL: [Plan; 3] = [Plan::Zen, Plan::Go, Plan::Free];
 
-    /// 喂给 [`crate::vendor::plans`] 的静态清单（两档的段与名字都从本枚举派生）。
-    pub const PLAN_INFOS: [crate::vendor::PlanInfo; 2] = [
+    /// 喂给 [`crate::vendor::plans`] 的静态清单（段与名字从本枚举派生）。
+    pub const PLAN_INFOS: [crate::vendor::PlanInfo; 3] = [
         crate::vendor::PlanInfo {
             id_segment: Plan::Zen.id_segment(),
             display_name: Plan::Zen.display_name(),
@@ -510,6 +531,10 @@ impl Plan {
         crate::vendor::PlanInfo {
             id_segment: Plan::Go.id_segment(),
             display_name: Plan::Go.display_name(),
+        },
+        crate::vendor::PlanInfo {
+            id_segment: Plan::Free.id_segment(),
+            display_name: Plan::Free.display_name(),
         },
     ];
 
@@ -523,6 +548,7 @@ impl Plan {
         match self {
             Plan::Zen => VENDOR_ID,
             Plan::Go => "opencode-go",
+            Plan::Free => "opencode-free",
         }
     }
 
@@ -531,6 +557,7 @@ impl Plan {
         match self {
             Plan::Zen => "opencode Zen",
             Plan::Go => "opencode Go",
+            Plan::Free => "opencode Free",
         }
     }
 
@@ -544,6 +571,10 @@ impl Plan {
     pub fn style(self) -> crate::relay::provider_config::ProvisionStyle {
         match self {
             Plan::Zen => crate::relay::provider_config::ProvisionStyle::default(),
+            Plan::Free => crate::relay::provider_config::ProvisionStyle {
+                codex_wire_chat: true,
+                ..Default::default()
+            },
             Plan::Go => crate::relay::provider_config::ProvisionStyle {
                 // Go 网关 /v1/messages 只认 x-api-key（Bearer 被静默忽略，仓内
                 // OpenCode Go preset 的注释实测钉过）。
@@ -560,6 +591,10 @@ impl Plan {
     /// `{id_segment}/{app}`）可覆盖。
     pub fn config_for(self, app: &crate::app_config::AppType) -> Option<(String, String)> {
         let builtin = self.builtin_config_for(app)?;
+        // Free policy is local and exact: a remote tier override cannot select a paid model.
+        if self == Plan::Free {
+            return Some((builtin.0.into(), builtin.1.into()));
+        }
 
         let key = format!("{}/{}", self.id_segment(), app.as_str());
         let remote = crate::relay::remote_config::load_cached()
@@ -579,6 +614,15 @@ impl Plan {
         app: &crate::app_config::AppType,
     ) -> Option<(&'static str, &'static str)> {
         match self {
+            Plan::Free => match app {
+                crate::app_config::AppType::Codex
+                | crate::app_config::AppType::Hermes
+                | crate::app_config::AppType::OpenClaw
+                | crate::app_config::AppType::OpenCode => {
+                    Some((FREE_API_ORIGIN, FREE_CHAT_MODELS[0]))
+                }
+                _ => None,
+            },
             Plan::Zen => Some(match app {
                 crate::app_config::AppType::Codex => (API_ORIGIN, CODEX_MODEL),
                 crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
@@ -612,6 +656,9 @@ impl Plan {
     /// 远端 `tier_configs` 键 `{id_segment}/claude` 的 `claude_roles` 可覆盖。
     pub fn claude_role_models(self) -> crate::relay::model_selection::ClaudeRoleModels {
         let builtin = self.builtin_claude_roles();
+        if self == Plan::Free {
+            return builtin;
+        }
         let key = format!("{}/claude", self.id_segment());
         let Some(remote) = crate::relay::remote_config::load_cached()
             .and_then(|config| config.tier_configs.get(&key).cloned())
@@ -646,6 +693,13 @@ impl Plan {
 
     fn builtin_claude_roles(self) -> crate::relay::model_selection::ClaudeRoleModels {
         match self {
+            Plan::Free => crate::relay::model_selection::ClaudeRoleModels {
+                opus: FREE_CHAT_MODELS[0].into(),
+                fable: FREE_CHAT_MODELS[0].into(),
+                sonnet: FREE_CHAT_MODELS[0].into(),
+                haiku: FREE_CHAT_MODELS[0].into(),
+                subagent: FREE_CHAT_MODELS[0].into(),
+            },
             Plan::Zen => crate::relay::model_selection::ClaudeRoleModels {
                 opus: "claude-opus-5".to_string(),
                 fable: "claude-fable-5".to_string(),

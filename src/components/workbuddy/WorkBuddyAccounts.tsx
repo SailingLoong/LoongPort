@@ -10,6 +10,7 @@ import {
 import {
   workbuddyApi,
   type WorkBuddyAccount,
+  type WorkBuddyClaimResult,
   type WorkBuddyLogin,
 } from "@/lib/api/workbuddy";
 import { settingsApi } from "@/lib/api/settings";
@@ -29,6 +30,9 @@ export function WorkBuddyAccounts() {
   const alive = useRef(true);
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
+  const [claimResults, setClaimResults] = useState<
+    { id: string; error: WorkBuddyClaimResult["error"] }[] | null
+  >(null);
   useEffect(() => {
     alive.current = true;
     void workbuddyApi
@@ -61,8 +65,18 @@ export function WorkBuddyAccounts() {
     }
   };
   const update = (row: WorkBuddyAccount) => {
-    if (alive.current)
-      setAccounts((rows) => rows.map((old) => (old.id === row.id ? row : old)));
+    if (!alive.current) return;
+    setAccounts((rows) =>
+      rows.some((old) => old.id === row.id)
+        ? rows.map((old) => (old.id === row.id ? row : old))
+        : [...rows, row],
+    );
+    setClaimResults(
+      (results) =>
+        results?.map((result) =>
+          result.id === row.id ? { ...result, error: null } : result,
+        ) ?? null,
+    );
   };
   return (
     <section aria-label={t("workbuddy.title")} className="space-y-3">
@@ -72,11 +86,49 @@ export function WorkBuddyAccounts() {
           <Button
             size="sm"
             variant="outline"
+            disabled={
+              busy !== null || loading || !accounts.some((row) => row.canClaim)
+            }
+            onClick={() =>
+              void run("claimAll", async () => {
+                setClaimResults(null);
+                const results = await workbuddyApi.claimAll();
+                if (!alive.current) return;
+                setAccounts((rows) => {
+                  const updated = new Map(rows.map((row) => [row.id, row]));
+                  for (const { account } of results)
+                    updated.set(account.id, account);
+                  return [...updated.values()];
+                });
+                setClaimResults(
+                  results.map(({ account, error }) => ({
+                    id: account.id,
+                    error,
+                  })),
+                );
+              })
+            }
+          >
+            {busy === "claimAll" && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            )}
+            {t(
+              busy === "claimAll"
+                ? "workbuddy.claimingAll"
+                : "workbuddy.claimAll",
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             disabled={busy !== null || loading || accounts.length === 0}
             onClick={() =>
               void run("all", async () => {
                 const rows = await workbuddyApi.refreshAll();
-                if (alive.current) setAccounts(rows);
+                if (alive.current) {
+                  setAccounts(rows);
+                  setClaimResults(null);
+                }
               })
             }
           >
@@ -137,6 +189,7 @@ export function WorkBuddyAccounts() {
                 if (result.state === "saved") {
                   setLogin(null);
                   setAccounts(await workbuddyApi.list());
+                  setClaimResults(null);
                 } else setWaiting(true);
               })
             }
@@ -152,6 +205,46 @@ export function WorkBuddyAccounts() {
         <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
           {t("workbuddy.empty")}
         </p>
+      )}
+      {claimResults !== null && (
+        <div
+          role="region"
+          aria-label={t("workbuddy.claimResults")}
+          className="rounded-xl border border-border p-3 text-sm"
+        >
+          <h3 className="font-medium">{t("workbuddy.claimResults")}</h3>
+          {claimResults.length === 0 ? (
+            <p role="status" className="mt-2 text-muted-foreground">
+              {t("workbuddy.claimNone")}
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-2">
+              {claimResults.map((result) => {
+                const account = accounts.find((row) => row.id === result.id);
+                return account ? (
+                  <li
+                    key={result.id}
+                    className="flex flex-wrap justify-between gap-2"
+                  >
+                    <span>{account.label}</span>
+                    <span
+                      role="status"
+                      className={
+                        result.error
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      }
+                    >
+                      {result.error
+                        ? t("workbuddy.claimFailed")
+                        : t(`workbuddy.state.${account.claimState}`)}
+                    </span>
+                  </li>
+                ) : null;
+              })}
+            </ul>
+          )}
+        </div>
       )}
       <div className="grid gap-2">
         {accounts.map((account) => (

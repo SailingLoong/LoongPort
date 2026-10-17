@@ -1181,6 +1181,8 @@
     "openReleaseNotesFailed": "Failed to open release notes:"
   },
   "providerForm": {
+    "freeOnly": "Free only",
+    "freeModel": "Free",
     "supplierName": "Provider Name",
     "supplierNameRequired": "Provider Name *",
     "supplierNamePlaceholder": "e.g., Anthropic Official",
@@ -4687,6 +4689,11 @@
     "add": "Add WorkBuddy account",
     "refreshAll": "Refresh all",
     "claim": "Claim today's check-in credits",
+    "claimAll": "Claim for all eligible accounts",
+    "claimingAll": "Claiming credits…",
+    "claimResults": "Claim results",
+    "claimNone": "There are no eligible accounts to claim for.",
+    "claimFailed": "Not completed. Refresh this account's status and try again.",
     "total": "Remaining credits",
     "expiry": "Next expiry",
     "updated": "Updated",

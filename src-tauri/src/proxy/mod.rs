@@ -15,6 +15,8 @@ pub mod error_mapper;
 pub(crate) mod failover_switch;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod forwarder;
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
+mod free_models;
 pub mod gemini_url;
 pub mod handler_config;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]

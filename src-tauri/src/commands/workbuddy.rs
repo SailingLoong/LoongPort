@@ -6,7 +6,7 @@ use crate::{
         clock::SystemClock,
         engine::Engine,
         http::OfficialHttp,
-        model::{AccountView, Failure},
+        model::{AccountView, ClaimResult, Failure},
     },
 };
 use tauri::State;
@@ -62,6 +62,19 @@ pub(crate) async fn claim_workbuddy_today(
         clock: &SystemClock,
     }
     .claim(&id)
+    .await
+}
+#[tauri::command]
+pub(crate) async fn claim_all_workbuddy_today(
+    state: State<'_, AppState>,
+) -> Result<Vec<ClaimResult>, Failure> {
+    let session = state.db.secret_session();
+    Engine {
+        session,
+        transport: &OfficialHttp,
+        clock: &SystemClock,
+    }
+    .claim_all()
     .await
 }
 #[tauri::command]

@@ -166,6 +166,26 @@ impl<T: Transport> Engine<'_, T> {
         }
         self.list().await
     }
+    pub async fn claim_all(&self) -> Result<Vec<ClaimResult>, Failure> {
+        // Reuse the lease owner; account IDs are hashes and cannot collide with this key.
+        let _batch = lease(self.session, "claim-all")?;
+        let operation_day = today(self.clock.now_ms());
+        let accounts = self.list().await?;
+        let mut results = Vec::new();
+        for account in accounts.into_iter().filter(|row| row.can_claim) {
+            let result = if today(self.clock.now_ms()) == operation_day {
+                self.claim(&account.id).await
+            } else {
+                Err(Failure::Unconfirmed)
+            };
+            let (account, error) = match result {
+                Ok(updated) => (updated, None),
+                Err(error) => (account, Some(error)),
+            };
+            results.push(ClaimResult { account, error });
+        }
+        Ok(results)
+    }
     pub async fn claim(&self, id: &str) -> Result<AccountView, Failure> {
         let operation_day = today(self.clock.now_ms());
         let _lease = lease(self.session, id)?;

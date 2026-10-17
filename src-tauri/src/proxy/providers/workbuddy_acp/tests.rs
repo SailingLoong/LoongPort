@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub(crate) struct Mock {
     sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
+    pub(crate) connections: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) methods: Arc<Mutex<Vec<String>>>,
     stop: &'static str,
 }
@@ -15,6 +16,9 @@ fn update(text: &str) -> Value {
     json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-a","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})
 }
 async fn receive(State(state): State<Mock>, headers: http::HeaderMap) -> axum::response::Response {
+    state
+        .connections
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(headers["authorization"], "Bearer SYNTHETIC_TICKET");
     let (sender, receiver) = tokio::sync::mpsc::channel(16);
     *state.sender.lock().await = Some(sender);
@@ -107,6 +111,7 @@ pub(crate) fn request(stream: bool) -> Value {
 pub(crate) async fn server(stop: &'static str) -> (Provider, Mock, tokio::task::JoinHandle<()>) {
     let state = Mock {
         sender: Arc::new(Mutex::new(None)),
+        connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         methods: Arc::new(Mutex::new(vec![])),
         stop,
     };

@@ -190,6 +190,66 @@ function renderClaudeCodexForm(onSubmit: (values: ProviderFormValues) => void) {
   );
 }
 
+function renderFreeCodexForm(
+  onSubmit: (values: ProviderFormValues) => void,
+  freeOnly = true,
+) {
+  const queryClient = createTestQueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ProviderForm
+        appId="codex"
+        submitLabel="save-provider"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        initialData={{
+          name: "Synthetic free",
+          category: "third_party",
+          meta: { apiFormat: "openai_chat" },
+          settingsConfig: {
+            freeOnly,
+            auth: { OPENAI_API_KEY: "SYNTHETIC" },
+            config:
+              'model_provider = "custom"\nmodel = "glm-5.3-flash-free"\n[model_providers.custom]\nname = "Synthetic"\nbase_url = "https://opencode.ai/inference/openai/v1"\nwire_api = "chat"',
+            modelCatalog: { models: [{ model: "glm-5.3-flash-free" }] },
+          },
+        }}
+      />
+    </QueryClientProvider>,
+  );
+}
+
+describe("free-only Codex editing", () => {
+  it("keeps the existing Responses normalization when the policy is disabled", async () => {
+    const onSubmit = vi.fn();
+    renderFreeCodexForm(onSubmit, false);
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const settings = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
+    expect(settings.freeOnly).toBe(false);
+    expect(settings.config).toContain('wire_api = "responses"');
+  });
+
+  it("preserves the backend-owned free-only policy on ordinary save", async () => {
+    const onSubmit = vi.fn();
+    renderFreeCodexForm(onSubmit);
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(onSubmit.mock.calls[0][0].settingsConfig).freeOnly).toBe(
+      true,
+    );
+  });
+  it("preserves the free plan's configured native Chat protocol", async () => {
+    const onSubmit = vi.fn();
+    renderFreeCodexForm(onSubmit);
+    fireEvent.click(screen.getByRole("button", { name: "save-provider" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(
+      JSON.parse(onSubmit.mock.calls[0][0].settingsConfig).config,
+    ).toContain('wire_api = "chat"');
+  });
+});
+
 describe("ProviderForm Codex Official managed account", () => {
   beforeEach(() => {
     authState.codexReauthRequired = false;

@@ -13,6 +13,7 @@ pub(crate) enum Endpoint {
     Config,
     Claim,
 }
+#[derive(Clone)]
 pub(crate) struct Request {
     pub endpoint: Endpoint,
     pub version: String,
@@ -113,6 +114,52 @@ mod tests {
             region: None,
         }
     }
+    #[test]
+    fn disabled_captcha_config_needs_no_sdk_fields() {
+        let config = captcha_config(&serde_json::json!({
+            "code": 0, "data": {"configs": {"captcha": {"enabled": false}}}
+        }))
+        .unwrap();
+        assert!(!config.enabled);
+    }
+    #[test]
+    #[cfg(feature = "gui")]
+    fn claim_http_headers_are_optional_and_sensitive_when_present() {
+        let http = Http::new().unwrap();
+        let mut input = req();
+        input.endpoint = Endpoint::Claim;
+        input.plan = Some("synthetic-plan".into());
+        let plain = http.build_request(input).unwrap();
+        assert_eq!(plain.method(), reqwest::Method::POST);
+        assert_eq!(
+            plain.url().as_str(),
+            "https://zcode.z.ai/api/v1/zcode-plan/billing/claim"
+        );
+        assert!(!plain
+            .headers()
+            .contains_key("X-Aliyun-Captcha-Verify-Param"));
+        assert!(!plain
+            .headers()
+            .contains_key("X-Aliyun-Captcha-Verify-Region"));
+        assert!(plain.headers()["authorization"].is_sensitive());
+        let body: Value =
+            serde_json::from_slice(plain.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"plan_id":"synthetic-plan"}));
+        let mut input = req();
+        input.endpoint = Endpoint::Claim;
+        input.plan = Some("synthetic-plan".into());
+        input.captcha = Some(SecretValue::new("synthetic-human-proof").unwrap());
+        input.region = Some("cn".into());
+        let verified = http.build_request(input).unwrap();
+        assert!(verified.headers()["X-Aliyun-Captcha-Verify-Param"].is_sensitive());
+        assert_eq!(verified.headers()["X-Aliyun-Captcha-Verify-Region"], "cn");
+        let mut invalid = req();
+        invalid.endpoint = Endpoint::Claim;
+        assert_eq!(
+            http.build_request(invalid).unwrap_err(),
+            OfficialError::InvalidInput
+        );
+    }
     #[tokio::test]
     async fn cancellation_admits_no_network_request() {
         let fake = Fake {
@@ -201,6 +248,74 @@ impl Http {
                 .map_err(|_| OfficialError::Transport)?,
         })
     }
+    fn build_request(&self, request: Request) -> Result<reqwest::Request, OfficialError> {
+        let path = match request.endpoint {
+            Endpoint::Preview => "zcode-plan/billing/preview",
+            Endpoint::Balance => "zcode-plan/billing/balance",
+            Endpoint::Config => "client/configs",
+            Endpoint::Claim => "zcode-plan/billing/claim",
+        };
+        if request.version.is_empty()
+            || request.version.len() > 64
+            || !request
+                .version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
+        {
+            return Err(OfficialError::InvalidInput);
+        }
+        let mut url = url::Url::parse(&format!("https://zcode.z.ai/api/v1/{path}"))
+            .map_err(|_| OfficialError::InvalidInput)?;
+        let os = match std::env::consts::OS {
+            "macos" => "darwin",
+            other => other,
+        };
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x64",
+            other => other,
+        };
+        let platform = format!("{os}-{arch}");
+        if matches!(request.endpoint, Endpoint::Preview | Endpoint::Balance) {
+            url.query_pairs_mut()
+                .append_pair("app_version", &request.version);
+        }
+        if request.endpoint == Endpoint::Preview {
+            url.query_pairs_mut().append_pair("platform", &platform);
+        }
+        let mut auth =
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", request.jwt.expose()))
+                .map_err(|_| OfficialError::InvalidInput)?;
+        auth.set_sensitive(true);
+        let mut builder = if request.endpoint == Endpoint::Claim {
+            self.client.post(url)
+        } else {
+            self.client.get(url)
+        };
+        builder = builder
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .header("X-ZCode-App-Version", &request.version)
+            .header("X-Platform", platform)
+            .header("X-Title", "LoongPort")
+            .header(
+                "User-Agent",
+                concat!("LoongPort/", env!("CARGO_PKG_VERSION")),
+            );
+        if request.endpoint == Endpoint::Claim {
+            if let Some(captcha) = request.captcha.as_ref() {
+                let mut header = reqwest::header::HeaderValue::from_str(captcha.expose())
+                    .map_err(|_| OfficialError::InvalidInput)?;
+                header.set_sensitive(true);
+                builder = builder.header("X-Aliyun-Captcha-Verify-Param", header);
+                if let Some(region) = request.region {
+                    builder = builder.header("X-Aliyun-Captcha-Verify-Region", region);
+                }
+            }
+            let plan = request.plan.ok_or(OfficialError::InvalidInput)?;
+            builder = builder.json(&serde_json::json!({"plan_id":plan}));
+        }
+        builder.build().map_err(|_| OfficialError::InvalidInput)
+    }
 }
 #[cfg(feature = "gui")]
 impl Transport for Http {
@@ -210,73 +325,7 @@ impl Transport for Http {
             return script.send(request);
         }
         Box::pin(async move {
-            let path = match request.endpoint {
-                Endpoint::Preview => "zcode-plan/billing/preview",
-                Endpoint::Balance => "zcode-plan/billing/balance",
-                Endpoint::Config => "client/configs",
-                Endpoint::Claim => "zcode-plan/billing/claim",
-            };
-            if request.version.is_empty()
-                || request.version.len() > 64
-                || !request
-                    .version
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
-            {
-                return Err(OfficialError::InvalidInput);
-            }
-            let mut url = url::Url::parse(&format!("https://zcode.z.ai/api/v1/{path}"))
-                .map_err(|_| OfficialError::InvalidInput)?;
-            let os = match std::env::consts::OS {
-                "macos" => "darwin",
-                other => other,
-            };
-            let arch = match std::env::consts::ARCH {
-                "aarch64" => "arm64",
-                "x86_64" => "x64",
-                other => other,
-            };
-            let platform = format!("{os}-{arch}");
-            if matches!(request.endpoint, Endpoint::Preview | Endpoint::Balance) {
-                url.query_pairs_mut()
-                    .append_pair("app_version", &request.version);
-            }
-            if request.endpoint == Endpoint::Preview {
-                url.query_pairs_mut().append_pair("platform", &platform);
-            }
-            let mut auth =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", request.jwt.expose()))
-                    .map_err(|_| OfficialError::InvalidInput)?;
-            auth.set_sensitive(true);
-            let mut builder = if request.endpoint == Endpoint::Claim {
-                self.client.post(url)
-            } else {
-                self.client.get(url)
-            };
-            builder = builder
-                .header(reqwest::header::AUTHORIZATION, auth)
-                .header("X-ZCode-App-Version", &request.version)
-                .header("X-Platform", platform)
-                .header("X-Title", "LoongPort")
-                .header(
-                    "User-Agent",
-                    concat!("LoongPort/", env!("CARGO_PKG_VERSION")),
-                );
-            if request.endpoint == Endpoint::Claim {
-                let captcha = request
-                    .captcha
-                    .as_ref()
-                    .ok_or(OfficialError::InvalidInput)?;
-                let mut header = reqwest::header::HeaderValue::from_str(captcha.expose())
-                    .map_err(|_| OfficialError::InvalidInput)?;
-                header.set_sensitive(true);
-                builder = builder.header("X-Aliyun-Captcha-Verify-Param", header);
-                if let Some(region) = request.region {
-                    builder = builder.header("X-Aliyun-Captcha-Verify-Region", region);
-                }
-                let plan = request.plan.ok_or(OfficialError::InvalidInput)?;
-                builder = builder.json(&serde_json::json!({"plan_id":plan}));
-            }
+            let outgoing = self.build_request(request)?;
             let error = |e: reqwest::Error| {
                 if e.is_timeout() {
                     OfficialError::Timeout
@@ -284,7 +333,7 @@ impl Transport for Http {
                     OfficialError::Transport
                 }
             };
-            let mut response = builder.send().await.map_err(error)?;
+            let mut response = self.client.execute(outgoing).await.map_err(error)?;
             if response
                 .content_length()
                 .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
@@ -304,15 +353,26 @@ impl Transport for Http {
     }
 }
 pub(crate) fn captcha_config(value: &Value) -> Result<CaptchaConfig, OfficialError> {
-    if matches!(value.get("code").and_then(Value::as_i64), Some(401 | 403)) {
+    if matches!(super::claim::response_code(value), Some(401 | 403)) {
         return Err(OfficialError::Unauthorized);
     }
-    if value.get("code").and_then(Value::as_i64) != Some(0) {
+    if super::claim::response_code(value) != Some(0) {
         return Err(OfficialError::BusinessRejected);
     }
     let c = value
         .pointer("/data/configs/captcha")
         .ok_or(OfficialError::InvalidResponse)?;
+    if c.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Ok(CaptchaConfig {
+            enabled: false,
+            region: String::new(),
+            prefix: String::new(),
+            scene_id: String::new(),
+        });
+    }
+    if c.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err(OfficialError::InvalidResponse);
+    }
     let field = |key| {
         c.get(key)
             .and_then(Value::as_str)
@@ -334,14 +394,10 @@ pub(crate) fn captcha_config(value: &Value) -> Result<CaptchaConfig, OfficialErr
 }
 
 pub(crate) fn read_data(value: Value) -> Result<Value, OfficialError> {
-    if matches!(value.get("code").and_then(Value::as_i64), Some(401 | 403)) {
+    if matches!(super::claim::response_code(&value), Some(401 | 403)) {
         return Err(OfficialError::Unauthorized);
     }
-    if value
-        .get("code")
-        .and_then(Value::as_i64)
-        .is_some_and(|c| c != 0 && c != 200)
-    {
+    if super::claim::response_code(&value).is_some_and(|c| c != 0 && c != 200) {
         return Err(OfficialError::BusinessRejected);
     }
     value

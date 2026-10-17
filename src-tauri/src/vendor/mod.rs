@@ -305,6 +305,17 @@ pub fn plan_style(
     }
 }
 
+pub(crate) fn is_free_plan(vendor: Vendor, segment: &str) -> bool {
+    vendor == Vendor::OpenCode && segment == opencode::Plan::Free.id_segment()
+}
+
+/// Apply a plan constraint at existing configuration-generation boundaries.
+pub(crate) fn apply_plan_policy(vendor: Vendor, segment: &str, settings: &mut serde_json::Value) {
+    if is_free_plan(vendor, segment) {
+        settings["freeOnly"] = serde_json::json!(true);
+    }
+}
+
 /// 该厂商**某个 plan**能服务的模型清单（去重），供 provision 写进 `modelCatalog`
 /// —— 省心模式的模型偏好过滤与托盘 app→模型映射都以目录为准，没有目录的档位
 /// 在用户设了偏好时会被静默排除（2026-08-17 真实 smoke 实测 DeepSeek 直连中招）。
@@ -313,6 +324,12 @@ pub fn plan_style(
 /// 与生成配置同源 —— 两边各写一份清单迟早分叉。`[1M]` 是上下文长度变体后缀，
 /// 目录收基础名（角色 env 才带后缀）。
 pub fn catalog_models(vendor: Vendor, id_segment: &str) -> Vec<String> {
+    if is_free_plan(vendor, id_segment) {
+        return opencode::FREE_CHAT_MODELS
+            .iter()
+            .map(|model| (*model).to_owned())
+            .collect();
+    }
     let mut models: Vec<String> = Vec::new();
     let push = |models: &mut Vec<String>, model: &str| {
         let base = model.trim_end_matches("[1M]");
@@ -334,6 +351,11 @@ pub fn catalog_models(vendor: Vendor, id_segment: &str) -> Vec<String> {
         &roles.subagent,
     ] {
         push(&mut models, model);
+    }
+    if vendor == Vendor::BigModel && id_segment == bigmodel::VENDOR_ID {
+        for model in bigmodel::FREE_TEXT_MODELS {
+            push(&mut models, model);
+        }
     }
     models
 }

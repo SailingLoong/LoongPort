@@ -115,6 +115,12 @@ pub(crate) struct AccountView {
     pub can_refresh: bool,
     pub can_claim: bool,
 }
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaimResult {
+    pub account: AccountView,
+    pub error: Option<Failure>,
+}
 pub(crate) fn today(now: i64) -> String {
     use chrono::TimeZone;
     chrono::FixedOffset::east_opt(8 * 3600)

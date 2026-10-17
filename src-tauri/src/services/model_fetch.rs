@@ -16,6 +16,10 @@ use std::time::Duration;
 pub struct FetchedModel {
     pub id: String,
     pub owned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_free: Option<bool>,
 }
 
 /// 模型列表响应的兼容格式。
@@ -36,22 +40,158 @@ struct ModelsResponse {
 struct ModelEntry {
     id: String,
     owned_by: Option<String>,
+    pricing: Option<serde_json::Value>,
 }
+
+/// Reserved OpenRouter identities retain their free variant through routing.
+pub(crate) fn is_openrouter_free_model(model: &str) -> bool {
+    !model.chars().any(|c| c.is_whitespace() || c.is_control())
+        && (model == "openrouter/free"
+            || model.strip_suffix(":free").is_some_and(|id| !id.is_empty()))
+}
+pub(crate) fn is_reserved_free_model(model: &str) -> bool {
+    is_openrouter_free_model(model) || crate::vendor::opencode::FREE_CHAT_MODELS.contains(&model)
+}
+
+pub(crate) fn is_opencode_free_source(source: &str) -> bool {
+    official_model_host(source).as_deref() == Some("opencode.ai")
+        && url::Url::parse(source).is_ok_and(|url| {
+            url.query().is_none()
+                && url.fragment().is_none()
+                && matches!(
+                    url.path().trim_end_matches('/'),
+                    "/inference/openai/v1"
+                        | "/inference/openai/v1/chat/completions"
+                        | "/inference/openai/v1/models"
+                        | "/inference/v1/models"
+                )
+        })
+}
+fn official_model_host(source: &str) -> Option<String> {
+    let source = url::Url::parse(source).ok()?;
+    (source.scheme() == "https"
+        && source.port_or_known_default() == Some(443)
+        && source.username().is_empty()
+        && source.password().is_none())
+    .then(|| source.host_str().map(str::to_owned))?
+}
+pub(crate) fn is_openrouter_source(source: &str) -> bool {
+    official_model_host(source).as_deref() == Some("openrouter.ai")
+}
+
+fn zero_price(value: &serde_json::Value) -> Option<bool> {
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        // serde_json can already have rounded a positive wire number to 0.0.
+        // Only integer zero retains enough evidence to prove a zero rate.
+        serde_json::Value::Number(n) if n.as_f64() == Some(0.0) && !n.is_i64() && !n.is_u64() => {
+            return None;
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    if text.len() > 128 || text.starts_with('-') {
+        return None;
+    }
+    let parsed: f64 = text.parse().ok()?;
+    if !parsed.is_finite() {
+        return None;
+    }
+    // Avoid underflow turning a positive decimal rate into a false zero.
+    let mantissa = text.split(['e', 'E']).next()?.trim_start_matches('+');
+    Some(parsed == 0.0 && mantissa.chars().all(|c| c == '0' || c == '.'))
+}
+fn describe_model(model: ModelEntry, source: &str) -> FetchedModel {
+    let host = official_model_host(source);
+    let openrouter = is_openrouter_source(source);
+    let guaranteed_free = (is_opencode_free_source(source)
+        && crate::vendor::opencode::FREE_CHAT_MODELS.contains(&model.id.as_str()))
+        || (openrouter && is_openrouter_free_model(&model.id))
+        || (host.as_deref() == Some("open.bigmodel.cn")
+            && crate::vendor::bigmodel::FREE_TEXT_MODELS.contains(&model.id.as_str()));
+    let is_free = if let Some(raw) = model.pricing.as_ref() {
+        raw.as_object().and_then(|prices| {
+            let states: Vec<_> = prices.values().map(zero_price).collect();
+            if states.contains(&Some(false)) {
+                return Some(false);
+            }
+            if !prices.contains_key("prompt")
+                || !prices.contains_key("completion")
+                || states.iter().any(|v| *v != Some(true))
+            {
+                return None;
+            }
+            // Temporary zero prices on ordinary OpenRouter IDs do not promise
+            // a free variant. Keep them out of the guaranteed-free selector.
+            if openrouter && !guaranteed_free {
+                None
+            } else {
+                Some(true)
+            }
+        })
+    } else {
+        guaranteed_free.then_some(true)
+    };
+    let pricing = model
+        .pricing
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|prices| {
+            prices
+                .iter()
+                .map(|(key, value)| {
+                    zero_price(value)?;
+                    Some((
+                        key.clone(),
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    ))
+                })
+                .collect()
+        });
+    FetchedModel {
+        id: model.id,
+        owned_by: model.owned_by,
+        pricing,
+        is_free,
+    }
+}
+
+#[cfg(test)]
+#[path = "model_fetch_price_tests.rs"]
+mod price_tests;
 
 /// `models[]` 条目对应的模型 id：`slug` 优先，回退 OpenAI 风格的 `id`；
 /// 非数组、非对象、非字符串或空串一律跳过，绝不报错。
-fn catalog_model_ids(models: Option<serde_json::Value>) -> Vec<String> {
+fn catalog_model_entries(models: Option<serde_json::Value>) -> Vec<ModelEntry> {
     let Some(serde_json::Value::Array(entries)) = models else {
         return Vec::new();
     };
     entries
         .iter()
-        .filter_map(|m| {
-            ["slug", "id"]
+        .filter_map(|entry| {
+            let id = ["slug", "id"]
                 .iter()
-                .find_map(|k| m.get(k)?.as_str().filter(|s| !s.is_empty()))
+                .find_map(|key| entry.get(key)?.as_str().filter(|id| !id.is_empty()))?;
+            Some(ModelEntry {
+                id: id.to_owned(),
+                owned_by: entry
+                    .get("owned_by")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                pricing: entry.get("pricing").cloned(),
+            })
         })
-        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+fn catalog_model_ids(models: Option<serde_json::Value>) -> Vec<String> {
+    catalog_model_entries(models)
+        .into_iter()
+        .map(|entry| entry.id)
         .collect()
 }
 
@@ -124,16 +264,11 @@ pub async fn fetch_models(
                 .map_err(|e| format!("Failed to parse response: {e}"))?;
 
             let mut models: Vec<FetchedModel> = if let Some(data) = resp.data {
-                data.into_iter()
-                    .map(|m| FetchedModel {
-                        id: m.id,
-                        owned_by: m.owned_by,
-                    })
-                    .collect()
+                data.into_iter().map(|m| describe_model(m, url)).collect()
             } else {
-                catalog_model_ids(resp.models)
+                catalog_model_entries(resp.models)
                     .into_iter()
-                    .map(|id| FetchedModel { id, owned_by: None })
+                    .map(|model| describe_model(model, url))
                     .collect()
             };
 
@@ -340,6 +475,30 @@ fn ends_with_version_segment(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn free_model_prices_survive_the_existing_fetch_entry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            axum::Json(serde_json::json!({"data":[{"id":"vendor/model:free","pricing":{"prompt":"0","completion":"0","request":"0"}}]}))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = super::fetch_models(
+            &format!("http://{address}"),
+            "synthetic-key",
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        server.abort();
+        let wire = serde_json::to_value(result.unwrap()).unwrap();
+        assert_eq!(wire[0]["pricing"]["prompt"], "0");
+        assert_eq!(wire[0]["isFree"], true);
+    }
     use super::*;
 
     #[tokio::test]

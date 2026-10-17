@@ -29,6 +29,17 @@ export interface WorkBuddyLogin {
   flowId: string;
   verificationUri: string;
 }
+export type WorkBuddyFailure =
+  | "unconfirmed"
+  | "needsVerification"
+  | "unsupportedContext"
+  | "storageUnavailable"
+  | "busy"
+  | "expiredAuthorization";
+export interface WorkBuddyClaimResult {
+  account: WorkBuddyAccount;
+  error: WorkBuddyFailure | null;
+}
 export const workbuddyApi = {
   list: () => invoke<WorkBuddyAccount[]>("list_workbuddy_accounts"),
   refresh: (id: string) =>
@@ -37,6 +48,7 @@ export const workbuddyApi = {
     invoke<WorkBuddyAccount[]>("refresh_all_workbuddy_accounts"),
   claim: (id: string) =>
     invoke<WorkBuddyAccount>("claim_workbuddy_today", { id }),
+  claimAll: () => invoke<WorkBuddyClaimResult[]>("claim_all_workbuddy_today"),
   beginLogin: () => invoke<WorkBuddyLogin>("begin_workbuddy_authorization"),
   finishLogin: (flowId: string) =>
     invoke<{ state: "saved" | "waiting" }>("finish_workbuddy_authorization", {

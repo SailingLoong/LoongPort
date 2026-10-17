@@ -5,6 +5,8 @@ import { toast } from "sonner";
 export interface FetchedModel {
   id: string;
   ownedBy: string | null;
+  pricing?: Record<string, string> | null;
+  isFree?: boolean | null;
 }
 
 export interface ModelFetchOptions {
