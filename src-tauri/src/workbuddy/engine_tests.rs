@@ -161,6 +161,230 @@ async fn lost_receipt_survives_restart_and_next_click_queries_without_resubmitti
         .unwrap()
         .contains(&Endpoint::Claim));
 }
+
+#[tokio::test]
+async fn pending_unknown_claim_survives_verification_and_reauthorization_without_replay() {
+    let (s, id) = setup();
+    let b = store::binding(&s).unwrap();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    q.push((Endpoint::Claim, Err(Failure::Unconfirmed)));
+    q.push((Endpoint::Status, Ok(json!({"code":401}))));
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let row = e.claim(&id).await.unwrap();
+    assert_eq!(row.claim_state, ClaimState::NeedsVerification);
+    assert!(!row.can_claim);
+    assert_eq!(row.credited, None);
+    let pending = serde_json::to_value(&store::load(&s, &b).unwrap()[0].pending).unwrap();
+    assert_eq!(pending["receipt"], "unconfirmed");
+    assert_eq!(pending["before"], 10.0);
+    assert!(pending["expected"].is_null());
+
+    // Recreate the operation owner and cover both explicit recovery entry points.
+    for (code, refresh) in [(403, true), (10085, false)] {
+        let mut q = if refresh { resource(10.0) } else { vec![] };
+        q.push((Endpoint::Status, Ok(json!({"code":code}))));
+        if !refresh {
+            q.extend(resource(10.0));
+        }
+        let recovery = Fake::new(q);
+        let e = Engine {
+            session: &s,
+            transport: &recovery,
+            clock: &super::clock::FixedClock(NOW),
+        };
+        let row = if refresh {
+            e.refresh(&id).await.unwrap()
+        } else {
+            e.claim(&id).await.unwrap()
+        };
+        assert_eq!(row.claim_state, ClaimState::NeedsVerification);
+        assert!(!row.can_claim);
+        assert_eq!(row.credited, None);
+        assert_eq!(
+            serde_json::to_value(&store::load(&s, &b).unwrap()[0].pending).unwrap(),
+            pending
+        );
+        assert!(!recovery.calls.lock().unwrap().contains(&Endpoint::Claim));
+        assert!(recovery.queue.lock().unwrap().is_empty());
+    }
+
+    let authorization = Fake::new(vec![
+        (
+            Endpoint::AuthState,
+            Ok(
+                json!({"code":0,"data":{"state":"synthetic-recovery","authUrl":"https://www.codebuddy.cn/login?state=synthetic-recovery"}}),
+            ),
+        ),
+        (
+            Endpoint::AuthToken,
+            Ok(
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_REAUTHORIZED_TOKEN","domain":"www.codebuddy.cn"}}),
+            ),
+        ),
+        (
+            Endpoint::Profile,
+            Ok(
+                json!({"code":0,"data":{"uid":"synthetic-uid","nickname":"Synthetic reauthorized account","domain":"www.codebuddy.cn"}}),
+            ),
+        ),
+    ]);
+    let login = super::authorization::begin(&s, &authorization, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        super::authorization::finish(&s, &authorization, &login.flow_id, NOW + 1)
+            .await
+            .unwrap()
+            .state,
+        super::authorization::AuthorizationState::Saved,
+    );
+    let rows = store::load(&s, &b).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].account.id(&b.vault_id), id);
+    assert_eq!(rows[0].account.token, "SYNTHETIC_REAUTHORIZED_TOKEN");
+    assert_eq!(serde_json::to_value(&rows[0].pending).unwrap(), pending);
+    assert!(!authorization
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&Endpoint::Claim));
+
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let reconciled = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &reconciled,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert_eq!(
+        e.claim(&id).await.unwrap().claim_state,
+        ClaimState::Available
+    );
+    assert!(store::load(&s, &b).unwrap()[0].pending.is_none());
+    assert!(!reconciled.calls.lock().unwrap().contains(&Endpoint::Claim));
+
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
+    q.push(status(true));
+    q.extend(resource(30.0));
+    let explicit_retry = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &explicit_retry,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert_eq!(e.claim(&id).await.unwrap().claim_state, ClaimState::Claimed);
+    for transport in [&f, &explicit_retry] {
+        assert_eq!(
+            transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|endpoint| **endpoint == Endpoint::Claim)
+                .count(),
+            1
+        );
+        assert!(transport.queue.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn pending_known_receipt_survives_verification_until_authoritative_readback() {
+    for (receipt, expected, credited) in [
+        (
+            json!({"code":0,"credit":20}),
+            ClaimState::Claimed,
+            Some(20.0),
+        ),
+        (json!({"code":1001}), ClaimState::AlreadyClaimed, None),
+    ] {
+        let (s, id) = setup();
+        let b = store::binding(&s).unwrap();
+        let mut q = vec![status(false)];
+        q.extend(resource(10.0));
+        q.push((Endpoint::Claim, Ok(receipt)));
+        q.push((Endpoint::Status, Ok(json!({"code":401}))));
+        q.extend(resource(30.0));
+        let f = Fake::new(q);
+        let e = Engine {
+            session: &s,
+            transport: &f,
+            clock: &super::clock::FixedClock(NOW),
+        };
+        let row = e.claim(&id).await.unwrap();
+        assert_eq!(row.claim_state, ClaimState::NeedsVerification);
+        assert!(!row.can_claim);
+        assert_eq!(row.credited, None);
+        let pending = store::load(&s, &b).unwrap()[0].pending.clone().unwrap();
+        assert_eq!(pending.receipt, expected);
+        assert_eq!(pending.before, Some(10.0));
+        assert_eq!(pending.expected, credited);
+
+        let mut q = resource(30.0);
+        q.push(status(true));
+        let recovery = Fake::new(q);
+        let e = Engine {
+            session: &s,
+            transport: &recovery,
+            clock: &super::clock::FixedClock(NOW),
+        };
+        let row = e.refresh(&id).await.unwrap();
+        assert_eq!(row.claim_state, expected);
+        assert_eq!(row.credited, credited);
+        assert!(!row.can_claim);
+        assert!(store::load(&s, &b).unwrap()[0].pending.is_none());
+        assert!(!recovery.calls.lock().unwrap().contains(&Endpoint::Claim));
+        assert!(recovery.queue.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn terminal_claim_receipts_keep_their_existing_resolution_on_verification() {
+    for (code, expected) in [
+        (401, ClaimState::NeedsVerification),
+        (1002, ClaimState::Unavailable),
+    ] {
+        let (s, id) = setup();
+        let mut q = vec![status(false)];
+        q.extend(resource(10.0));
+        q.push((Endpoint::Claim, Ok(json!({"code":code}))));
+        q.push((Endpoint::Status, Ok(json!({"code":401}))));
+        q.extend(resource(10.0));
+        let f = Fake::new(q);
+        let e = Engine {
+            session: &s,
+            transport: &f,
+            clock: &super::clock::FixedClock(NOW),
+        };
+        let row = e.claim(&id).await.unwrap();
+        assert_eq!(row.claim_state, expected);
+        assert!(!row.can_claim);
+        assert_eq!(row.credited, None);
+        assert!(store::load(&s, &store::binding(&s).unwrap()).unwrap()[0]
+            .pending
+            .is_none());
+        assert!(f.queue.lock().unwrap().is_empty());
+        assert_eq!(
+            f.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|endpoint| **endpoint == Endpoint::Claim)
+                .count(),
+            1
+        );
+    }
+}
 #[tokio::test]
 async fn already_or_inactive_or_verification_does_not_submit() {
     for response in [

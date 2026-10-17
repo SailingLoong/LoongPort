@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
 import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
@@ -130,6 +131,187 @@ it("adding an account starts only on click and saves after explicit authorizatio
   );
   await waitFor(() => expect(api.finishLogin).toHaveBeenCalledWith("f1"));
   expect(api.claim).not.toHaveBeenCalled();
+});
+
+it.each(["success", "failure"] as const)(
+  "retains the saved authorization list when the initial read settles late with %s",
+  async (outcome) => {
+    let resolveInitial!: (rows: WorkBuddyAccount[]) => void;
+    let rejectInitial!: (error: Error) => void;
+    api.list
+      .mockImplementationOnce(
+        () =>
+          new Promise<WorkBuddyAccount[]>((resolve, reject) => {
+            resolveInitial = resolve;
+            rejectInitial = reject;
+          }),
+      )
+      .mockResolvedValueOnce([row]);
+    api.beginLogin.mockResolvedValue({
+      flowId: "f1",
+      verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
+    });
+    api.finishLogin.mockResolvedValue({ state: "saved" });
+    render(<WorkBuddyAccounts />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "workbuddy.finishAuthorization",
+      }),
+    );
+    expect(await screen.findByText("Synthetic account")).toBeVisible();
+    await act(async () => {
+      if (outcome === "success") resolveInitial([]);
+      else rejectInitial(new Error("SYNTHETIC_OLD_LIST_FAILURE"));
+    });
+    expect(screen.getByText("Synthetic account")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("common.loading")).not.toBeInTheDocument();
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.finishLogin).toHaveBeenCalledOnce();
+    expect(api.claim).not.toHaveBeenCalled();
+    expect(api.claimAll).not.toHaveBeenCalled();
+  },
+);
+
+it("keeps the newer authorization read pending when the initial read finishes", async () => {
+  let resolveInitial!: (rows: WorkBuddyAccount[]) => void;
+  let resolveSaved!: (rows: WorkBuddyAccount[]) => void;
+  api.list
+    .mockImplementationOnce(
+      () =>
+        new Promise<WorkBuddyAccount[]>(
+          (resolve) => (resolveInitial = resolve),
+        ),
+    )
+    .mockImplementationOnce(
+      () =>
+        new Promise<WorkBuddyAccount[]>((resolve) => (resolveSaved = resolve)),
+    );
+  api.beginLogin.mockResolvedValue({
+    flowId: "f1",
+    verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
+  });
+  api.finishLogin.mockResolvedValue({ state: "saved" });
+  render(<WorkBuddyAccounts />);
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: "workbuddy.finishAuthorization",
+    }),
+  );
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  await act(async () => resolveInitial([]));
+  expect(screen.getByText("common.loading")).toBeVisible();
+  expect(screen.queryByText("workbuddy.empty")).not.toBeInTheDocument();
+  await act(async () => resolveSaved([row]));
+  expect(screen.getByText("Synthetic account")).toBeVisible();
+  expect(screen.queryByText("common.loading")).not.toBeInTheDocument();
+});
+
+it("ignores the retired mount read after StrictMode restarts the effect", async () => {
+  let resolveRetired!: (rows: WorkBuddyAccount[]) => void;
+  api.list
+    .mockImplementationOnce(
+      () =>
+        new Promise<WorkBuddyAccount[]>(
+          (resolve) => (resolveRetired = resolve),
+        ),
+    )
+    .mockResolvedValueOnce([row]);
+  render(
+    <StrictMode>
+      <WorkBuddyAccounts />
+    </StrictMode>,
+  );
+  expect(await screen.findByText("Synthetic account")).toBeVisible();
+  await act(async () => resolveRetired([]));
+  expect(screen.getByText("Synthetic account")).toBeVisible();
+  expect(api.list).toHaveBeenCalledTimes(2);
+  expect(api.beginLogin).not.toHaveBeenCalled();
+});
+
+it("clears an initial read failure when authorization starts a replacement read", async () => {
+  let rejectInitial!: (error: Error) => void;
+  let resolveFinish!: (value: { state: "saved" }) => void;
+  api.list
+    .mockImplementationOnce(
+      () =>
+        new Promise<WorkBuddyAccount[]>(
+          (_, reject) => (rejectInitial = reject),
+        ),
+    )
+    .mockResolvedValueOnce([row]);
+  api.beginLogin.mockResolvedValue({
+    flowId: "f1",
+    verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
+  });
+  api.finishLogin.mockImplementationOnce(
+    () => new Promise((resolve) => (resolveFinish = resolve)),
+  );
+  render(<WorkBuddyAccounts />);
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: "workbuddy.finishAuthorization",
+    }),
+  );
+  await act(async () => rejectInitial(new Error("SYNTHETIC_INITIAL_FAILURE")));
+  expect(screen.getByRole("alert")).toHaveTextContent("workbuddy.failed");
+  await act(async () => resolveFinish({ state: "saved" }));
+  expect(await screen.findByText("Synthetic account")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("does not let a pending initial read hide a newer authorization failure", async () => {
+  let resolveInitial!: (rows: WorkBuddyAccount[]) => void;
+  api.list.mockImplementationOnce(
+    () =>
+      new Promise<WorkBuddyAccount[]>((resolve) => (resolveInitial = resolve)),
+  );
+  api.beginLogin.mockRejectedValueOnce(new Error("SYNTHETIC_AUTH_FAILURE"));
+  render(<WorkBuddyAccounts />);
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "workbuddy.failed",
+  );
+  await act(async () => resolveInitial([row]));
+  expect(screen.getByText("Synthetic account")).toBeVisible();
+  expect(screen.getByRole("alert")).toHaveTextContent("workbuddy.failed");
+});
+
+it("retains claim results if the saved authorization list cannot be read", async () => {
+  api.claimAll.mockResolvedValueOnce([{ account: row, error: "busy" }]);
+  api.list
+    .mockResolvedValueOnce([row])
+    .mockRejectedValueOnce(new Error("SYNTHETIC_LIST_FAILURE"));
+  api.beginLogin.mockResolvedValue({
+    flowId: "f1",
+    verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
+  });
+  api.finishLogin.mockResolvedValue({ state: "saved" });
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.claimAll" }),
+  );
+  const results = await screen.findByRole("region", {
+    name: "workbuddy.claimResults",
+  });
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: "workbuddy.finishAuthorization",
+    }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "workbuddy.failed",
+  );
+  expect(results).toBeVisible();
+  expect(within(results).getByText("workbuddy.claimFailed")).toBeVisible();
+  expect(screen.getAllByText("Synthetic account")).toHaveLength(2);
 });
 
 it("batch claim is explicit, single flight and applies only backend results", async () => {
