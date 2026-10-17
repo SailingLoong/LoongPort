@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Loader2, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,28 +28,37 @@ export function WorkBuddyAccounts() {
   const [busy, setBusy] = useState<string | null>(null);
   const active = useRef(false);
   const alive = useRef(true);
+  const listGeneration = useRef(0);
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [claimResults, setClaimResults] = useState<
     { id: string; error: WorkBuddyClaimResult["error"] }[] | null
   >(null);
+  const loadAccounts = useCallback(async () => {
+    const generation = ++listGeneration.current;
+    const isCurrent = () =>
+      alive.current && generation === listGeneration.current;
+    setFailed(false);
+    try {
+      const rows = await workbuddyApi.list();
+      if (isCurrent()) {
+        setAccounts(rows);
+        setClaimResults(null);
+      }
+    } catch {
+      if (isCurrent()) setFailed(true);
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }, []);
   useEffect(() => {
     alive.current = true;
-    void workbuddyApi
-      .list()
-      .then((rows) => {
-        if (alive.current) setAccounts(rows);
-      })
-      .catch(() => {
-        if (alive.current) setFailed(true);
-      })
-      .finally(() => {
-        if (alive.current) setLoading(false);
-      });
+    void loadAccounts();
     return () => {
       alive.current = false;
+      listGeneration.current += 1;
     };
-  }, []);
+  }, [loadAccounts]);
   const run = async (key: string, operation: () => Promise<void>) => {
     if (active.current) return;
     active.current = true;
@@ -188,8 +197,7 @@ export function WorkBuddyAccounts() {
                 if (!alive.current) return;
                 if (result.state === "saved") {
                   setLogin(null);
-                  setAccounts(await workbuddyApi.list());
-                  setClaimResults(null);
+                  await loadAccounts();
                 } else setWaiting(true);
               })
             }
