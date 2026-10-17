@@ -432,8 +432,8 @@ fn unknown_mode_checkpoint_and_corrupt_legacy_backup_block_before_writes() {
                         .lock()
                         .unwrap()
                         .execute(
-                            "UPDATE loongport_schema_version SET version=25 WHERE id=1",
-                            [],
+                            "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                            [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
                         )
                         .unwrap();
                 }
