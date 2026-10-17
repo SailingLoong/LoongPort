@@ -792,6 +792,15 @@ pub async fn handle_chat_completions(
         .and_then(|m| m.provider_type.as_deref())
         == Some("qoder_sdk")
     {
+        // The SDK transport has no verified free route. HTTP provider settings
+        // cannot certify it; enforce free intent before resolving auth/runtime.
+        super::free_models::enforce(
+            &mut false,
+            &body,
+            &body,
+            "",
+            super::free_models::configured(&ctx.provider.settings_config),
+        )?;
         let auth =
             get_adapter(&AppType::Codex).and_then(|adapter| adapter.extract_auth(&ctx.provider));
         let Some(auth) = auth else {
