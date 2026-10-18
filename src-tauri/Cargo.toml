@@ -220,6 +220,8 @@ panic = "unwind"
 strip = "symbols"
 
 [dev-dependencies]
+# Deterministic deadline tests; release Tokio features remain unchanged.
+tokio = { version = "1", features = ["test-util"] }
 serial_test = "4"
 tempfile = "3"
 tauri = { version = "2.8.2", features = ["test"] }
