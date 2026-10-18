@@ -1085,7 +1085,8 @@ mod paperclip_schema_lifecycle_tests {
             database::loongport_schema::read_stored_version(&staged).unwrap(),
             26
         );
-        crate::database::dao::qoder_campaign_operations::read_rows(&staged).unwrap();
+        // The existing read-only owner validates the receipt schema and rows.
+        database::vault::preflight_connection(&staged).unwrap();
         assert!(!supports_loongport_version(27));
     }
 

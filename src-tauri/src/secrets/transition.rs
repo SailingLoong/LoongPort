@@ -1661,7 +1661,13 @@ mod tests {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
         } else {
-            crate::database::dao::qoder_campaign_operations::create_schema(conn).unwrap();
+            // Use the existing schema owner instead of crossing its private DAO.
+            crate::database::loongport_schema::apply(conn).unwrap();
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(conn).unwrap(),
+                version,
+                "the fixed v26 fixture must not follow a future schema target"
+            );
         }
         if version < 25 {
             conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings")
