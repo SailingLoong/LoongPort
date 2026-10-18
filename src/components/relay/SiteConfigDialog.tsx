@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -49,48 +49,79 @@ export function SiteConfigDialog({
 }: SiteConfigDialogProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState("");
-  const [applying, setApplying] = useState(false);
-  const [resetting, setResetting] = useState(false);
-  const busy = applying || resetting;
+  const [operation, setOperation] = useState<
+    "apply" | "reset" | "refresh" | null
+  >(null);
+  const [saved, setSaved] = useState<{
+    operation: "apply" | "reset";
+    count: number;
+  } | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const pending = useRef(false);
+  const generation = useRef(0);
+  useEffect(
+    () => () => {
+      generation.current += 1;
+    },
+    [],
+  );
+  const busy = operation !== null;
+  const applying = operation === "apply";
+  const resetting = operation === "reset";
 
   const close = () => {
-    if (busy) return;
+    if (pending.current) return;
     setInput("");
+    setSaved(null);
+    setRefreshError(null);
     onOpenChange(false);
   };
 
-  const apply = async () => {
-    setApplying(true);
+  // A successful mutation must never be repeated just because list refresh failed.
+  // Keep this receipt in the existing dialog; retry only the original refresh callback.
+  const run = async (action: "apply" | "reset" | "refresh") => {
+    if (pending.current || (action !== "refresh" && saved)) return;
+    pending.current = true;
+    const current = generation.current;
+    const active = () => generation.current === current;
+    setOperation(action);
+    setRefreshError(null);
     try {
-      const summary = await relayApi.applySiteConfig(relayId, input);
-      toast.success(
-        t("loongport.siteConfig.appliedToast", {
-          count: summary.applied.length,
-        }),
-      );
-      await onApplied();
+      if (action !== "refresh") {
+        let summary;
+        try {
+          summary =
+            action === "apply"
+              ? await relayApi.applySiteConfig(relayId, input)
+              : await relayApi.resetSiteConfig(relayId);
+        } catch (error) {
+          if (active()) toast.error(String(error));
+          return;
+        }
+        if (!active()) return;
+        setSaved({ operation: action, count: summary.applied.length });
+        toast.success(
+          t(
+            action === "apply"
+              ? "loongport.siteConfig.appliedToast"
+              : "loongport.siteConfig.resetToast",
+            { count: summary.applied.length },
+          ),
+        );
+      }
+      try {
+        await onApplied();
+      } catch (error) {
+        if (active()) setRefreshError(String(error));
+        return;
+      }
+      if (!active()) return;
       setInput("");
+      setSaved(null);
       onOpenChange(false);
-    } catch (error) {
-      toast.error(String(error));
     } finally {
-      setApplying(false);
-    }
-  };
-
-  const reset = async () => {
-    setResetting(true);
-    try {
-      const summary = await relayApi.resetSiteConfig(relayId);
-      toast.success(
-        t("loongport.siteConfig.resetToast", { count: summary.applied.length }),
-      );
-      await onApplied();
-      onOpenChange(false);
-    } catch (error) {
-      toast.error(String(error));
-    } finally {
-      setResetting(false);
+      pending.current = false;
+      if (active()) setOperation(null);
     }
   };
 
@@ -112,8 +143,30 @@ export function SiteConfigDialog({
           placeholder={t("loongport.siteConfig.placeholder")}
           className="min-h-28 font-mono text-xs"
           spellCheck={false}
-          disabled={busy}
+          disabled={busy || saved !== null}
         />
+        {saved && (
+          <p role="status" className="text-sm">
+            {t(
+              saved.operation === "apply"
+                ? "loongport.siteConfig.appliedToast"
+                : "loongport.siteConfig.resetToast",
+              { count: saved.count },
+            )}
+          </p>
+        )}
+        {refreshError && (
+          <div role="alert" className="text-sm text-destructive">
+            {refreshError}
+            <Button
+              variant="link"
+              disabled={busy}
+              onClick={() => void run("refresh")}
+            >
+              {t("common.retry")}
+            </Button>
+          </div>
+        )}
         {/* 三按钮，视觉权重从低到高（左 → 右），与 `SwitchTierConfirmDialog`
             同一梯度：**取消**（ghost）/ 恢复默认（outline，次要动作）/ 应用（主）。
             「恢复默认」不是退路也不是主流程——它是与应用对称的另一个方向，
@@ -124,8 +177,8 @@ export function SiteConfigDialog({
           </Button>
           <Button
             variant="outline"
-            disabled={busy}
-            onClick={() => void reset()}
+            disabled={busy || saved !== null}
+            onClick={() => void run("reset")}
           >
             {resetting ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -134,8 +187,8 @@ export function SiteConfigDialog({
             )}
           </Button>
           <Button
-            disabled={busy || input.trim().length === 0}
-            onClick={() => void apply()}
+            disabled={busy || saved !== null || input.trim().length === 0}
+            onClick={() => void run("apply")}
           >
             {applying ? (
               <Loader2 className="h-4 w-4 animate-spin" />
