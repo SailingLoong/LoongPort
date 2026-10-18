@@ -26,91 +26,88 @@ pub(crate) struct EnvironmentFacts {
     pub site_origins: Vec<String>,
 }
 
-/// 拼装环境快照。全部字段 best-effort：单项失败降级为缺省值并记 log，
-/// 不让「数不清 provider」这类小故障拖垮整个导出。
+/// Basic metadata is always safe to send. Detailed collection is lazy and only
+/// performed after the caller passes the existing diagnostics consent switch.
 pub(crate) async fn gather_environment(
     db: &std::sync::Arc<crate::database::Database>,
+    include_diagnostics: bool,
 ) -> EnvironmentFacts {
-    // 工具版本探测是子进程批次（秒级），只在做包时按需跑。
-    let tool_versions = crate::commands::misc::get_tool_versions(None, None)
-        .await
-        .unwrap_or_default();
-    let proxy = crate::commands::global_proxy::get_upstream_proxy_status();
-    let settings = crate::settings::get_settings();
+    gather_environment_internal(db, include_diagnostics, None).await
+}
+
+/// Feedback collects configuration only for explicitly selected applications.
+pub(crate) async fn gather_feedback_environment(
+    db: &std::sync::Arc<crate::database::Database>,
+    include_diagnostics: bool,
+    selected_apps: Vec<String>,
+) -> EnvironmentFacts {
+    gather_environment_internal(db, include_diagnostics, Some(selected_apps)).await
+}
+
+async fn gather_environment_internal(
+    db: &std::sync::Arc<crate::database::Database>,
+    include_diagnostics: bool,
+    selected_apps: Option<Vec<String>>,
+) -> EnvironmentFacts {
+    use crate::diagnostics_snapshot::{environment_manifest, status, CollectionStatus};
 
     let db = std::sync::Arc::clone(db);
-    let (db_json, site_origins) = match tauri::async_runtime::spawn_blocking(
-        move || -> Result<(Value, Vec<String>), AppError> {
-            let conn = db
-                .conn
-                .lock()
-                .map_err(|e| AppError::Message(format!("获取数据库连接失败: {e}")))?;
-            let schema_version = crate::database::loongport_schema::read_stored_version(&conn)?;
-            let providers: i64 = conn
-                .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let relay_accounts: i64 = conn
-                .query_row("SELECT COUNT(*) FROM loongport_relay", [], |row| row.get(0))
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT site_origin FROM loongport_relay ORDER BY site_origin")
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let site_origins = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let site_count = site_origins.len() as i64;
-            Ok((
-                json!({
-                    "schemaVersion": schema_version,
-                    "counts": {
-                        "providers": providers,
-                        "relaySites": site_count,
-                        "relayAccounts": relay_accounts,
-                    },
-                }),
-                site_origins,
-            ))
+    match tauri::async_runtime::spawn_blocking(move || {
+        let mut site_origins = Vec::new();
+        let manifest = environment_manifest(include_diagnostics, || {
+            let db_facts = (|| -> Result<Value, AppError> {
+                let conn = db.conn.try_lock().map_err(|_| AppError::Message("database unavailable".into()))?;
+                let schema_version = crate::database::loongport_schema::read_stored_version(&conn)?;
+                let providers: i64 = conn.query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let relay_accounts: i64 = conn.query_row("SELECT COUNT(*) FROM loongport_relay", [], |row| row.get(0))
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let mut stmt = conn.prepare("SELECT DISTINCT site_origin FROM loongport_relay ORDER BY site_origin")
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                site_origins = stmt.query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| AppError::Database(e.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(json!({
+                    "status":"ok",
+                    "data": {"schemaVersion":schema_version,"counts": {
+                        "providers":providers,"relaySites":site_origins.len(),"relayAccounts":relay_accounts,
+                    }},
+                }))
+            })().unwrap_or_else(|_| status(CollectionStatus::Unavailable));
+            let settings = crate::settings::get_settings();
+            let proxy = crate::commands::global_proxy::get_upstream_proxy_status();
+            let mut details = json!({
+                "schemaVersion":1,
+                "portableMode":crate::commands::misc::portable_mode_enabled(),
+                "settings": {
+                    "receiveBetaUpdates":settings.receive_beta_updates,
+                    "crowdMetricsEnabled":settings.crowd_metrics_enabled,
+                },
+                // No proxy URL, host, username, or port enters metadata.
+                "proxy": {"enabled":proxy.enabled,"configured":proxy.proxy_url.is_some()},
+                "db":db_facts,
+                "toolVersions":crate::commands::misc::local_tool_diagnostics(),
+            });
+            if let Some(selected) = &selected_apps {
+                let mut applications = crate::diagnostics_snapshot::selected_application_snapshots(selected);
+                if serde_json::to_vec(&applications).map_or(true, |bytes| bytes.len() > 128 * 1024) {
+                    applications = status(CollectionStatus::Truncated);
+                }
+                details["applications"] = applications;
+            } else {
+                // Preserve the explicitly requested standalone export behavior.
+                details["codex"] = crate::diagnostics_snapshot::codex_snapshot(&crate::codex_config::get_codex_config_path());
+            }
+            details
+        });
+        EnvironmentFacts { manifest, site_origins }
+    }).await {
+        Ok(facts) => facts,
+        Err(_) => EnvironmentFacts {
+            manifest: environment_manifest(include_diagnostics, || status(CollectionStatus::Unavailable)),
+            site_origins: Vec::new(),
         },
-    )
-    .await
-    {
-        Ok(Ok(facts)) => facts,
-        Ok(Err(e)) => {
-            // best-effort：计数/站点清单读不出来不该拖垮整个导出。
-            log::warn!("诊断包环境计数读取失败（降级为缺省）: {e}");
-            (json!({}), Vec::new())
-        }
-        Err(e) => {
-            log::warn!("诊断包环境计数任务失败（降级为缺省）: {e}");
-            (json!({}), Vec::new())
-        }
-    };
-
-    let manifest = json!({
-        "appVersion": env!("CARGO_PKG_VERSION"),
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "family": std::env::consts::FAMILY,
-        "portableMode": crate::commands::misc::portable_mode_enabled(),
-        "settings": {
-            "language": settings.language,
-            "receiveBetaUpdates": settings.receive_beta_updates,
-            "crowdMetricsEnabled": settings.crowd_metrics_enabled,
-        },
-        "proxy": {
-            "enabled": proxy.enabled,
-            // 代理 URL 可能带用户名/密码 —— 掩码后仅留 scheme://host:port。
-            "url": proxy.proxy_url.as_deref().map(crate::proxy::http_client::mask_url),
-        },
-        "toolVersions": tool_versions,
-        "db": db_json,
-    });
-
-    EnvironmentFacts {
-        manifest,
-        site_origins,
     }
 }
 
@@ -119,7 +116,7 @@ pub(crate) async fn build_diagnostics_bundle(
     db: &std::sync::Arc<crate::database::Database>,
     include_sites: bool,
 ) -> Result<Vec<u8>, AppError> {
-    let facts = gather_environment(db).await;
+    let facts = gather_environment(db, true).await;
     let origins = include_sites.then(|| facts.site_origins.clone());
     tauri::async_runtime::spawn_blocking(move || {
         collect_diagnostics(facts.manifest, origins).and_then(build_diagnostics_zip)

@@ -391,6 +391,10 @@ pub struct RemoteConfig {
     /// 消费闸见 [`feedback_endpoint`]（HTTPS 硬校验）。双向兼容理由同上。
     #[serde(default)]
     pub feedback_url: Option<String>,
+    /// Signed capability of this same feedback endpoint. Only the exact known
+    /// protocol enables optional private form fields; absence/future values fail closed.
+    #[serde(default)]
+    pub feedback_protocol_version: Option<u32>,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -578,6 +582,10 @@ pub fn feedback_endpoint(config: &RemoteConfig) -> Option<String> {
         return None;
     }
     Some(url.to_string())
+}
+
+pub fn feedback_extended_fields_supported(config: &RemoteConfig) -> bool {
+    config.feedback_protocol_version == Some(2) && feedback_endpoint(config).is_some()
 }
 
 /// 过滤出当前客户端认识且内容完整的公告：未知类型、空 id/标题/正文一律跳过
@@ -1343,6 +1351,7 @@ mod tests {
             star_reward: None,
             relay_model_selection: None,
             feedback_url: None,
+            feedback_protocol_version: None,
         }
     }
 
@@ -1363,6 +1372,7 @@ mod tests {
             star_reward: None,
             relay_model_selection: None,
             feedback_url: None,
+            feedback_protocol_version: None,
         }
     }
 
@@ -2405,5 +2415,29 @@ mod tests {
             builtin,
             "远端缺席 = 内置表，这是三层回落（远端 > 缓存 > 内置）落到选型的形态"
         );
+    }
+    #[test]
+    fn feedback_extended_fields_require_exact_signed_protocol_and_endpoint() {
+        for version in [None, Some(0), Some(1), Some(3), Some(u32::MAX)] {
+            let config = RemoteConfig {
+                feedback_url: Some("https://example.invalid/feedback".into()),
+                feedback_protocol_version: version,
+                ..Default::default()
+            };
+            assert!(!feedback_extended_fields_supported(&config));
+        }
+        let config = RemoteConfig {
+            feedback_url: Some("https://example.invalid/feedback".into()),
+            feedback_protocol_version: Some(2),
+            ..Default::default()
+        };
+        assert!(feedback_extended_fields_supported(&config));
+        assert!(!feedback_extended_fields_supported(&RemoteConfig {
+            feedback_url: None,
+            ..config
+        }));
+        let old: RemoteConfig =
+            serde_json::from_str(r#"{"feedback_url":"https://example.invalid/feedback"}"#).unwrap();
+        assert_eq!(old.feedback_protocol_version, None);
     }
 }

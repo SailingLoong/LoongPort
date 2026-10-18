@@ -106,6 +106,17 @@ pub(crate) struct ConnectionMutex {
     secrets: std::sync::Arc<crate::SecretSession>,
 }
 impl ConnectionMutex {
+    /// Passive diagnostics must not wait behind a business transaction. Keep
+    /// the same session denial and returned guard as the original lock owner.
+    #[cfg(any(feature = "gui", test))]
+    pub(crate) fn try_lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, AppError> {
+        let conn = self
+            .inner
+            .try_lock()
+            .map_err(|_| AppError::Database("Database lock unavailable".into()))?;
+        self.secrets.ensure_available()?;
+        Ok(conn)
+    }
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, AppError> {
         let conn = self
             .inner
@@ -382,5 +393,54 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(count == 0)
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_connection_tests {
+    use super::*;
+    fn fixture() -> ConnectionMutex {
+        ConnectionMutex {
+            inner: Mutex::new(Connection::open_in_memory().unwrap()),
+            secrets: crate::SecretSession::ephemeral().unwrap(),
+        }
+    }
+    #[test]
+    fn diagnostic_try_lock_uses_real_available_connection() {
+        let owner = fixture();
+        assert_eq!(
+            owner
+                .try_lock()
+                .unwrap()
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn diagnostic_try_lock_does_not_wait_for_busy_connection() {
+        let owner = fixture();
+        let held = owner.lock().unwrap();
+        assert!(owner.try_lock().is_err());
+        drop(held);
+        assert!(owner.try_lock().is_ok());
+    }
+    #[test]
+    fn diagnostic_try_lock_preserves_blocked_session_denial() {
+        let owner = fixture();
+        owner.secrets.set_blocked(true);
+        assert!(owner.lock().is_err());
+        assert!(owner.try_lock().is_err());
+        owner.secrets.set_blocked(false);
+        assert!(owner.try_lock().is_ok());
+    }
+    #[test]
+    fn diagnostic_try_lock_fails_closed_on_poison() {
+        let owner = fixture();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = owner.inner.lock().unwrap();
+            panic!("synthetic lock poisoning");
+        }));
+        assert!(owner.try_lock().is_err());
     }
 }

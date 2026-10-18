@@ -184,6 +184,231 @@ pub async fn get_tool_versions(
     Ok(results)
 }
 
+/// Diagnostic export uses the existing bounded local CLI owner, never the
+/// version UI's remote registry lookup. Raw output and errors stay local.
+pub(crate) fn local_tool_diagnostics() -> serde_json::Value {
+    let working_dir = std::env::temp_dir();
+    local_tool_diagnostics_with_probe(std::time::Duration::from_secs(8), |tool, timeout| {
+        run_detected_tool_command_with_timeout(
+            tool,
+            &["--version"],
+            Some(timeout),
+            &[],
+            &working_dir,
+        )
+    })
+}
+
+fn local_tool_diagnostics_with_probe(
+    total_budget: std::time::Duration,
+    mut probe: impl FnMut(&str, std::time::Duration) -> Result<std::process::Output, String>,
+) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    let mut versions = serde_json::Map::new();
+    for tool in VALID_TOOLS {
+        let remaining = total_budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            let mut skipped = crate::diagnostics_snapshot::tool_version_snapshot(Err("timeout"));
+            skipped["probeStarted"] = serde_json::Value::Bool(false);
+            versions.insert(tool.to_string(), skipped);
+            continue;
+        }
+        let timeout = remaining.min(std::time::Duration::from_secs(3));
+        // The existing runner kills/reaps on its own deadline. Do not abandon
+        // a background task using an async timeout. Cleanup may exceed budget.
+        let result = probe(tool, timeout);
+        let mut snapshot = if started.elapsed() >= total_budget {
+            crate::diagnostics_snapshot::tool_version_snapshot(Err("timeout"))
+        } else {
+            diagnostic_tool_probe_result(tool, &result)
+        };
+        if started.elapsed() >= total_budget {
+            snapshot["budgetExceeded"] = serde_json::Value::Bool(true);
+        }
+        snapshot["probeStarted"] = serde_json::Value::Bool(true);
+        versions.insert(tool.to_string(), snapshot);
+    }
+    serde_json::Value::Object(versions)
+}
+
+fn diagnostic_tool_probe_result(
+    tool: &str,
+    result: &Result<std::process::Output, String>,
+) -> serde_json::Value {
+    use crate::diagnostics_snapshot::tool_version_snapshot;
+    match result {
+        Ok(output) if output.stdout.len().saturating_add(output.stderr.len()) > 64 * 1024 => {
+            tool_version_snapshot(Err("truncated"))
+        }
+        Ok(output) if output.status.success() => {
+            let raw = if output.stdout.is_empty() {
+                &output.stderr
+            } else {
+                &output.stdout
+            };
+            match std::str::from_utf8(raw) {
+                Ok(raw) => tool_version_snapshot(Ok(&extract_version(raw.trim()))),
+                Err(_) => tool_version_snapshot(Err("unavailable")),
+            }
+        }
+        Err(error)
+            if error
+                .strip_prefix("Command timed out after ")
+                .and_then(|v| v.strip_suffix('s'))
+                .is_some_and(|v| v.parse::<u64>().is_ok()) =>
+        {
+            tool_version_snapshot(Err("timeout"))
+        }
+        Err(error) if error == &format!("{tool} is not installed") => {
+            tool_version_snapshot(Err("not_configured"))
+        }
+        _ => tool_version_snapshot(Err("unavailable")),
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_probe_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn output(code: i32, stdout: &[u8], stderr: &[u8]) -> Result<std::process::Output, String> {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        })
+    }
+
+    #[test]
+    fn probe_errors_are_categories_without_private_error_text() {
+        for (error, status) in [
+            ("Command timed out after 3s", "timeout"),
+            ("codex is not installed", "not_configured"),
+            ("PRIVATE_CANARY_8675309 /home/private", "unavailable"),
+        ] {
+            let result = diagnostic_tool_probe_result("codex", &Err(error.into()));
+            assert_eq!(result["status"], status);
+            assert!(!result.to_string().contains("PRIVATE_CANARY"));
+            assert!(!result.to_string().contains("/home"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_outputs_are_bounded_and_success_is_not_assumed() {
+        let result = diagnostic_tool_probe_result(
+            "codex",
+            &output(0, b"codex-cli 1.2.3-beta.1+private", b"PRIVATE_CANARY"),
+        );
+        assert_eq!(result["data"]["version"], "1.2.3-beta.1");
+        assert_eq!(result["data"]["versionExact"], false);
+        assert!(!result.to_string().contains("private"));
+        assert_eq!(
+            diagnostic_tool_probe_result("codex", &output(1, b"1.2.3", b"PRIVATE_CANARY"))
+                ["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            diagnostic_tool_probe_result("codex", &output(0, &vec![b'x'; 65537], b""))["status"],
+            "truncated"
+        );
+    }
+    #[test]
+    fn exhausted_batch_budget_never_starts_a_probe() {
+        let calls = std::cell::Cell::new(0);
+        let result = local_tool_diagnostics_with_probe(std::time::Duration::ZERO, |_, _| {
+            calls.set(calls.get() + 1);
+            Err("unavailable".into())
+        });
+        assert_eq!(calls.get(), 0);
+        assert!(result
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["probeStarted"] == false));
+        assert_eq!(result.as_object().unwrap().len(), VALID_TOOLS.len());
+        assert!(result
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["status"] == "timeout"));
+    }
+
+    #[test]
+    fn probe_overrun_stops_all_remaining_probes_and_is_reported() {
+        let calls = std::cell::Cell::new(0);
+        let budget = std::time::Duration::from_millis(15);
+        let result = local_tool_diagnostics_with_probe(budget, |_, timeout| {
+            assert!(timeout <= budget);
+            calls.set(calls.get() + 1);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Err("unavailable".into())
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result[VALID_TOOLS[0]]["status"], "timeout");
+        assert_eq!(result[VALID_TOOLS[0]]["budgetExceeded"], true);
+        assert_eq!(result[VALID_TOOLS[0]]["probeStarted"], true);
+        assert_eq!(result[VALID_TOOLS[1]]["probeStarted"], false);
+        assert!(result
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["status"] == "timeout"));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn batch_timeout_kills_real_synthetic_process_tree_and_reaps_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_pid = dir.path().join("parent-pid");
+        let side_effect = dir.path().join("must-not-exist");
+        let calls = std::cell::Cell::new(0);
+        let result = local_tool_diagnostics_with_probe(
+            std::time::Duration::from_millis(100),
+            |_, timeout| {
+                calls.set(calls.get() + 1);
+                crate::process::run_tool_at_path_with_timeout(
+                    std::path::Path::new("/bin/sh"),
+                    &[
+                        "-c",
+                        "echo $$ > \"$1\"; (sleep 0.5; touch \"$2\") & wait",
+                        "diagnostic-fixture",
+                        parent_pid.to_str().unwrap(),
+                        side_effect.to_str().unwrap(),
+                    ],
+                    timeout,
+                )
+            },
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(result
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["status"] == "timeout"));
+        let pid = std::fs::read_to_string(parent_pid)
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        // SAFETY: signal 0 only checks whether this recorded synthetic child exists.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "direct child must be reaped"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(
+            !side_effect.exists(),
+            "a surviving descendant must not continue after timeout"
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn run_tool_lifecycle_action(
     tools: Vec<String>,

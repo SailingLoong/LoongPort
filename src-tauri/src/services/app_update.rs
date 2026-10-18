@@ -6,12 +6,66 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::watch;
 
+use crate::diagnostics::DiagnosticEvent;
 use crate::error::AppError;
 
 use super::app_update_policy::{self as policy, CheckFailure, DownloadFailure};
 use super::app_update_stage::{DownloadTicket, PrestageAction, ReadyUpdate};
 
 pub type AppUpdateStage = super::app_update_stage::UpdateStage<Update>;
+
+// Diagnostic labels are static, and counts come from the existing owner. Never
+// attach an Update, error, version, URL, installer path or frontend request ID.
+fn update_event(stage: &'static str, outcome: &'static str) -> DiagnosticEvent {
+    DiagnosticEvent::new("app.update", outcome).field("stage", stage)
+}
+
+// Instance-local logging only: dropping a future must close its started event,
+// without cancelling work, changing the stage owner or inventing a failure.
+struct UpdateDiagnostic<F: Fn(&'static str) -> DiagnosticEvent> {
+    event: F,
+    terminal: bool,
+}
+
+impl<F: Fn(&'static str) -> DiagnosticEvent> UpdateDiagnostic<F> {
+    fn new(event: F) -> Self {
+        log::debug!("{}", event("started"));
+        Self {
+            event,
+            terminal: false,
+        }
+    }
+
+    fn finish(
+        &mut self,
+        outcome: &'static str,
+        error_category: Option<&'static str>,
+        byte_count: Option<u64>,
+    ) {
+        if self.terminal {
+            return;
+        }
+        self.terminal = true;
+        let mut event = (self.event)(outcome);
+        if let Some(category) = error_category {
+            event = event.field("error_category", category);
+        }
+        if let Some(count) = byte_count {
+            event = event.field("byte_count", count);
+        }
+        if outcome == "failed" {
+            log::warn!("{event}");
+        } else {
+            log::debug!("{event}");
+        }
+    }
+}
+
+impl<F: Fn(&'static str) -> DiagnosticEvent> Drop for UpdateDiagnostic<F> {
+    fn drop(&mut self) {
+        self.finish("dropped", None, None);
+    }
+}
 
 /// Keep channel selection pinned while the bounded race is in flight. Each
 /// updater gets one endpoint, avoiding the plugin's serial endpoint loop.
@@ -69,8 +123,14 @@ async fn check_update_with_proxy_fallback(
     budget: Duration,
     minimum: Option<&str>,
 ) -> Result<Option<Update>, String> {
+    log::debug!("{}", update_event("check", "started"));
     let beta = crate::settings::get_settings().receive_beta_updates;
-    let endpoints = channel_endpoints(app, beta)?;
+    let endpoints = channel_endpoints(app, beta).inspect_err(|_| {
+        log::warn!(
+            "{}",
+            update_event("check", "failed").field("error_category", "configuration")
+        );
+    })?;
     let mut checks = Vec::new();
     for (index, endpoint) in endpoints.into_iter().enumerate() {
         for direct in [false, true] {
@@ -109,14 +169,33 @@ async fn check_update_with_proxy_fallback(
         semver::Version::parse(&a.version).ok() > semver::Version::parse(&b.version).ok()
     })
     .await
-    .map_err(|error| match error {
-        CheckFailure::TimedOut => "更新检查超时或结果不完整，请重试或从官网下载".to_string(),
-        CheckFailure::NoCandidates => "没有可用的更新端点".to_string(),
-        CheckFailure::Failed(errors) => format!("无法确认更新，请重试：{}", errors.join("；")),
+    .map_err(|error| {
+        let category = match &error {
+            CheckFailure::TimedOut => "timeout",
+            CheckFailure::NoCandidates => "no_candidates",
+            CheckFailure::Failed(_) => "endpoint_failure",
+        };
+        log::warn!(
+            "{}",
+            update_event("check", "failed").field("error_category", category)
+        );
+        match error {
+            CheckFailure::TimedOut => "更新检查超时或结果不完整，请重试或从官网下载".to_string(),
+            CheckFailure::NoCandidates => "没有可用的更新端点".to_string(),
+            CheckFailure::Failed(errors) => format!("无法确认更新，请重试：{}", errors.join("；")),
+        }
     })?;
     if beta != crate::settings::get_settings().receive_beta_updates {
+        log::warn!(
+            "{}",
+            update_event("check", "failed").field("error_category", "channel_changed")
+        );
         return Err("更新通道已改变，请重新检查".to_string());
     }
+    log::debug!(
+        "{}",
+        update_event("check", "completed").field("update_available", result.is_some())
+    );
     Ok(result)
 }
 
@@ -233,21 +312,41 @@ fn verify_installer_signature(
     version: &str,
     require_signed_version: bool,
 ) -> Result<(), String> {
-    let decode = |value: &str, what: &str| {
+    let event = |outcome| update_event("verify", outcome).field("byte_count", bytes.len() as u64);
+    log::debug!("{}", event("started"));
+    let failure = |category| log::warn!("{}", event("failed").field("error_category", category));
+    let decode = |value: &str, what: &str, category: &'static str| {
         base64::engine::general_purpose::STANDARD
             .decode(value)
             .ok()
             .and_then(|decoded| String::from_utf8(decoded).ok())
-            .ok_or_else(|| format!("{what} 不是有效的 base64/UTF-8"))
+            .ok_or_else(|| {
+                failure(category);
+                format!("{what} 不是有效的 base64/UTF-8")
+            })
     };
-    let public_key = PublicKey::decode(&decode(pub_key, "更新公钥")?)
-        .map_err(|e| format!("更新公钥解析失败: {e}"))?;
-    let signature = Signature::decode(&decode(release_signature, "更新签名")?)
-        .map_err(|e| format!("更新签名解析失败: {e}"))?;
-    public_key
-        .verify(bytes, &signature, true)
-        .map_err(|e| format!("更新签名校验失败: {e}"))?;
+    let public_key =
+        PublicKey::decode(&decode(pub_key, "更新公钥", "key_encoding")?).map_err(|e| {
+            failure("key_decode");
+            format!("更新公钥解析失败: {e}")
+        })?;
+    let signature = Signature::decode(&decode(
+        release_signature,
+        "更新签名",
+        "signature_encoding",
+    )?)
+    .map_err(|e| {
+        failure("signature_decode");
+        format!("更新签名解析失败: {e}")
+    })?;
+    public_key.verify(bytes, &signature, true).map_err(|e| {
+        failure("signature_verification");
+        format!("更新签名校验失败: {e}")
+    })?;
     policy::verify_signed_version(signature.trusted_comment(), version, require_signed_version)
+        .inspect_err(|_| failure("signed_version"))?;
+    log::debug!("{}", event("completed"));
+    Ok(())
 }
 
 /// 启动闸门：应用上个会话预下载好的更新。
@@ -296,8 +395,11 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
     .await
     {
         Ok(update) => update,
-        Err(e) => {
-            log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
+        Err(_) => {
+            log::info!(
+                "{}",
+                update_event("startup", "deferred").field("reason", "manifest_unavailable")
+            );
             return;
         }
     };
@@ -308,10 +410,16 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
         match pending_update_action(Some(&version), offered_version, dismissed.as_deref()) {
             PendingUpdateAction::NothingStaged => {}
             PendingUpdateAction::KeepForManual => {
-                log::debug!("版本 {version} 已被用户跳过，保留预下载产物供手动升级");
+                log::debug!(
+                    "{}",
+                    update_event("startup", "deferred").field("reason", "dismissed")
+                );
             }
             PendingUpdateAction::Drop => {
-                log::info!("预下载产物 {version} 已失效（更新撤回或有更新版本），清除");
+                log::info!(
+                    "{}",
+                    update_event("startup", "discarding").field("reason", "obsolete")
+                );
                 let _ = std::fs::remove_file(&installer);
             }
             PendingUpdateAction::Install => install_candidate = Some(installer),
@@ -324,34 +432,43 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
 
     let bytes = match tokio::fs::read(&installer).await {
         Ok(bytes) => bytes,
-        Err(e) => {
-            log::warn!("预下载安装包读取失败，删除后继续正常启动: {e}");
+        Err(_) => {
+            log::warn!(
+                "{}",
+                update_event("startup", "failed").field("error_category", "cache_read")
+            );
             let _ = std::fs::remove_file(&installer);
             return;
         }
     };
     let Some(pubkey) = updater_pubkey(app) else {
-        log::error!("tauri.conf.json 缺 updater pubkey，无法重验预下载产物，跳过自动安装");
+        log::error!(
+            "{}",
+            update_event("startup", "failed").field("error_category", "missing_public_key")
+        );
         return;
     };
-    if let Err(e) = verify_installer_signature(
+    if verify_installer_signature(
         &bytes,
         &update.signature,
         &pubkey,
         &update.version,
         require_signed_version(app),
-    ) {
-        log::warn!("预下载安装包验签失败（疑似损坏/被篡改），删除后继续正常启动: {e}");
+    )
+    .is_err()
+    {
         let _ = std::fs::remove_file(&installer);
         return;
     }
     // 字节已读入内存且验签通过，产物文件使命完成；先删再装，成功路径
     //（不返回）不留残留，下次启动也不用再靠 reconcile 清。
     let _ = std::fs::remove_file(&installer);
-    log::info!("启动闸门：安装预下载更新 {}", update.version);
-    if let Err(e) = install_bytes_and_restart(app, update, bytes).await {
+    if install_bytes_and_restart(app, update, bytes).await.is_err() {
         // 安装失败不算致命：正常启动，用户仍可手动升级（届时现场重下）。
-        log::error!("启动闸门安装预下载更新失败，继续正常启动: {e}");
+        log::error!(
+            "{}",
+            update_event("startup", "failed").field("error_category", "install")
+        );
     }
 }
 
@@ -391,6 +508,8 @@ fn schedule_prestage(app: &AppHandle, check: u64, available: Option<Update>) -> 
 
 async fn prestage_download(app: AppHandle, update: Update, mut ticket: DownloadTicket) {
     let id = ticket.id;
+    let event = |outcome| update_event("prestage", outcome).field("attempt_id", id);
+    let mut diagnostic = UpdateDiagnostic::new(event);
     let version = update.version.clone();
     let result = async {
         let dir = staged_update_dir(&app).ok_or_else(|| "无法读取更新缓存目录".to_string())?;
@@ -401,7 +520,10 @@ async fn prestage_download(app: AppHandle, update: Update, mut ticket: DownloadT
         let temporary = dir.join(format!("{version}.{id}.partial"));
         let bytes = tokio::select! {
             biased;
-            _ = &mut ticket.cancel => return Err("预下载已被较新的更新取代".to_string()),
+            _ = &mut ticket.cancel => {
+                diagnostic.finish("cancelled", None, None);
+                return Err("预下载已被较新的更新取代".to_string());
+            },
             result = download_update_bytes(&app, &update, id, None) => result?,
         };
         if let Err(error) = tokio::fs::write(&temporary, bytes).await {
@@ -419,7 +541,10 @@ async fn prestage_download(app: AppHandle, update: Update, mut ticket: DownloadT
         );
         match published {
             Ok(true) => Ok(()),
-            Ok(false) => Err("预下载已被较新的更新取代".to_string()),
+            Ok(false) => {
+                diagnostic.finish("superseded", None, None);
+                Err("预下载已被较新的更新取代".to_string())
+            }
             Err(error) => {
                 let _ = tokio::fs::remove_file(temporary).await;
                 Err(error)
@@ -427,9 +552,11 @@ async fn prestage_download(app: AppHandle, update: Update, mut ticket: DownloadT
         }
     }
     .await;
-    if let Err(error) = &result {
-        log::warn!("后台预下载结束: {error}");
+    if result.is_err() {
+        diagnostic.finish("failed", Some("download_or_storage"), None);
         app.state::<AppUpdateStage>().set_failed(id);
+    } else {
+        diagnostic.finish("completed", None, None);
     }
     if let Some(done) = ticket.done.take() {
         let _ = done.send(result);
@@ -531,16 +658,24 @@ async fn download_update_bytes(
     id: u64,
     preferred: Option<&str>,
 ) -> Result<Vec<u8>, String> {
+    let event = |outcome| update_event("download", outcome).field("attempt_id", id);
+    let mut diagnostic = UpdateDiagnostic::new(event);
     if policy::is_withdrawn_version(&update.version) {
+        diagnostic.finish("failed", Some("withdrawn"), None);
         return Err("该版本已撤回，请检查更新版本".into());
     }
     let deadline = tokio::time::Instant::now() + policy::DOWNLOAD_TOTAL_BUDGET;
     let stage = app.state::<AppUpdateStage>();
     let _download = tokio::time::timeout_at(deadline, stage.download.lock())
         .await
-        .map_err(|_| "等待现有更新下载超时，请重试".to_string())?;
+        .map_err(|_| {
+            diagnostic.finish("failed", Some("queue_timeout"), None);
+            "等待现有更新下载超时，请重试".to_string()
+        })?;
     emit_download_progress(app, id, "probing", "official", 0, None);
-    let routes = download_routes(update, preferred)?;
+    let routes = download_routes(update, preferred).inspect_err(|_| {
+        diagnostic.finish("failed", Some("untrusted_alternative"), None);
+    })?;
     let probes = tokio::time::timeout_at(
         deadline,
         futures::future::join_all(routes.into_iter().map(|route| async move {
@@ -549,12 +684,18 @@ async fn download_update_bytes(
         })),
     )
     .await
-    .map_err(|_| "更新下载已达总时限，请换源重试或从官网下载".to_string())?;
-    let routes = policy::rank_download_routes(probes, preferred).map_err(str::to_string)?;
+    .map_err(|_| {
+        diagnostic.finish("failed", Some("probe_timeout"), None);
+        "更新下载已达总时限，请换源重试或从官网下载".to_string()
+    })?;
+    let routes = policy::rank_download_routes(probes, preferred)
+        .inspect_err(|_| diagnostic.finish("failed", Some("no_routes"), None))
+        .map_err(str::to_string)?;
     let mut failures = Vec::new();
     for (index, route) in routes.into_iter().enumerate() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            diagnostic.finish("failed", Some("total_timeout"), None);
             return Err("更新下载已达总时限，请换源重试或从官网下载".into());
         }
         emit_download_progress(
@@ -569,8 +710,28 @@ async fn download_update_bytes(
             0,
             None,
         );
+        let route_event = |outcome| {
+            update_event("download_route", outcome)
+                .field("attempt_id", id)
+                .field("route_index", index as u64)
+                .field(
+                    "source",
+                    match route.source {
+                        "official" => "official",
+                        "github" => "github",
+                        "manifest" => "manifest",
+                        _ => "other",
+                    },
+                )
+                .field("direct", route.direct)
+        };
+        let mut route_diagnostic = UpdateDiagnostic::new(route_event);
         let mut candidate = update.clone();
-        candidate.download_url = tauri::Url::parse(&route.url).map_err(|e| e.to_string())?;
+        candidate.download_url = tauri::Url::parse(&route.url).map_err(|e| {
+            route_diagnostic.finish("failed", Some("invalid_url"), None);
+            diagnostic.finish("failed", Some("invalid_url"), None);
+            e.to_string()
+        })?;
         candidate.no_proxy = route.direct;
         candidate.timeout = Some(remaining);
         let (progress, receiver) = watch::channel(0_u64);
@@ -586,11 +747,18 @@ async fn download_update_bytes(
         match policy::bounded_download(download, receiver, policy::DOWNLOAD_IDLE_BUDGET, remaining)
             .await
         {
-            Ok(bytes) => return Ok(bytes),
+            Ok(bytes) => {
+                route_diagnostic.finish("completed", None, Some(bytes.len() as u64));
+                diagnostic.finish("completed", None, Some(bytes.len() as u64));
+                return Ok(bytes);
+            }
             Err(DownloadFailure::TimedOut) => {
-                return Err("更新下载已达总时限，请换源重试或从官网下载".into())
+                route_diagnostic.finish("failed", Some("total_timeout"), Some(downloaded));
+                diagnostic.finish("failed", Some("total_timeout"), None);
+                return Err("更新下载已达总时限，请换源重试或从官网下载".into());
             }
             Err(DownloadFailure::Stalled) => {
+                route_diagnostic.finish("failed", Some("stalled"), Some(downloaded));
                 failures.push(format!("{}：60秒无下载进展", route.source))
             }
             Err(DownloadFailure::Operation(error)) => {
@@ -599,7 +767,18 @@ async fn download_update_bytes(
                 // arbitrary error substring, and never bypass a withdrawal.
                 let withdrawn = matches!(&error, tauri_plugin_updater::Error::Network(message)
                     if message == &format!("Download request failed with status: {}", reqwest::StatusCode::GONE));
+                let category = if withdrawn {
+                    "withdrawn"
+                } else {
+                    match &error {
+                        tauri_plugin_updater::Error::Reqwest(_)
+                        | tauri_plugin_updater::Error::Network(_) => "network",
+                        _ => "verification_or_download",
+                    }
+                };
+                route_diagnostic.finish("failed", Some(category), Some(downloaded));
                 if withdrawn {
+                    diagnostic.finish("failed", Some("withdrawn"), None);
                     return Err("该版本已撤回，请检查更新版本".into());
                 }
                 if !matches!(
@@ -607,6 +786,7 @@ async fn download_update_bytes(
                     tauri_plugin_updater::Error::Reqwest(_)
                         | tauri_plugin_updater::Error::Network(_)
                 ) {
+                    diagnostic.finish("failed", Some("verification_or_download"), None);
                     return Err(format!("更新校验或下载失败，未安装：{error}"));
                 }
                 failures.push(format!("{}：{error}", route.source));
@@ -614,6 +794,7 @@ async fn download_update_bytes(
         }
         // The previous full download future was dropped before the next starts.
     }
+    diagnostic.finish("failed", Some("routes_exhausted"), None);
     Err(format!(
         "所有下载路径均失败，请手动换源重试或从官网下载：{}",
         failures.join("；")
@@ -627,21 +808,32 @@ async fn install_bytes_and_restart(
     update: Update,
     bytes: Vec<u8>,
 ) -> Result<bool, String> {
+    let event = |outcome| update_event("install", outcome).field("byte_count", bytes.len() as u64);
+    log::info!("{}", event("started"));
     if policy::is_withdrawn_version(&update.version) {
+        log::warn!("{}", event("failed").field("error_category", "withdrawn"));
         return Err("该版本已撤回，请检查更新版本".into());
     }
     if !crate::settings::get_settings().receive_beta_updates
         && semver::Version::parse(&update.version).is_ok_and(|version| !version.pre.is_empty())
     {
+        log::warn!(
+            "{}",
+            event("failed").field("error_category", "channel_changed")
+        );
         return Err("已关闭测试版更新，未安装这份测试版，请重新检查".into());
     }
     if !version_at_least(
         &update.version,
         app.state::<AppUpdateStage>().minimum_version().as_deref(),
     ) {
+        log::warn!(
+            "{}",
+            event("failed").field("error_category", "version_floor")
+        );
         return Err("已发现更高版本，未安装较旧的更新，请重试".into());
     }
-    log::info!("开始安装应用更新: {}", update.version);
+    let byte_count = bytes.len() as u64;
 
     #[cfg(target_os = "windows")]
     {
@@ -656,24 +848,38 @@ async fn install_bytes_and_restart(
         crate::remove_tray_icon_before_exit(app);
         crate::destroy_single_instance_lock(app);
         update.install(bytes).map_err(|e| {
+            log::error!("{}", update_event("install", "failed").field("byte_count", byte_count).field("error_category", "installer"));
             format!(
                 "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停，套餐领取已暂停至重启；请重启应用后再试。"
             )
         })?;
+        log::info!(
+            "{}",
+            update_event("install", "completed").field("byte_count", byte_count)
+        );
         Ok(true)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         // macOS/Linux install() 会返回；先安装，避免安装失败时误停代理/撤回接管。
-        update
-            .install(bytes)
-            .map_err(|e| format!("安装更新失败: {e}"))?;
+        update.install(bytes).map_err(|e| {
+            log::error!(
+                "{}",
+                update_event("install", "failed")
+                    .field("byte_count", byte_count)
+                    .field("error_category", "installer")
+            );
+            format!("安装更新失败: {e}")
+        })?;
 
         crate::save_window_state_before_exit(app);
         crate::cleanup_before_exit(app).await;
 
-        log::info!("应用更新安装完成，正在重启应用");
+        log::info!(
+            "{}",
+            update_event("install", "completed").field("byte_count", byte_count)
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         crate::restart_process(app);
     }
@@ -757,10 +963,19 @@ async fn install_ready_update(
     match tokio::fs::read(&ready.installer).await {
         Ok(bytes) => {
             if policy::is_withdrawn_version(&ready.update.version) {
+                log::warn!(
+                    "{}",
+                    update_event("cached_install", "failed").field("error_category", "withdrawn")
+                );
                 let _ = std::fs::remove_file(&ready.installer);
                 return Some(Err("该版本已撤回，请检查更新版本".into()));
             }
             let Some(pubkey) = updater_pubkey(app) else {
+                log::warn!(
+                    "{}",
+                    update_event("cached_install", "failed")
+                        .field("error_category", "missing_public_key")
+                );
                 return Some(Err("更新公钥缺失，无法验证缓存安装包".into()));
             };
             if let Err(error) = verify_installer_signature(
@@ -776,8 +991,11 @@ async fn install_ready_update(
             let _ = std::fs::remove_file(&ready.installer);
             Some(install_bytes_and_restart(app, ready.update, bytes).await)
         }
-        Err(e) => {
-            log::warn!("预下载安装包读取失败，转为现场下载: {e}");
+        Err(_) => {
+            log::warn!(
+                "{}",
+                update_event("cached_install", "failed").field("error_category", "cache_read")
+            );
             None
         }
     }
@@ -923,5 +1141,97 @@ mod tests {
             .expect("serialize up-to-date result");
 
         assert_eq!(value, serde_json::json!({ "status": "upToDate" }));
+    }
+}
+
+#[cfg(test)]
+mod update_diagnostic_tests {
+    use super::{update_event, verify_installer_signature, UpdateDiagnostic};
+    use base64::Engine as _;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    // A deterministic test-only signer keeps these fixtures independent of
+    // release keys, update servers and real installer bytes.
+    pub(super) fn signed_fixture(bytes: &[u8], version: &str) -> (String, String) {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let prefix = [b"Ed".as_slice(), &[0; 8]].concat();
+        let signature = key.sign(bytes);
+        let comment =
+            format!("version:{version}\tfile:PRIVATE_PATH_CANARY\ttoken:PRIVATE_TOKEN_CANARY");
+        let global = key.sign(&[signature.as_ref(), comment.as_bytes()].concat());
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let public = format!(
+            "untrusted comment: PRIVATE_KEY_COMMENT_CANARY\n{}",
+            encode(&[prefix.as_slice(), key.public_key().as_ref()].concat())
+        );
+        let signed = format!(
+            "untrusted comment: PRIVATE_SIGNATURE_COMMENT_CANARY\n{}\ntrusted comment: {comment}\n{}",
+            encode(&[prefix.as_slice(), signature.as_ref()].concat()),
+            encode(global.as_ref())
+        );
+        (encode(public.as_bytes()), encode(signed.as_bytes()))
+    }
+
+    #[test]
+    fn signed_installer_validation_keeps_its_success_and_failure_contract() {
+        let bytes = b"PRIVATE_BODY_CANARY";
+        let (key, signature) = signed_fixture(bytes, "6.18.1");
+        assert!(verify_installer_signature(bytes, &signature, &key, "6.18.1", true).is_ok());
+        let wrong_version = verify_installer_signature(bytes, &signature, &key, "6.18.2", true);
+        assert_eq!(wrong_version, Err("更新签名版本与清单不符".into()));
+        assert!(verify_installer_signature(b"tampered", &signature, &key, "6.18.1", true).is_err());
+        assert_eq!(
+            verify_installer_signature(bytes, &signature, "invalid", "6.18.1", true),
+            Err("更新公钥 不是有效的 base64/UTF-8".into())
+        );
+        assert_eq!(
+            verify_installer_signature(bytes, "invalid", &key, "6.18.1", true),
+            Err("更新签名 不是有效的 base64/UTF-8".into())
+        );
+    }
+
+    #[test]
+    fn update_event_uses_the_existing_structured_envelope() {
+        let event = update_event("verify", "failed")
+            .field("error_category", "signed_version")
+            .field("byte_count", 42_u64);
+        let value: serde_json::Value = serde_json::from_str(&event.to_string()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "event": "app.update", "outcome": "failed", "stage": "verify",
+                "error_category": "signed_version", "byte_count": 42
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_guard_closes_once_and_does_not_reclassify_terminal_outcomes() {
+        // Enable lazy debug event construction even when this test runs alone.
+        // Reuse the existing global logger rather than installing a competing one.
+        log::set_max_level(log::LevelFilter::Trace);
+        for terminal in [
+            None,
+            Some("cancelled"),
+            Some("superseded"),
+            Some("completed"),
+            Some("failed"),
+        ] {
+            let outcomes = std::cell::RefCell::new(Vec::new());
+            {
+                let mut diagnostic = UpdateDiagnostic::new(|outcome| {
+                    outcomes.borrow_mut().push(outcome);
+                    update_event("prestage", outcome)
+                });
+                if let Some(terminal) = terminal {
+                    diagnostic.finish(terminal, None, None);
+                    diagnostic.finish("failed", Some("download_or_storage"), None);
+                }
+            }
+            assert_eq!(
+                *outcomes.borrow(),
+                ["started", terminal.unwrap_or("dropped")]
+            );
+        }
     }
 }

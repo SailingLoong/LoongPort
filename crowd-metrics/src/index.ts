@@ -11,7 +11,7 @@
 import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
-import { handleFeedback, handleFeedbackAsset, dayUtc } from "./feedback";
+import { handleFeedback, handleFeedbackAsset, maintainFeedback, dayUtc } from "./feedback";
 import { handleIngest, type Env } from "./ingest";
 import { handlePing } from "./ping";
 import { hourFloorUtc } from "./validate";
@@ -84,7 +84,9 @@ const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
  * 按小时时间闸节流 —— cron 从未触发过（见 freshness.ts 的背景说明），
  * 保留期不能指望它。
  */
-async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
+async function recomputeSnapshot(env: Env, nowSec: number, ctx: ExecutionContext): Promise<Snapshot> {
+  // A feedback provider failure must not block the independent public metrics response.
+  ctx.waitUntil(maintainFeedback(env, nowSec));
   const [rows, modelRows] = await Promise.all([queryRawRows(env, nowSec), queryModelRows(env, nowSec)]);
   const snapshot = buildSnapshot(rows, nowSec);
   snapshot.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
@@ -109,7 +111,7 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
   })();
 
-  // 反馈附件在 KV 里靠 expirationTtl 原生过期，无需清理任务（见 feedback.ts 模块文档）。
+  // Feedback lifecycle work is owned separately above, never by the hourly cleanup gate.
 
   await Promise.all([
     env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)),
@@ -158,7 +160,7 @@ export default {
   async fetch(
     request: Request,
     env: Env,
-    _ctx: ExecutionContext,
+    ctx: ExecutionContext,
   ): Promise<Response> {
     const { pathname } = new URL(request.url);
 
@@ -178,10 +180,10 @@ export default {
       return handleFeedbackAsset(request, env, pathname.slice("/v1/feedback-asset/".length));
     }
     if (request.method === "GET" && pathname === "/v1/snapshot") {
-      return serveKvPayload(env, SNAPSHOT_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));
+      return serveKvPayload(env, SNAPSHOT_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000), ctx));
     }
     if (request.method === "GET" && pathname === "/v1/trend") {
-      return serveKvPayload(env, TREND_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));
+      return serveKvPayload(env, TREND_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000), ctx));
     }
     if (request.method === "OPTIONS" && (pathname === "/v1/snapshot" || pathname === "/v1/trend")) {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -203,7 +205,7 @@ export default {
     // 冗余 belt：GET 自愈已覆盖新鲜度与清理（见 freshness.ts 背景说明），
     // cron 即使永不触发，系统也自洽。真触发时就当多刷一次。
     const nowSec = Math.floor(Date.now() / 1000);
-    ctx.waitUntil(recomputeSnapshot(env, nowSec));
+    ctx.waitUntil(recomputeSnapshot(env, nowSec, ctx));
   },
 };
 
