@@ -435,12 +435,14 @@ pub struct CodexChatReasoningConfig {
     /// 靠穷举字段提取、并不读取本字段；保留作文档说明与未来按格式分发（如 think_tags）的预留。
     #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
-    /// 运行时字段（不持久化、不进 meta）：当前请求模型在平台侧声明的合法 effort
-    /// 档位，由 resolve 按请求模型从供应商 `settings_config.modelCatalog` 的
-    /// `reasoningLevels`（逐模型声明，见 #6228）查表填充。仅 "zen" 值映射消费：
-    /// Some → 钳到合法档；None → 不发 effort 字段（模型未收录或为 toggle 型）。
+    /// Exact resolved per-model efforts. Runtime only; never rounds an unsupported choice.
     #[serde(skip)]
     pub effort_levels: Option<Vec<String>>,
+    /// Single pure resolver result for this exact request model. Never persisted.
+    #[serde(skip)]
+    pub resolved_capabilities: Option<crate::codex_reasoning::ReasoningCapabilities>,
+    #[serde(skip)]
+    pub transport_kind: Option<crate::codex_reasoning::TransportKind>,
 }
 
 /// Local proxy request overrides applied after route/protocol transforms.
@@ -461,6 +463,13 @@ impl LocalProxyRequestOverrides {
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
+    /// App/provider field overrides; never written into the application's live config.
+    #[serde(
+        rename = "applicationModelOverrides",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub application_model_overrides:
+        Option<crate::services::provider::model_settings::ApplicationModelOverrides>,
     /// 自定义端点列表（按 URL 去重存储）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints: HashMap<String, crate::settings::CustomEndpoint>,

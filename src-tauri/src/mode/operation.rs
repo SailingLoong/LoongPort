@@ -1030,11 +1030,26 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
             return Err(invalid_pending());
         }
         match request.scope {
-            state::SaveScope::Provider => {
+            state::SaveScope::Provider | state::SaveScope::ProviderModelSettings => {
                 let row = target.saved_row.as_ref().ok_or_else(invalid_pending)?;
                 if !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
                     || request.provider_id.as_deref() != Some(saved_provider(row)?.id.as_str())
                 {
+                    return Err(invalid_pending());
+                }
+                if request.scope == state::SaveScope::ProviderModelSettings
+                    && (target.pointer.is_some()
+                        || target.model_preference.is_some()
+                        || target.routing_order.is_some()
+                        || target.state.as_ref().is_some_and(|mode| {
+                            mode.mode != Some(state::Mode::Proxy)
+                                || !mode.attached
+                                || mode.proxy_route.as_deref() != request.provider_id.as_deref()
+                                || mode.contract.is_none()
+                        }))
+                {
+                    // The existing row planner may refresh the active proxy's
+                    // contract, but this editor never changes route or mode.
                     return Err(invalid_pending());
                 }
             }
@@ -1048,6 +1063,7 @@ fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(),
                     state::SaveScope::ClaudeSharedSettings => "claude",
                     state::SaveScope::GeminiSharedSettings => "gemini",
                     state::SaveScope::Provider
+                    | state::SaveScope::ProviderModelSettings
                     | state::SaveScope::CodexCatalogRestore
                     | state::SaveScope::ApplicationRouting => {
                         unreachable!()
@@ -1344,6 +1360,13 @@ pub(crate) fn verify_saved_row(
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
+    let model_settings = target
+        .save_request
+        .as_ref()
+        .is_some_and(|request| request.scope == state::SaveScope::ProviderModelSettings);
+    if model_settings {
+        validate_operation(app.as_str(), state::op::APPLY, target)?;
+    }
     if let Some(order) = &target.routing_order {
         crate::database::order_profiles::verify_prepared(
             db,
@@ -1362,6 +1385,15 @@ pub(crate) fn verify_saved_row(
         let digest = Database::provider_update_digest(&current)?;
         if digest != row.before && digest != Database::provider_update_digest(&planned)? {
             return Err(AppError::Config("mode.provider_changed".into()));
+        }
+        if model_settings && digest == row.before {
+            // Compare the real pre-publication row in the same canonical image
+            // used by this owner. Endpoints and credential references remain
+            // with their original owners. Once the row equals planned, recovery
+            // relies on this authenticated intent and the original CAS digest.
+            let previous = serde_json::from_value(Database::provider_update_value(&current)?)
+                .map_err(|_| invalid_pending())?;
+            crate::services::provider::model_settings::validate_change(app, &previous, &planned)?;
         }
     }
     Ok(())
@@ -2069,3 +2101,7 @@ pub(crate) fn admit_metadata_write(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "operation_model_settings_scope_tests.rs"]
+mod model_settings_scope_tests;

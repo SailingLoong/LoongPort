@@ -267,6 +267,7 @@ pub fn responses_to_chat_completions_with_reasoning(
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
 
     if let Some(model) = body.get("model") {
         result["model"] = model.clone();
@@ -286,10 +287,22 @@ pub fn responses_to_chat_completions_with_reasoning(
     if let Some(input) = body.get("input") {
         append_responses_input_as_chat_messages(input, &mut messages, &tool_context)?;
     }
+    let recovered =
+        super::codex_chat_tool_history::preserve_invalid_tool_calls_as_text(&mut messages);
+    if recovered > 0 {
+        // Counts only: historical arguments and tool results may contain secrets.
+        log::warn!("[Codex Chat] Preserved {recovered} malformed historical tool call(s) as text");
+    }
+    // DeepSeek strictly validates tool-result adjacency. Limit this replay
+    // repair to explicit DeepSeek model IDs: other providers may interpret
+    // assistant turns differently, and rewriting their history changes caches.
+    if is_deepseek_chat_model(model) {
+        coalesce_replayed_tool_turn_messages(&mut messages);
+    }
+    backfill_tool_call_reasoning_placeholders(&mut messages);
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
 
-    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
         if super::transform::is_openai_o_series(model) {
             result["max_completion_tokens"] = max_tokens.clone();
@@ -310,7 +323,7 @@ pub fn responses_to_chat_completions_with_reasoning(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, reasoning_config);
+    apply_reasoning_options(&mut result, &body, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -354,195 +367,128 @@ fn apply_reasoning_options(
     result: &mut Value,
     body: &Value,
     config: Option<&CodexChatReasoningConfig>,
-) {
+) -> Result<(), ProxyError> {
+    use crate::codex_reasoning::{request_intent, transport_can_disable, ReasoningIntent};
+    let intent = request_intent(body).map_err(ProxyError::TransformError)?;
     let Some(config) = config else {
-        // Unknown capabilities do not authorize model choices or erase an explicit
-        // client value: only convert the standard protocol field here.
-        if let Some(effort) = body.pointer("/reasoning/effort") {
-            result["reasoning_effort"] = effort.clone();
+        // Unknown does not establish support or erase the caller's explicit standard field.
+        match intent {
+            ReasoningIntent::Effort(effort) => result["reasoning_effort"] = json!(effort),
+            ReasoningIntent::Off => result["reasoning_effort"] = json!("none"),
+            ReasoningIntent::On => return Err(ProxyError::TransformError("Select an endpoint compatibility template before enabling thinking without an effort".into())),
+            ReasoningIntent::ServiceDefault => {},
         }
-        return;
+        return Ok(());
     };
-
-    let supports_effort = config.supports_effort.unwrap_or(false);
-    let supports_thinking = config.supports_thinking.unwrap_or(false) || supports_effort;
-    let Some(reasoning_enabled) = reasoning_requested(body) else {
-        return;
-    };
-
-    if supports_thinking {
-        match config
-            .thinking_param
-            .as_deref()
-            .unwrap_or("thinking")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "thinking" => {
-                result["thinking"] = json!({
-                    "type": if reasoning_enabled { "enabled" } else { "disabled" }
-                });
-            }
-            "enable_thinking" => {
-                result["enable_thinking"] = json!(reasoning_enabled);
-            }
-            "reasoning_split" => {
-                result["reasoning_split"] = json!(reasoning_enabled);
-            }
-            _ => {}
+    if let Some(capability) = &config.resolved_capabilities {
+        capability
+            .validate_intent(&intent)
+            .map_err(ProxyError::TransformError)?;
+    }
+    crate::codex_reasoning::validate_transport_intent(config, &intent)
+        .map_err(ProxyError::TransformError)?;
+    let effort_param = config.effort_param.as_deref().unwrap_or("reasoning_effort");
+    // Output exclusion is orthogonal to the thinking selection; never interpret it as off.
+    if effort_param == "reasoning.effort" {
+        if let Some(exclude) = body.pointer("/reasoning/exclude") {
+            result["reasoning"]["exclude"] = exclude.clone();
         }
     }
-
-    // effort_param 在 early return 之前算出：reasoning.effort 形态的「显式关闭」分支要用到。
-    let effort_param = config
-        .effort_param
-        .as_deref()
-        .unwrap_or("reasoning_effort")
-        .trim()
-        .to_ascii_lowercase();
-
-    if !reasoning_enabled {
-        // OpenRouter 原生 reasoning.effort 支持显式 "none"（语义：彻底关闭推理）。
-        // 上游显式发 effort=none/off/disabled（或 reasoning=null）时 reasoning_enabled 为 false，
-        // 直接 return 会丢失关闭意图——OpenRouter 部分模型默认开思考，不带字段无法关闭，
-        // 造成行为与成本偏差；故对该形态忠实转发 {"reasoning":{"effort":"none"}}。
-        // 有独立 thinking 开关的平台由上方字段关闭；只有 effort 参数的平台保留 none。
-        // 注意：完全不带 reasoning 字段时 reasoning_requested 返回 None 已提前 return，
-        // 不会走到这里，故只有上游「显式」表达关闭才透传 none。
-        if supports_effort && effort_param == "reasoning.effort" {
-            result["reasoning"] = json!({ "effort": "none" });
-        } else if supports_effort
-            && effort_param == "reasoning_effort"
-            && config.thinking_param.as_deref() == Some("none")
-        {
-            // This transport has no independent switch. Preserve the explicit
-            // disabled value even when model capabilities have not been declared.
-            result["reasoning_effort"] = json!("none");
-        }
-        return;
+    if matches!(intent, ReasoningIntent::ServiceDefault) {
+        return Ok(());
     }
-
-    if !supports_effort {
-        return;
+    let enabled = !matches!(intent, ReasoningIntent::Off);
+    if !enabled && !transport_can_disable(config) {
+        return Err(ProxyError::TransformError(
+            "This endpoint cannot encode an explicit thinking-off request".into(),
+        ));
     }
-
-    let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let Some(mapped) = map_reasoning_effort(
-        effort,
-        config.effort_value_mode.as_deref(),
-        config.effort_levels.as_deref(),
-    ) else {
-        return;
-    };
-
-    match effort_param.as_str() {
-        // OpenAI 风格顶层字段（DeepSeek 官方、OpenAI o-series 等）。
-        "reasoning_effort" => {
-            result["reasoning_effort"] = json!(mapped);
+    if enabled && config.supports_thinking == Some(false) && config.supports_effort == Some(false) {
+        return Err(ProxyError::TransformError(
+            "This endpoint explicitly does not support thinking".into(),
+        ));
+    }
+    let has_switch = config.supports_thinking == Some(true)
+        && match config.thinking_param.as_deref() {
+            Some("thinking") => {
+                result["thinking"] = json!({"type": if enabled {"enabled"} else {"disabled"}});
+                true
+            }
+            Some("enable_thinking") => {
+                result["enable_thinking"] = json!(enabled);
+                true
+            }
+            Some("reasoning_split") => {
+                result["reasoning_split"] = json!(enabled);
+                true
+            }
+            _ => false,
+        };
+    match intent {
+        ReasoningIntent::Off if !has_switch => match effort_param {
+            "reasoning.effort" => result["reasoning"]["effort"] = json!("none"),
+            "reasoning_effort" => result["reasoning_effort"] = json!("none"),
+            _ => {
+                return Err(ProxyError::TransformError(
+                    "Endpoint has no supported thinking-off field".into(),
+                ))
+            }
+        },
+        ReasoningIntent::Effort(effort) => {
+            if config.supports_effort == Some(false) {
+                return Err(ProxyError::TransformError("This endpoint supports no reasoning strength parameter; select its thinking switch or service default".into()));
+            }
+            let mapped = map_reasoning_effort(&effort, config.effort_value_mode.as_deref(), config.effort_levels.as_deref()).ok_or_else(|| ProxyError::TransformError(format!("Endpoint does not support reasoning effort {effort}; select a supported effort or service default")))?;
+            match effort_param {
+                "reasoning_effort" => result["reasoning_effort"] = json!(mapped),
+                "reasoning.effort" => result["reasoning"]["effort"] = json!(mapped),
+                _ => {
+                    return Err(ProxyError::TransformError(
+                        "Endpoint has no supported reasoning effort field".into(),
+                    ))
+                }
+            }
         }
-        // OpenRouter 原生归一化对象：reasoning.effort 会被 OpenRouter 翻译成各底层模型
-        // （OpenAI/Grok/Gemini/Anthropic）的正确推理参数，覆盖面比顶层 OpenAI 别名更全。
-        // 本转换从空对象构造、不残留原始 reasoning 对象，故不会出现 reasoning 与
-        // reasoning_effort 并存触发 400 的情况（参见 openclaw#24119）。
-        "reasoning.effort" => {
-            result["reasoning"] = json!({ "effort": mapped });
+        ReasoningIntent::On if !has_switch => {
+            if effort_param == "reasoning.effort" {
+                result["reasoning"]["enabled"] = json!(true);
+            } else if config
+                .resolved_capabilities
+                .as_ref()
+                .is_some_and(|capability| {
+                    capability.mode == crate::codex_reasoning::ReasoningMode::Required
+                })
+            { /* mandatory endpoint needs no switch */
+            } else {
+                return Err(ProxyError::TransformError("This endpoint requires an explicit effort; enabling thinking cannot silently select one".into()));
+            }
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn reasoning_requested(body: &Value) -> Option<bool> {
-    if let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) {
-        return Some(!matches!(
-            effort.trim().to_ascii_lowercase().as_str(),
-            "none" | "off" | "disabled"
-        ));
-    }
-
-    body.get("reasoning").map(|value| !value.is_null())
-}
-
+/// Preserve exact effort semantics. Unsupported values are rejected by the caller;
+/// they are never rounded, upgraded, or removed from a successful request.
 fn map_reasoning_effort<'a>(
-    effort: &str,
+    effort: &'a str,
     mode: Option<&str>,
-    effort_levels: Option<&'a [String]>,
+    effort_levels: Option<&[String]>,
 ) -> Option<&'a str> {
-    let effort = effort.trim().to_ascii_lowercase();
-    if matches!(effort.as_str(), "none" | "off" | "disabled") {
+    if effort == "none" {
         return None;
     }
-
-    // ultra 是 Codex 扩展档位：已知枚举的专用模式（deepseek/openrouter/low_high）
-    // 钳到自身最高合法档而非丢弃——丢弃会让"选最深思考"静默退化成"不带 effort"；
-    // passthrough 面向枚举未知的通用上游，档位由用户/预设的 reasoningLevels 声明
-    // 背书，与 max/xhigh 一样原值透传。
-    match mode.unwrap_or("passthrough") {
-        "deepseek" => match effort.as_str() {
-            "max" | "xhigh" | "ultra" => Some("max"),
-            _ => Some("high"),
-        },
-        "low_high" => match effort.as_str() {
-            "minimal" | "low" => Some("low"),
-            _ => Some("high"),
-        },
-        // OpenRouter effort 枚举为 xhigh|high|medium|low|minimal（无 max）。max 是
-        // Codex / 部分模型的扩展档位，对 OpenRouter 非法，会触发
-        // `400 reasoning_effort: Invalid option`（见 openclaw#77350）；钳到最高合法档
-        // xhigh，其余合法值透传，未知值丢弃以免被上游拒绝。
-        "openrouter" => match effort.as_str() {
-            "max" | "xhigh" | "ultra" => Some("xhigh"),
-            "high" => Some("high"),
-            "medium" => Some("medium"),
-            "low" => Some("low"),
-            "minimal" => Some("minimal"),
-            _ => None,
-        },
-        // OpenCode Zen：合法档位逐模型（表数据 = 供应商 modelCatalog 各条目的
-        // reasoningLevels，镜像 models.dev——glm-5.2 仅 high|max、deepseek-v4-flash
-        // 为 low|high|max、kimi-k3 仅 max），opencode 客户端也严格按模型声明发值，
-        // 故不能用统一并集映射。无表（模型未收录目录、或为 toggle/budget 型未声明
-        // effort）→ None，完全不发 reasoning_effort；有表 → 钳到「不小于请求的
-        // 最近合法档」，请求超出最高档则取最高合法档；请求值本身无法识别 → None
-        // （同其他模式的未知值丢弃策略）。
-        "zen" => {
-            let levels = effort_levels?;
-            let requested = zen_effort_rank(&effort)?;
-            levels
-                .iter()
-                .filter_map(|level| zen_effort_rank(level).map(|rank| (rank, level.as_str())))
-                .filter(|(rank, _)| *rank >= requested)
-                .min_by_key(|(rank, _)| *rank)
-                .or_else(|| {
-                    levels
-                        .iter()
-                        .filter_map(|level| {
-                            zen_effort_rank(level).map(|rank| (rank, level.as_str()))
-                        })
-                        .max_by_key(|(rank, _)| *rank)
-                })
-                .map(|(_, level)| level)
-        }
-        _ => match effort.as_str() {
-            "minimal" => Some("minimal"),
-            "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" => Some("high"),
-            "xhigh" => Some("xhigh"),
-            "max" => Some("max"),
-            "ultra" => Some("ultra"),
-            _ => None,
-        },
+    let config = CodexChatReasoningConfig {
+        supports_effort: Some(true),
+        effort_value_mode: mode.map(str::to_string),
+        ..Default::default()
+    };
+    if !crate::codex_reasoning::transport_allows_effort(&config, effort)
+        || effort_levels.is_some_and(|levels| !levels.iter().any(|level| level == effort))
+    {
+        return None;
     }
-}
-
-/// Codex 规范档位序（minimal < low < medium < high < xhigh < max < ultra），供 zen
-/// 逐模型钳制做大小比较；目录里的非法/扩展值（如 "none"）返回 None，查表时被滤掉。
-fn zen_effort_rank(effort: &str) -> Option<usize> {
-    crate::codex_reasoning::effort_rank(&effort.trim().to_ascii_lowercase())
-        .filter(|rank| *rank > 0)
+    Some(effort)
 }
 
 /// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
@@ -658,8 +604,183 @@ fn append_responses_input_as_chat_messages(
         last_assistant_index,
         &mut pending_reasoning,
     );
-    backfill_tool_call_reasoning_placeholders(messages);
     Ok(())
+}
+
+fn is_deepseek_chat_model(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name == "deepseek" || name.starts_with("deepseek-")
+}
+
+/// Responses can replay assistant text (including an empty tool-only turn's
+/// trailing message) before all tool results have arrived. Chat requires those
+/// results to follow one assistant tool-call message without another assistant
+/// in between. Keep the replayed content on that message until its calls are
+/// answered, without crossing user/system boundaries or fabricating results.
+fn coalesce_replayed_tool_turn_messages(messages: &mut Vec<Value>) {
+    let mut normalized: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut open_tool_turn: Option<usize> = None;
+    let mut pending_call_ids = HashSet::new();
+
+    for mut message in std::mem::take(messages) {
+        match message.get("role").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                    let reuses_call_id = open_tool_turn
+                        .and_then(|index| normalized[index].get("tool_calls"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|existing| {
+                            calls.iter().any(|call| {
+                                let Some(id) = call.get("id").and_then(Value::as_str) else {
+                                    return false;
+                                };
+                                !id.is_empty()
+                                    && existing.iter().any(|previous| {
+                                        previous.get("id").and_then(Value::as_str) == Some(id)
+                                    })
+                            })
+                        });
+                    if reuses_call_id {
+                        // A new attempt must remain after the earlier call/result
+                        // with that ID, even if another parallel call is pending.
+                        open_tool_turn = None;
+                        pending_call_ids.clear();
+                    }
+                    for call in calls {
+                        register_known_tool_call_id(&mut pending_call_ids, call);
+                    }
+                }
+                if let Some(index) = open_tool_turn {
+                    let target = &mut normalized[index];
+                    merge_chat_assistant_content(target, message["content"].take());
+                    let mut reasoning = message
+                        .get("reasoning_content")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string);
+                    attach_pending_reasoning_to_assistant_unique(target, &mut reasoning);
+                    if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut)
+                    {
+                        target["tool_calls"].as_array_mut().unwrap().append(calls);
+                    }
+                    continue;
+                }
+                if !pending_call_ids.is_empty() {
+                    open_tool_turn = Some(normalized.len());
+                }
+            }
+            Some("tool") => {
+                let matched_pending_call = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|call_id| pending_call_ids.remove(call_id));
+                if !matched_pending_call {
+                    // Keep an orphan at its original position; a future call must
+                    // never be hoisted before it and retroactively claim its result.
+                    pending_call_ids.clear();
+                }
+                if pending_call_ids.is_empty() {
+                    open_tool_turn = None;
+                }
+            }
+            _ => {
+                open_tool_turn = None;
+                pending_call_ids.clear();
+            }
+        }
+        normalized.push(message);
+    }
+    *messages = normalized;
+}
+
+fn merge_chat_assistant_content(target: &mut Value, content: Value) {
+    fn is_empty(content: &Value) -> bool {
+        content.is_null()
+            || content.as_str().is_some_and(str::is_empty)
+            || content.as_array().is_some_and(Vec::is_empty)
+    }
+
+    fn into_parts(content: Value) -> Vec<Value> {
+        match content {
+            Value::Array(parts) => parts,
+            Value::String(text) => vec![json!({"type": "text", "text": text})],
+            other => vec![other],
+        }
+    }
+
+    if is_empty(&content) {
+        return;
+    }
+    if is_empty(&target["content"]) {
+        target["content"] = content;
+        return;
+    }
+    let previous = target["content"].take();
+    target["content"] = match (previous, content) {
+        (Value::String(mut previous), Value::String(text)) => {
+            previous.push('\n');
+            previous.push_str(&text);
+            Value::String(previous)
+        }
+        (previous, content) => {
+            let mut parts = into_parts(previous);
+            parts.extend(into_parts(content));
+            Value::Array(parts)
+        }
+    };
+}
+
+fn register_known_tool_call_id(known_tool_call_ids: &mut HashSet<String>, tool_call: &Value) {
+    if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
+        if !id.is_empty() {
+            known_tool_call_ids.insert(id.to_string());
+        }
+    }
+}
+
+fn attach_pending_reasoning_to_assistant_unique(
+    message: &mut Value,
+    pending_reasoning: &mut Option<String>,
+) {
+    let Some(reasoning) = pending_reasoning.take() else {
+        return;
+    };
+    let reasoning = reasoning.trim();
+    if reasoning.is_empty() {
+        return;
+    }
+
+    let existing_text = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let existing_segments: Vec<&str> = existing_text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let missing_segments: Vec<&str> = reasoning
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty() && !existing_segments.contains(segment))
+        .collect();
+    if missing_segments.is_empty() {
+        return;
+    }
+
+    let merged = if existing_segments.is_empty() {
+        missing_segments.join("\n\n")
+    } else {
+        let existing = existing_segments.join("\n\n");
+        let missing = missing_segments.join("\n\n");
+        format!("{existing}\n\n{missing}")
+    };
+    if let Some(obj) = message.as_object_mut() {
+        obj.insert("reasoning_content".to_string(), Value::String(merged));
+    }
 }
 
 fn append_responses_item_as_chat_message(
@@ -2072,17 +2193,14 @@ mod tests {
     }
 
     #[test]
-    fn disabled_effort_does_not_send_an_off_parameter() {
-        let input = json!({"model":"alias", "input":"hello", "reasoning":{"effort":"none"}});
+    fn unsupported_off_fails_instead_of_disappearing() {
         let config = CodexChatReasoningConfig {
             supports_effort: Some(false),
             supports_thinking: Some(false),
-            effort_param: Some("reasoning.effort".into()),
             ..Default::default()
         };
-        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-        assert!(result.get("reasoning").is_none());
-        assert!(result.get("reasoning_effort").is_none());
+        let input = json!({"model":"alias", "reasoning":{"effort":"none"}});
+        assert!(responses_to_chat_completions_with_reasoning(input, Some(&config)).is_err());
     }
 
     #[test]
@@ -2094,25 +2212,15 @@ mod tests {
     }
 
     #[test]
-    fn map_reasoning_effort_handles_ultra_per_mode() {
-        // passthrough 面向枚举未知的通用上游：ultra 与 max/xhigh 一样原值透传，
-        // 让声明了该档位的上游能收到用户选择。
+    fn map_reasoning_effort_never_clamps_ultra_to_another_level() {
         assert_eq!(map_reasoning_effort("ultra", None, None), Some("ultra"));
-        // 已知枚举的专用模式钳到自身最高合法档，而不是走 None 被静默丢弃。
+        for mode in ["deepseek", "low_high", "openrouter"] {
+            assert_eq!(map_reasoning_effort("ultra", Some(mode), None), None);
+        }
         assert_eq!(
-            map_reasoning_effort("ultra", Some("deepseek"), None),
-            Some("max")
+            map_reasoning_effort("VendorTier", None, None),
+            Some("VendorTier")
         );
-        assert_eq!(
-            map_reasoning_effort("ultra", Some("low_high"), None),
-            Some("high")
-        );
-        assert_eq!(
-            map_reasoning_effort("ultra", Some("openrouter"), None),
-            Some("xhigh")
-        );
-        // 真正的未知值仍然丢弃，防上游 400。
-        assert_eq!(map_reasoning_effort("turbo", None, None), None);
     }
 
     #[test]
@@ -2602,7 +2710,7 @@ mod tests {
         let input = json!({
             "model": "deepseek-v4-pro",
             "input": "hello",
-            "reasoning": {"effort": "xhigh"}
+            "reasoning": {"effort": "low"}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2612,12 +2720,14 @@ mod tests {
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["thinking"]["type"], "enabled");
-        assert_eq!(result["reasoning_effort"], "max");
+        assert_eq!(result["reasoning_effort"], "low");
     }
 
     #[test]
@@ -2654,14 +2764,15 @@ mod tests {
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
-        // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
-        // 且写进原生 reasoning 对象，而非顶层 reasoning_effort 别名。
+        // The exact accepted value is preserved in the native reasoning object.
         let input = json!({
             "model": "deepseek/deepseek-chat-v3.1",
             "input": "hello",
-            "reasoning": {"effort": "max"}
+            "reasoning": {"effort": "xhigh"}
         });
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
@@ -2696,6 +2807,8 @@ mod tests {
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let input = json!({
@@ -2722,6 +2835,8 @@ mod tests {
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let input = json!({
@@ -2738,135 +2853,101 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_clamps_zen_effort_to_model_declared_levels() {
-        // OpenCode Zen 平台形态 + 逐模型档位钳制（表数据镜像 models.dev：glm-5.2
-        // 仅声明 high|max）。锁定：统一并集映射会把 Codex 默认的 medium 发给只声明
-        // high|max 的 glm-5.2（恰好是预设默认模型），严格校验的网关会报错；
-        // 低档一律上钳到最近合法档，超出最高档（含 Codex 扩展档 ultra）取最高合法档。
+    fn responses_request_to_chat_validates_zen_effort_against_model_declared_levels() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec!["high".to_string(), "max".to_string()]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["high".into(), "max".into()]),
+            ..Default::default()
         };
-
-        for (input_effort, expected) in [
-            ("minimal", "high"),
-            ("low", "high"),
-            ("medium", "high"),
-            ("high", "high"),
-            ("xhigh", "max"),
-            ("max", "max"),
-            ("ultra", "max"),
-        ] {
-            let input = json!({
-                "model": "glm-5.2",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(
-                result["reasoning_effort"], expected,
-                "effort={input_effort}"
-            );
-            // 写成顶层 reasoning_effort；不发任何 thinking 字段
-            // （网关只认平台归一参数，不认厂商 thinking 形状）。
-            assert!(result.get("thinking").is_none());
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
     fn responses_request_to_chat_zen_preserves_low_when_model_declares_it() {
-        // deepseek-v4-flash 声明 low|high|max：low 合法原样透传，medium 上钳 high，
-        // xhigh 上钳 max——回归锁：旧 deepseek 厂商分支把非 max 一律归 high，
-        // 逐模型钳制不得比那更差，也不得发出声明外的值。
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec![
-                "low".to_string(),
-                "high".to_string(),
-                "max".to_string(),
-            ]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["low".into(), "high".into(), "max".into()]),
+            ..Default::default()
         };
-
-        for (input_effort, expected) in [
-            ("minimal", "low"),
-            ("low", "low"),
-            ("medium", "high"),
-            ("xhigh", "max"),
-        ] {
-            let input = json!({
-                "model": "deepseek-v4-flash",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(
-                result["reasoning_effort"], expected,
-                "effort={input_effort}"
-            );
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
-    fn responses_request_to_chat_zen_single_level_model_clamps_everything_to_max() {
-        // kimi-k3 仅声明 max（全模型交集不存在，统一映射覆盖不了它——必须逐模型）：
-        // 任何请求档都钳到 max。
+    fn responses_request_to_chat_zen_single_level_model_rejects_other_efforts() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec!["max".to_string()]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["max".into()]),
+            ..Default::default()
         };
-
-        for input_effort in ["minimal", "medium", "high", "max"] {
-            let input = json!({
-                "model": "kimi-k3",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(result["reasoning_effort"], "max", "effort={input_effort}");
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
-    fn responses_request_to_chat_omits_zen_effort_without_model_levels() {
-        // 模型未在目录声明 effort（toggle/budget 型如 glm-5.1、qwen 系，或目录未收录）
-        // → 完全不发 reasoning_effort，避免给严格校验的网关送无法核实的值。
+    fn responses_request_to_chat_preserves_zen_effort_without_model_levels() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            ..Default::default()
         };
-
-        let input = json!({
-            "model": "glm-5.1",
-            "input": "hello",
-            "reasoning": {"effort": "medium"}
-        });
-        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-
-        assert!(result.get("reasoning_effort").is_none());
-        assert!(result.get("thinking").is_none());
+        let input = json!({"model":"alias", "reasoning":{"effort":"medium"}});
+        assert_eq!(
+            responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap()
+                ["reasoning_effort"],
+            "medium"
+        );
     }
 
     #[test]
@@ -2874,7 +2955,7 @@ mod tests {
         let input = json!({
             "model": "kimi-k2.6",
             "input": "hello",
-            "reasoning": {"effort": "high"}
+            "reasoning": {"enabled": true}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2884,6 +2965,8 @@ mod tests {
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -2897,7 +2980,7 @@ mod tests {
         let input = json!({
             "model": "qwen3-max",
             "input": "hello",
-            "reasoning": {"effort": "medium"}
+            "reasoning": {"enabled": true}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2907,6 +2990,8 @@ mod tests {
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3484,7 +3569,7 @@ mod tests {
                     "type": "function_call",
                     "call_id": "call_1",
                     "name": "read_file",
-                    "arguments": "not json"
+                    "arguments": "{}"
                 },
                 {
                     "type": "function_call_output",
@@ -3497,10 +3582,7 @@ mod tests {
         let result = responses_to_chat_completions(input).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
-        assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["arguments"],
-            "not json"
-        );
+        assert_eq!(messages[0]["tool_calls"][0]["function"]["arguments"], "{}");
         assert_eq!(messages[1]["content"], "plain text result");
     }
 
@@ -4886,5 +4968,982 @@ mod tests {
             "tools should be present from tool_search_output"
         );
         assert_eq!(result["tools"][0]["function"]["name"], "search_docs");
+    }
+    #[test]
+    fn deepseek_low_is_exact_in_catalog_and_wire() {
+        let settings = json!({"modelCatalog":{"models":[{"model":"relay-alias", "reasoningMode":"toggle", "reasoningLevels":["none","low","high","max"]}]}});
+        let config = crate::codex_reasoning::chat_transport(
+            "openai billing group",
+            "https://api.deepseek.com/v1",
+            "relay-alias",
+            None,
+            &settings,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config.effort_levels.as_ref().unwrap(),
+            &vec!["none", "low", "high", "max"]
+        );
+        for stream in [false, true] {
+            let mut result = json!({});
+            apply_reasoning_options(
+                &mut result,
+                &json!({"reasoning":{"effort":"low"},"stream":stream}),
+                Some(&config),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                json!({"thinking":{"type":"enabled"},"reasoning_effort":"low"})
+            );
+        }
+    }
+    #[test]
+    fn service_default_injects_nothing_and_explicit_off_is_encoded() {
+        let config = crate::codex_reasoning::infer_chat_transport(
+            "ignored",
+            "https://api.deepseek.com",
+            "unknown",
+        )
+        .unwrap();
+        let mut result = json!({});
+        apply_reasoning_options(&mut result, &json!({}), Some(&config)).unwrap();
+        assert_eq!(result, json!({}));
+        apply_reasoning_options(
+            &mut result,
+            &json!({"reasoning":{"effort":"none"}}),
+            Some(&config),
+        )
+        .unwrap();
+        assert_eq!(result, json!({"thinking":{"type":"disabled"}}));
+    }
+    #[test]
+    fn client_choice_wins_and_output_exclusion_is_not_off() {
+        use crate::codex_reasoning::{apply_app_default, request_intent, ReasoningIntent};
+        let mut request = json!({"reasoning":{"effort":"none","exclude":true}});
+        apply_app_default(&mut request, Some(&ReasoningIntent::Effort("max".into())));
+        assert_eq!(request_intent(&request).unwrap(), ReasoningIntent::Off);
+        let config = crate::codex_reasoning::infer_chat_transport(
+            "ignored",
+            "https://openrouter.ai/api/v1",
+            "alias",
+        )
+        .unwrap();
+        let mut result = json!({});
+        apply_reasoning_options(&mut result, &request, Some(&config)).unwrap();
+        assert_eq!(
+            result,
+            json!({"reasoning":{"effort":"none","exclude":true}})
+        );
+        let mut result = json!({});
+        apply_reasoning_options(
+            &mut result,
+            &json!({"reasoning":{"exclude":true}}),
+            Some(&config),
+        )
+        .unwrap();
+        assert_eq!(result, json!({"reasoning":{"exclude":true}}));
+    }
+    #[test]
+    fn app_default_is_used_only_without_client_choice_and_never_service_metadata() {
+        use crate::codex_reasoning::{apply_app_default, ReasoningIntent};
+        let mut body = json!({"reasoning":{"exclude":true}});
+        apply_app_default(&mut body, Some(&ReasoningIntent::Effort("low".into())));
+        assert_eq!(body["reasoning"]["effort"], "low");
+        let mut body = json!({"reasoning":{"effort":"default"}});
+        apply_app_default(&mut body, Some(&ReasoningIntent::Effort("max".into())));
+        assert_eq!(body["reasoning"]["effort"], "default");
+        let mut body = json!({});
+        apply_app_default(&mut body, None);
+        assert_eq!(body, json!({}));
+    }
+    #[test]
+    fn unknown_and_empty_and_unsupported_remain_distinct() {
+        use crate::codex_reasoning::{
+            resolve_settings_capability, CapabilitySource, ReasoningMode,
+        };
+        let unknown = resolve_settings_capability("alias", &json!({}), None, None);
+        assert_eq!(unknown.mode, ReasoningMode::Unknown);
+        assert_eq!(unknown.source, CapabilitySource::Unknown);
+        let empty = resolve_settings_capability(
+            "gpt-6-astra",
+            &json!({"modelCatalog":{"models":[{"model":"gpt-6-astra","reasoningLevels":[]}]}}),
+            None,
+            None,
+        );
+        assert_eq!(empty.mode, ReasoningMode::Unknown);
+        assert!(empty.levels.is_empty());
+        assert_eq!(empty.source, CapabilitySource::AppDeclaration);
+        let unsupported = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"unsupported","reasoningLevels":[]}),
+        )
+        .unwrap();
+        assert_eq!(unsupported.mode, ReasoningMode::Unsupported);
+        assert!(unsupported.levels.is_empty());
+    }
+    #[test]
+    fn toggle_only_never_becomes_high_and_required_never_becomes_off() {
+        use crate::codex_reasoning::{ReasoningIntent, ReasoningMode};
+        let cap = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"toggle","reasoningLevels":[]}),
+        )
+        .unwrap();
+        assert!(cap.levels.is_empty());
+        assert!(cap.validate_intent(&ReasoningIntent::On).is_ok());
+        assert!(cap.validate_intent(&ReasoningIntent::Off).is_ok());
+        let toggle_transport =
+            crate::codex_reasoning::reasoning_template("thinkingToggle").unwrap();
+        assert!(crate::codex_reasoning::validate_transport_intent(
+            &toggle_transport,
+            &ReasoningIntent::Effort("high".into())
+        )
+        .is_err());
+        let required = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"required","reasoningLevels":["high"]}),
+        )
+        .unwrap();
+        assert_eq!(required.mode, ReasoningMode::Required);
+        assert!(required.validate_intent(&ReasoningIntent::Off).is_err());
+        let old =
+            crate::codex_reasoning::declared_capabilities(&json!({"reasoningLevels":["high"]}))
+                .unwrap();
+        assert_eq!(old.mode, ReasoningMode::Supported);
+        assert!(old.validate_intent(&ReasoningIntent::Off).is_ok()); // Unknown switchability is not a client prohibition.
+    }
+    #[test]
+    fn contradictory_declarations_fail_before_wire() {
+        for declaration in [
+            json!({"reasoningMode":"unsupported","reasoningLevels":["high"]}),
+            json!({"reasoningMode":"required","reasoningLevels":["none","high"],"defaultReasoningLevel":"none"}),
+        ] {
+            let cap = crate::codex_reasoning::declared_capabilities(&declaration).unwrap();
+            assert!(!cap.conflicts.is_empty());
+            assert!(cap
+                .validate_intent(&crate::codex_reasoning::ReasoningIntent::Effort(
+                    "high".into()
+                ))
+                .is_err());
+        }
+        let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningLevels":["low","ultra"]}]}});
+        let config = crate::codex_reasoning::chat_transport(
+            "account",
+            "https://api.deepseek.com",
+            "alias",
+            None,
+            &settings,
+            None,
+        )
+        .unwrap();
+        assert!(!config
+            .resolved_capabilities
+            .as_ref()
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(apply_reasoning_options(
+            &mut json!({}),
+            &json!({"reasoning":{"effort":"ultra"}}),
+            Some(&config)
+        )
+        .is_err());
+    }
+    #[test]
+    fn unsupported_choices_fail_not_round_or_disappear() {
+        for (mode, bad) in [
+            ("deepseek", "medium"),
+            ("deepseek", "xhigh"),
+            ("openrouter", "ultra"),
+            ("low_high", "medium"),
+            ("zen", "low"),
+        ] {
+            let config = crate::provider::CodexChatReasoningConfig {
+                supports_effort: Some(true),
+                effort_value_mode: Some(mode.into()),
+                effort_param: Some("reasoning_effort".into()),
+                effort_levels: Some(vec!["high".into()]),
+                ..Default::default()
+            };
+            assert!(
+                apply_reasoning_options(
+                    &mut json!({}),
+                    &json!({"reasoning":{"effort":bad}}),
+                    Some(&config)
+                )
+                .is_err(),
+                "{mode} {bad}"
+            );
+        }
+        let disabled = crate::provider::CodexChatReasoningConfig {
+            supports_effort: Some(false),
+            supports_thinking: Some(false),
+            ..Default::default()
+        };
+        assert!(apply_reasoning_options(
+            &mut json!({}),
+            &json!({"reasoning":{"effort":"none"}}),
+            Some(&disabled)
+        )
+        .is_err());
+    }
+    #[test]
+    fn model_identity_is_exact_not_case_folded_or_suffix_guessed() {
+        assert!(crate::codex_reasoning::curated_capabilities("prefix/deepseek-v4-flash").is_none());
+        assert!(
+            crate::codex_reasoning::curated_capabilities("unlisted-deepseek-v4.1-flash").is_none()
+        );
+    }
+    #[test]
+    fn serialized_modes_are_stable_and_no_implicit_required_flag_exists() {
+        let cap = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningLevels":["low","high"]}),
+        )
+        .unwrap();
+        let dto = serde_json::to_value(cap).unwrap();
+        assert_eq!(dto["mode"], "supported");
+        assert_eq!(dto["source"], "appDeclaration");
+        assert!(dto.get("required").is_none());
+    }
+    #[test]
+    fn unknown_display_levels_preserve_verified_request_constraints_through_chat_projection() {
+        for required in [false, true] {
+            let mut facts = crate::codex_reasoning::native_capabilities(
+                &json!({"supported_reasoning_levels":[{"effort":"high"}]}),
+            )
+            .unwrap();
+            if required {
+                facts.mode = crate::codex_reasoning::ReasoningMode::Required;
+            }
+            let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningMode":"unknown","reasoningLevels":[]}]}});
+            let template = crate::codex_reasoning::reasoning_template("openaiChatEffort");
+            let config = crate::codex_reasoning::chat_transport(
+                "fixture",
+                "https://relay.example/v1",
+                "alias",
+                template.as_ref(),
+                &settings,
+                Some(facts),
+            )
+            .unwrap();
+            let cap = config.resolved_capabilities.as_ref().unwrap();
+            assert!(cap.levels.is_empty() && !cap.controls.effort);
+            for effort in ["high", "low", "ultra", "none"] {
+                let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+                let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+                if effort == "high" || (!required && effort == "none") {
+                    assert_eq!(result.unwrap()["reasoning_effort"], effort);
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joined_empty_verified_metadata_does_not_deny_app_declared_effort() {
+        let facts =
+            crate::codex_reasoning::native_capabilities(&json!({"supported_reasoning_levels":[]}))
+                .unwrap();
+        let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningMode":"supported","reasoningLevels":["high"]}]}});
+        let template = crate::codex_reasoning::reasoning_template("openaiChatEffort");
+        let config = crate::codex_reasoning::chat_transport(
+            "fixture",
+            "https://relay.example/v1",
+            "alias",
+            template.as_ref(),
+            &settings,
+            Some(facts),
+        )
+        .unwrap();
+        let cap = config.resolved_capabilities.as_ref().unwrap();
+        assert!(cap.conflicts.is_empty(), "{:?}", cap.conflicts);
+        let intent = crate::codex_reasoning::ReasoningIntent::Effort("high".into());
+        cap.validate_intent(&intent).unwrap();
+        crate::codex_reasoning::validate_transport_intent(&config, &intent).unwrap();
+        let input = json!({"model":"alias","input":"hello","reasoning":{"effort":"high"}});
+        let wire = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert_eq!(wire["reasoning_effort"], "high");
+    }
+    #[test]
+    fn joined_unverified_profile_cannot_erase_derived_endpoint_constraints() {
+        let mut template = crate::codex_reasoning::reasoning_template("deepseekChat").unwrap();
+        template.effort_value_mode = Some("passthrough".into());
+        let config = crate::codex_reasoning::chat_transport(
+            "fixture",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+            Some(&template),
+            &json!({}),
+            None,
+        )
+        .unwrap();
+        let cap = config.resolved_capabilities.as_ref().unwrap();
+        assert!(cap.levels.is_empty() && !cap.controls.effort && !cap.verified);
+        assert!(cap.conflicts.is_empty());
+        for effort in ["low", "high", "max", "ultra"] {
+            let intent = crate::codex_reasoning::ReasoningIntent::Effort(effort.into());
+            let cap_ok = cap.validate_intent(&intent).is_ok();
+            let transport_ok =
+                crate::codex_reasoning::validate_transport_intent(&config, &intent).is_ok();
+            assert_eq!(
+                cap_ok, transport_ok,
+                "{effort}: final capability and transport must agree"
+            );
+            assert_eq!(cap_ok, effort != "ultra");
+            let input =
+                json!({"model":"deepseek-v4-flash","input":"hello","reasoning":{"effort":effort}});
+            let wire = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if effort == "ultra" {
+                assert!(wire.is_err());
+            } else {
+                assert_eq!(wire.unwrap()["reasoning_effort"], effort);
+            }
+        }
+    }
+    fn convert_deepseek_test_input(items: Vec<Value>) -> Value {
+        responses_to_chat_completions(json!({
+            "model": "deepseek/deepseek-v4-flash",
+            "input": items
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn responses_request_to_chat_limits_tool_replay_repair_to_deepseek() {
+        for (model, repair) in [
+            ("deepseek-v4-flash", true),
+            ("deepseek/deepseek-v4-flash", true),
+            ("deepseek-ai/DeepSeek-V3.2", true),
+            ("Pro/deepseek-ai/DeepSeek-R1", true),
+            ("DEEPSEEK-CHAT", true),
+            ("deepseek", true),
+            ("gpt-5.4", false),
+            ("kimi-k3", false),
+            ("glm-5.2", false),
+            ("MiniMax-M2.7", false),
+            ("qwen3.6-plus", false),
+            ("claude-sonnet-4-6", false),
+            ("custom-alias", false),
+            ("deepseek/gpt-5.4", false),
+            ("not-deepseek-v4-flash", false),
+        ] {
+            let result = responses_to_chat_completions(json!({
+                "model": model,
+                "input": [
+                    test_function_call("call_1"),
+                    {"type": "message", "role": "assistant", "content": "Replay text.",
+                        "reasoning_content": "replay thought"},
+                    test_function_output("call_1", json!("ok"))
+                ]
+            }))
+            .unwrap();
+
+            if repair {
+                assert_complete_tool_turns(&result);
+                assert_eq!(message_roles(&result), vec!["assistant", "tool"], "{model}");
+                assert_eq!(result["messages"][0]["content"], "Replay text.");
+                assert_eq!(result["messages"][0]["reasoning_content"], "replay thought");
+            } else {
+                assert_eq!(
+                    result["messages"],
+                    json!([
+                        {"role": "assistant", "content": null, "tool_calls": [
+                            {"id": "call_1", "type": "function", "function": {
+                                "name": "view_image", "arguments": "{}"
+                            }}
+                        ], "reasoning_content": "tool call"},
+                        {"role": "assistant", "content": "Replay text.", "reasoning_content": "replay thought"},
+                        {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+                    ]),
+                    "{model}"
+                );
+            }
+        }
+    }
+
+    fn assert_complete_tool_turns(result: &Value) {
+        let mut pending = HashSet::new();
+        for message in result_messages(result) {
+            let role = message["role"].as_str().unwrap();
+            if !pending.is_empty() {
+                assert_eq!(role, "tool", "interrupted tool turn: {result}");
+            }
+            if role == "tool" {
+                let call_id = message["tool_call_id"].as_str().unwrap();
+                assert!(pending.remove(call_id), "unexpected tool result: {result}");
+            }
+            if let Some(calls) = message["tool_calls"].as_array() {
+                for call in calls {
+                    assert!(pending.insert(call["id"].as_str().unwrap()));
+                }
+            }
+        }
+        assert!(pending.is_empty(), "missing tool results: {result}");
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_valid_deepseek_tool_history_bytes_stable() {
+        let items = vec![
+            json!({"type": "message", "role": "user", "content": "Inspect the image."}),
+            json!({"type": "message", "role": "assistant", "content": "Checking."}),
+            test_function_call("call_1"),
+            test_function_call("call_2"),
+            test_function_output("call_2", json!("")),
+            test_function_output(
+                "call_1",
+                json!([
+                    {"type": "text", "text": "image result"},
+                    {"type": "input_image", "image_url": "https://example.com/image.png"}
+                ]),
+            ),
+            json!({"type": "message", "role": "assistant", "content": "Image inspected.",
+                "reasoning_content": "final answer thought"}),
+            json!({"type": "message", "role": "user", "content": "Continue."}),
+            test_function_call("call_next"),
+            test_function_output("call_next", json!("ok")),
+        ];
+        let original = convert_test_input(items.clone());
+        let deepseek = convert_deepseek_test_input(items);
+
+        assert_complete_tool_turns(&deepseek);
+        assert_eq!(
+            serde_json::to_vec(&deepseek["messages"]).unwrap(),
+            serde_json::to_vec(&original["messages"]).unwrap(),
+            "well-formed history must keep its cache-sensitive serialization"
+        );
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_empty_assistant_replay_inside_tool_turn() {
+        let empty_messages = [
+            json!({"type": "message", "role": "assistant", "content": null}),
+            json!({"type": "message", "role": "assistant", "content": null,
+                "reasoning_content": "tool-only thought"}),
+            json!({"type": "message", "role": "assistant", "content": ""}),
+            json!({"type": "message", "role": "assistant", "content": []}),
+            json!({"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": ""}
+            ]}),
+            json!({"type": "message", "role": "assistant"}),
+            json!({"role": "assistant", "content": ""}),
+            json!({"type": "future_message", "role": "assistant", "content": ""}),
+            json!({"type": "input_text", "role": "assistant", "text": ""}),
+        ];
+
+        for empty_message in empty_messages {
+            let reasoning = empty_message.get("reasoning_content").cloned();
+            let result = convert_deepseek_test_input(vec![
+                test_function_call("call_1"),
+                empty_message,
+                test_function_output("call_1", json!("")),
+            ]);
+
+            assert_complete_tool_turns(&result);
+            assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+            assert_eq!(result["messages"][0]["tool_calls"][0]["id"], "call_1");
+            assert_eq!(result["messages"][1]["content"], "");
+            if let Some(reasoning) = reasoning {
+                assert_eq!(result["messages"][0]["reasoning_content"], reasoning);
+            }
+        }
+    }
+
+    #[test]
+    fn responses_request_to_chat_coalesces_custom_and_search_tool_replay() {
+        for (call, output) in [
+            (
+                json!({"type": "custom_tool_call", "call_id": "call_1",
+                    "name": "apply_patch", "input": "patch"}),
+                json!({"type": "custom_tool_call_output", "call_id": "call_1", "output": "ok"}),
+            ),
+            (
+                json!({"type": "tool_search_call", "call_id": "call_1", "arguments": {"query": "shell"}}),
+                json!({"type": "tool_search_output", "call_id": "call_1", "output": []}),
+            ),
+        ] {
+            let expected_output = canonical_json_string(&output);
+            let result = convert_deepseek_test_input(vec![
+                call,
+                json!({"type": "message", "role": "assistant", "content": ""}),
+                output,
+            ]);
+            assert_complete_tool_turns(&result);
+            assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+            assert_eq!(result["messages"][1]["content"], expected_output);
+        }
+    }
+
+    #[test]
+    fn responses_request_to_chat_preserves_replayed_tool_turn_text_and_reasoning() {
+        let mut first_call = test_function_call("call_1");
+        first_call["reasoning_content"] = json!("first thought");
+        let mut second_call = test_function_call("call_2");
+        second_call["reasoning_content"] = json!("third thought");
+        let result = convert_deepseek_test_input(vec![
+            first_call,
+            json!({
+                "type": "message", "role": "assistant", "content": "First update.",
+                "reasoning_content": "second thought"
+            }),
+            second_call,
+            json!({"type": "message", "role": "assistant", "content": "Second update."}),
+            test_function_output("call_1", json!("first result")),
+            test_function_output("call_2", json!("second result")),
+        ]);
+
+        assert_complete_tool_turns(&result);
+        assert_eq!(message_roles(&result), vec!["assistant", "tool", "tool"]);
+        let assistant = &result["messages"][0];
+        assert_eq!(assistant["content"], "First update.\nSecond update.");
+        assert_eq!(
+            assistant["reasoning_content"],
+            "first thought\n\nsecond thought\n\nthird thought"
+        );
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+        assert_eq!(assistant["tool_calls"][1]["id"], "call_2");
+    }
+
+    #[test]
+    fn responses_request_to_chat_coalesces_assistant_replay_between_parallel_results() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("call_1"),
+            test_function_call("call_2"),
+            test_function_output("call_2", json!("second result")),
+            json!({
+                "type": "message", "role": "assistant", "content": "Still working.",
+                "reasoning_content": "waiting for the first result"
+            }),
+            test_function_output("call_1", json!("first result")),
+            json!({"type": "message", "role": "assistant", "content": "Done."}),
+        ]);
+
+        assert_complete_tool_turns(&result);
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "tool", "assistant"]
+        );
+        assert_eq!(result["messages"][0]["content"], "Still working.");
+        assert_eq!(
+            result["messages"][0]["reasoning_content"],
+            "waiting for the first result"
+        );
+        assert_eq!(result["messages"][1]["tool_call_id"], "call_2");
+        assert_eq!(result["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(result["messages"][3]["content"], "Done.");
+    }
+
+    #[test]
+    fn responses_request_to_chat_preserves_multimodal_assistant_replay() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("call_1"),
+            json!({"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "Image context."},
+                {"type": "refusal", "refusal": "Cannot identify a person."},
+                {"type": "input_image", "image_url": "https://example.com/image.png"}
+            ]}),
+            test_function_output("call_1", json!("ok")),
+        ]);
+
+        assert_complete_tool_turns(&result);
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(
+            result["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "Image context."},
+                {"type": "text", "text": "Cannot identify a person."},
+                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_user_boundaries_and_missing_results() {
+        for role in ["user", "system"] {
+            let result = convert_deepseek_test_input(vec![
+                test_function_call("call_missing"),
+                json!({"type": "message", "role": role, "content": "New context."}),
+                json!({"type": "message", "role": "assistant", "content": "Next turn."}),
+                test_function_call("call_next"),
+                test_function_output("call_next", json!("ok")),
+            ]);
+            let messages = result_messages(&result);
+            let assistants: Vec<_> = messages
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .collect();
+            assert_eq!(assistants.len(), 3);
+            assert_eq!(assistants[0]["tool_calls"][0]["id"], "call_missing");
+            assert_eq!(assistants[2]["tool_calls"][0]["id"], "call_next");
+            assert_eq!(assistants[1]["content"], "Next turn.");
+            let outputs: Vec<_> = messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .collect();
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0]["tool_call_id"], "call_next");
+        }
+    }
+
+    // Synthetic history: a model stopped in the middle of a JSON string and
+    // the client retained the failed call before asking the model to continue.
+    fn malformed_history_request(arguments: Value) -> Value {
+        json!({
+            "model": "test-model",
+            "input": [
+                {"type": "function_call", "call_id": "call_broken", "name": "lookup",
+                 "arguments": arguments, "reasoning_content": "Existing reasoning."},
+                {"type": "function_call_output", "call_id": "call_broken",
+                 "output": "failed to parse function arguments: unexpected end of input"},
+                {"role": "user", "content": "continue"}
+            ],
+            "tools": [{"type": "function", "name": "lookup", "parameters": {
+                "type": "object", "properties": {"query": {"type": "string"}}
+            }}]
+        })
+    }
+
+    #[test]
+    fn malformed_history_arguments_preserve_attempt_and_error_as_text() {
+        let raw = r#"{"query":"unfinished"#;
+        let result = responses_to_chat_completions(malformed_history_request(json!(raw))).unwrap();
+        let messages = result_messages(&result);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0].get("tool_calls").is_none());
+        let text = messages[0]["content"].as_str().unwrap();
+        for preserved in ["lookup", raw, "failed to parse function arguments"] {
+            assert!(text.contains(preserved), "missing context: {preserved}");
+        }
+        assert!(messages[0]["reasoning_content"]
+            .as_str()
+            .unwrap()
+            .contains("Existing reasoning."));
+        assert_eq!(messages[1], json!({"role": "user", "content": "continue"}));
+        assert_eq!(result["tools"][0]["function"]["name"], "lookup");
+    }
+
+    #[test]
+    fn malformed_history_arguments_recover_non_object_json_without_guessing() {
+        for arguments in ["not json", "[]", "42", "true", "null", "\"text\""] {
+            let result =
+                responses_to_chat_completions(malformed_history_request(json!(arguments))).unwrap();
+            let messages = result_messages(&result);
+            assert!(messages
+                .iter()
+                .all(|message| message.get("tool_calls").is_none()));
+            assert!(messages.iter().all(|message| message["role"] != "tool"));
+            assert!(messages[0]["content"].as_str().unwrap().contains(arguments));
+        }
+    }
+
+    #[test]
+    fn malformed_history_arguments_keep_valid_parallel_calls_paired() {
+        for bad_result_first in [true, false] {
+            let mut body = malformed_history_request(json!("{broken"));
+            let input = body["input"].as_array_mut().unwrap();
+            input.insert(
+                1,
+                json!({"type": "function_call", "call_id": "call_ok", "name": "lookup",
+                "arguments": "{\"query\":\"weather\"}"}),
+            );
+            input.insert(
+                if bad_result_first { 3 } else { 2 },
+                json!({
+                    "type": "function_call_output", "call_id": "call_ok", "output": "sunny"
+                }),
+            );
+            let result = responses_to_chat_completions(body).unwrap();
+            let messages = result_messages(&result);
+            assert_eq!(messages.len(), 3);
+            assert_eq!(
+                messages[0]["tool_calls"],
+                json!([{
+                    "id": "call_ok", "type": "function", "function": {
+                        "name": "lookup", "arguments": "{\"query\":\"weather\"}"
+                    }
+                }])
+            );
+            assert!(messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("failed to parse function arguments"));
+            assert_eq!(
+                messages[1],
+                json!({"role": "tool", "tool_call_id": "call_ok", "content": "sunny"})
+            );
+            assert_eq!(messages[2]["role"], "user");
+        }
+    }
+
+    #[test]
+    fn malformed_history_arguments_do_not_affect_valid_objects_or_no_arg_calls() {
+        for arguments in [
+            json!("{\"query\":\"weather\"}"),
+            json!({"query": "weather"}),
+            json!("{}"),
+            json!(""),
+        ] {
+            let result =
+                responses_to_chat_completions(malformed_history_request(arguments)).unwrap();
+            let messages = result_messages(&result);
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0]["tool_calls"][0]["id"], "call_broken");
+            let args = messages[0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            assert!(serde_json::from_str::<Value>(args).unwrap().is_object());
+            assert_eq!(messages[1]["role"], "tool");
+        }
+    }
+
+    #[test]
+    fn malformed_history_arguments_preserve_tool_result_media() {
+        let mut body = malformed_history_request(json!("{broken"));
+        let image_url = "data:image/png;base64,aGVsbG8=";
+        body["input"][1]["output"] = json!([
+            {"type": "input_text", "text": "failed to parse function arguments"},
+            {"type": "input_image", "image_url": image_url}
+        ]);
+        let result = responses_to_chat_completions(body).unwrap();
+        let messages = result_messages(&result);
+        assert!(messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()));
+        assert!(messages.iter().all(|message| message["role"] != "tool"));
+        assert!(messages.iter().any(|message| message["role"] == "user"
+            && message["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part
+                    .pointer("/image_url/url")
+                    .and_then(Value::as_str)
+                    == Some(image_url)))));
+    }
+
+    #[test]
+    fn malformed_history_arguments_without_a_result_remain_visible_as_context() {
+        let mut body = malformed_history_request(json!("{broken"));
+        body["input"].as_array_mut().unwrap().remove(1);
+        let result = responses_to_chat_completions(body).unwrap();
+        let messages = result_messages(&result);
+        assert!(messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()));
+        assert!(messages[0]["content"].as_str().unwrap().contains("{broken"));
+        assert_eq!(messages.last().unwrap()["content"], "continue");
+    }
+
+    #[test]
+    fn malformed_history_late_results_do_not_cross_user_or_system_boundaries() {
+        for role in ["user", "system", "developer"] {
+            let result = responses_to_chat_completions(json!({
+                "model": "deepseek-chat",
+                "input": [
+                    {"type": "function_call", "call_id": "failed", "name": "lookup", "arguments": "{broken"},
+                    {"type": "message", "role": role, "content": "New context."},
+                    {"type": "function_call_output", "call_id": "failed", "output": "late failure"}
+                ]
+            })).unwrap();
+            let messages = result_messages(&result);
+            assert!(messages.iter().all(|message| message["role"] != "tool"));
+            assert!(messages
+                .iter()
+                .all(|message| message.get("tool_calls").is_none()));
+            let assistants: Vec<_> = messages
+                .iter()
+                .filter(|m| m["role"] == "assistant")
+                .collect();
+            assert_eq!(
+                assistants.len(),
+                2,
+                "late result must stay after its boundary: {role}"
+            );
+            assert!(assistants[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("{broken"));
+            assert!(!assistants[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("late failure"));
+            assert!(assistants[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("late failure"));
+            assert_eq!(
+                serde_json::to_string(&messages)
+                    .unwrap()
+                    .matches("late failure")
+                    .count(),
+                1
+            );
+            if role == "user" {
+                assert_eq!(
+                    messages[1],
+                    json!({"role": "user", "content": "New context."})
+                );
+            } else {
+                // The existing MiniMax-compatible system-head collapse remains unchanged.
+                assert_eq!(
+                    messages[0],
+                    json!({"role": "system", "content": "New context."})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_history_reused_id_keeps_new_valid_call_and_result_after_boundary() {
+        for role in ["user", "system"] {
+            let result = responses_to_chat_completions(json!({
+                "model": "deepseek-chat",
+                "input": [
+                    {"type": "function_call", "call_id": "reused", "name": "lookup", "arguments": "{broken"},
+                    {"role": role, "content": "Retry."},
+                    {"type": "function_call", "call_id": "reused", "name": "lookup", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "reused", "output": "new result"}
+                ]
+            })).unwrap();
+            let messages = result_messages(&result);
+            let calls: Vec<_> = messages
+                .iter()
+                .filter_map(|m| m["tool_calls"].as_array())
+                .flatten()
+                .collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["id"], "reused");
+            assert_eq!(calls[0]["function"]["arguments"], "{}");
+            let results: Vec<_> = messages.iter().filter(|m| m["role"] == "tool").collect();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["content"], "new result");
+        }
+    }
+
+    #[test]
+    fn deepseek_replay_reasoning_is_not_duplicated_or_prefixed_by_placeholder() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("call_1"),
+            json!({"role": "assistant", "content": "Working.", "reasoning_content": "same thought"}),
+            json!({"role": "assistant", "content": "Still working.", "reasoning_content": "same thought"}),
+            test_function_output("call_1", json!("ok")),
+        ]);
+        assert_complete_tool_turns(&result);
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(result["messages"][0]["reasoning_content"], "same thought");
+    }
+
+    #[test]
+    fn deepseek_replay_repairs_after_malformed_calls_and_preserves_valid_results() {
+        let result = convert_deepseek_test_input(vec![
+            json!({"type": "function_call", "call_id": "bad", "name": "lookup", "arguments": "{broken"}),
+            test_function_call("good"),
+            json!({"role": "assistant", "content": "Working.", "reasoning_content": "real thought"}),
+            test_function_output("bad", json!("parse failed")),
+            test_function_output("good", json!("ok")),
+        ]);
+        assert_complete_tool_turns(&result);
+        assert_eq!(message_roles(&result), vec!["assistant", "tool"]);
+        assert_eq!(
+            result["messages"][0]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result["messages"][0]["tool_calls"][0]["id"], "good");
+        assert_eq!(result["messages"][0]["reasoning_content"], "real thought");
+        assert!(result["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("parse failed"));
+        assert_eq!(result["messages"][1]["tool_call_id"], "good");
+    }
+    #[test]
+    fn deepseek_replay_does_not_retroactively_pair_orphan_with_future_call() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("a"),
+            test_function_output("b", json!("old orphan")),
+            test_function_call("b"),
+            test_function_output("a", json!("ok")),
+        ]);
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "assistant", "tool"]
+        );
+        assert_eq!(
+            result["messages"][0]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result["messages"][0]["tool_calls"][0]["id"], "a");
+        assert_eq!(result["messages"][1]["tool_call_id"], "b");
+        assert_eq!(result["messages"][1]["content"], "old orphan");
+        assert_eq!(result["messages"][2]["tool_calls"][0]["id"], "b");
+        assert_eq!(result["messages"][3]["tool_call_id"], "a");
+    }
+
+    #[test]
+    fn deepseek_replay_keeps_reused_call_id_after_its_previous_result() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("a"),
+            test_function_call("b"),
+            test_function_output("a", json!("old result")),
+            test_function_call("a"),
+            test_function_output("b", json!("other result")),
+            test_function_output("a", json!("new result")),
+        ]);
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "assistant", "tool", "tool"]
+        );
+        assert_eq!(
+            result["messages"][0]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(result["messages"][0]["tool_calls"][0]["id"], "a");
+        assert_eq!(result["messages"][0]["tool_calls"][1]["id"], "b");
+        assert_eq!(result["messages"][1]["content"], "old result");
+        assert_eq!(
+            result["messages"][2]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result["messages"][2]["tool_calls"][0]["id"], "a");
+        assert_eq!(result["messages"][3]["tool_call_id"], "b");
+        assert_eq!(result["messages"][4]["content"], "new result");
+    }
+
+    #[test]
+    fn deepseek_replay_still_merges_distinct_calls_during_parallel_results() {
+        let result = convert_deepseek_test_input(vec![
+            test_function_call("a"),
+            test_function_call("b"),
+            test_function_output("a", json!("first result")),
+            test_function_call("c"),
+            test_function_output("b", json!("second result")),
+            test_function_output("c", json!("third result")),
+        ]);
+        assert_complete_tool_turns(&result);
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "tool", "tool"]
+        );
+        let calls = result["messages"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(result["messages"][1]["content"], "first result");
+        assert_eq!(result["messages"][2]["content"], "second result");
+        assert_eq!(result["messages"][3]["content"], "third result");
     }
 }

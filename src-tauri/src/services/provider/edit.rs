@@ -72,6 +72,25 @@ fn draft_digest(
     };
     crate::config::serialize_json_bytes(&value).map(|bytes| digest(Some(&bytes)).unwrap())
 }
+fn scoped_draft_digest(
+    app: &AppType,
+    provider: &Provider,
+    original: &str,
+    delete: bool,
+    catalog: Option<&CatalogDecision>,
+    scope: state::SaveScope,
+) -> Result<String, AppError> {
+    let original_digest = draft_digest(app, provider, original, delete, catalog)?;
+    match scope {
+        state::SaveScope::Provider => Ok(original_digest),
+        state::SaveScope::ProviderModelSettings if !delete && catalog.is_none() => {
+            let image = json!([scope, original_digest]);
+            crate::config::serialize_json_bytes(&image).map(|bytes| digest(Some(&bytes)).unwrap())
+        }
+        _ => Err(problem("readOnly")),
+    }
+}
+
 fn result(app: &AppType, request: &SaveRequest, status: &str, why: Option<&str>) -> Value {
     let mut value = json!({"app":app.as_str(),"request":request,"status":status});
     if let Some(code) = why {
@@ -81,7 +100,10 @@ fn result(app: &AppType, request: &SaveRequest, status: &str, why: Option<&str>)
 }
 fn query_locked(state: &AppState, app: &AppType, request: &SaveRequest) -> Result<Value, AppError> {
     admitted(state, app)?;
-    if request.scope != state::SaveScope::Provider {
+    if !matches!(
+        request.scope,
+        state::SaveScope::Provider | state::SaveScope::ProviderModelSettings
+    ) {
         return Err(problem("readOnly"));
     }
     let vault = state.db.secret_session().read()?;
@@ -106,6 +128,29 @@ pub(crate) fn query(
         futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
     Ok(query_locked(state, app, &request)
         .unwrap_or_else(|error| result(app, &request, "unknown", Some(code(&error)))))
+}
+
+/// Reopen the same app-local receipt. This never recovers, writes, or invents a request.
+pub(crate) fn model_settings_original_save(
+    state: &AppState,
+    app: &AppType,
+    provider_id: &str,
+) -> Result<Option<Value>, AppError> {
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    admitted(state, app)?;
+    let vault = state.db.secret_session().read()?;
+    let live = state::load_app(&DeviceStore::for_device(), &vault, app.as_str())?;
+    let Some(entry) = live.apps.get(app.as_str()) else {
+        return Ok(None);
+    };
+    Ok(operation::saved_request_view(
+        app.as_str(),
+        entry,
+        state::SaveScope::ProviderModelSettings,
+        Some(provider_id),
+    )?
+    .map(|view| result(app, &view.request, view.status, None)))
 }
 
 fn key_text(value: &str) -> Result<Option<&str>, AppError> {
@@ -327,15 +372,28 @@ fn prepare(
     ProviderService::prepare_provider_update(state, app, draft)
 }
 
+#[derive(Clone, Copy)]
+struct EditOptions<'a> {
+    expected_row_revision: Option<&'a str>,
+    delete_credential: bool,
+    catalog: Option<&'a CatalogDecision>,
+    scope: state::SaveScope,
+}
+
 fn planned(
     state: &AppState,
     app: &AppType,
     draft: Provider,
     original: &str,
     id: &str,
-    delete: bool,
-    catalog: Option<&CatalogDecision>,
+    options: EditOptions<'_>,
 ) -> Result<(Provider, Provider, controller::SaveRowPlan), AppError> {
+    let EditOptions {
+        expected_row_revision,
+        delete_credential: delete,
+        catalog,
+        scope,
+    } = options;
     admitted(state, app)?;
     if draft.id != original {
         return Err(problem("readOnly"));
@@ -350,7 +408,22 @@ fn planned(
         .db
         .get_provider_by_id(original, app.as_str())?
         .ok_or_else(|| problem("readOnly"))?;
-    let draft = prepare(state, app, &previous, draft, delete)?;
+    if expected_row_revision.is_some_and(|expected| {
+        Database::provider_update_digest(&previous).ok().as_deref() != Some(expected)
+    }) {
+        return Err(AppError::Conflict("provider.edit.sourceChanged".into()));
+    }
+    let draft = match scope {
+        state::SaveScope::Provider => prepare(state, app, &previous, draft, delete)?,
+        state::SaveScope::ProviderModelSettings if !delete && catalog.is_none() => {
+            // A model-only request must be checked against the real current row.
+            // Full-editor normalization can touch unrelated fields, so it cannot
+            // be used to manufacture this narrow plan.
+            super::model_settings::validate_change(app, &previous, &draft)?;
+            draft
+        }
+        _ => return Err(problem("readOnly")),
+    };
     let plan =
         controller::plan_row_save(&state.proxy_service, app, &previous, &draft, id, catalog)?;
     Ok((previous, draft, plan))
@@ -442,10 +515,62 @@ pub(crate) fn preview_with_catalog(
     delete_credential: bool,
     catalog: Option<&CatalogDecision>,
 ) -> Result<Value, AppError> {
-    let draft = draft_digest(app, &provider, original, delete_credential, catalog)?;
+    preview_scoped(
+        state,
+        app,
+        provider,
+        original,
+        id,
+        EditOptions {
+            expected_row_revision: None,
+            delete_credential,
+            catalog,
+            scope: state::SaveScope::Provider,
+        },
+    )
+}
+
+pub(crate) fn preview_model_settings(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    id: &str,
+    expected_row_revision: &str,
+) -> Result<Value, AppError> {
+    preview_scoped(
+        state,
+        app,
+        provider,
+        original,
+        id,
+        EditOptions {
+            expected_row_revision: Some(expected_row_revision),
+            delete_credential: false,
+            catalog: None,
+            scope: state::SaveScope::ProviderModelSettings,
+        },
+    )
+}
+
+fn preview_scoped(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    id: &str,
+    options: EditOptions<'_>,
+) -> Result<Value, AppError> {
+    let EditOptions {
+        expected_row_revision,
+        delete_credential,
+        catalog,
+        scope,
+    } = options;
+    let draft = scoped_draft_digest(app, &provider, original, delete_credential, catalog, scope)?;
     let mut request = SaveRequest {
         id: id.into(),
-        scope: state::SaveScope::Provider,
+        scope,
         provider_id: Some(original.into()),
         draft_digest: draft.clone(),
         revision: draft,
@@ -460,8 +585,12 @@ pub(crate) fn preview_with_catalog(
         provider,
         original,
         id,
-        delete_credential,
-        catalog,
+        EditOptions {
+            expected_row_revision,
+            delete_credential,
+            catalog,
+            scope,
+        },
     ) {
         Ok((previous, provider, plan)) => {
             request.revision = plan.revision;
@@ -530,11 +659,63 @@ pub(crate) fn confirm_with_catalog(
     delete_credential: bool,
     catalog: Option<&CatalogDecision>,
 ) -> Result<Value, AppError> {
+    confirm_scoped(
+        state,
+        app,
+        provider,
+        original,
+        request,
+        EditOptions {
+            expected_row_revision: None,
+            delete_credential,
+            catalog,
+            scope: state::SaveScope::Provider,
+        },
+    )
+}
+
+pub(crate) fn confirm_model_settings(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    request: SaveRequest,
+    expected_row_revision: &str,
+) -> Result<Value, AppError> {
+    confirm_scoped(
+        state,
+        app,
+        provider,
+        original,
+        request,
+        EditOptions {
+            expected_row_revision: Some(expected_row_revision),
+            delete_credential: false,
+            catalog: None,
+            scope: state::SaveScope::ProviderModelSettings,
+        },
+    )
+}
+
+fn confirm_scoped(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    request: SaveRequest,
+    options: EditOptions<'_>,
+) -> Result<Value, AppError> {
+    let EditOptions {
+        expected_row_revision,
+        delete_credential,
+        catalog,
+        scope,
+    } = options;
     request.validate()?;
-    if request.scope != state::SaveScope::Provider
+    if request.scope != scope
         || request.provider_id.as_deref() != Some(original)
         || provider.id != original
-        || draft_digest(app, &provider, original, delete_credential, catalog)?
+        || scoped_draft_digest(app, &provider, original, delete_credential, catalog, scope)?
             != request.draft_digest
     {
         return Ok(result(app, &request, "conflict", None));
@@ -554,8 +735,12 @@ pub(crate) fn confirm_with_catalog(
         provider,
         original,
         &request.id,
-        delete_credential,
-        catalog,
+        EditOptions {
+            expected_row_revision,
+            delete_credential,
+            catalog,
+            scope,
+        },
     ) {
         Ok(plan) => plan,
         Err(error) => return Ok(result(app, &request, "blocked", Some(code(&error)))),

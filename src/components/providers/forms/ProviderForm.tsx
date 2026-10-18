@@ -199,8 +199,9 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { inputModalities }
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
-      ...(reasoningLevels && reasoningLevels.length > 0
-        ? { reasoningLevels }
+      ...(reasoningLevels !== undefined ? { reasoningLevels } : {}),
+      ...(item.reasoningMode !== undefined
+        ? { reasoningMode: item.reasoningMode }
         : {}),
       ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
     });

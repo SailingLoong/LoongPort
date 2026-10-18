@@ -394,6 +394,7 @@ pub struct PendingFile {
 pub enum SaveScope {
     #[default]
     Provider,
+    ProviderModelSettings,
     CodexSharedSettings,
     ClaudeSharedSettings,
     GeminiSharedSettings,
@@ -432,7 +433,7 @@ impl SaveRequest {
         };
         if uuid::Uuid::parse_str(&self.id).is_err()
             || match self.scope {
-                SaveScope::Provider => self
+                SaveScope::Provider | SaveScope::ProviderModelSettings => self
                     .provider_id
                     .as_ref()
                     .is_none_or(|id| id.trim().is_empty()),
@@ -1048,3 +1049,7 @@ pub(crate) fn apps_with_pending(
         .map(|(app, _)| app)
         .collect())
 }
+
+#[cfg(test)]
+#[path = "state_model_settings_scope_tests.rs"]
+mod model_settings_scope_tests;

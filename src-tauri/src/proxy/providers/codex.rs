@@ -450,49 +450,73 @@ pub fn resolve_codex_chat_reasoning_config(
 pub fn normalize_request_reasoning(
     provider: &Provider,
     body: &mut JsonValue,
-    model_changed: bool,
+    _model_changed: bool,
 ) -> Result<(), String> {
-    // Same-model adapter mappings (for example xhigh -> max) are protocol encoding,
-    // not an incompatible model selection, and retain their existing semantics.
-    if !model_changed {
-        return Ok(());
+    if !crate::services::provider::model_settings::owned_scope_matches(provider) {
+        return Err(crate::codex_config::APPLICATION_MODEL_SOURCE_CHANGED.into());
     }
+
+    // Validate every request, including unchanged models and failover targets.
+    // A client's explicit service default/off/effort always wins over the app default.
+    let legacy_default = provider
+        .settings_config
+        .get("config")
+        .and_then(JsonValue::as_str)
+        .and_then(|text| toml::from_str::<TomlTable>(text).ok())
+        .and_then(|table| {
+            table
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        })
+        .and_then(|effort| {
+            crate::codex_reasoning::request_intent(
+                &serde_json::json!({"reasoning":{"effort":effort}}),
+            )
+            .ok()
+        });
+    let app_default = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.application_model_overrides.as_ref())
+        .and_then(|overrides| overrides.reasoning.as_ref())
+        .or(legacy_default.as_ref());
+    crate::codex_reasoning::apply_app_default(body, app_default);
     let Some(model) = body.get("model").and_then(JsonValue::as_str) else {
         return Ok(());
     };
-    let Some(effort) = body
-        .pointer("/reasoning/effort")
-        .and_then(JsonValue::as_str)
-    else {
-        return Ok(());
-    };
-    let declared = crate::codex_reasoning::model_row(&provider.settings_config, model)
-        .and_then(crate::codex_reasoning::declared_capabilities);
-    let transport = codex_provider_uses_chat_completions(provider)
-        .then(|| resolve_codex_chat_reasoning_config(provider, body))
-        .flatten();
-    let official = if codex_provider_uses_anthropic(provider) {
-        None
-    } else if codex_provider_uses_chat_completions(provider) {
-        crate::codex_config::official_reasoning_capabilities(model)
-    } else {
-        crate::codex_config::native_reasoning_capabilities(
-            provider
-                .settings_config
-                .get("config")
-                .and_then(JsonValue::as_str)
-                .unwrap_or_default(),
-            model,
-        )
-    };
-    let Some(capabilities) =
-        crate::codex_reasoning::resolve(model, declared, official, transport.as_ref())
-    else {
-        return Ok(()); // Unknown is not an assertion that reasoning is unsupported.
-    };
-    let selected = capabilities.selected_effort(model, effort)?;
-    if selected != effort {
-        body["reasoning"]["effort"] = JsonValue::String(selected);
+    let intent = crate::codex_reasoning::request_intent(body)?;
+    let transport = crate::codex_config::resolve_provider_reasoning_transport(provider, model);
+    if let Some(transport) = &transport {
+        crate::codex_reasoning::validate_transport_intent(transport, &intent)?;
+    }
+    crate::codex_config::resolve_provider_model_capability(provider, model)
+        .validate_intent(&intent)?;
+    if !codex_provider_uses_chat_completions(provider) && !codex_provider_uses_anthropic(provider) {
+        // Validate first, then project only the native Responses contract. Client
+        // nulls mean no injection; output controls remain orthogonal and untouched.
+        if let Some(reasoning) = body.get_mut("reasoning").and_then(JsonValue::as_object_mut) {
+            match intent {
+                crate::codex_reasoning::ReasoningIntent::Off => {
+                    reasoning.remove("enabled");
+                    reasoning.insert("effort".into(), JsonValue::String("none".into()));
+                }
+                crate::codex_reasoning::ReasoningIntent::Effort(level) => {
+                    reasoning.remove("enabled");
+                    reasoning.insert("effort".into(), JsonValue::String(level));
+                }
+                crate::codex_reasoning::ReasoningIntent::ServiceDefault => {
+                    if reasoning
+                        .get("effort")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|level| level.trim().eq_ignore_ascii_case("default"))
+                    {
+                        reasoning.remove("effort");
+                    }
+                }
+                crate::codex_reasoning::ReasoningIntent::On => {}
+            }
+        }
     }
     Ok(())
 }
@@ -1505,25 +1529,20 @@ wire_api = "responses"
     }
 
     #[test]
-    fn changed_model_reasoning_uses_declared_default_or_requires_choice() {
-        let provider = create_provider(json!({
-            "modelCatalog":{"models":[
-                {"model":"target","reasoningLevels":["low","high"],"defaultReasoningLevel":"low"},
-                {"model":"no-default","reasoningLevels":["low","high"]}
-            ]}
-        }));
-        let mut body = json!({"model":"target","reasoning":{"effort":"ultra","summary":"auto"}});
-        normalize_request_reasoning(&provider, &mut body, true).unwrap();
-        assert_eq!(body["reasoning"]["effort"], "low");
-        assert_eq!(body["reasoning"]["summary"], "auto");
-        body["model"] = json!("no-default");
-        body["reasoning"]["effort"] = json!("ultra");
-        assert!(normalize_request_reasoning(&provider, &mut body, true).is_err());
-        normalize_request_reasoning(&provider, &mut body, false).unwrap();
-        assert_eq!(
-            body["reasoning"]["effort"], "ultra",
-            "same-model protocol encoding remains owned by the adapter"
-        );
+    fn changed_and_unchanged_models_require_a_supported_explicit_choice() {
+        let provider = create_provider(json!({"modelCatalog":{"models":[
+            {"model":"target","reasoningLevels":["low","high"],"defaultReasoningLevel":"high"}
+        ]}}));
+        for changed in [false, true] {
+            let mut body =
+                json!({"model":"target","reasoning":{"effort":"ultra","summary":"auto"}});
+            assert!(normalize_request_reasoning(&provider, &mut body, changed).is_err());
+            assert_eq!(body["reasoning"]["effort"], "ultra");
+            body["reasoning"]["effort"] = json!("low");
+            normalize_request_reasoning(&provider, &mut body, changed).unwrap();
+            assert_eq!(body["reasoning"]["effort"], "low");
+            assert_eq!(body["reasoning"]["summary"], "auto");
+        }
     }
 
     #[test]
@@ -1663,6 +1682,8 @@ wire_api = "chat"
                 effort_value_mode: None,
                 output_format: Some("auto".to_string()),
                 effort_levels: None,
+                resolved_capabilities: None,
+                transport_kind: None,
             }),
             ..Default::default()
         });
@@ -1717,16 +1738,12 @@ wire_api = "chat"
 "#
         }));
 
-        // 模型是 MiniMax（官方用 reasoning_split），但平台是 SiliconFlow —— 应走平台的 enable_thinking。
-        let config = resolve_codex_chat_reasoning_config(
+        // No verified endpoint template is inferred from a vendor/model display name.
+        assert!(resolve_codex_chat_reasoning_config(
             &provider,
-            &json!({ "model": "MiniMaxAI/MiniMax-M2.5" }),
+            &json!({"model":"unverified-alias"})
         )
-        .unwrap();
-
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
-        assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.output_format.as_deref(), Some("reasoning_content"));
+        .is_none());
     }
 
     #[test]
@@ -1743,15 +1760,12 @@ wire_api = "chat"
 "#
         }));
 
-        // 模型是 GLM（智谱自家用 thinking:{type}），但平台是 ModelScope ——
-        // 应走平台级 enable_thinking，而不是被 glm 模型规则注入智谱方言。
-        let config =
-            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "ZhipuAI/GLM-5.2" }))
-                .unwrap();
-
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
-        assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.output_format.as_deref(), Some("reasoning_content"));
+        // No verified endpoint template is inferred from a vendor/model display name.
+        assert!(resolve_codex_chat_reasoning_config(
+            &provider,
+            &json!({"model":"unverified-alias"})
+        )
+        .is_none());
     }
 
     #[test]
@@ -1774,7 +1788,7 @@ wire_api = "chat"
         let config =
             resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.2" })).unwrap();
 
-        assert_eq!(config.supports_thinking, Some(true));
+        assert_eq!(config.supports_thinking, Some(false));
         assert_eq!(config.supports_effort, Some(true));
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("reasoning_effort"));
@@ -1803,9 +1817,9 @@ wire_api = "chat"
             }
         }));
 
-        // 逐模型查表：声明了 reasoningLevels 的模型附上各自档位（模型名大小写不敏感）。
+        // 逐模型查表：声明了 reasoningLevels 的模型附上各自档位（精确模型ID）。
         let config =
-            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "GLM-5.2" })).unwrap();
+            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.2" })).unwrap();
         assert_eq!(
             config.effort_levels,
             Some(vec!["high".to_string(), "max".to_string()])
@@ -1866,6 +1880,8 @@ wire_api = "chat"
                 effort_value_mode: Some("zen".to_string()),
                 output_format: Some("reasoning_content".to_string()),
                 effort_levels: None,
+                resolved_capabilities: None,
+                transport_kind: None,
             }),
             ..Default::default()
         });
@@ -1901,29 +1917,12 @@ wire_api = "chat"
 "#
         }));
 
-        // step-3.7-flash：官方三档 low/medium/high —— 必须 passthrough，
-        // 套 low_high 会把 medium 塌成 high（假差异档）
-        let config =
-            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "step-3.7-flash" }))
-                .unwrap();
-        assert_eq!(config.supports_effort, Some(true));
-        assert_eq!(config.effort_value_mode.as_deref(), Some("passthrough"));
-
-        // step-3.5-flash-2603：官方两档 low/high，沿用收敛映射
-        let config = resolve_codex_chat_reasoning_config(
-            &provider,
-            &json!({ "model": "step-3.5-flash-2603" }),
-        )
-        .unwrap();
-        assert_eq!(config.supports_effort, Some(true));
-        assert_eq!(config.effort_value_mode.as_deref(), Some("low_high"));
-
-        // 无后缀 step-3.5-flash：官方未暴露 effort，不下发
-        let config =
-            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "step-3.5-flash" }))
-                .unwrap();
-        assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("none"));
+        // Name-only compatibility profiles cannot supply endpoint capability facts.
+        for model in ["step-3.7-flash", "step-3.5-flash-2603", "step-3.5-flash"] {
+            assert!(
+                resolve_codex_chat_reasoning_config(&provider, &json!({"model":model})).is_none()
+            );
+        }
     }
 
     #[test]
@@ -1990,5 +1989,367 @@ wire_api = "responses"
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
+    }
+
+    fn reasoning_test_provider(base: &str, format: &str, levels: serde_json::Value) -> Provider {
+        Provider::with_id(
+            "reasoning-test".into(),
+            "openai billing group".into(),
+            json!({"base_url":base,"apiFormat":format,"modelCatalog":{"models":[{"model":"alias","reasoningMode":"toggle","reasoningLevels":levels}]}}),
+            None,
+        )
+    }
+
+    #[test]
+    fn actual_provider_glue_preserves_deepseek_native_low_and_rejects_bad_effort() {
+        let p = reasoning_test_provider(
+            "https://api.deepseek.com/v1",
+            "responses",
+            json!(["none", "low", "high", "max"]),
+        );
+        for changed in [false, true] {
+            let mut low = json!({"model":"alias","reasoning":{"effort":"low"},"stream":true});
+            normalize_request_reasoning(&p, &mut low, changed).unwrap();
+            assert_eq!(low["reasoning"]["effort"], "low");
+            assert!(low.get("thinking").is_none());
+            let mut bad = json!({"model":"alias","reasoning":{"effort":"medium"}});
+            assert!(normalize_request_reasoning(&p, &mut bad, changed).is_err());
+        }
+    }
+
+    #[test]
+    fn actual_provider_glue_typed_service_default_blocks_legacy_and_client_null_blocks_app() {
+        use crate::codex_reasoning::ReasoningIntent;
+        let mut p = reasoning_test_provider(
+            "https://api.deepseek.com/v1",
+            "responses",
+            json!(["none", "low", "high", "max"]),
+        );
+        p.settings_config["config"] = json!("model='alias'\nmodel_reasoning_effort='max'");
+        p = crate::services::provider::model_settings::apply_patch(
+            &crate::app_config::AppType::Codex,
+            &p,
+            &crate::services::provider::model_settings::ModelSettingsPatch {
+                reasoning: Some(crate::services::provider::model_settings::FieldChange::Set(
+                    ReasoningIntent::ServiceDefault,
+                )),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The typed choice still overrides a preserved legacy value. Choice fields
+        // are not source identity, so adding the legacy fallback cannot rebind it.
+        p.settings_config["config"] = json!("model='alias'\nmodel_reasoning_effort='max'");
+        let mut body = json!({"model":"alias"});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert!(body.get("reasoning").is_none());
+        p.meta
+            .as_mut()
+            .unwrap()
+            .application_model_overrides
+            .as_mut()
+            .unwrap()
+            .reasoning = Some(ReasoningIntent::Effort("low".into()));
+        for reasoning in [serde_json::Value::Null, json!({"effort":null})] {
+            let mut body = json!({"model":"alias","reasoning":reasoning});
+            let original = body.clone();
+            normalize_request_reasoning(&p, &mut body, false).unwrap();
+            assert_eq!(body, original);
+        }
+        let mut body = json!({"model":"alias"});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+
+    #[test]
+    fn actual_provider_glue_validates_each_final_target_not_only_model_switch() {
+        let accepted = reasoning_test_provider(
+            "https://api.deepseek.com/v1",
+            "chat_completions",
+            json!(["none", "low", "high", "max"]),
+        );
+        let rejected = reasoning_test_provider(
+            "https://api.deepseek.com/v1",
+            "chat_completions",
+            json!(["high", "max"]),
+        );
+        let mut body = json!({"model":"alias","reasoning":{"effort":"low"}});
+        normalize_request_reasoning(&accepted, &mut body, false).unwrap();
+        assert!(normalize_request_reasoning(&rejected, &mut body, false).is_err());
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+
+    #[test]
+    fn chat_template_selection_rejects_other_protocols() {
+        for format in ["responses", "anthropic"] {
+            let provider = reasoning_test_provider("https://relay.example/v1", format, json!([]));
+            assert!(
+                crate::codex_config::validate_reasoning_template_for_provider(
+                    &provider,
+                    "deepseekChat"
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn final_native_intent_projection_matrix() {
+        let p = reasoning_test_provider(
+            "https://api.deepseek.com/v1",
+            "responses",
+            json!(["none", "low", "high", "max"]),
+        );
+        for reasoning in [
+            json!({"enabled":false}),
+            json!({"effort":"off"}),
+            json!({"effort":"disabled"}),
+            json!({"effort":"none"}),
+        ] {
+            let mut body = json!({"model":"alias","reasoning":reasoning});
+            body["reasoning"]["summary"] = json!("auto");
+            body["reasoning"]["exclude"] = json!(true);
+            normalize_request_reasoning(&p, &mut body, false).unwrap();
+            assert_eq!(
+                body["reasoning"],
+                json!({"effort":"none","summary":"auto","exclude":true})
+            );
+            assert!(body.get("thinking").is_none());
+        }
+        let mut body = json!({"model":"alias","reasoning":{"effort":"default","summary":"auto","exclude":true}});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert_eq!(body["reasoning"], json!({"summary":"auto","exclude":true}));
+        for reasoning in [
+            json!({"effort":"low","enabled":false}),
+            json!({"effort":"none","enabled":true}),
+        ] {
+            let mut body = json!({"model":"alias","reasoning":reasoning});
+            assert!(normalize_request_reasoning(&p, &mut body, false).is_err());
+        }
+    }
+    #[test]
+    fn final_unknown_native_preserves_explicit_off_without_advertising_a_switch() {
+        let mut p = reasoning_test_provider("https://relay.example/v1", "responses", json!([]));
+        p.settings_config["modelCatalog"] = json!({"models":[]});
+        for reasoning in [
+            json!({"enabled":false}),
+            json!({"effort":"off"}),
+            json!({"effort":"none"}),
+        ] {
+            let mut body = json!({"model":"alias","reasoning":reasoning});
+            normalize_request_reasoning(&p, &mut body, false).unwrap();
+            assert_eq!(body["reasoning"], json!({"effort":"none"}));
+        }
+        let cap = crate::codex_config::resolve_provider_model_capability(&p, "alias");
+        assert!(!cap.verified && !cap.controls.off);
+        let mut body = json!({"model":"alias","reasoning":{"enabled":true}});
+        assert!(normalize_request_reasoning(&p, &mut body, false).is_err());
+        for reasoning in [
+            serde_json::Value::Null,
+            json!({"effort":null}),
+            json!({"effort":"ultra"}),
+            json!({"summary":"auto"}),
+        ] {
+            let mut body = json!({"model":"alias","reasoning":reasoning});
+            let original = body.clone();
+            normalize_request_reasoning(&p, &mut body, false).unwrap();
+            assert_eq!(body, original);
+        }
+        let mut body = json!({"model":"alias"});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert!(body.get("reasoning").is_none());
+    }
+    #[test]
+    fn final_nullable_legacy_transport_hides_strength_without_rejecting_client_passthrough() {
+        let mut p = reasoning_test_provider(
+            "https://relay.example/v1",
+            "chat_completions",
+            json!(["low", "high"]),
+        );
+        p.settings_config["modelCatalog"]["models"][0]["reasoningMode"] = json!("supported");
+        p.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(crate::provider::CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                thinking_param: Some("thinking".into()),
+                effort_param: Some("reasoning_effort".into()),
+                supports_effort: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let cap = crate::codex_config::resolve_provider_model_capability(&p, "alias");
+        assert!(!cap.controls.effort);
+        let mut body = json!({"model":"alias","reasoning":{"effort":"low"}});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+    #[test]
+    fn final_supported_unknown_switch_preserves_client_off_but_required_rejects() {
+        let mut p = reasoning_test_provider(
+            "https://relay.example/v1",
+            "responses",
+            json!(["low", "high"]),
+        );
+        p.settings_config["modelCatalog"]["models"][0]["reasoningMode"] = json!("supported");
+        let cap = crate::codex_config::resolve_provider_model_capability(&p, "alias");
+        assert!(!cap.controls.off);
+        let mut body = json!({"model":"alias","reasoning":{"effort":"none"}});
+        normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "none");
+        p.settings_config["modelCatalog"]["models"][0]["reasoningMode"] = json!("required");
+        let original = body.clone();
+        assert!(normalize_request_reasoning(&p, &mut body, false).is_err());
+        assert_eq!(body, original);
+        p.settings_config["apiFormat"] = json!("chat_completions");
+        p.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(crate::provider::CodexChatReasoningConfig {
+                supports_thinking: Some(false),
+                supports_effort: Some(false),
+                thinking_param: Some("none".into()),
+                effort_param: Some("none".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        p.settings_config["modelCatalog"] = json!({"models":[]});
+        assert!(normalize_request_reasoning(&p, &mut body, false).is_err());
+        assert_eq!(body, original);
+    }
+    #[test]
+    fn stale_owned_scope_blocks_before_injecting_app_defaults() {
+        let mut p = reasoning_test_provider(
+            "https://relay.example/v1",
+            "responses",
+            json!(["low", "high"]),
+        );
+        p.settings_config["config"] = json!("model='alias'");
+        p.meta = Some(crate::provider::ProviderMeta {
+            application_model_overrides: Some(
+                crate::services::provider::model_settings::ApplicationModelOverrides {
+                    reasoning: Some(crate::codex_reasoning::ReasoningIntent::Effort(
+                        "high".into(),
+                    )),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        });
+        let capability = crate::codex_config::resolve_provider_model_capability(&p, "alias");
+        assert_eq!(
+            capability.conflicts,
+            vec![crate::codex_config::APPLICATION_MODEL_SOURCE_CHANGED]
+        );
+        assert!(!capability.controls.on && !capability.controls.off && !capability.controls.effort);
+        let mut body = json!({"model":"alias"});
+        let original = body.clone();
+        assert_eq!(
+            normalize_request_reasoning(&p, &mut body, false).unwrap_err(),
+            crate::codex_config::APPLICATION_MODEL_SOURCE_CHANGED
+        );
+        assert_eq!(body, original);
+    }
+    fn joined_provider(model: &str) -> Provider {
+        let mut p =
+            reasoning_test_provider("https://relay.example/v1", "chat_completions", json!([]));
+        p.settings_config["modelCatalog"] =
+            json!({"models":[{"model":model,"reasoningMode":"unknown","reasoningLevels":[]}]});
+        p.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: crate::codex_reasoning::reasoning_template("openaiChatEffort"),
+            ..Default::default()
+        });
+        p
+    }
+
+    #[test]
+    fn joined_unknown_empty_preserves_standard_effort_and_off_through_serialized_wire() {
+        let p = joined_provider("alias");
+        let cap = crate::codex_config::resolve_provider_model_capability(&p, "alias");
+        assert!(cap.levels.is_empty() && !cap.controls.effort && !cap.controls.off);
+        for stream in [false, true] {
+            for effort in ["low", "high", "none"] {
+                let mut body = json!({"model":"alias","input":"hello","stream":stream,"reasoning":{"effort":effort}});
+                crate::proxy::providers::normalize_request_reasoning(&p, &mut body, false).unwrap();
+                let transport =
+                    crate::proxy::providers::resolve_codex_chat_reasoning_config(&p, &body);
+                let sent=crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body,transport.as_ref()).unwrap();
+                let wire: serde_json::Value =
+                    serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
+                assert_eq!(wire["reasoning_effort"], effort);
+                assert_eq!(wire["stream"], stream);
+                assert!(wire.get("thinking").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn joined_unknown_passthrough_preserves_custom_case_with_and_without_template_and_on_native() {
+        for format in ["responses", "chat_completions"] {
+            for with_template in [false, true] {
+                if format == "responses" && with_template {
+                    continue;
+                }
+                let mut p = joined_provider("alias");
+                p.settings_config["apiFormat"] = json!(format);
+                if !with_template {
+                    p.meta = None;
+                }
+                for stream in [false, true] {
+                    for effort in ["VendorTier", "vendor-custom", "high"] {
+                        let mut body = json!({"model":"alias","input":"hello","stream":stream,"reasoning":{"effort":effort}});
+                        crate::proxy::providers::normalize_request_reasoning(&p, &mut body, false)
+                            .unwrap();
+                        let sent = if format == "responses" {
+                            body
+                        } else {
+                            let transport =
+                                crate::proxy::providers::resolve_codex_chat_reasoning_config(
+                                    &p, &body,
+                                );
+                            crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body,transport.as_ref()).unwrap()
+                        };
+                        let wire: serde_json::Value =
+                            serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
+                        assert_eq!(
+                            if format == "responses" {
+                                &wire["reasoning"]["effort"]
+                            } else {
+                                &wire["reasoning_effort"]
+                            },
+                            effort
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joined_known_chat_off_contract_rejects_wrong_template_but_native_none_survives() {
+        let mut p = joined_provider("alias");
+        p.settings_config["base_url"] = json!("https://api.deepseek.com/v1");
+        p.settings_config["modelCatalog"] = json!({"models":[]});
+        let mut body = json!({"model":"alias","input":"hello","reasoning":{"effort":"none"}});
+        assert!(
+            crate::proxy::providers::normalize_request_reasoning(&p, &mut body, false).is_err()
+        );
+        let transport = crate::proxy::providers::resolve_codex_chat_reasoning_config(&p, &body);
+        assert!(crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body.clone(),transport.as_ref()).is_err());
+        p.settings_config["apiFormat"] = json!("responses");
+        p.meta = None;
+        crate::proxy::providers::normalize_request_reasoning(&p, &mut body, false).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn joined_zen_unknown_model_preserves_standard_explicit_effort() {
+        let mut p = joined_provider("alias");
+        p.settings_config["base_url"] = json!("https://opencode.ai/zen/v1");
+        p.meta = None;
+        p.settings_config["modelCatalog"] = json!({"models":[]});
+        let mut body = json!({"model":"alias","input":"hello","reasoning":{"effort":"high"}});
+        crate::proxy::providers::normalize_request_reasoning(&p, &mut body, false).unwrap();
+        let transport = crate::proxy::providers::resolve_codex_chat_reasoning_config(&p, &body);
+        let wire=crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body,transport.as_ref()).unwrap();
+        assert_eq!(wire["reasoning_effort"], "high");
     }
 }

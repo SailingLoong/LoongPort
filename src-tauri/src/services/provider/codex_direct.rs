@@ -589,6 +589,13 @@ fn plan_target(db: &Database, owner: &Owner<'_>, target: &Target<'_>) -> Result<
     Ok(planned)
 }
 
+/// Codex client retry/idle settings follow only the selected provider row.
+const PROXY_KEPT_CLIENT_KEYS: &[&str] = &[
+    "request_max_retries",
+    "stream_max_retries",
+    "stream_idle_timeout_ms",
+];
+
 fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
     if planned.official {
         planned.config.route = RouteWrite::OfficialProxy {
@@ -612,6 +619,13 @@ fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
                 let mut capabilities = Table::new();
                 capabilities.insert("remote_compaction", compaction.clone());
                 proxy_table.insert("capabilities", Item::Table(capabilities));
+            }
+            // Upstream #8265: these are Codex client settings, also valid for
+            // the local route. URL, auth and other upstream fields stay private.
+            for key in PROXY_KEPT_CLIENT_KEYS {
+                if let Some(value) = table.get(key) {
+                    proxy_table.insert(key, value.clone());
+                }
             }
         }
         planned.config.route = RouteWrite::Custom(proxy_table);
@@ -2688,3 +2702,271 @@ pub(crate) fn confirm_catalog_restore(
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "codex_native_proof_tests.rs"]
 mod native_proof_tests;
+
+#[cfg(test)]
+mod proxy_projection_tests {
+    use super::*;
+    use serde_json::json;
+    use toml_edit::DocumentMut;
+
+    const LOCAL_PROXY: &str = "http://127.0.0.1:15721/v1";
+
+    fn selected_plan(config: &str, official: bool) -> Planned {
+        let settings = json!({"auth": {"OPENAI_API_KEY": "synthetic-key"}, "config": config});
+        let projection = CodexProjection::of(&RowInput {
+            settings: &settings,
+            official,
+            proxy_injected_oauth: false,
+        })
+        .expect("project the selected provider row");
+        let (route, stamp) = direct_route(&projection, true, None).expect("direct route");
+        Planned {
+            config: CodexConfigPatch {
+                top: projection.top,
+                nested: projection.nested,
+                exclusive: projection.exclusive,
+                outgoing: Vec::new(),
+                route,
+                catalog: false,
+                retired: Vec::new(),
+            },
+            catalog: None,
+            auth: settings["auth"].clone(),
+            official,
+            keep_native: false,
+            stamp,
+            leaving_official: None,
+            outgoing_catalog: None,
+            facts: RowFacts {
+                retired: Vec::new(),
+                third_party_keys: Vec::new(),
+                official_logins: Vec::new(),
+            },
+            catalog_intent: None,
+        }
+    }
+
+    fn row_config(extra: &str) -> String {
+        format!(
+            "model_provider = 'selected'\n[model_providers.selected]\nname = 'Relay'\nbase_url = 'https://upstream.example.invalid/v1'\nwire_api = 'responses'\n{extra}"
+        )
+    }
+
+    fn write_proxy(config: &str, live: &mut DocumentMut) {
+        let mut planned = selected_plan(config, false);
+        apply_proxy_projection(&mut planned, LOCAL_PROXY, true);
+        assert_eq!(planned.stamp, Some(RouteAuth::Bearer));
+        assert!(planned.keep_native);
+        planned
+            .config
+            .apply_to(std::path::Path::new("config.toml"), live)
+            .expect("apply the real config patch");
+    }
+
+    #[test]
+    fn proxy_projection_preserves_all_three_client_settings_from_selected_row() {
+        for (request, stream, timeout) in [(7, 50, 600_000), (0, 0, 0), (9, 12, 4_294_967_296)] {
+            let config = row_config(&format!(
+                "request_max_retries = {request}\nstream_max_retries = {stream}\nstream_idle_timeout_ms = {timeout}\n"
+            ));
+            // Both supported TOML table shapes use the original row projector.
+            let mut inline = config.parse::<DocumentMut>().unwrap();
+            let providers = inline
+                .remove("model_providers")
+                .unwrap()
+                .into_table()
+                .unwrap();
+            inline["model_providers"] =
+                Item::Value(TomlValue::InlineTable(providers.into_inline_table()));
+            for config in [config, inline.to_string()] {
+                let mut live = DocumentMut::new();
+                write_proxy(&config, &mut live);
+                let proxy = &live["model_providers"][ROUTE_ID];
+                assert_eq!(
+                    proxy.get("request_max_retries").and_then(Item::as_integer),
+                    Some(request)
+                );
+                assert_eq!(
+                    proxy.get("stream_max_retries").and_then(Item::as_integer),
+                    Some(stream)
+                );
+                assert_eq!(
+                    proxy
+                        .get("stream_idle_timeout_ms")
+                        .and_then(Item::as_integer),
+                    Some(timeout)
+                );
+            }
+        }
+    }
+
+    fn assert_single_client_setting(key: &str) {
+        let mut live = DocumentMut::new();
+        write_proxy(&row_config(&format!("{key} = 17\n")), &mut live);
+        let proxy = &live["model_providers"][ROUTE_ID];
+        for other in [
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+        ] {
+            assert_eq!(
+                proxy.get(other).and_then(Item::as_integer),
+                (other == key).then_some(17),
+                "{key}/{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_projection_preserves_request_retries_without_inventing_defaults() {
+        assert_single_client_setting("request_max_retries");
+    }
+
+    #[test]
+    fn proxy_projection_preserves_stream_retries_without_inventing_defaults() {
+        assert_single_client_setting("stream_max_retries");
+    }
+
+    #[test]
+    fn proxy_projection_preserves_stream_idle_timeout_without_inventing_defaults() {
+        assert_single_client_setting("stream_idle_timeout_ms");
+    }
+
+    #[test]
+    fn proxy_projection_switch_replaces_and_clears_previous_client_settings() {
+        let mut live = "# keep user configuration\n[mcp_servers.example]\ncommand = 'example'\n"
+            .parse::<DocumentMut>()
+            .unwrap();
+        write_proxy(&row_config("request_max_retries = 7\nstream_max_retries = 50\nstream_idle_timeout_ms = 600000\n"), &mut live);
+        assert_eq!(
+            live["model_providers"][ROUTE_ID]
+                .get("request_max_retries")
+                .and_then(Item::as_integer),
+            Some(7)
+        );
+        write_proxy(&row_config("request_max_retries = 2\n"), &mut live);
+        let proxy = &live["model_providers"][ROUTE_ID];
+        assert_eq!(
+            proxy.get("request_max_retries").and_then(Item::as_integer),
+            Some(2)
+        );
+        assert!(proxy.get("stream_max_retries").is_none());
+        assert!(proxy.get("stream_idle_timeout_ms").is_none());
+        write_proxy(&row_config(""), &mut live);
+        let proxy = &live["model_providers"][ROUTE_ID];
+        for key in [
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+        ] {
+            assert!(proxy.get(key).is_none(), "{key}");
+        }
+        assert_eq!(
+            live["mcp_servers"]["example"]["command"].as_str(),
+            Some("example")
+        );
+        assert!(live.to_string().contains("# keep user configuration"));
+    }
+
+    #[test]
+    fn proxy_projection_keeps_url_auth_and_private_headers_owned_by_proxy() {
+        for name in ["Relay", "OpenAI"] {
+            for capability in [None, Some("v2"), Some("unsupported")] {
+                let mut config = row_config(
+                    "experimental_bearer_token = 'synthetic-private-token'\nenv_key = 'SYNTHETIC_UPSTREAM_KEY'\nhttp_headers = { X-Upstream-Only = 'private' }\nenv_http_headers = { X-Upstream-Only = 'SYNTHETIC_PRIVATE_HEADER' }\nquery_params = { api_key = 'synthetic-private-query' }\nauth = { command = 'synthetic-auth-command' }\naws = { profile = 'synthetic-aws-profile' }\nrequires_openai_auth = true\nsupports_websockets = true\ncapabilities = { external_web_access = false }\n"
+                ).parse::<DocumentMut>().unwrap();
+                config["model_providers"]["selected"]["name"] = toml_edit::value(name);
+                if let Some(capability) = capability {
+                    config["model_providers"]["selected"]["capabilities"]["remote_compaction"] =
+                        toml_edit::value(capability);
+                }
+                let mut live = DocumentMut::new();
+                write_proxy(&config.to_string(), &mut live);
+                let proxy = &live["model_providers"][ROUTE_ID];
+                assert_eq!(proxy["base_url"].as_str(), Some(LOCAL_PROXY));
+                assert_eq!(proxy["wire_api"].as_str(), Some("responses"));
+                assert_eq!(
+                    proxy["experimental_bearer_token"].as_str(),
+                    Some(crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER)
+                );
+                assert_eq!(
+                    proxy["name"].as_str(),
+                    Some(if name == "OpenAI" { "OpenAI" } else { ROUTE_ID })
+                );
+                for private_key in [
+                    "http_headers",
+                    "env_http_headers",
+                    "env_key",
+                    "query_params",
+                    "auth",
+                    "aws",
+                    "requires_openai_auth",
+                    "supports_websockets",
+                ] {
+                    assert!(proxy.get(private_key).is_none(), "{private_key}");
+                }
+                assert_eq!(
+                    proxy
+                        .get("capabilities")
+                        .and_then(|v| v.get("remote_compaction"))
+                        .and_then(Item::as_str),
+                    capability
+                );
+                assert!(proxy
+                    .get("capabilities")
+                    .and_then(|v| v.get("external_web_access"))
+                    .is_none());
+                assert!(!live.to_string().contains("synthetic-private"));
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_projection_does_not_inherit_client_settings_from_other_scopes() {
+        let config = format!("request_max_retries = 99\n{}\n[model_providers.inactive]\nrequest_max_retries = 98\nstream_max_retries = 97\nstream_idle_timeout_ms = 96\n", row_config(""));
+        let mut live = row_config(
+            "request_max_retries = 95\nstream_max_retries = 94\nstream_idle_timeout_ms = 93\n",
+        )
+        .replace("selected", ROUTE_ID)
+        .parse::<DocumentMut>()
+        .unwrap();
+        write_proxy(&config, &mut live);
+        for key in [
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+        ] {
+            assert!(
+                live["model_providers"][ROUTE_ID].get(key).is_none(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_projection_official_switch_does_not_inherit_third_party_client_settings() {
+        for unify in [false, true] {
+            let mut live = row_config("request_max_retries = 7\nstream_max_retries = 50\nstream_idle_timeout_ms = 600000\n").replace("selected", ROUTE_ID).parse::<DocumentMut>().unwrap();
+            let mut planned = selected_plan("model = 'gpt-synthetic'\n", true);
+            apply_proxy_projection(&mut planned, LOCAL_PROXY, unify);
+            assert!(planned.stamp.is_none());
+            planned
+                .config
+                .apply_to(std::path::Path::new("config.toml"), &mut live)
+                .unwrap();
+            let proxy = &live["model_providers"][ROUTE_ID];
+            for key in [
+                "request_max_retries",
+                "stream_max_retries",
+                "stream_idle_timeout_ms",
+            ] {
+                assert!(proxy.get(key).is_none(), "{key}/{unify}");
+            }
+            assert_eq!(proxy["base_url"].as_str(), Some(LOCAL_PROXY));
+            assert_eq!(
+                proxy.get("requires_openai_auth").and_then(Item::as_bool),
+                unify.then_some(true)
+            );
+        }
+    }
+}

@@ -476,6 +476,9 @@ pub(crate) fn persist_provision_batch(
             continue;
         };
 
+        let settings_guard =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+        let generated_settings = defaults.clone();
         let existing = state
             .db
             .get_provider_by_id(&provider_id, app_type.as_str())
@@ -508,6 +511,7 @@ pub(crate) fn persist_provision_batch(
                     .as_ref()
                     .and_then(|old| old.available_models.clone())
             });
+        let previous_for_settings = existing.clone();
         let mut settings_config = match existing {
             Some(old) if user_edited || candidate.models.is_none() => {
                 // Remote availability never owns editable routing. An unavailable inventory
@@ -580,7 +584,7 @@ pub(crate) fn persist_provision_batch(
 
         let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
 
-        let provider = Provider {
+        let mut provider = Provider {
             id: provider_id.clone(),
             name: display_name.clone(),
             settings_config,
@@ -609,7 +613,17 @@ pub(crate) fn persist_provision_batch(
             available_models: available_models.clone(),
         };
 
-        if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+        let generated = Provider {
+            settings_config: generated_settings,
+            ..provider.clone()
+        };
+        if let Err(error) = crate::services::provider::model_settings::save_managed_refresh(
+            state,
+            app_type,
+            previous_for_settings.as_ref(),
+            &generated,
+            &mut provider,
+        ) {
             batch.failures.push(FailureInfo {
                 group_name: candidate.group_name,
                 reason: format!(
@@ -619,6 +633,8 @@ pub(crate) fn persist_provision_batch(
             });
             continue;
         }
+
+        drop(settings_guard);
 
         if let Some(models) = candidate.models.as_ref() {
             let models = model_selection::filter_models(app_type, models);
