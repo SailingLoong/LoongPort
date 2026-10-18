@@ -269,7 +269,7 @@ fn add_provider_internal_impl(
     // 而那一区的「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
     //
     // 这个口子不是本轮引入的（`add` 从来就没拦），但手已经伸到这个文件、现在做得了
-    // ⇒ 一并清掉（CLAUDE.md defer 准入闸的空间维度）。
+    // ⇒ 一并清掉（AGENTS.md defer 准入闸的空间维度）。
     //
     // provision 自己不走这条命令（它直调 `state.db.save_provider`），所以拦这里
     // 不影响正常的档位生成。
@@ -838,7 +838,7 @@ mod managed_guard_tests {
     ///
     /// 这个口子**不是本轮引入的** —— `add` 从来就没有守卫，所以上面那条绕过就算堵了，
     /// 走 `add_provider` 仍能一步到位造出伪装的托管项。手已经伸到这个文件、现在
-    /// 做得了 ⇒ 一并清（CLAUDE.md defer 准入闸的空间维度）。
+    /// 做得了 ⇒ 一并清（AGENTS.md defer 准入闸的空间维度）。
     #[test]
     fn add_provider_rejects_a_managed_id() {
         let provider = Provider::with_id(

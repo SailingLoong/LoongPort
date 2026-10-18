@@ -124,7 +124,7 @@ const DialogContent = React.forwardRef<
               `z-10` 是必需的：`DialogHeader` 带 `bg-muted/20` 背景，同层级下
               后面的兄弟节点会盖住它，但 header 是 flex 布局里的实体块 ——
               不提层的话 X 会被 header 的背景吃掉一半。样式抄 `SessionToc` 那份
-              （仓里已有的同形范例，CLAUDE.md §一「视觉 token 抄上游」）。 */}
+              （仓里已有的同形范例，AGENTS.md §一「视觉 token 抄上游」）。 */}
           {showCloseButton && (
             <DialogPrimitive.Close
               className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:pointer-events-none"

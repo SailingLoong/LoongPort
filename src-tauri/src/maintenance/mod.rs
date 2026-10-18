@@ -21,7 +21,7 @@ pub fn start(app: tauri::AppHandle) {
 #[cfg(feature = "gui")]
 /// 广场开关的存量补播种：**一次性**（写-if-None），启动即跑。
 ///
-/// 触发归属（CLAUDE.md §1.4）：播种是数据层自己的初始化动作，挂在启动上；
+/// 触发归属（AGENTS.md §1.4）：播种是数据层自己的初始化动作，挂在启动上；
 /// 广场页与设置页只读 `plaza_visible` 的现成产出，不驱动它。首启弹窗那条
 /// 播种在用户提交动作里（`relay::plaza::seed_from_first_site`），与本任务
 /// 在同一设置写锁内裁决，显式首域与用户开关优先。

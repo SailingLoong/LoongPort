@@ -21,7 +21,7 @@ rquickjs = { version = "0.14", features = ["array-buffer", "classes"] }
 
 [package]
 # ⚠️ crate name 保持上游的 `cc-switch`，别改 —— 118 处引用、改了收益为零
-# （裁决见 CLAUDE.md「三点五」）。面向用户的二进制名走下方 [[bin]]
+# （裁决见 AGENTS.md「三点五」）。面向用户的二进制名走下方 [[bin]]
 # （与 tauri.conf.json 的 `mainBinaryName` 同名，闸钉着）。
 name = "cc-switch"
 version.workspace = true

@@ -31,7 +31,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
     };
 
     let filename = match app {
-        AppType::Claude => "CLAUDE.md",
+        AppType::Claude => "AGENTS.md",
         AppType::Codex => "AGENTS.md",
         AppType::Gemini => "GEMINI.md",
         AppType::GrokBuild | AppType::OpenCode | AppType::OpenClaw => "AGENTS.md",

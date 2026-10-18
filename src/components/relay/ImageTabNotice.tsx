@@ -28,7 +28,7 @@ import { useSetImagegenMcpEnabled } from "@/lib/query/imagegen";
  *
  * ## 为什么用 `Alert` 而不是自己画一个框
  *
- * 上游已有（`components/ui/alert.tsx`，标准 shadcn 封装）。CLAUDE.md §一：
+ * 上游已有（`components/ui/alert.tsx`，标准 shadcn 封装）。AGENTS.md §一：
  * 能复用就复用，视觉 token 跟着上游走，新页面与旧页面放一起看不出是两个人写的。
  *
  * ## `empty` 那一支

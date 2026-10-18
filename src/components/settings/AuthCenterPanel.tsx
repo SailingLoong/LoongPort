@@ -115,7 +115,7 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
         <CodexOAuthSection showAccountQuota />
 
         {/* 「切回 ChatGPT 官方登录」——**LoongPort 自己的东西**，收在
-            `components/relay/` 下（这里只挂一行，见 CLAUDE.md §一）。
+            `components/relay/` 下（这里只挂一行，见 AGENTS.md §一）。
             放这一节是因为语义对口：它做的就是「把 codex 从中转站切回 ChatGPT 官方」，
             而用户在 ChatGPT 里点「注销」是没用的（配的是 provider auth 模式）。 */}
         <RestoreOfficialLoginButton />

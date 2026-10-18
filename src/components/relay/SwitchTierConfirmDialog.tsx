@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-// 复用上游已有的平台检测，别新写一份（CLAUDE.md §一）。
+// 复用上游已有的平台检测，别新写一份（AGENTS.md §一）。
 //
 // 它靠 UA 判断 —— 在**主窗口**里是可靠的：本仓只给登录窗与充值窗设过自定义 UA
 // （`relay::login::WEBVIEW_USER_AGENT`），主窗口用的是系统默认 UA。

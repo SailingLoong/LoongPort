@@ -12,7 +12,7 @@ fn prompt_list_refreshes_external_edits_without_changing_inactive_templates() {
     let state = create_test_state().unwrap();
 
     for (app, relative_path) in [
-        (AppType::Claude, ".claude/CLAUDE.md"),
+        (AppType::Claude, ".claude/AGENTS.md"),
         (AppType::Codex, ".codex/AGENTS.md"),
     ] {
         let active = Prompt {
@@ -126,7 +126,7 @@ fn saving_inactive_prompts_keeps_a_hand_written_file_until_the_last_enabled_one_
     let state = create_test_state().unwrap();
 
     for (app, path) in [
-        (AppType::Claude, home.join(".claude/CLAUDE.md")),
+        (AppType::Claude, home.join(".claude/AGENTS.md")),
         (AppType::Codex, home.join(".codex/AGENTS.md")),
         (AppType::Hermes, hermes_dir.join("SOUL.md")),
     ] {

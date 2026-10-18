@@ -1,19 +1,505 @@
-# AGENTS.md
+# LoongPort 代码仓规则
 
-本仓所有 AI 辅助开发（Claude / Cursor / Copilot / 其它 agent）**必须先阅读并严格遵守**：
+产品说明见 [LOONGPORT.md](LOONGPORT.md)（那份给人看：它替用户做什么、六条硬约束、怎么打包）。
+本文件只讲**写这个仓的代码时怎么决策**。
 
-1. **全局工作准则**：`~/.claude/CLAUDE.md` —— 三把尺子（业界最佳实践 / 反过度设计 / 低耦合高内聚）与红旗信号，所有技术决策都受它约束。
-2. **本仓规则**：`./CLAUDE.md` —— 本仓的代码规则（复用上游、技术栈、验收闸）。
+## 设计档案在另一个仓
 
-**冲突时全局优先**：`~/.claude/CLAUDE.md` 声明了尺子的优先级（上位条胜出），本仓 `CLAUDE.md` 不得与其冲突。
+设计文档、进度、spec 不在本仓，在同级的档案仓里（需要时用 `/add-dir` 单次挂载，别常驻）。
+维护者本机的具体布局见工作区那份 `AGENTS.md`（不入任何仓）。
 
-本文件只是指向 —— 真正的规则在 `CLAUDE.md`，别在这里复制内容（避免两份规则分叉）。
+**上一代实现是「参考不复用」**：它的 relay 层比现在这版复杂一个数量级（云同步边界、
+多 app 展开、更多分支裁决），照搬会把这版简化的成果丢掉。查它的**结论**（实测记录、
+某个设计为什么那样分）是对的，照抄它的**实现**是错的；那边带行号的引用基于旧的子模块
+指针，引用前先 `grep -n` 复核。
 
-## 本仓交付入口
+## 一、最高优先级：能复用 cc-switch 的就复用
 
-实施、独立审查和发布交接请使用本仓 [PR 模板](.github/pull_request_template.md) 记录实际责任人、输入及批准版本、交付物、验证证据、剩余缺口与范围裁剪。角色可以兼任，但独立审查需标明审查人和结论；批准或计划不能填写成测试通过。
+**这个仓是 cc-switch 的 fork，底层要跟着上游升级。** 所以「复用上游」不是风格偏好，
+而是**决定未来升级成本的架构约束** —— 每一处自己另写的东西，都是将来 merge 上游时要手工
+处理的冲突；每一处复用上游的东西，上游改进了我们免费拿到。
 
-- 开始前明确输入与已批准范围；实施中保留受影响测试和具体交付证据，范围变化记录原因及批准状态。
-- 交接按本地验证、精确 SHA 的 CI、合并、发布、线上 / 原生验收分别记录；未执行写“待验证”，不以单平台替代其他平台。
-- 使用 [贡献指南](CONTRIBUTING.md)、[本仓规则](CLAUDE.md) 和 [Tauri 打包兼容性门禁](docs/tauri-packaging-compatibility.md) 作为规则来源；本入口不更改既有身份、PR、发布或权限规则。
-- 长任务可按 [ZCode 交付清单](docs/zcode-quick-account-v1-delivery.md) 的字段建立简短公开交付记录；只放本仓可公开的事实与证据，不复制私有档案、私有链接、聊天历史或个人信息。
+### 判定顺序（自上而下，命中即停）
+
+1. **上游已有的组件 / hook / 工具函数 / 类型** → 直接用。
+   例：折叠用 `src/components/ui/collapsible.tsx`（Radix 封装，已在仓里），
+   不要引第三方折叠库、也不要自己写展开动画。
+2. **上游已有的视觉 token**（间距、圆角、选中态、hover 效果）→ 抄它的值。
+   判据：新页面和旧页面放一起，看不出是两个人写的。
+3. **上游已有的模式**（数据流、命令命名、错误处理形状）→ 照它的形状写。
+4. 以上都没有 → 才新建，且**新建的东西尽量收在自己的目录里**
+   （`src/components/relay/`、`src-tauri/src/relay/`），别散进上游文件。
+
+### 改上游文件时：改动面越小越好
+
+不得不动上游文件时（如 `App.tsx` 的视图分流、`ProviderList` 加一层过滤），
+**只改必须改的那几行**，把逻辑放进自己的新文件里让它调用。
+
+反例：为了实现一个功能把上游某个 600 行组件重构一遍 —— 那等于放弃了那个文件的上游升级。
+
+### 什么时候可以不复用
+
+- 上游那套**语义上不适用**：例 `ProviderCard` 服务的是「用户手工配置的 provider」
+  （可编辑、可删除、可拖拽排序），而 LoongPort 的托管项没有这些操作 —— 硬塞进去会让
+  两种形态互相污染。这时另建组件是对的，但**视觉 token 仍要抄**。
+- 上游的默认行为**对 LoongPort 有害**：例 updater 端点指向 cc-switch 自己的发布源，
+  留着会把用户升级成 cc-switch（见 `lib.rs` 里那段说明）。这类要明确禁用并写清理由。
+
+判据一句话：**「不复用」要能说出上游那套具体哪里不适用，说不出就是复用**。
+
+## 二、技术栈事实（别套错工具）
+
+| 项 | 实际 | 常见误判 |
+|---|---|---|
+| UI 库 | **Radix UI + Tailwind v3**（shadcn/ui 那套） | 不是 Semi Design、不是 antd、不是 MUI |
+| Tailwind | **v3.4.x**，配置在 `tailwind.config.cjs`，CSS 用 `@tailwind base` | 不是 v4 —— 别套 `@theme` / `@import "tailwindcss"`，v3 不认，样式会当场崩 |
+| 图标 | `lucide-react` | 别引第二个图标库 |
+| 样式合并 | `clsx` + `tailwind-merge`（`cn()`） | 别手拼 className 字符串 |
+| 后端 | Tauri 2 + Rust，SQLite 走 `rusqlite` | — |
+
+`src/components/ui/` 下是标准 shadcn 封装（`collapsible` / `accordion` / `dialog` /
+`select` / `tabs` …，共 23 个），**先翻那个目录再考虑新建**。
+
+### ⚠️ 许可证界线：sub2api 是 LGPL-3.0，本仓是 MIT
+
+| 项目 | 许可证 | 我们能做什么 |
+|---|---|---|
+| **cc-switch**（本仓 fork 源） | **MIT** | **可自由复用代码** —— §一「能复用就复用」讲的就是它 |
+| **sub2api**（对接的中转站后端） | **LGPL-3.0 或更高** | **只能读，不能抄代码进本仓** |
+
+**为什么读它没问题**：我们与 sub2api 的关系是**HTTP 客户端**，不链接、不包含它的代码 ——
+跟浏览器访问一个 LGPL 网站一样，不构成衍生作品。
+
+**可以从它源码拿的（接口事实，不受版权保护）**：
+端点路径、HTTP 方法、鉴权方式、请求/响应的字段名与类型、状态码语义、
+业务规则的**结论**（如「高峰倍率只对订阅型分组生效」）。
+
+**不能拿的（表达形式，受版权保护）**：
+整片函数实现、成套的 struct 定义照搬、算法代码逐行翻译。
+⚠️ 具体踩点：它前端有个 `platform → app` 映射函数（`KeysView` 的 `ns()`）与我们的
+`platform_map` 做同一件事 —— **参考它的取值域可以，照抄那个函数不行**。
+我们的 `platform_map` 是独立实现（穷尽 match + 编译期基数闸），有意不同构。
+
+**一句话判据**：**写下来的是「那边的接口长什么样」就没问题，是「那边的代码怎么写的」就不行。**
+
+（顺带：sub2api 的 README_CN 声明「从未授权任何个人或组织基于本项目开展商业化运营」——
+那是针对「拿它的代码搭站运营」，不针对「写一个客户端连它」。但商业化前值得再确认。）
+
+### 查 sub2api 的行为：先找它的 Go 源码，别逆推线上 JS
+
+对接 sub2api（端点、字段、鉴权、计费规则）时，**优先看 sub2api 后端的 Go 源码**
+（开源，`Wei-Shaw/sub2api`；源码在本机 design 仓的 `upstream/sub2api` 子模块，
+路径见工作区那份 AGENTS.md —— 维护者本机布局唯一源）。
+它是契约本身，比读线上 SPA 的 minified bundle、比历史实测记录都权威一个量级 ——
+能给到「哪个 handler 第几行填了哪个字段」级别的证据。
+
+三条纪律（都踩过）：
+
+1. **只认 `routes/*.go` 里的路由注册，handler 上方的注释不可信**：
+   `user_handler.go` 注释写 `GET /api/v1/users/me` 而真实路由是 `/user/profile`；
+   `api_key_handler.go` 写 `/api/v1/api-keys/:id` 而真实是 `/keys/:id`。
+2. **注意版本差**：本地 clone 的 commit 与线上跑的版本常常不同
+   （实测：本地 `0.1.165` vs 线上 `0.1.169`）。凭源码下的结论，落地前对线上响应复核一次。
+3. **别用 HTTP 状态码探测 SPA 路由**：sub2api 前端是 Vue SPA，
+   `/topup` `/recharge` `/wallet` 全返回 200（同一个 `index.html`），
+   但路由表里根本没这些路径。要查路由得读打包后的 JS 或源码。
+
+### 读上游源码之前：先查代码地图
+
+档案仓里有一份 cc-switch 的 zread wiki（30 页，覆盖 Tauri 2 架构、AppState、SQLite schema
+与迁移、Provider 数据模型、Live Config 写入、路由与故障转移、React 组件架构、i18n、测试
+体系等）。**读上游源码前先查它，能省掉一轮 grep。**
+
+三条硬约束（都踩过或实测过）：
+
+1. **别 `@` 导入、别软链进本仓** —— 全量 376k 字符，`@` 进来当场炸上下文；且它 untracked
+   在子模块工作树里、不入任何 git，软链 commit 后在新 clone 的机器上是悬空链接。按需读单页。
+2. **它正文写的「当前版本 3.18.0」是错的**（抄了旧 README），别引它当事实。
+   但**行号是准的** —— 六处抽样全部对齐。
+3. **子模块指针一 bump 行号就集体失准**（纯注释 commit 也能让整片下移）。指针不自动 bump
+   所以当前稳；bump 那天要么重新生成，要么降级成「只读结构、不引行号」。
+
+### 改 codex 模型目录 / 上下文窗口：三条外部事实（对着 codex-rs 源码核实过）
+
+1. **本地 catalog 是该 provider 的唯一权威**。config.toml 配了 `model_catalog_json` 后，
+   codex 给这个 provider 建 `StaticModelsManager`（model-provider/src/provider.rs），
+   官方 `models_cache.json` 的元数据**完全不参与** —— catalog 里写 262144，codex 就真跑
+   256k（比官方默认 272k 还低）。别拿官方缓存推断生成档位上的行为。
+2. **`model_context_window` 会被 `max_context_window` 钳制**。config.toml 顶层的
+   `model_context_window`（「1M 上下文窗口」开关写的值）在 codex 侧先
+   `min(该模型 entry 的 max_context_window)` 再生效（models-manager `with_config_overrides`，
+   官方测试名就叫 `model_context_window_override_clamps_to_max_context_window`）。
+   曾把映射表值同时钉进两个键，导致 1M 开关对任何填了窗口的行静默失效 —— PR #221 修根：
+   不再编造上限；厂商镜像路径保留厂商 max、用户值更高时抬升。
+3. **官方 catalog 的形状是两个不同的值**：`context_window`=默认窗口（官方模型当前全是
+   272k，2026-08 快照、会漂移），`max_context_window`=上限（gpt-5.4=1M、5.6 系=872k、
+   5.5/5.4-mini=272k）。`max_context_window` 是 serde 全可选字段，缺省=不钳制；
+   `auto_compact_token_limit` 缺省时按窗口 90% 推导。
+4. **官方同名模型默认取官方高窗口**：生成 catalog 时按 slug 匹配本机
+   `models_cache.json`（codex 官方目录缓存），命中则默认窗口=官方上限、并如实声明
+   该上限（钳制语义因此是正确的）；未命中的第三方模型不声明上限，显式行值永远赢。
+   旧的全局兜底 262144 在官方 slug 上是残留，自动剥离让位；Kimi 系列的 262144 是
+   真实窗口，未命中官方目录所以保留。
+
+修后语义：映射表「上下文窗口」= 该模型默认窗口（官方模型缺省=官方上限，逐模型不同）；
+1M 开关 = 全局覆盖（codex 官方对 `model_context_window` 的定义）；catalog 启动时加载，
+改完要重启 codex。生成逻辑全在 `codex_config.rs`：`codex_model_catalog_from_settings`
+入口（含 config 顶层 `model_context_window` 拾取）→ `codex_catalog_model_entry`
+（中性模板）/ `codex_vendor_catalog_model_entry`（厂商官方目录镜像）。
+
+## 三、LoongPort 自己的代码在哪
+
+```
+src-tauri/src/relay/          ← 中转站链路（sub2api / creds / login / provision / chatgpt_app）
+src-tauri/src/commands/relay/ ← 中转站命令层（按领域拆分，总览见该目录 mod.rs）
+src/components/relay/         ← 前端面板
+src/lib/api/relay.ts          ← 前端类型与 invoke 封装
+```
+
+碰这几处之外的文件时，先问一句「这是在改上游吗、改动面能不能更小」。
+
+### 术语唯源在 docs/glossary.md
+
+中转站域的概念用词（站点 / 账号行 / 分组 / 档位 / 套餐 / provider 记录 / 平台 / app…）
+**定义与命名规矩唯一源在 [`docs/glossary.md`](docs/glossary.md)**，新代码命名前先查它；
+wire/DB 契约名在它的冻结名单里（读宽写窄，别改）。这里只指路，不复制内容。
+
+### 这是 fork，不是「把 cc-switch 当依赖引入」
+
+16.9 万行 Rust 里我们自己写的只有 **5621 行（3.3%）** —— 上游代码是**躯干**，我们在它身上
+加东西。所以别把它想成 `import cc_switch`：没有那层边界，`relay/` 与上游代码在同一个
+crate、共享 `AppState`、共用它的 `ProviderService` / `write_live_snapshot` / deeplink 构造。
+
+**这正是 §一「能复用就复用」的物理基础**，也是「改上游文件要改动面最小」的原因。
+
+### 上游升级协议：直接复用，禁止平行移植
+
+LoongPort 的默认升级动作是**直接吸收 cc-switch 上游提交**，不是在自有目录里重新实现
+一遍同样的通用能力。上游已经解决的配置读写、会话解析、用量统计、性能优化、兼容逻辑，
+优先使用原提交和原模块边界；只有当 LoongPort 的产品行为确实不同，才在冲突点保留最小、
+可说明理由的差异。
+
+每次升级前先把改动分成三类：
+
+1. **上游通用能力**：直接 merge/cherry-pick 上游提交，尽量保留上游文件和测试。
+2. **LoongPort 策略或产品差异**：留在 LoongPort 自有模块，或在上游文件中保留最小接缝。
+3. **纯上游产品改动**：如果 LoongPort 不需要，不要为了“看起来同步”把它带进来。
+
+升级时必须遵守：
+
+- 优先使用稳定 tag 或已合入 release 的上游提交，不以浮动 `main` 作为唯一依据。
+- 不要把上游通用实现复制到第二个文件；发现两套逻辑时，回到上游实现作为唯一 owner。
+- 不要因为当前 UI 暂时不用就删除 cc-switch 原始功能；LoongPort 暂时不消费的能力也必须保留，
+  以便后续升级和功能回归时仍能直接吸收。
+- cc-switch 上游文件只有在真实产品差异或冲突无法避免时才改；改动应集中在薄接缝，
+  并在提交说明或代码注释中写清“上游行为、LoongPort 差异、保留原因”。
+- 兼容修复、性能优化、LoongPort 产品定制分别提交，避免下一次升级无法判断哪些改动可直接丢弃。
+- 每个持久化事实、路径解析规则和状态转换只能有一个 owner；不要在 LoongPort 再维护一份
+  与上游互相同步的镜像状态。
+
+升级验收必须回答三个问题：下一版 cc-switch 是否可以继续直接 merge，LoongPort 差异是否
+集中且有边界，cc-switch 原始功能是否仍然保留。回答不清楚时先调整代码边界，不要继续叠加
+适配层。
+
+**每次同步后往 [`docs/upstream-merges.md`](docs/upstream-merges.md) 台账记一行**
+（冲突文件数等）：合并成本是要监控的指标，不是背景噪音——冲突面连涨三次
+同步就要动结构，别硬解着一路滑下去（判据见台账内说明）。
+
+## 三点五、改「cc-switch」这个名字：判据是**会不会跨出进程边界**
+
+fork 之后到处都是上游的名字。哪些该改、哪些改了会坏，**不看它在底层还是上层，
+看那个字符串会不会离开本进程**：
+
+| 类别 | 例子 | 处理 |
+|---|---|---|
+| **只活在进程内 / 只给人看** | 日志文件名、启动日志、托盘 tooltip、弹窗文案 | ✅ **直接改**，零风险 |
+| **跨出去了，但能「读宽写窄」** | `model_provider` 标记（写进用户 `~/.codex/config.toml`）、model catalog 文件名 | ✅ **改，但必须留兜底**，见下 |
+| **跨出去且无法兜底** | crate name（决定二进制名，118 处引用，改了收益为零） | ❌ **不改** |
+| **它本身就是兜底** | `LEGACY_..._ID = "ccswitch"`、`app_config.rs` 提到的 `~/.cc-switch/config.json` | ❌ **绝不改** —— 改了就认不出旧数据 |
+
+### 「读宽写窄」是改持久化契约的唯一安全姿势
+
+**识别认全部历史值，写入只产出当前值。** 上游自己就用这个模式
+（`codex_history_migration.rs` 的 `CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS`）。
+
+2026-08-02 按它改了两个（都在 `codex_config.rs`）：
+
+```rust
+pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "loongport-official";
+const LEGACY_OFFICIAL_PROXY_PROVIDER_IDS: &[&str] = &["cc-switch-official"];
+pub fn is_official_proxy_provider_id(id: &str) -> bool { /* 认新旧两个 */ }
+```
+
+不留兜底的后果不是报错，是**静默失效**：老用户 `config.toml` 里写的是旧标记，
+认不出来 ⇒ 崩溃后的兜底清理跳过它 ⇒ codex 一直指着一个不再监听的本地端口，
+而用户完全不知为何连不上。
+
+那两个 legacy 数组**只增不删** —— 每一项都对应「某个版本的用户机器上可能存在的值」。
+
+## 三点六、⚠️ 同一事实散在多处 = 静默失效的温床
+
+**本轮最贵的教训**：deeplink scheme 声明在**三处**，其中 `Info.plist` 漏改还写着
+`ccswitch`，而另两处已是 `loongport` ⇒ 系统把 `ccswitch://` 交给我们、代码不认；
+`loongport://` 系统压根不路由给我们 ⇒ **deeplink 导入完全失效，且不报任何错**。
+
+这类问题的共性：**编译器管不到非 Rust 文件**（`.plist` / `.json` / `.ts`），
+不一致时不崩不报，只是功能悄悄没了。
+
+**通用解法：加一条 `include_str!` 比对的测试。** 已有两道，照它们的形状加新的：
+
+| 闸 | 守什么 |
+|---|---|
+| `deeplink::scheme_consistency_tests` | `APP_SCHEME` 必须同时在 `Info.plist` 与 `tauri.conf.json` 里 |
+| `relay::managed::prefix_matches_the_frontend_copy` | `MANAGED_ID_PREFIX` 必须与 `src/config/constants.ts` 一致 |
+
+**新增任何「跨语言/跨文件的同一事实」时，一并加闸** —— 否则它迟早分叉，
+而分叉那天没人会收到通知。同类闸如今还有：`config.rs::brand_constant_consistency`
+（`OFFICIAL_WEBSITE` / `GITHUB_REPO` 与 `constants.ts` 比对）、`events.rs` 的
+事件名主表、`vendor::frontend_catalog_matches_the_rust_registry`
+（厂商 id + 展示名）、`relay` 两个状态枚举的线上名钉死测试。
+
+### 前端只展示后端定义的业务事实
+
+LoongPort 的业务事实由后端负责计算和定义。前端的职责只有两类：
+
+1. 把用户动作传给后端，例如刷新、切换、登录、删除；
+2. 展示后端 DTO 返回的结果。
+
+因此，凡是涉及「展示什么」「是否展示」「是否允许操作」的业务判据，都必须由后端
+给出最终结果。后端字段有值，前端就展示；后端没有值，前端就留空。前端不得为了
+“看起来完整”而猜测、补默认值或根据多个原始字段重新计算一遍。
+
+**禁止的做法：**
+
+- 前端组合 `loggedIn`、`sessionExpired`、`keyReady`、`providerId` 等原始字段，
+  自行推导「能否查余额」「能否刷新」「是否在使用」「该显示哪个状态」；
+- 后端已经有业务结论，前端又保存一份镜像状态，并靠不同刷新时机维持同步；
+- 后端没有昵称、价格、额度或已用量时，前端自行拼接、换算或填一个占位业务值。
+
+**正确的契约形状：**
+
+- 后端 DTO 直接返回 `status`、`isCurrent`、`canQueryBalance`、`canRefresh`、
+  `canDelete` 等可直接展示或消费的最终事实；
+- 可选业务数据使用 `Option` / `null` 表达「后端没有权威结果」，前端收到空值就不展示；
+- 前端可以把后端状态枚举映射成文案、颜色、图标和组件，但不能改变它的业务含义。
+
+纯前端事实不受此限制，例如折叠、hover、焦点、动画、请求中的 loading、弹窗开关、
+拖拽过程和本地展示偏好。这些状态的 owner 本来就在前端，不应为了“统一放后端”而上收。
+
+**刷新/预热的触发权同样属于数据层（2026-09-06 定）**：缓存、刷新、探活这类
+「让数据变新」的动作由数据层自治（应用启动补齐、业务事件、维护任务触发），
+任何视图/模式的读路径不得顺带驱动它们——判据：**删掉那个视图或切换模式，
+数据层的行为必须不变**。先例：站点余额缓存（`relay/balance.rs` 缓存原语 +
+`services/site_balance_refresh.rs` 编排层）。原则唯源在全局准则（尺子 1.4
+「行为与状态同样有 owner」），这里只记 LoongPort 的落地形状与先例。
+
+## 四、验收：六道闸
+
+任何改动收尾都要过（CI 跑的就是这些，本地先过一遍省得来回）：
+
+```
+cd src-tauri
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+cd ..
+npx tsc --noEmit && npx prettier --check "{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}" && npx vitest run
+```
+
+两个坑（都踩过）：
+
+- **`cargo` 不在默认 PATH 里**，先 `export PATH="$HOME/.cargo/bin:$PATH"`，
+  否则拿到的是 `command not found` 而非真实结果。
+- **prettier 的 glob 必须与 CI 一致**（`"{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}"`，
+  即 `package.json` 的 `format:check`）。别缩成 `src/**` —— 那会漏掉
+  `tests/` 与 `.html`，本地全绿而 CI 红（2026-08-07 实测：`tests/components/…`
+  的格式问题本地闸从来没扫到，合并时才被线上拦下）。直接跑
+  `pnpm format:check` 最省事，别手写 glob。
+
+**`cargo test` / `clippy` 全绿不代表能打包** —— CI 的 Backend Checks 不跑 `tauri build`，
+Tauri 的 npm↔crate 兼容性必须另外检查。冻结安装后运行 `pnpm check:tauri`
+与 `pnpm test:tauri-compatibility`；普通 CI 和 Release 都执行该门禁。失败复盘、
+依赖对齐与发布验收标准见 [Tauri 打包兼容性门禁](docs/tauri-packaging-compatibility.md)。
+
+### 推送前快速预判会不会红
+
+六道闸不用每次全跑 —— CI 红不红可以按改动面跑**最小集**预判，远程精确提交仍须通过 CI：
+
+- 只动 `src/` / `tests/`：前端三件套（typecheck / format:check / test:unit）。
+- 只动 `src-tauri/`：后端三件套（fmt / clippy / test）。改 Cargo manifest、
+  锁文件或 Tauri NPM 包时，另跑上述跨生态兼容性门禁。
+- 依据有两条：CI 的 clippy 与本地同一条命令（都带 `--all-targets`，2026-08-25
+  起对齐——此前 CI 不带它，测试代码的 lint 线上隐形，攒过 9 处存量才补齐）；
+  CI 工具链走 `rust-toolchain.toml`（同本机版本，2026-08-16 #150 起 —— 别在
+  workflow 里换回 `@stable`，那会覆盖钉版，重新制造「本地绿 CI 红」的漂移）。
+
+本地判不了的三块，按相关性扫一眼而不是跑更多命令：
+
+- `#[cfg(target_os = "windows")]` 分支 macOS 编译器看不见 —— 动了 Windows
+  特定代码才需要留意，那是 `windows-build.yml` 那条腿兜的。
+- WSL2 契约 job 只测 `config` 原子写一条 —— 动到它才相关。
+- `Cargo.lock` / 依赖升级可能改行为（dependabot 的红全在这类），闸照跑、
+  结论保守点。
+
+**别拿打包当预检**：上一段说过检查面不同，方向反了 —— 打包留给发版前那次。
+
+### 合并到远程 main：走 PR，且要过线上 4 个必需检查
+
+改动要进 `main` 一律走 PR（`gh pr create`），不要直接 push 到 `main`。
+**线上闸门是 4 个必需检查**（`Frontend Checks` + 三平台 `Backend Checks`，
+内容就是上面那六道闸，见 `.github/workflows/ci.yml`）—— 本地全绿不代表远程会绿，
+外部改动（fork PR）的验证点只有它。合并方式与仓库惯例一致用 merge commit
+（dependabot 的自动合才是 squash，见下）。
+
+标准流程（本地六道闸全过之后）：
+
+```
+git fetch origin main && git checkout -b fix/xxx origin/main
+# ...改动 + 本地六道闸...
+git push -u origin fix/xxx
+gh pr create --base main --head fix/xxx --title "..." --body-file pr_body.md
+gh pr merge fix/xxx --auto --merge    # 等 4 个必需检查全绿后自动合
+```
+
+`--auto` 只负责"检查绿了自动合"，**一道闸都没省**：main 的分支保护把 4 个
+必需检查设为 required，任何一个不过都不会合。`--merge`（merge commit）是
+人工 PR 的惯例；`dependabot-auto-merge.yml` 里那条用 `--squash` 是给
+dependabot 的，别照搬。PR 模板在 `.github/pull_request_template.md`。
+**main 只接受通过 PR 的改动** —— 这条与 design 仓无关（流程知识跟着代码走，
+不抄进档案仓，见全局准则 §1.4 唯一数据源）。
+
+### 打包与产物归档：唯一源在 LOONGPORT.md，这里只指路
+
+打包命令、DMG 坑、产物路径、归档约定**全部收在
+[LOONGPORT.md](LOONGPORT.md) 的打包章节**，那里是**唯一一份**，
+别在 AGENTS.md 里复制第二遍（见全局准则 §1.4）。要打包时去读那份。
+
+唯一属于 AGENTS.md（维护视角）的是上面那条警告：**`cargo test` / `clippy` 全绿
+不代表能打包** —— 跨生态兼容性另由 `pnpm check:tauri` 预检，完整发布产物
+仍按 [Tauri 打包兼容性门禁](docs/tauri-packaging-compatibility.md) 验收。
+
+## 五、打 tag 发版：必须写清这一版干了啥
+
+**每个 `v*` tag 都要说明这一版做了什么，唯一源是 annotated tag message 的正文**
+（首行标题之外的部分）。Release 页的「本次更新」直接取它，`release.yml` 的
+`tag-notes` job 负责读取与校验。
+
+**为什么要有这条**：`publish-release` 的 `body` 原先是整段写死的模板，只有版本号会变 ⇒
+[Releases 页](https://github.com/SailingLoong/LoongPort/releases)每一版长得一模一样，
+用户无从判断该不该升级。而 tag message 里其实早就写了内容（`v3.23.2` 那条写得很完整），
+只是没人读它 —— 这不是「缺少内容」，是**内容和展示之间断了一截**，已修根。
+
+### 怎么写
+
+```bash
+cat > /tmp/notes.md <<'EOF'
+LoongPort v3.24.0
+
+修好 Cloudflare 托管站点的登录，并让 live 配置不再抹掉用户手写内容。
+
+#### 新增
+- ...
+
+#### 修复
+- ...
+EOF
+
+git tag -a v3.24.0 --cleanup=whitespace -F /tmp/notes.md
+git push origin v3.24.0
+```
+
+三条硬约束（都实测过）：
+
+1. **`--cleanup=whitespace` 不能省** —— git 默认的 `strip` 模式把**以 `#` 开头的行当注释
+   删掉**，`### 新增` 这种 Markdown 标题会**静默消失**（`- 条目` 还在，标题没了）。
+   实测：默认模式下 `### 新增` / `### 修复` 两行全被吞，正文只剩两条裸列表项。
+2. **小标题从 `####` 起** —— Release body 自己那层用的是 `###`（「本次更新」「下载」），
+   正文里再用 `###` 会和它平级，层级读起来是乱的。
+3. **首行是标题、空一行、再写正文** —— 校验只看正文（`%(contents:body)`）。
+   历史上那些只有一行 `LoongPort v3.23.0` 的 tag 正文为空，会被直接拦下。
+
+### 写什么、不写什么
+
+- **写**「这版为什么值得升」：修了什么用户能感知的问题、新增什么能力，用人话，
+  面向下载的人而不是面向维护者。
+- **不写** PR 编号清单和 commit 流水 —— GitHub 会按两个 tag 之间的 PR 自动生成
+  「What's Changed」追加在后面（`generate_release_notes: true`，本仓 main 只接受 PR
+  进入，所以那份列表天然完整）。**人写的和自动生成的各管一段，别手抄一遍。**
+
+### 忘了写会怎样
+
+`tag-notes` job 在**编包之前**跑，几秒内就红，不会浪费 40 分钟构建（macOS 那格还是
+10× 计费）。它红了整条发布通道就停，补救是删 tag 重打：
+
+```bash
+git tag -d v3.24.0 && git push origin :refs/tags/v3.24.0
+git tag -a v3.24.0 --cleanup=whitespace -F /tmp/notes.md
+git push origin v3.24.0
+```
+
+### 预发布（beta）：命名与生命周期（2026-09-12 定）
+
+**tag 名带 `-` 就是预发布开关**：`release.yml` 按 `contains(tag, '-')` 判定挂
+GitHub Pre-release 标记——预发布不算 Latest，更新器与下载页永远拿不到它
+（存量用户零打扰）。命名遵循 semver 预发布段：
+
+- **格式** `vX.Y.Z-beta.N`（如 `v6.24.0-beta.1`）。语义阶梯照业界惯例：
+  `-alpha.N` 早期内部测试 / `-beta.N` 功能齐全的公开测试 / `-rc.N` 基本定稿的
+  候选版。当前流程只用 beta 一层，够用不预埋多层。
+- **序号只往前**：同段 beta.1 → beta.2 → …，从 beta.1 起步；转正 = 版本号
+  去掉预发布段发正式版（`6.23.0-beta.2` → `v6.23.0`），不发「beta.final」
+  之类的过渡号。
+- **正式版发出后该段封盘**：`6.23.0` 已发布就不再有 `6.23.0-beta.3`
+  （semver 上它小于正式版，版本史倒挂）；下一段从新版本号起步
+  （`v6.24.0-beta.1`；patch 量级则 `v6.23.1-beta.1`）。
+- **已发布的 beta Release 与 tag 不删**：预发布自动带黄标、在 Releases 页
+  排在正式版之后、不进任何下载/更新通道，误装路径已被机制隔离；删除反而
+  悬空「跳过本版本」记录、Issue 版本引用与 git 历史。唯一例外 = 打歪了删
+  tag 重打（见上文恢复流程，且仅限 Release 未被消费时）。
+- 发版流程与正式版完全同构（版本号 4 处 bump 到带预发布段的号、release
+  分支 PR、annotated tag 正文照写）；验证清单多一条差异项：**latest.json
+  必须仍返回上一正式版**（返回 beta 才是事故）。客户端「接收测试版更新」
+  开关的通道语义在 website `latest-beta.json`（最新发布、不分正式/预发布，
+  正式版发布后 beta 用户自然收到升级提示回正轨）。
+
+### 版本号升哪一位（patch / minor 硬判据，2026-09-16 立规、2026-09-19 收紧）
+
+**默认 patch**：修复、小改动、**单个新功能，一律 patch**（`6.26.1`、`6.26.2` …）。
+**minor 只有两个入口**：① 窗口内有 **2 个及以上**面向用户的新功能；② 维护者点名
+升 minor（先例：v6.16.0）。不存在「内容成规模」这类主观判定——发版前数一遍
+窗口内面向用户的新功能，数不满两个就 patch，**没有裁量空间，不写「我觉得
+这版内容多」这种理由**。
+
+历史：6.19.0–6.24.0 连续开 minor 属流程漂移（09-16 立规叫停）；v6.26.0 段是
+旧软判据「发版前明确判定内容比较多」的最后一次误开（09-18，单功能当「成规模」）
+——段已开，按封盘规则走到转正为止。beta 段同判据：patch 量级的新段从
+`vX.Y.Z+1-beta.1` 起步，minor 量级从 `vX.Y+1.0-beta.1` 起步。
+
+### 版本轨道与上游的关系（切轨判据，2026-08-17 定）
+
+LoongPort 与 cc-switch 是**同一版本号空间里的两条轨道**：v6.0.0 起跳过了 4/5
+（fork 基线 v3.19.2，撞号会让用户与搜索混淆），而更新器把小版本号当降级判据
+⇒ **LoongPort 的版本号必须永远大于上游同期的号**。这是一条只能往前跑的跑步机。
+
+- **切轨触发判据**：上游进入 `N-1` 段（例：LoongPort 在 6.x，上游开始发 5.x）时，
+  在下一个 LoongPort 大版本窗口切到不会撞的方案——calver（`2026.9.0`）或独立段。
+  切轨是一次性决策：更新器只认 LoongPort 自己的 Release（技术上断链风险低），
+  要评估的是用户认知与外部资料的连续性。
+- **别做**：为了躲撞号频繁跳段（v4/v5 那种一次性让位是特例，不是惯例）；
+  回到 1.0.0 重新计（更新器判降级，老用户断链）。
+- 发版前顺手看一眼上游最新 tag，把「上游追到哪了」当作发版 checklist 的一项。
+
+## 六、公开仓隐私纪律：用户的真实使用细节不进任何公开产物
+
+本仓与教程仓（`cc-switch-relay-tutorial`）公开，website 的部署产物公开。commit
+message、PR 标题与正文、tag 与 Release 说明、issue、代码注释、测试用例、截图——
+这些都随仓公开。其中**不得出现用户的真实使用细节**：
+
+- 手动添加的站点域名（含站点自报的 `site_name`、日志摘录、示例数据、截图水印）；
+- 账号、邮箱、token、本机路径里的用户名；
+- 诊断时抓到的真实站点响应原文。
+
+**怎么写**：测试与注释用中性占位（`apex.example` / `panel.example`）；commit 与
+发布说明用泛化描述（如「裸域 301 到 www 的站点」）。**敏感事实的去处**：design
+私库或本机 agent 记忆（先例：中转站台账 xlsx 放 design 私库）。
+
+自检一句话：这段文字被站点主人或陌生路人看到，会不会暴露「谁在用什么站、怎么
+用」——会，就先改成中性描述再提交。

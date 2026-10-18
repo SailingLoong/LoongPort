@@ -45,7 +45,7 @@ import { useTierVerification } from "./model-verification/TierVerificationProvid
  *
  * `ProviderCard` 626 行，服务的是**用户手工配置的 provider**（可编辑、可删除、
  * 可拖拽排序）。托管档位没有这些操作 —— 硬塞进去会让两种形态互相污染
- * （CLAUDE.md §一「什么时候可以不复用」正是这一条）。
+ * （AGENTS.md §一「什么时候可以不复用」正是这一条）。
  *
  * 但**视觉 token 全部抄它**，判据是「和旧页面放一起看不出是两个人写的」：
  * `rounded-xl border p-4`、选中态 `border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10`
@@ -71,7 +71,7 @@ import { useTierVerification } from "./model-verification/TierVerificationProvid
  *
  * ⚠️ **Tailwind 的 JIT 靠扫源码里的字面 class 生成样式**，模板拼出来的名字它看不见
  * ⇒ 那条样式压根不生成 ⇒ 按钮**永远不显形**，而且 tsc / build 都不报错。
- * 这正是 CLAUDE.md §三点六 说的那类「编译器管不到、不一致时不崩只是功能悄悄没了」。
+ * 这正是 AGENTS.md §三点六 说的那类「编译器管不到、不一致时不崩只是功能悄悄没了」。
  *
  * ## 为什么两个 group 都取了名字
  *
@@ -808,7 +808,7 @@ function TierItem({
         <TierVerifyButton tier={tier} canVerify={tier.canVerifyModels} />
 
         {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
-            （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），
+            （AGENTS.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），
             那个判断在宿主里，不在这儿：本组件不知道用户勾过「不再提示」没有。 */}
         <Button
           type="button"

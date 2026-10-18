@@ -94,7 +94,7 @@ pub struct TierInfo {
 /// spec §三 定的是 `RelayRow { ..., tiers: Vec<TierRow> }`，这里**复用已有的
 /// [`TierInfo`] 而不新建 `TierRow`** —— 两者字段本就一致（含那个关键的
 /// `rate_multiplier: Option<f64>`），再建一个只会让同一个概念有两种形状，
-/// 前端也得写两套类型（CLAUDE.md §一：能复用就复用）。
+/// 前端也得写两套类型（AGENTS.md §一：能复用就复用）。
 ///
 /// **它是只读本地的**，与 [`RelayStatus`] 的首屏契约一致（不发网络请求）——
 /// 所以 `tiers` 里的 `rate_multiplier` 恒为 `None`，倍率要等用户主动刷新（provision）

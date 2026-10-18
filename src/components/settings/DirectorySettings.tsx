@@ -7,7 +7,7 @@ import type { ResolvedDirectories } from "@/hooks/useSettings";
 // ⚠️ **从 hook 那边 import，不在这里另写一份 `Exclude<AppId, …>`**。
 // 原来这里有一份同名的本地拷贝，而 `useDirectorySettings.ts` 里那份是真源头 ——
 // 两份一分叉（加一个不该有目录设置的 app 时只改了一处）就是编译期报「类型不兼容」，
-// 而排查得先发现存在两份定义。CLAUDE.md §三点六。
+// 而排查得先发现存在两份定义。AGENTS.md §三点六。
 import type { DirectoryAppId } from "@/hooks/useDirectorySettings";
 
 interface DirectorySettingsProps {

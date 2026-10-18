@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
  *
  * ## 它守的是什么
  *
- * 这套 UI 是从 `RelayRow` 抄过来的（CLAUDE.md §一：两类行放一起看不出是两个人
+ * 这套 UI 是从 `RelayRow` 抄过来的（AGENTS.md §一：两类行放一起看不出是两个人
  * 写的）。抄的时候最容易丢的正是上面那三条不显眼的约定，而丢了之后
  * 类型检查、prettier、vitest 全绿。
  */
@@ -74,7 +74,7 @@ describe("恢复默认只动当前这一个平台", () => {
 
 describe("编辑流程复用 useTierEditGuard", () => {
   it("官网行走的是同一个 hook，不是自己做的一套", () => {
-    // 这条守 CLAUDE.md §一：编辑页复用上游 `EditProviderDialog`，
+    // 这条守 AGENTS.md §一：编辑页复用上游 `EditProviderDialog`，
     // 事前警告复用同一个 guard。另做一套等于把那些坑再踩一遍
     // （尤其「保存失败必须 throw，否则弹窗照关、用户配置全丢」那条）。
     expect(SECTION).toContain("requestEdit({");

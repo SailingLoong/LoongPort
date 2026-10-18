@@ -70,7 +70,7 @@ export const MANAGED_PROVIDER_ID_PREFIX = "loongport-";
  * 改的人在那个文件里搜不到 `setItem`，自然以为改完了。
  *
  * 所以这里不只是「集中管理」的偏好 —— 提到一处**消掉了分叉的物理条件**，
- * 比再加一道 `include_str!` 比对闸便宜（见 `CLAUDE.md` §三点六）。
+ * 比再加一道 `include_str!` 比对闸便宜（见 `AGENTS.md` §三点六）。
  */
 export const LAST_APP_STORAGE_KEY = "loongport-last-app";
 /** 见 {@link LAST_APP_STORAGE_KEY} —— 同一组，读写都在 `App.tsx`。 */

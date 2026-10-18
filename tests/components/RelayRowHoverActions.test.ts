@@ -159,7 +159,7 @@ describe("RelayRow hover-reveal actions", () => {
   });
 
   it("keeps ProviderActions on the same shape: main button inside the gate", () => {
-    // 跨文件的同一事实要有闸（CLAUDE.md §三点六）：「整组 hover（含主按钮）」
+    // 跨文件的同一事实要有闸（AGENTS.md §三点六）：「整组 hover（含主按钮）」
     // 这条分界线在 RelayRow（上面的用例）与 ProviderActions（ProviderCard 的
     // 动作区，gating 已从 ProviderCard 外层包装收进组件内部）两处各写一份。
     const actions = fs.readFileSync(PROVIDER_ACTIONS_TSX, "utf8");

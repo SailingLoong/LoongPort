@@ -468,7 +468,7 @@ impl AppType {
         )
     }
 
-    /// 该 app 是否有可托管的提示词文件（CLAUDE.md / AGENTS.md / …）。
+    /// 该 app 是否有可托管的提示词文件（AGENTS.md / AGENTS.md / …）。
     ///
     /// ClaudeDesktop 与 CodexImage 不是能读提示词文件的 CLI —— 见
     /// [`AppType::CodexImage`] 的说明。「支不支持 Prompts」以这里为唯一判据，
@@ -781,7 +781,7 @@ impl MultiAppConfig {
     /// 适用于「老版本已经生成过 config.json，但当时还没有 Prompt 功能」的升级场景。
     /// 判定规则：
     /// - 仅当所有应用的 prompts 都为空时才尝试导入（避免打扰已经在使用 Prompt 功能的用户）
-    /// - 每个应用最多导入一次，对应各自的提示词文件（如 CLAUDE.md/AGENTS.md/GEMINI.md）
+    /// - 每个应用最多导入一次，对应各自的提示词文件（如 AGENTS.md/AGENTS.md/GEMINI.md）
     ///
     /// 返回值：
     /// - Ok(true)  表示至少有一个应用成功导入了提示词
@@ -1424,7 +1424,7 @@ mod app_type_all_tests {
         assert!(!AppType::ClaudeDesktop.supports_prompts());
         assert!(!AppType::CodexImage.supports_prompts());
         // 其余（含 Pi——`sync_to_live` 对它的跳过是投影语义不同，不是能力
-        // 缺失）都是能读 CLAUDE.md / AGENTS.md / SOUL.md 的 CLI。
+        // 缺失）都是能读 AGENTS.md / AGENTS.md / SOUL.md 的 CLI。
         for app in AppType::all() {
             let is_non_cli = matches!(app, AppType::ClaudeDesktop | AppType::CodexImage);
             assert_ne!(
