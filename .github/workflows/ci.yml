@@ -302,22 +302,6 @@ jobs:
         shell: bash
         run: mkdir -p dist
 
-      - name: Prepare WSL2-backed test environment
-        shell: pwsh
-        run: |
-          wsl.exe -d Ubuntu-24.04 -- bash -lc "rm -rf /tmp/cc-switch-windows-test-root && mkdir -p /tmp/cc-switch-windows-test-root/{home,temp} && chmod -R 0777 /tmp/cc-switch-windows-test-root"
-          $testRoot = "\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-windows-test-root"
-          $testHome = Join-Path $testRoot "home"
-          $testTemp = Join-Path $testRoot "temp"
-          foreach ($path in @($testRoot, $testHome, $testTemp)) {
-            if (-not (Test-Path -LiteralPath $path)) {
-              throw "WSL2-backed test path is unavailable: $path"
-            }
-          }
-          "CC_SWITCH_TEST_HOME=$testHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CC_SWITCH_WSL_TEST_DIR=$testRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CC_SWITCH_WSL_TEST_TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Compile backend tests with native temp
         # link.exe/mt.exe cannot create manifests when TEMP points at a WSL UNC path,
         # 所以 cargo（构建）只允许出现在这一步。顺带解析出 lib 测试二进制的路径，
@@ -338,6 +322,22 @@ jobs:
           $rel = $m.Matches[0].Groups[1].Value
           $exe = if ([IO.Path]::IsPathRooted($rel)) { $rel } else { Join-Path $pwd.Path $rel }
           "CC_SWITCH_TEST_BIN=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare WSL2-backed test environment
+        shell: pwsh
+        run: |
+          wsl.exe -d Ubuntu-24.04 -- bash -lc "rm -rf /tmp/cc-switch-windows-test-root && mkdir -p /tmp/cc-switch-windows-test-root/{home,temp} && chmod -R 0777 /tmp/cc-switch-windows-test-root"
+          $testRoot = "\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-windows-test-root"
+          $testHome = Join-Path $testRoot "home"
+          $testTemp = Join-Path $testRoot "temp"
+          foreach ($path in @($testRoot, $testHome, $testTemp)) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "WSL2-backed test path is unavailable: $path"
+            }
+          }
+          "CC_SWITCH_TEST_HOME=$testHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_SWITCH_WSL_TEST_DIR=$testRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_SWITCH_WSL_TEST_TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run Windows-to-WSL2 filesystem contract
         # 直接执行上一步编好的测试二进制：契约本身要求 TEMP/HOME 落在 WSL UNC
