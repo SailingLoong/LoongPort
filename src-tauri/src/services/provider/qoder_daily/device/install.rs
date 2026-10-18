@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt},
     path::PathBuf,
 };
 
@@ -84,6 +84,7 @@ pub(super) struct PinnedFile {
     path: PathBuf,
     file: File,
     stamp: Stamp,
+    sha256: &'static str,
 }
 impl PinnedFile {
     pub(super) fn open(path: PathBuf, pin: &Pin) -> Result<Self, Dependency> {
@@ -123,11 +124,36 @@ impl PinnedFile {
             path,
             file,
             stamp: stamp(&meta),
+            sha256: pin.sha256,
         };
         result.recheck()?;
         Ok(result)
     }
     pub(super) fn recheck(&self) -> Result<(), Dependency> {
+        self.recheck_identity()?;
+        // Metadata is not a content proof: same-length writes can share a
+        // filesystem timestamp. Read the held descriptor at explicit offsets,
+        // bounded by the admitted pin, without changing its shared file cursor.
+        let size =
+            usize::try_from(self.stamp.size).map_err(|_| Dependency::OfficialDeviceUnverified)?;
+        let mut bytes = vec![0; size];
+        self.file
+            .read_exact_at(&mut bytes, 0)
+            .map_err(|_| Dependency::OfficialDeviceUnverified)?;
+        let mut extra = [0u8; 1];
+        if self
+            .file
+            .read_at(&mut extra, self.stamp.size)
+            .map_err(|_| Dependency::OfficialDeviceUnverified)?
+            != 0
+            || hex_digest(&bytes) != self.sha256
+        {
+            return Err(Dependency::OfficialDeviceUnverified);
+        }
+        // Retain the path/inode/ownership/mode/time fence around the full read.
+        self.recheck_identity()
+    }
+    fn recheck_identity(&self) -> Result<(), Dependency> {
         let named =
             fs::symlink_metadata(&self.path).map_err(|_| Dependency::OfficialDeviceUnverified)?;
         let opened = self
@@ -268,6 +294,40 @@ mod tests {
         std::os::unix::fs::symlink(p.parent().unwrap(), &alias).unwrap();
         assert!(PinnedFile::open(alias.join("fixture"), &pin).is_err());
         assert!(held.recheck().is_ok());
+    }
+    #[test]
+    fn unchanged_rechecks_preserve_the_held_file_cursor() {
+        use std::io::{Seek, SeekFrom};
+        let (_t, p, mut pin) = fixture();
+        let hash = hex_digest(b"synthetic");
+        pin.sha256 = Box::leak(hash.into_boxed_str());
+        let held = PinnedFile::open(p, &pin).unwrap();
+        // try_clone shares the OS cursor. Positional verification must neither
+        // depend on that cursor nor change it for another holder.
+        let mut shared = held.file.try_clone().unwrap();
+        shared.seek(SeekFrom::Start(3)).unwrap();
+        for _ in 0..3 {
+            assert!(held.recheck().is_ok());
+            assert_eq!(shared.stream_position().unwrap(), 3);
+        }
+    }
+    #[test]
+    fn same_length_rewrite_is_rejected_even_when_metadata_matches() {
+        let (_t, p, mut pin) = fixture();
+        let hash = hex_digest(b"synthetic");
+        pin.sha256 = Box::leak(hash.into_boxed_str());
+        let mut held = PinnedFile::open(p.clone(), &pin).unwrap();
+        fs::write(&p, b"different").unwrap();
+        let after = stamp(&held.file.metadata().unwrap());
+        assert_eq!(
+            (after.dev, after.ino, after.size),
+            (held.stamp.dev, held.stamp.ino, held.stamp.size)
+        );
+        // Deterministically emulate a timestamp-granularity collision. Only the
+        // test's recorded metadata is aligned; the admitted content pin remains.
+        held.stamp = after;
+        assert!(stamp(&fs::symlink_metadata(&p).unwrap()) == held.stamp);
+        assert!(held.recheck().is_err());
     }
     #[test]
     fn mutable_bytes_in_same_inode_are_rejected_on_recheck() {
