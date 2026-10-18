@@ -10,7 +10,7 @@
  * 「当前用哪个档位生图」的唯一 owner 是生图栏的启用项（`providers.is_current` +
  * 设备级 `currentProviderCodexImage`）。这里顶部的快切只是同一个动作的第二个入口
  * （复用 `relayApi.switchTier`），切换后 MCP 那条链路同步跟着变 —— 那是期望中的
- * 一致：用户心里的模型是「我现在用这家生图」。见 CLAUDE.md「前端只展示后端定义的
+ * 一致：用户心里的模型是「我现在用这家生图」。见 AGENTS.md「前端只展示后端定义的
  * 业务事实」。
  */
 

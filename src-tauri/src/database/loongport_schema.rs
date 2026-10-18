@@ -871,7 +871,7 @@ fn rename_operator_table_to_relay(conn: &Connection) -> Result<(), AppError> {
 ///
 /// ## 清掉旧键
 ///
-/// 做减法（CLAUDE.md：清包袱不在旧的旁边加一层）：值已经搬到新位置，留着它只会让
+/// 做减法（AGENTS.md：清包袱不在旧的旁边加一层）：值已经搬到新位置，留着它只会让
 /// 将来读代码的人怀疑「是不是还有第二个来源」。
 fn inherit_the_old_current_image_tier(conn: &Connection) -> Result<(), AppError> {
     const OLD_KEY: &str = "loongport_current_image_tier";

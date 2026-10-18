@@ -261,7 +261,7 @@ fn profile_snapshot_apply_roundtrip_restores_configuration() {
     assert!(prompts.get("pr1").expect("pr1").enabled, "pr1 re-enabled");
     assert!(!prompts.get("pr2").expect("pr2").enabled, "pr2 disabled");
 
-    let live_prompt = fs::read_to_string(claude_dir.join("CLAUDE.md")).expect("read CLAUDE.md");
+    let live_prompt = fs::read_to_string(claude_dir.join("AGENTS.md")).expect("read AGENTS.md");
     assert_eq!(
         live_prompt,
         prompt("pr1", true).content,

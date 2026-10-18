@@ -56,7 +56,7 @@ skills、prompt 一件件重新配。两边的数据目录完全隔离：
 | LoongPort | `~/.loongport/`（`config.rs:21` `APP_DIR_NAME`） | `loongport.db`（`config.rs:24`） |
 
 ⚠️ **这个隔离是有意的、别改**：两个 app 可以同时装、同时跑，共用一个库会互相踩
-（`app_config.rs` 那些 `~/.cc-switch` 引用是**旧数据识别**用的兜底，属 CLAUDE.md
+（`app_config.rs` 那些 `~/.cc-switch` 引用是**旧数据识别**用的兜底，属 AGENTS.md
 §三点五「它本身就是兜底」那一类，绝不能改）。要的是**一次性拷过来**，不是共用。
 
 **要做的**：设置页给一个「从 cc-switch 导入」按钮 —— 检测到 `~/.cc-switch/cc-switch.db`
@@ -73,7 +73,7 @@ cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch �
    - **不该搬**：LoongPort 自己的表（`loongport_*` / relay 凭据 / `device-id`），
      cc-switch 里压根没有。
    - **要单独想**：cc-switch 里那些**指向别家中转站**的 provider。照搬进来会与
-     LoongPort 托管的档位混在一列里，而两者语义不同（见 CLAUDE.md「§什么时候可以不复用」
+     LoongPort 托管的档位混在一列里，而两者语义不同（见 AGENTS.md「§什么时候可以不复用」
      里 `ProviderCard` vs 托管项那段）。是全搬、只搬官方直连、还是让用户勾选？
 2. **复用 `import_config_from_file`**（`commands/import_export.rs:42`）**别新写一套** ——
    它已有 `db.import_sql` + `run_post_import_sync` + 自动建备份（返回 `backup_id`）
@@ -101,7 +101,7 @@ cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch �
 
 **为什么不能并存**：两条指向同一个上游的记录，用户看到的是重复档位，
 而其中一条不受 provision 管（改模型 / 换 sk 都不会跟着动）⇒ 用哪条完全看运气。
-这与 CLAUDE.md §三点六「同一事实散在多处」是同一类病。
+这与 AGENTS.md §三点六「同一事实散在多处」是同一类病。
 
 **判据（维护者给的）**：`域名 + sk 密钥` 两者合起来做唯一键 —— 单看 sk 可能撞
 （不同站点的 key 格式相同），单看域名会把同站点的多个档位误并成一个，合起来不会重复。

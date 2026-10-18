@@ -25,7 +25,7 @@ import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
  *
  * `App.tsx` 是上游文件。把 state、弹窗、判据摊在那里等于把 LoongPort 的实现搬进上游，
  * 将来 merge 上游时那一片全是冲突。收在这里之后 `App.tsx` 只多一行
- * `onSwitch={guardedSwitch}` 与一个 `{switchDialog}`（CLAUDE.md §一「改上游文件时
+ * `onSwitch={guardedSwitch}` 与一个 `{switchDialog}`（AGENTS.md §一「改上游文件时
  * 改动面越小越好」）。
  *
  * ## 判据复用 `chatgptNeedsAttention`，与档位切换完全一致

@@ -12,7 +12,7 @@ import { PURCHASE_CLOSED, VENDOR_LOGIN_ERROR } from "@/lib/api/events";
  * 只是两个名字不同 ⇒ 用户走完登录流程、凭据解析失败，界面上**什么都不发生**
  * （而那正是最需要提示的一刻，不说他会反复重登）。`tsc` 管不到，单测碰不到。
  *
- * CLAUDE.md §三点六：新增任何「跨语言 / 跨文件的同一事实」时一并加闸 ——
+ * AGENTS.md §三点六：新增任何「跨语言 / 跨文件的同一事实」时一并加闸 ——
  * 否则它迟早分叉，而分叉那天没人会收到通知。
  *
  * 2026-08-07 前 `VENDOR_LOGIN_ERROR_EVENT` 定义在 `commands/vendor.rs`，迁入

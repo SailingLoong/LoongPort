@@ -31,7 +31,7 @@ pub const DB_FILE_NAME: &str = "loongport.db";
 // 品牌常量：**前端 `src/config/constants.ts` 有等价副本**
 //
 // 跨语言没法共享常量，所以两边各存一份。而「同一事实散在多处」是静默失效的温床
-// （见 CLAUDE.md §三点六）—— 所以本文件末尾有一道 `include_str!` 比对的测试，
+// （见 AGENTS.md §三点六）—— 所以本文件末尾有一道 `include_str!` 比对的测试，
 // 任一边改了另一边没跟上就测试红。**新增这类常量时一并往那道闸里加一行。**
 // ============================================================================
 
@@ -903,7 +903,7 @@ mod brand_constant_consistency {
     /// 跨语言编译器管不到 `.ts`，不一致时不报错、不崩溃 —— 只是某个按钮跳到错的地方，
     /// 或前后端一个拦一个不拦。这道闸把那类问题从「静默失效」变成「测试红」。
     ///
-    /// **新增这类常量时往下面的表里加一行。** 判据（CLAUDE.md §三点六）：
+    /// **新增这类常量时往下面的表里加一行。** 判据（AGENTS.md §三点六）：
     /// 凡「同一事实同时存在于 Rust 与非 Rust 文件」，就该在这里对上。
     #[test]
     fn frontend_copies_match() {
@@ -930,7 +930,7 @@ mod brand_constant_consistency {
     ///
     /// `package.json` / `Cargo.toml` / `tauri.conf.json` 各存一份。Tauri 自己有
     /// npm↔crate 的校验，但**它只在 `tauri build` 时触发** —— `cargo test` 与
-    /// `clippy` 全绿也测不到（`CLAUDE.md` §四 记着这条，2026-08-02 踩过，`ca82a908`）。
+    /// `clippy` 全绿也测不到（`AGENTS.md` §四 记着这条，2026-08-02 踩过，`ca82a908`）。
     ///
     /// 这条闸把「打包到最后一步才炸」提前成 `cargo test` 秒红。
     ///

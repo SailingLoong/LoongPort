@@ -67,7 +67,7 @@ import { vendorBusyKey, vendorPlanBusyKey } from "./VendorRow";
  * 它要挂进 `App.tsx`（上游文件）。如果把 `relays` / `busy` / 那几个行内 handler
  * 摊在那里，等于把 relay 的实现搬进上游文件 —— 将来 merge 上游时那一片全是冲突。
  * 收在这个组件里，`App.tsx` 只需一行 `<RelaySection appId={activeApp} />`
- * （CLAUDE.md §一「改上游文件时改动面越小越好」）。
+ * （AGENTS.md §一「改上游文件时改动面越小越好」）。
  *
  * ## 它是中转站链路唯一的宿主（2026-08-04）
  *

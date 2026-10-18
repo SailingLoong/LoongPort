@@ -52,7 +52,7 @@ export interface EditableTier {
  * `EditProviderDialog` 已经支持全部字段（各 CLI 的表单分支、通用配置片段、
  * 自定义端点、模型目录）。托管档位就是一条正常的 provider 记录
  * （`category = "aggregator"`、写在同一张表里），那页直接就能编辑它 ——
- * 自己再做一个表单等于把上游那套维护责任接过来（CLAUDE.md §一）。
+ * 自己再做一个表单等于把上游那套维护责任接过来（AGENTS.md §一）。
  *
  * ## 为什么必须先弹警告
  *

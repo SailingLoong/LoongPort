@@ -7,7 +7,7 @@
 //!
 //! 事件名是**跨文件、跨语言**的契约：Rust 侧要 emit、前端要 listen，两边的字符串
 //! 一旦分叉，界面就不刷新 / 弹错窗口，且编译过、测试绿、没有任何报错
-//! （CLAUDE.md §三点六 的"同一事实散在多处 = 静默失效"）。
+//! （AGENTS.md §三点六 的"同一事实散在多处 = 静默失效"）。
 //!
 //! 历史教训：`provider-switched` 曾散在 7 处 Rust emit + 3 处前端监听，全是裸字面量，
 //! 没有任何东西守住它们一致。收进这里后，加新事件 = 两端各加一个常量 + 闸自动守。
@@ -114,7 +114,7 @@ pub const MODEL_MISMATCH: &str = "model-mismatch";
 ///
 /// ⚠️ 放在 events.rs（而不是某个命令模块）是因为它是**跨模块**的：`commands::provider`
 /// 是私有模块，deeplink（crate 级模块）访问不到它。凡「改了 current 就要通知界面」的
-/// 路径都从这里发，别在别处复制第二遍（CLAUDE.md §1.4）。
+/// 路径都从这里发，别在别处复制第二遍（AGENTS.md §1.4）。
 pub fn emit_provider_switched(
     app_handle: &tauri::AppHandle,
     app_type: &AppType,
@@ -147,7 +147,7 @@ mod consistency_tests {
     /// 跨语言编译器管不到 `.ts`，不一致时不报错、不崩溃 —— 只是事件发出去前端收不到、
     /// 界面不刷新。这道闸把那类问题从「静默失效」变成「测试红」。
     ///
-    /// **新增跨语言事件时往下面的表里加一行。** 判据（CLAUDE.md §三点六）：
+    /// **新增跨语言事件时往下面的表里加一行。** 判据（AGENTS.md §三点六）：
     /// 凡「同一事实同时存在于 Rust 与非 Rust 文件」，就该在这里对上。
     /// 形状照 `config.rs::brand_constant_consistency::frontend_copies_match`。
     #[test]

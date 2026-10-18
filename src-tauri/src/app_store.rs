@@ -222,7 +222,7 @@ mod tests {
     use super::*;
 
     /// `app_paths.json` 的位置由 `tauri.conf.json` 的 `identifier` 推出来，
-    /// 而那是**跨文件的同一事实**（CLAUDE.md §三点六）。
+    /// 而那是**跨文件的同一事实**（AGENTS.md §三点六）。
     ///
     /// 这道闸盯住三件事，任一条破了 `read_app_config_dir_override_without_tauri`
     /// 就会静默读不到覆盖 —— 症状是「用户设了数据目录，但生图 MCP 还是用默认库」，

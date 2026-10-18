@@ -186,7 +186,7 @@ Full install and usage guide (in Chinese): **[docs/loongport-cli.md](docs/loongp
 The system tray offers quick tier switching for supported applications. See the
 [product guide](docs/guide/README.en.md) for model selection and configuration recovery.
 
-Credentials and site data live in a local SQLite database under `~/.loongport/` and are
+Credentials and site data live in an encrypted local SQLite database under `~/.loongport/` and are
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
 has no account system and no server of its own, so it never receives them.
 

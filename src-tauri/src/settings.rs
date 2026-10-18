@@ -3011,7 +3011,7 @@ mod tests {
     /// 「新装用户默认看哪些 app」在 Rust（`VisibleApps::default`）与 TS
     /// （`DEFAULT_VISIBLE_APPS`，settings 未加载瞬间的兜底）各存一份 —— 跨语言
     /// 编译器管不到，分叉只表现为两边短暂闪不同的 tab 集。这道闸把分叉变成
-    /// `cargo test` 秒红（CLAUDE.md §三点六；hermes 曾真实分叉过）。
+    /// `cargo test` 秒红（AGENTS.md §三点六；hermes 曾真实分叉过）。
     #[test]
     fn default_visible_apps_match_the_frontend_copy() {
         let ts = include_str!("../../src/config/appConfig.tsx");
