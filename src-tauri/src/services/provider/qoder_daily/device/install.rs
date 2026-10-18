@@ -215,6 +215,9 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
+        // macOS temp_dir can contain /var -> /private/var. Positive identity
+        // tests require an actual canonical path, just like the installed app.
+        let root = fs::canonicalize(root).unwrap();
         let path = root.join("fixture");
         fs::write(&path, b"synthetic").unwrap();
         (
@@ -254,6 +257,17 @@ mod tests {
         assert!(PinnedFile::open(link, &pin).is_err());
         fs::hard_link(&p, p.with_extension("hard")).unwrap();
         assert!(PinnedFile::open(p, &pin).is_err());
+    }
+    #[test]
+    fn parent_directory_alias_never_inherits_a_hash_pin() {
+        let (_t, p, mut pin) = fixture();
+        let hash = hex_digest(b"synthetic");
+        pin.sha256 = Box::leak(hash.into_boxed_str());
+        let held = PinnedFile::open(p.clone(), &pin).unwrap();
+        let alias = p.parent().unwrap().join("directory-alias");
+        std::os::unix::fs::symlink(p.parent().unwrap(), &alias).unwrap();
+        assert!(PinnedFile::open(alias.join("fixture"), &pin).is_err());
+        assert!(held.recheck().is_ok());
     }
     #[test]
     fn mutable_bytes_in_same_inode_are_rejected_on_recheck() {

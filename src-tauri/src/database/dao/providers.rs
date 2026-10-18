@@ -483,8 +483,17 @@ impl Database {
         }
         session.ensure_available()?;
         let mut conn = lock_conn!(self.conn);
+        // Claim intent performs a read-before-write CAS across independent
+        // connections. Reserve the writer before reading, so SQLite's busy
+        // handler can wait instead of failing a deferred lock-upgrade deadlock.
+        // Ordinary provider saves retain their existing transaction behavior.
+        let behavior = if qoder_operation.is_some() {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        };
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(behavior)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
@@ -791,7 +800,9 @@ impl Database {
     ) -> Result<(), AppError> {
         let vault = self.secrets.read()?;
         let mut conn = lock_conn!(self.conn);
-        let tx = conn.transaction()?;
+        // Retirement reads the receipt before conditionally clearing Provider
+        // pending. Acquire the same writer admission before that first read.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for operation in super::qoder_campaign_operations::read_on(&tx, identity)? {
             if server_now >= operation.binding.end_at() {
                 Self::clear_qoder_pending_on(&tx, &vault, &operation)?;

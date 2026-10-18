@@ -33,6 +33,9 @@ impl LocalHttp {
                         Err(e) => panic!("{e}"),
                     }
                 };
+                // Accepted sockets may inherit the listener's nonblocking mode
+                // on Unix platforms. Normalize the fixture, retaining the read timeout.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                     .unwrap();

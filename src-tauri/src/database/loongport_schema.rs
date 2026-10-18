@@ -2405,8 +2405,10 @@ mod tests {
     fn qoder_v25_migrates_once_without_changing_upstream_version() {
         let conn = mem();
         ensure_version_table(&conn).unwrap();
-        set_version(&conn, 25).unwrap();
+        // Build the historical table before claiming that v25 is installed:
+        // the production owner must never repair a missing installed table.
         crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+        set_version(&conn, 25).unwrap();
         let upstream: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
@@ -2437,8 +2439,10 @@ mod tests {
     fn qoder_invalid_v25_schema_does_not_advance() {
         let conn = mem();
         ensure_version_table(&conn).unwrap();
-        set_version(&conn, 25).unwrap();
+        // Build the historical table before claiming that v25 is installed:
+        // the production owner must never repair a missing installed table.
         crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+        set_version(&conn, 25).unwrap();
         conn.execute_batch("CREATE TABLE qoder_campaign_operations(attempt_id TEXT)")
             .unwrap();
         assert!(apply(&conn).is_err());
