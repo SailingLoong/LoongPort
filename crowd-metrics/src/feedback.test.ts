@@ -15,11 +15,7 @@ import {
 
 const SOURCE = "0123456789abcdef0123456789abcdef";
 
-function makeFile(
-  name: string,
-  size: number,
-  type = "image/png",
-): File {
+function makeFile(name: string, size: number, type = "image/png"): File {
   return new File([new Uint8Array(size)], name, { type });
 }
 
@@ -68,13 +64,20 @@ describe("parseFeedbackForm", () => {
   });
 
   it("sourceId 只认 32 位小写 hex", () => {
-    for (const bad of ["", "XYZ", "0123456789ABCDEF0123456789ABCDEF", "0".repeat(31)]) {
+    for (const bad of [
+      "",
+      "XYZ",
+      "0123456789ABCDEF0123456789ABCDEF",
+      "0".repeat(31),
+    ]) {
       expect(parseFeedbackForm(makeForm({ sourceId: bad })).ok).toBe(false);
     }
   });
 
   it("appVersion 与 ping 同一套形状闸（拒任意文本/超长）", () => {
-    expect(parseFeedbackForm(makeForm({ appVersion: "6.25.0-beta.1" })).ok).toBe(true);
+    expect(
+      parseFeedbackForm(makeForm({ appVersion: "6.25.0-beta.1" })).ok,
+    ).toBe(true);
     for (const bad of ["", "has space", "a".repeat(40), "6.20.0/../../etc"]) {
       expect(parseFeedbackForm(makeForm({ appVersion: bad })).ok).toBe(false);
     }
@@ -83,7 +86,9 @@ describe("parseFeedbackForm", () => {
   it("description 拒空串与超长", () => {
     expect(parseFeedbackForm(makeForm({ description: "" })).ok).toBe(false);
     expect(
-      parseFeedbackForm(makeForm({ description: "字".repeat(MAX_DESCRIPTION_CHARS + 1) })).ok,
+      parseFeedbackForm(
+        makeForm({ description: "字".repeat(MAX_DESCRIPTION_CHARS + 1) }),
+      ).ok,
     ).toBe(false);
   });
 
@@ -92,7 +97,9 @@ describe("parseFeedbackForm", () => {
     expect(parseFeedbackForm(makeForm({ meta: "[1,2]" })).ok).toBe(false);
     expect(parseFeedbackForm(makeForm({ meta: '"text"' })).ok).toBe(false);
     expect(
-      parseFeedbackForm(makeForm({ meta: JSON.stringify({ k: "x".repeat(MAX_META_BYTES) }) })).ok,
+      parseFeedbackForm(
+        makeForm({ meta: JSON.stringify({ k: "x".repeat(MAX_META_BYTES) }) }),
+      ).ok,
     ).toBe(false);
   });
 
@@ -100,21 +107,29 @@ describe("parseFeedbackForm", () => {
     const tooMany = Array.from({ length: MAX_SCREENSHOTS + 1 }, (_, i) =>
       makeFile(`s${i}.png`, 8),
     );
-    expect(parseFeedbackForm(makeForm({ screenshots: tooMany })).ok).toBe(false);
+    expect(parseFeedbackForm(makeForm({ screenshots: tooMany })).ok).toBe(
+      false,
+    );
 
     expect(
-      parseFeedbackForm(makeForm({ screenshots: [makeFile("big.png", 5 * 1024 * 1024 + 1)] })).ok,
+      parseFeedbackForm(
+        makeForm({ screenshots: [makeFile("big.png", 5 * 1024 * 1024 + 1)] }),
+      ).ok,
     ).toBe(false);
 
     expect(
-      parseFeedbackForm(makeForm({ screenshots: [makeFile("a.txt", 8, "text/plain")] })).ok,
+      parseFeedbackForm(
+        makeForm({ screenshots: [makeFile("a.txt", 8, "text/plain")] }),
+      ).ok,
     ).toBe(false);
   });
 
   it("bundle 超过整包上限拒，缺省为 null", () => {
     expect(
       parseFeedbackForm(
-        makeForm({ bundle: makeFile("z.zip", 10 * 1024 * 1024 + 1, "application/zip") }),
+        makeForm({
+          bundle: makeFile("z.zip", 10 * 1024 * 1024 + 1, "application/zip"),
+        }),
       ).ok,
     ).toBe(false);
     expect(expectOk(parseFeedbackForm(makeForm())).bundle).toBeNull();
@@ -124,84 +139,45 @@ describe("parseFeedbackForm", () => {
     expect(expectOk(parseFeedbackForm(makeForm())).signals).toBeNull();
 
     const signals = JSON.stringify({
-      lastCrash: { at: "2026-09-15 20:00:17", appVersion: "6.24.0", message: "boom" },
+      lastCrash: {
+        at: "2026-09-15 20:00:17",
+        appVersion: "6.24.0",
+        message: "boom",
+      },
       recentErrors: ["[2026-09-21][ERROR][m] x"],
     });
     const parsed = expectOk(parseFeedbackForm(makeForm({ signals })));
     expect(parsed.signals).toEqual(JSON.parse(signals));
 
     // 坏 JSON / 非对象 / 超长：都不该把用户的反馈拒掉
-    expect(expectOk(parseFeedbackForm(makeForm({ signals: "not-json" }))).signals).toBeNull();
-    expect(expectOk(parseFeedbackForm(makeForm({ signals: "[1,2]" }))).signals).toBeNull();
     expect(
-      expectOk(parseFeedbackForm(makeForm({ signals: "x".repeat(MAX_SIGNALS_BYTES + 1) })))
-        .signals,
+      expectOk(parseFeedbackForm(makeForm({ signals: "not-json" }))).signals,
+    ).toBeNull();
+    expect(
+      expectOk(parseFeedbackForm(makeForm({ signals: "[1,2]" }))).signals,
+    ).toBeNull();
+    expect(
+      expectOk(
+        parseFeedbackForm(
+          makeForm({ signals: "x".repeat(MAX_SIGNALS_BYTES + 1) }),
+        ),
+      ).signals,
     ).toBeNull();
   });
 });
 
-describe("issue 组装", () => {
-  const base = expectOk(parseFeedbackForm(makeForm()));
-
-  it("标题取描述首行并截断", () => {
-    expect(buildIssueTitle("第一行\n第二行")).toBe("[App 反馈] 第一行");
-    expect(buildIssueTitle("长".repeat(80))).toBe(`[App 反馈] ${"长".repeat(50)}`);
+describe("issue notification minimization", () => {
+  const reportId = "4a267031-4dd2-48ed-822e-aa0bddf681e4";
+  it("uses only a report ID for the title", () => {
+    expect(buildIssueTitle(reportId)).toBe(`[App feedback] ${reportId}`);
   });
-
-  it("正文含描述、截图内联、诊断包链接与环境摘要", () => {
-    const body = buildIssueBody(base, ["https://metrics.example/feedback-asset/x.png"], "https://metrics.example/feedback-asset/y.zip");
-    expect(body).toContain("示例反馈");
-    expect(body).toContain("![截图](https://metrics.example/feedback-asset/x.png)");
-    expect(body).toContain("[diagnostics.zip](https://metrics.example/feedback-asset/y.zip)");
-    expect(body).toContain("```json");
-    expect(body).toContain(`sourceId: \`${SOURCE}\``);
-  });
-
-  it("无附件时正文不含截图与诊断包段", () => {
-    const body = buildIssueBody(base, [], null);
-    expect(body).not.toContain("### 截图");
-    expect(body).not.toContain("### 诊断包");
-  });
-
-  it("signals 渲染「最近异常」节：崩溃带时间与当时版本、错误逐条列出", () => {
-    const form = expectOk(
-      parseFeedbackForm(
-        makeForm({
-          signals: JSON.stringify({
-            lastCrash: {
-              at: "2026-09-15 20:00:17.229",
-              appVersion: "6.24.0",
-              message: "cannot execute `LocalPool` executor",
-            },
-            recentErrors: [
-              "[2026-09-21][14:49:20][ERROR][proxy] 流式响应静默期超时 (120秒)",
-            ],
-          }),
-        }),
-      ),
-    );
-    const body = buildIssueBody(form, [], null);
-    expect(body).toContain("### 最近异常");
-    expect(body).toContain("- 上次崩溃：2026-09-15 20:00:17.229（v6.24.0）：cannot execute `LocalPool` executor");
-    expect(body).toContain("- [2026-09-21][14:49:20][ERROR][proxy] 流式响应静默期超时 (120秒)");
-    // 摘要节在诊断包与环境之间
-    expect(body.indexOf("### 最近异常")).toBeGreaterThan(0);
-  });
-
-  it("signals 形状未知或为空时正文不出现「最近异常」节", () => {
-    expect(buildIssueBody(base, [], null)).not.toContain("### 最近异常");
-
-    const weird = expectOk(
-      parseFeedbackForm(makeForm({ signals: JSON.stringify({ whatever: 1 }) })),
-    );
-    expect(buildIssueBody(weird, [], null)).not.toContain("### 最近异常");
-
-    const emptyCrash = expectOk(
-      parseFeedbackForm(
-        makeForm({ signals: JSON.stringify({ lastCrash: {}, recentErrors: [] }) }),
-      ),
-    );
-    expect(buildIssueBody(emptyCrash, [], null)).not.toContain("### 最近异常");
+  it("contains an exact reconciliation marker and receipt time, no content links", () => {
+    const body = buildIssueBody(reportId, 0);
+    expect(body.split("\n")[0]).toBe(`<!-- loongport-report:${reportId} -->`);
+    expect(body).toContain("1970-01-01T00:00:00.000Z");
+    expect(body).not.toContain("https://");
+    expect(body).not.toContain("sourceId");
+    expect(body).not.toContain("diagnostics");
   });
 });
 
@@ -215,8 +191,14 @@ describe("dayUtc", () => {
 
 describe("isValidAssetPath", () => {
   it("接受恰好两段（day/file）的真实 key 形状", () => {
-    expect(isValidAssetPath("2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837.zip")).toBe(true);
-    expect(isValidAssetPath("2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837-shot-1.png")).toBe(true);
+    expect(
+      isValidAssetPath("2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837.zip"),
+    ).toBe(true);
+    expect(
+      isValidAssetPath(
+        "2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837-shot-1.png",
+      ),
+    ).toBe(true);
   });
 
   it("拒绝零段/一段/三段、路径穿越与空段", () => {

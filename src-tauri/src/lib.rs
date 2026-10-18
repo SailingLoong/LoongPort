@@ -21,7 +21,13 @@ mod database;
 mod deeplink;
 mod diagnostics;
 mod diagnostics_export;
+#[cfg(any(feature = "gui", test))]
+mod diagnostics_snapshot;
 mod error;
+#[cfg(any(feature = "gui", test))]
+mod feedback_preview;
+#[cfg(any(feature = "gui", test))]
+mod feedback_receipt;
 mod gemini_config;
 mod gemini_mcp;
 mod grok_config;
@@ -1221,18 +1227,8 @@ fn initialize_runtime(
         // 计成两个。生成或落盘失败就跳过本轮，下次启动再试（不排队）。
         // 设置读写是文件 IO，搬进 `spawn_blocking`（与下面的站点读一致）。
         let install_id =
-            match tauri::async_runtime::spawn_blocking(|| -> Result<String, AppError> {
-                if crate::settings::get_settings().stats_install_id.is_none() {
-                    crate::settings::mutate_settings(|s| {
-                        s.stats_install_id
-                            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
-                    })?;
-                }
-                crate::settings::get_settings()
-                    .stats_install_id
-                    .ok_or_else(|| AppError::Config("install id 生成后仍缺失".to_string()))
-            })
-            .await
+            match tauri::async_runtime::spawn_blocking(crate::settings::ensure_stats_install_id)
+                .await
             {
                 Ok(Ok(id)) => id,
                 Ok(Err(e)) => {
@@ -1808,7 +1804,13 @@ pub fn run() {
             commands::export_diagnostics,
             commands::feedback_get_endpoint_configured,
             commands::read_clipboard_image,
+            commands::prepare_feedback,
+            commands::feedback_cancel_preview,
+            commands::feedback_get_form_capabilities,
             commands::submit_feedback,
+            commands::feedback_get_last_report,
+            commands::feedback_delete_local_report,
+            commands::feedback_export_last_diagnostics,
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
             commands::relay_list_directory,
