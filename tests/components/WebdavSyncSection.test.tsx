@@ -11,7 +11,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { invoke } from "@tauri-apps/api/core";
-import type { WebDavSyncSettings, S3SyncSettings } from "@/types";
+import type {
+  WebDavSyncSettings,
+  S3SyncSettings,
+  RemoteSnapshotInfo,
+} from "@/types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -659,6 +663,24 @@ describe("WebdavSyncSection", () => {
   });
 
   it("fetches remote info and uploads after confirmation", async () => {
+    const remoteInfo: RemoteSnapshotInfo = {
+      deviceName: "Deferred remote device",
+      createdAt: "2026-02-01T10:00:00Z",
+      snapshotId: "deferred-snapshot",
+      version: 2,
+      protocolVersion: 2,
+      layout: "current",
+      remotePath: "/synthetic/profile/snapshots/deferred-snapshot",
+      compatible: true,
+      artifacts: ["db.sql", "skills.zip"],
+    };
+    let resolveRemoteInfo!: (info: RemoteSnapshotInfo) => void;
+    const pendingRemoteInfo = new Promise<RemoteSnapshotInfo>((resolve) => {
+      resolveRemoteInfo = resolve;
+    });
+    settingsApiMock.webdavSyncFetchRemoteInfo.mockReturnValueOnce(
+      pendingRemoteInfo,
+    );
     renderSection(baseConfig);
 
     fireEvent.click(
@@ -670,19 +692,36 @@ describe("WebdavSyncSection", () => {
         1,
       );
     });
-
-    fireEvent.click(
-      screen.getByRole("button", {
+    expect(
+      screen.queryByRole("button", {
         name: "settings.webdavSync.confirmUpload.confirm",
       }),
-    );
+    ).not.toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", {
+      name: "settings.webdavSync.fetchingRemote",
+    })) {
+      expect(button).toBeDisabled();
+    }
+    expect(settingsApiMock.webdavSyncUpload).not.toHaveBeenCalled();
+
+    // A started request is not a rendered confirmation: wait for the dialog.
+    const confirmation = screen.findByRole("button", {
+      name: "settings.webdavSync.confirmUpload.confirm",
+    });
+    await act(async () => {
+      resolveRemoteInfo(remoteInfo);
+    });
+    const confirmButton = await confirmation;
+    expect(screen.getByText("Deferred remote device")).toBeInTheDocument();
+    expect(settingsApiMock.webdavSyncUpload).not.toHaveBeenCalled();
+    fireEvent.click(confirmButton);
 
     await waitFor(() => {
       expect(settingsApiMock.webdavSyncUpload).toHaveBeenCalledTimes(1);
+      expect(toastSuccessMock).toHaveBeenCalledWith(
+        "settings.webdavSync.uploadSuccess",
+      );
     });
-    expect(toastSuccessMock).toHaveBeenCalledWith(
-      "settings.webdavSync.uploadSuccess",
-    );
   });
 
   it("blocks upload confirmation if form changes after dialog opens", async () => {
@@ -697,14 +736,13 @@ describe("WebdavSyncSection", () => {
       );
     });
 
+    const confirmButton = await screen.findByRole("button", {
+      name: "settings.webdavSync.confirmUpload.confirm",
+    });
     fireEvent.change(screen.getByPlaceholderText("cc-switch-sync"), {
       target: { value: "new-root" },
     });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "settings.webdavSync.confirmUpload.confirm",
-      }),
-    );
+    fireEvent.click(confirmButton);
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith(
@@ -728,7 +766,7 @@ describe("WebdavSyncSection", () => {
     });
 
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "settings.webdavSync.confirmDownload.confirm",
       }),
     );
@@ -753,14 +791,13 @@ describe("WebdavSyncSection", () => {
       );
     });
 
+    const confirmButton = await screen.findByRole("button", {
+      name: "settings.webdavSync.confirmDownload.confirm",
+    });
     fireEvent.change(screen.getByPlaceholderText("default"), {
       target: { value: "new-profile" },
     });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "settings.webdavSync.confirmDownload.confirm",
-      }),
-    );
+    fireEvent.click(confirmButton);
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith(
