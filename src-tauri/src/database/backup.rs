@@ -99,6 +99,7 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 /// Their local rows are preserved when a downloaded snapshot is installed.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "paperclip_run_bindings",
+    "qoder_campaign_operations",
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
@@ -383,6 +384,7 @@ impl Database {
             .map_err(crate::secrets::inventory::secret_error)?;
         crate::secrets::inventory::validate_database(&connection, &source)?;
         crate::paperclip::bindings::read_rows(&connection)?;
+        crate::database::dao::qoder_campaign_operations::read_rows(&connection)?;
         crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
         super::vault::stamp(&connection, vault)?;
         Ok(ValidatedSyncSnapshot {
@@ -432,6 +434,11 @@ impl Database {
         crate::secrets::inventory::transform_database(&local, Some(current), next)?;
         Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
         crate::paperclip::bindings::preserve_local(current_conn, &incoming.connection)?;
+        crate::database::dao::qoder_campaign_operations::preserve_local(
+            current_conn,
+            &incoming.connection,
+        )?;
+        Self::preserve_qoder_states_on_restore(current_conn, &incoming.connection, current, next)?;
         crate::secrets::inventory::validate_database(&incoming.connection, next)?;
         Ok(incoming.connection)
     }
@@ -647,11 +654,25 @@ impl Database {
                 crate::paperclip::bindings::preserve_local(&main_conn, &staged_conn)?;
                 crate::paperclip::bindings::read_rows(&staged_conn)?
             };
+            let preserved_qoder_operations = {
+                let staged_conn = lock_conn!(staged.conn);
+                crate::database::dao::qoder_campaign_operations::preserve_local(
+                    &main_conn,
+                    &staged_conn,
+                )?;
+                crate::database::dao::qoder_campaign_operations::read_rows(&staged_conn)?
+            };
             prepare(&staged)?;
             let temp_conn = lock_conn!(staged.conn);
             if crate::paperclip::bindings::read_rows(&temp_conn)? != preserved_bindings {
                 return Err(AppError::Config("paperclip.local_bindings_changed".into()));
             }
+            if crate::database::dao::qoder_campaign_operations::read_rows(&temp_conn)?
+                != preserved_qoder_operations
+            {
+                return Err(AppError::Config("qoder.local_operations_changed".into()));
+            }
+            Self::preserve_qoder_states_on_restore(&main_conn, &temp_conn, vault, vault)?;
             crate::secrets::inventory::validate_database(&temp_conn, vault)?;
             let backup_path = Self::backup_database_file_from_conn(
                 &backup_file_guard,
@@ -956,7 +977,7 @@ impl Database {
             crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
             return Ok(());
         }
-        if version != 24 {
+        if !matches!(version, 24 | 25) {
             return Err(AppError::Config("upgrade.unsupported_source".into()));
         }
         let mut working = Connection::open_in_memory()?;
@@ -1741,6 +1762,11 @@ impl Database {
             )?;
             before_replace(safety_backup.as_deref())?;
             crate::paperclip::bindings::preserve_local(&main_conn, &staging_conn)?;
+            crate::database::dao::qoder_campaign_operations::preserve_local(
+                &main_conn,
+                &staging_conn,
+            )?;
+            Self::preserve_qoder_states_on_restore(&main_conn, &staging_conn, &vault, &vault)?;
             self.invalidate_pricing_observations()?;
             let backup = Backup::new(&staging_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
@@ -1859,6 +1885,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    include!("backup_qoder_tests.rs");
     use super::{lock_backup_file_operations, Database};
     use crate::error::AppError;
     use crate::secrets::VaultContext;
@@ -1970,7 +1997,7 @@ mod tests {
         db.migrate_released_checkpoint_schema(&device, &vault)?;
         assert_eq!(
             super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
-            25
+            super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?;
         db.migrate_released_checkpoint_schema(&device, &vault)?;

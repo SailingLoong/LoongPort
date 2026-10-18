@@ -463,6 +463,13 @@ impl LocalProxyRequestOverrides {
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
+    /// Backend-owned Qoder claim state; generic saves never trust this input.
+    #[serde(
+        default,
+        rename = "qoderCampaignState",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub qoder_campaign_state: Option<crate::services::provider::qoder_daily::State>,
     /// App/provider field overrides; never written into the application's live config.
     #[serde(
         rename = "applicationModelOverrides",

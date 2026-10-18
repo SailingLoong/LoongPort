@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 25;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 26;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -342,6 +342,21 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 }
                 conn.execute_batch("RELEASE paperclip_binding_migration")?;
             }
+            25 => {
+                conn.execute_batch("SAVEPOINT qoder_operation_migration")?;
+                let result = (|| {
+                    crate::database::dao::qoder_campaign_operations::create_schema(conn)?;
+                    crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
+                    set_version(conn, 26)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch(
+                        "ROLLBACK TO qoder_operation_migration; RELEASE qoder_operation_migration",
+                    )?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE qoder_operation_migration")?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -351,6 +366,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     // Installed v25 is evidence to validate, never permission to recreate a ledger.
     crate::paperclip::bindings::validate_schema(conn)?;
     crate::paperclip::bindings::read_rows(conn)?;
@@ -2270,14 +2286,20 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         apply(&conn).unwrap();
-        assert_eq!(read_stored_version(&conn).unwrap(), 25);
+        assert_eq!(
+            read_stored_version(&conn).unwrap(),
+            LOONGPORT_SCHEMA_VERSION
+        );
         assert!(table_exists(&conn, "paperclip_run_bindings").unwrap());
         let upstream_after: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(upstream_after, upstream_before);
         apply(&conn).unwrap();
-        assert_eq!(read_stored_version(&conn).unwrap(), 25);
+        assert_eq!(
+            read_stored_version(&conn).unwrap(),
+            LOONGPORT_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -2378,5 +2400,48 @@ mod tests {
         assert_eq!(row, ("{}".into(), None));
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
         apply(&conn).unwrap();
+    }
+    #[test]
+    fn qoder_v25_migrates_once_without_changing_upstream_version() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 25).unwrap();
+        crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+        let upstream: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        apply(&conn).unwrap();
+        apply(&conn).unwrap();
+        assert_eq!(read_stored_version(&conn).unwrap(), 26);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
+                .unwrap(),
+            upstream
+        );
+        assert!(
+            crate::database::dao::qoder_campaign_operations::read_rows(&conn)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn qoder_installed_v26_missing_table_is_rejected_without_repair() {
+        let db = crate::database::Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("DROP TABLE qoder_campaign_operations")
+            .unwrap();
+        assert!(apply(&conn).is_err());
+        assert!(!table_exists(&conn, "qoder_campaign_operations").unwrap());
+    }
+    #[test]
+    fn qoder_invalid_v25_schema_does_not_advance() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 25).unwrap();
+        crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE qoder_campaign_operations(attempt_id TEXT)")
+            .unwrap();
+        assert!(apply(&conn).is_err());
+        assert_eq!(read_stored_version(&conn).unwrap(), 25);
     }
 }

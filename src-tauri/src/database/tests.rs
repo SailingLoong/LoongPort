@@ -1328,3 +1328,6 @@ fn incremental_vacuum_reclaims_entire_freelist() {
     Database::incremental_vacuum_on_conn(&conn).expect("incremental vacuum");
     assert_eq!(freelist(&conn), 0, "all free pages should be reclaimed");
 }
+
+#[path = "tests/qoder_daily.rs"]
+mod qoder_daily;

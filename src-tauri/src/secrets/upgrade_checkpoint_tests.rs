@@ -485,7 +485,7 @@ fn source17_database_prepare_preserves_current_loongport_schema() {
         database::loongport_schema::apply(&conn).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&conn).unwrap(),
-            25
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
     }
     let before = super::review_tests::snapshot(f._temporary.path());

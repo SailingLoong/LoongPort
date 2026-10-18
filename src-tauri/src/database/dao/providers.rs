@@ -457,6 +457,27 @@ impl Database {
         session: &crate::secrets::session::SecretSession,
         vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
     ) -> Result<(), AppError> {
+        self.save_provider_with_vault_owned(
+            app_type,
+            provider,
+            (expected, mark_user_edited),
+            session,
+            vault,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    fn save_provider_with_vault_owned(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        comparison: (Option<&str>, bool),
+        session: &crate::secrets::session::SecretSession,
+        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+        qoder_operation: Option<&crate::services::provider::qoder_daily::Operation>,
+    ) -> Result<crate::services::provider::qoder_daily::PersistOutcome, AppError> {
+        let (expected, mark_user_edited) = comparison;
         if !std::ptr::eq(session, self.secrets.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
         }
@@ -466,12 +487,53 @@ impl Database {
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        if let Some(expected) = expected {
-            let current = Self::get_all_providers_on_connection(&tx, vault, app_type)?
-                .shift_remove(&provider.id)
+        use crate::services::provider::qoder_daily::{self, PersistOutcome};
+        let current =
+            Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
+        let mut replacement = provider.clone();
+        if let Some(operation) = qoder_operation {
+            let previous = current
+                .as_ref()
                 .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
-            let current_digest = Self::provider_update_digest(&current)?;
-            if current_digest == Self::provider_update_digest(provider)? {
+            let state = previous
+                .meta
+                .as_ref()
+                .and_then(|m| m.qoder_campaign_state.as_ref())
+                .ok_or_else(|| AppError::Config("qoder.generation_required".into()))?;
+            let next = replacement
+                .meta
+                .as_ref()
+                .and_then(|m| m.qoder_campaign_state.as_ref())
+                .ok_or_else(|| AppError::Config("qoder.generation_required".into()))?;
+            if app_type != "codex"
+                || expected.is_none()
+                || state.generation != operation.generation
+                || state.generation != next.generation
+                || qoder_daily::authentication_changed(previous, &replacement)
+                || next.pending.as_ref().map(|p| (&p.id, &p.generation))
+                    != Some((&operation.id, &operation.generation))
+                || operation.binding.identity().provider_id != provider.id
+            {
+                return Err(AppError::Config("qoder.generation_changed".into()));
+            }
+        } else {
+            Self::preserve_qoder_state_on_save(app_type, current.as_ref(), &mut replacement);
+        }
+        let provider = &replacement;
+        if let Some(expected) = expected {
+            let current = current
+                .as_ref()
+                .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
+            let current_digest = Self::provider_update_digest(current)?;
+            let backend_state_equal = current
+                .meta
+                .as_ref()
+                .and_then(|m| m.qoder_campaign_state.as_ref())
+                == provider
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.qoder_campaign_state.as_ref());
+            if current_digest == Self::provider_update_digest(provider)? && backend_state_equal {
                 if mark_user_edited {
                     tx.execute(
                         "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
@@ -479,13 +541,20 @@ impl Database {
                     )?;
                     tx.commit()?;
                 }
-                return Ok(());
+                return Ok(PersistOutcome::AlreadyCurrent);
             }
             if current_digest != expected {
                 return Err(AppError::Config("mode.provider_changed".into()));
             }
         }
 
+        if let Some(operation) = qoder_operation {
+            if let Some(previous) =
+                super::qoder_campaign_operations::insert_unknown_on(&tx, operation)?
+            {
+                Self::clear_qoder_pending_on(&tx, vault, &previous)?;
+            }
+        }
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
         let stored_settings = if crate::services::vendor_source_binding::is_reference(provider) {
@@ -611,6 +680,190 @@ impl Database {
                 log::warn!("Could not append new provider to application chain: {e}");
             }
         }
+        Ok(PersistOutcome::Applied)
+    }
+
+    fn preserve_qoder_state_on_save(
+        app_type: &str,
+        current: Option<&Provider>,
+        next: &mut Provider,
+    ) {
+        use crate::services::provider::qoder_daily::{self, State};
+        let is_qoder = app_type == "codex"
+            && next.meta.as_ref().and_then(|m| m.provider_type.as_deref()) == Some("qoder_sdk");
+        let owned = current
+            .and_then(|p| p.meta.as_ref())
+            .and_then(|m| m.qoder_campaign_state.clone());
+        let state = match (current, owned) {
+            (Some(previous), Some(mut state)) => {
+                if qoder_daily::authentication_changed(previous, next) {
+                    state.generation = State::fresh().generation;
+                }
+                Some(state)
+            }
+            (_, None) if is_qoder => Some(State::fresh()),
+            _ => None,
+        };
+        // Ignore forged, stale or copied frontend metadata, including on insert.
+        if next.meta.is_some() || state.is_some() {
+            next.meta
+                .get_or_insert_with(Default::default)
+                .qoder_campaign_state = state;
+        }
+    }
+
+    pub(crate) fn save_qoder_operation(
+        &self,
+        provider: &Provider,
+        operation: &crate::services::provider::qoder_daily::Operation,
+    ) -> Result<crate::services::provider::qoder_daily::PersistOutcome, AppError> {
+        use crate::services::provider::qoder_daily::Attempt;
+        let vault = self.secrets.read()?;
+        let expected = Self::provider_update_digest(provider)?;
+        let mut next = provider.clone();
+        let state = next
+            .meta
+            .as_mut()
+            .and_then(|m| m.qoder_campaign_state.as_mut())
+            .ok_or_else(|| AppError::Config("qoder.generation_required".into()))?;
+        state.pending = Some(Attempt {
+            id: operation.id.clone(),
+            generation: operation.generation.clone(),
+        });
+        self.save_provider_with_vault_owned(
+            "codex",
+            &next,
+            (Some(&expected), false),
+            self.secrets.as_ref(),
+            &vault,
+            Some(operation),
+        )
+    }
+
+    pub(crate) fn qoder_operations(
+        &self,
+        identity: &crate::services::provider::qoder_daily::contract::Identity,
+    ) -> Result<Vec<crate::services::provider::qoder_daily::Operation>, AppError> {
+        let conn = lock_conn!(self.conn);
+        super::qoder_campaign_operations::read_on(&conn, identity)
+    }
+
+    fn clear_qoder_pending_on(
+        tx: &Transaction<'_>,
+        vault: &VaultContext,
+        operation: &crate::services::provider::qoder_daily::Operation,
+    ) -> Result<(), AppError> {
+        for (id, provider) in Self::get_all_providers_on_connection(tx, vault, "codex")? {
+            let Some(mut meta) = provider.meta else {
+                continue;
+            };
+            let Some(state) = &mut meta.qoder_campaign_state else {
+                continue;
+            };
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.id == operation.id && p.generation == operation.generation)
+            {
+                // Only detach this exact old attempt; keep a newer current generation.
+                state.pending = None;
+                meta.custom_endpoints.clear();
+                let encrypted = seal_db(
+                    vault,
+                    "providers",
+                    "meta",
+                    &[&id, "codex"],
+                    &serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?,
+                )?;
+                tx.execute(
+                    "UPDATE providers SET meta=?1 WHERE id=?2 AND app_type='codex'",
+                    params![encrypted, id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retire_qoder_operations(
+        &self,
+        identity: &crate::services::provider::qoder_daily::contract::Identity,
+        server_now: i64,
+    ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction()?;
+        for operation in super::qoder_campaign_operations::read_on(&tx, identity)? {
+            if server_now >= operation.binding.end_at() {
+                Self::clear_qoder_pending_on(&tx, &vault, &operation)?;
+                // Retain the latest receipt as the anti-replay window lower bound.
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_qoder_operation(
+        &self,
+        operation: &crate::services::provider::qoder_daily::Operation,
+        outcome: crate::services::provider::qoder_daily::contract::Outcome,
+        server_now: Option<i64>,
+    ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction()?;
+        super::qoder_campaign_operations::update_result_on(&tx, operation, outcome)?;
+        if server_now.is_some_and(|now| now >= operation.binding.end_at()) {
+            Self::clear_qoder_pending_on(&tx, &vault, operation)?;
+            // The receipt stays until a later authenticated window replaces it.
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Existing restore owner holds the live connection and both vault contexts.
+    /// Target is unpublished staging. Incoming backend state is never authoritative.
+    pub(crate) fn preserve_qoder_states_on_restore(
+        live: &rusqlite::Connection,
+        target: &rusqlite::Connection,
+        current_vault: &VaultContext,
+        target_vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        let current = Self::get_all_providers_on_connection(live, current_vault, "codex")?;
+        let incoming = Self::get_all_providers_on_connection(target, target_vault, "codex")?;
+        if super::qoder_campaign_operations::read_rows(live)?
+            != super::qoder_campaign_operations::read_rows(target)?
+        {
+            return Err(AppError::Config("qoder.local_operations_changed".into()));
+        }
+        let tx = target.unchecked_transaction()?;
+        for (id, mut provider) in incoming {
+            Self::preserve_qoder_state_on_save("codex", current.get(&id), &mut provider);
+            if let Some(pending) = provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.qoder_campaign_state.as_ref())
+                .and_then(|s| s.pending.as_ref())
+            {
+                let count:i64=tx.query_row("SELECT count(*) FROM qoder_campaign_operations WHERE attempt_id=?1 AND credential_generation=?2",params![pending.id,pending.generation],|r|r.get(0))?;
+                if count != 1 {
+                    return Err(AppError::Config("qoder.pending_reference_invalid".into()));
+                }
+            }
+            let mut meta = provider.meta.unwrap_or_default();
+            meta.custom_endpoints.clear();
+            let encrypted = seal_db(
+                target_vault,
+                "providers",
+                "meta",
+                &[&id, "codex"],
+                &serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?,
+            )?;
+            tx.execute(
+                "UPDATE providers SET meta=?1 WHERE id=?2 AND app_type='codex'",
+                params![encrypted, id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -623,6 +876,9 @@ impl Database {
             crate::services::vendor_source_binding::inventory_settings(&provider)?;
         let mut meta = provider.meta.take().unwrap_or_default();
         meta.custom_endpoints.clear();
+        // Backend lifecycle state is not part of mode/model configuration equality.
+        // The claim owner checks its generation and attempt separately.
+        meta.qoder_campaign_state = None;
         provider.meta = Some(meta);
         serde_json::to_value(provider)
             .map_err(|_| AppError::Config("mode.invalid_saved_row".into()))
@@ -835,39 +1091,24 @@ impl Database {
         settings_config: &serde_json::Value,
     ) -> Result<(), AppError> {
         let vault = self.secrets.read()?;
-        let conn = lock_conn!(self.conn);
-        let mut updated = Provider::with_id(
-            provider_id.into(),
-            String::new(),
-            settings_config.clone(),
-            None,
-        );
-        updated.meta = Self::get_provider_meta_on_connection(&conn, &vault, provider_id, app_type)?;
-        let stored_settings = if crate::services::vendor_source_binding::is_reference(&updated) {
-            let app = app_type
-                .parse::<crate::app_config::AppType>()
-                .map_err(|_| AppError::Config("source.invalid_app".into()))?;
-            crate::services::vendor_source_binding::strip_key(&app, &updated)?
-        } else {
-            updated.settings_config
+        let current = {
+            let conn = lock_conn!(self.conn);
+            Self::get_all_providers_on_connection(&conn, &vault, app_type)?
+                .shift_remove(provider_id)
         };
-        conn.execute(
-            "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
-            params![
-                seal_db(
-                    &vault,
-                    "providers",
-                    "settings_config",
-                    &[provider_id, app_type],
-                    &serde_json::to_string(&stored_settings)
-                        .map_err(|e| AppError::Database(e.to_string()))?
-                )?,
-                provider_id,
-                app_type
-            ],
+        let Some(mut updated) = current else {
+            return Ok(());
+        };
+        let expected = Self::provider_update_digest(&updated)?;
+        updated.settings_config = settings_config.clone();
+        self.save_provider_with_vault(
+            app_type,
+            &updated,
+            Some(&expected),
+            false,
+            self.secrets.as_ref(),
+            &vault,
         )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
     }
 
     pub fn add_custom_endpoint(

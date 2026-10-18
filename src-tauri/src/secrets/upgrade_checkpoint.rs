@@ -13,10 +13,10 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
 pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The one historical checkpoint identity and the current identity. This is
+/// Explicitly supported historical and current checkpoint identities. This is
 /// only an admission bound; manifest/database checks still require exact equality.
 pub(crate) fn supports_loongport_version(version: i32) -> bool {
-    matches!(version, 24 | 25)
+    [24, 25, 26].contains(&version)
 }
 
 fn legacy_archive_source_versions() -> SchemaVersions {
@@ -1007,7 +1007,7 @@ mod paperclip_schema_lifecycle_tests {
     fn historical_source() -> super::super::checkpoint_tests::Fixture {
         let fixture = super::super::checkpoint_tests::Fixture::new();
         let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
         fixture
     }
 
@@ -1046,7 +1046,14 @@ mod paperclip_schema_lifecycle_tests {
     fn paperclip_native_v25_checkpoint_preserves_recorded_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        database::loongport_schema::apply(&source).unwrap();
+        // Fixed historical v25, not whatever current apply() produces.
+        crate::paperclip::bindings::ensure_schema(&source).unwrap();
+        source
+            .execute(
+                "UPDATE loongport_schema_version SET version=25 WHERE id=1",
+                [],
+            )
+            .unwrap();
         drop(source);
         let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
@@ -1064,6 +1071,22 @@ mod paperclip_schema_lifecycle_tests {
             .unwrap();
         crate::config_file_io::write_durable(&path(&f.device), &ciphertext).unwrap();
         assert!(stage(&f.root, &f.device, &f.vault, &id).is_err());
+    }
+
+    #[test]
+    fn qoder_current_v26_checkpoint_keeps_recorded_identity() {
+        let f = historical_source();
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        database::loongport_schema::apply(&source).unwrap();
+        drop(source);
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            26
+        );
+        crate::database::dao::qoder_campaign_operations::read_rows(&staged).unwrap();
+        assert!(!supports_loongport_version(27));
     }
 
     #[test]
@@ -1107,7 +1130,7 @@ mod paperclip_schema_lifecycle_tests {
         .unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&working).unwrap(),
-            25
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         assert_eq!(
             database::loongport_schema::read_stored_version(&original).unwrap(),
