@@ -196,14 +196,64 @@ pub(super) fn library_app_version(data_root: &std::path::Path) -> Option<String>
 pub(super) fn library_context(
     selected: Option<&Path>,
 ) -> Result<super::library_context::LibraryContext, BlockedReason> {
+    #[cfg(all(test, unix))]
+    if let Some(context) = test_library_context::lookup(selected) {
+        return Ok(context);
+    }
     library_from_user(&native_user()?, selected)
 }
 #[cfg(not(target_os = "macos"))]
 pub(super) fn library_context(
     _selected: Option<&std::path::Path>,
 ) -> Result<super::library_context::LibraryContext, BlockedReason> {
+    #[cfg(all(test, unix))]
+    if let Some(context) = test_library_context::lookup(_selected) {
+        return Ok(context);
+    }
     Err(BlockedReason::UnsupportedPlatform)
 }
+// Only explicit isolated fixture roots can override OS identity in unit tests.
+// Production context selection and the real cipher/owner are unchanged.
+#[cfg(all(test, unix))]
+pub(super) mod test_library_context {
+    use super::super::library_context::LibraryContext;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    fn contexts() -> &'static Mutex<HashMap<PathBuf, LibraryContext>> {
+        static CONTEXTS: OnceLock<Mutex<HashMap<PathBuf, LibraryContext>>> = OnceLock::new();
+        CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    pub(super) fn lookup(selected: Option<&Path>) -> Option<LibraryContext> {
+        contexts().lock().unwrap().get(selected?).cloned()
+    }
+    pub(crate) struct Scope(PathBuf);
+    impl Scope {
+        pub(crate) fn new(home: &Path, root: &Path) -> Self {
+            let temporary = std::env::temp_dir().canonicalize().unwrap();
+            assert_eq!(home.canonicalize().unwrap(), home);
+            assert_eq!(root.canonicalize().unwrap(), root);
+            assert!(home.starts_with(&temporary) && home != temporary);
+            assert!(root.starts_with(home) && root != home);
+            let context =
+                LibraryContext::from_os_identity(home.to_str().unwrap(), "synthetic-user", root)
+                    .unwrap();
+            let mut registered = contexts().lock().unwrap();
+            assert!(!registered.contains_key(root));
+            registered.insert(root.into(), context);
+            Self(root.into())
+        }
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            contexts().lock().unwrap().remove(&self.0);
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn library_from_user(
     user: &OsUser,

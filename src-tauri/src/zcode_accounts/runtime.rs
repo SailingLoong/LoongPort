@@ -36,6 +36,7 @@ fn import_reviews() -> &'static Mutex<super::import_reviews::Reviews> {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BundlePreview {
     preview_id: String,
+    owner_binding: String,
     rows: Vec<super::bundle_import::PreviewRow>,
 }
 pub(crate) struct BundlePreviewInput {
@@ -96,6 +97,7 @@ pub(super) async fn preview_bundle(
         });
         Ok(BundlePreview {
             preview_id,
+            owner_binding: store.import_owner_binding(&native)?,
             rows: inspected.rows,
         })
     })
@@ -946,6 +948,7 @@ pub(super) async fn preview_library_bundle(
         });
         Ok(BundlePreview {
             preview_id,
+            owner_binding: store.import_owner_binding(&native)?,
             rows: inspected.rows,
         })
     })
@@ -1077,6 +1080,23 @@ pub(super) async fn commit_library_bundle(
     run_owned(db, move |db| {
         let context = super::native_context::library_context(data_root.as_deref())?;
         let binding = library_binding(db, &context, input.revision.clone())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        let native = context.cipher()?;
+        let store = VaultAccountStore::new(session.root(), &vault)?;
+        // A previously consumed preview can only return its original receipt.
+        // Missing receipts never grant permission to recreate or replay a batch.
+        if let Some(receipt) = store.import_receipt(&native, &input.preview_id)? {
+            let choices: Vec<_> = input
+                .selected
+                .iter()
+                .map(|choice| (choice.index, choice.update_duplicate))
+                .collect();
+            if !receipt.matches_request(&input.revision, &choices) {
+                return Err(TransactionError::OperationAlreadyKnown.into());
+            }
+            return Ok(receipt.outcomes());
+        }
         let (mut review, mut checked) = import_reviews()
             .lock()
             .map_err(|_| RuntimeError::TaskFailed)?
@@ -1087,10 +1107,7 @@ pub(super) async fn commit_library_bundle(
                 std::time::Instant::now(),
             )
             .ok_or(TransactionError::SourceChanged)?;
-        let session = db.secret_session();
-        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
-        let native = context.cipher()?;
-        let store = VaultAccountStore::new(session.root(), &vault)?;
+        let indices: Vec<_> = input.selected.iter().map(|choice| choice.index).collect();
         let mut items = Vec::with_capacity(input.selected.len());
         for choice in input.selected {
             let snapshot = review
@@ -1109,7 +1126,36 @@ pub(super) async fn commit_library_bundle(
             });
         }
         store
-            .import_checked_profiles(&native, &input.revision, items)
+            .import_reviewed_profiles(&native, &input.revision, &input.preview_id, &indices, items)
+            .map_err(Into::into)
+    })
+    .await
+}
+
+/// A read of the authenticated catalog only. No preview or official check needed.
+pub(super) async fn bundle_import_result(
+    db: Arc<Database>,
+    data_root: Option<std::path::PathBuf>,
+    request_id: String,
+    owner_binding: Option<String>,
+) -> Result<super::import_receipts::ImportResult, RuntimeError> {
+    run_owned(db, move |db| {
+        let context = super::native_context::library_context(data_root.as_deref())?;
+        let session = db.secret_session();
+        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+        // A query can arrive before a not-yet-started commit. While its preview
+        // can still be consumed, missing is unknown. No preview mutation here.
+        let review_active = import_reviews()
+            .lock()
+            .map_err(|_| RuntimeError::TaskFailed)?
+            .is_active(&request_id, std::time::Instant::now());
+        VaultAccountStore::new(session.root(), &vault)?
+            .resolve_import(
+                &context.cipher()?,
+                &request_id,
+                owner_binding.as_deref(),
+                review_active,
+            )
             .map_err(Into::into)
     })
     .await

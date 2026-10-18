@@ -43,3 +43,48 @@
 新候选必须重新通过受影响测试与独立审查。纯核心 harness 必须编译产品真实模块；运行态/命令需验证实际进入编译图，不能把被 cfg 排除后的成功算覆盖。UI 检查取消、重复、结果恢复和列表刷新。真实 OAuth / 新 Key / 模型调用及原生进程操作仅在实际动作得到许可后执行。
 
 源码检查点与交付状态记在[既有交付清单](zcode-quick-account-v1-delivery.md)，具体任务见[恢复实施计划](superpowers/plans/2026-10-06-zcode-v2-recovery.md)。历史候选测试不替代本分支的新证据；文档检查点不代表新增功能已完成。
+
+### Durable import result recovery (catalog v4)
+
+Completed bundle imports retain their per-row outcomes inside the existing
+`ProfileCatalog` encrypted/authenticated image. Account changes and their receipt
+are published atomically by `VaultAccountStore`, including batches that keep every
+existing account. Receipts bind the preview request, original catalog revision,
+row indices, candidate content digests, identities and update choices. Repeating
+an already committed request returns its retained outcome only; a changed request
+is rejected. Querying an original result is read-only and never consumes a preview,
+checks an official service, switches ZCode or replays an import.
+
+The reader accepts catalog v1, v2 and v3; the first completed import writes v4.
+Older binaries cannot open v4. Rolling back a binary therefore also requires
+restoring the pre-upgrade vault backup, losing changes made after that backup.
+The external `.zsb` outer-v1/inner-v2 format is unchanged. Development tests use
+synthetic vaults only; migrating a user's actual vault and publishing a release
+require separate approval.
+
+Import receipts reuse the existing 1,024 retained-operation bound and 50-account
+bundle limit, subject to the existing 8 MiB catalog payload limit. They are never
+evicted. Reaching either bound rejects the new import before publication. An
+absent receipt alone grants no replay permission. Queries hold the same physical
+owner as commits; a canceled caller does not release its running commit worker.
+The original preview owner binding must match the vault root, vault/key identity,
+vault generation and native library context. A complete authenticated read can
+report `notRecorded` only when the request's preview is no longer live, so a query
+that wins scheduling before commit remains `unknown`. Consumed or expired previews
+cannot be reused. `notRecorded` describes only the current library, not historical
+absence (for example after restoring a backup), and permits only a fresh preview,
+current-account duplicate checks, renewed official checks and user confirmation.
+Unreadable data, changed/missing owner bindings and pending previews stay unknown.
+
+The renderer persists only the request ID, library scope and opaque owner binding, using the existing
+local-storage recovery-pointer convention (one current pointer per library,
+at most 16 libraries). It writes that pointer before dispatch, keeps it on an
+uncertain/malformed response, and removes only the matching pointer after a
+validated original result has been accepted by the still-active dialog. Late
+responses after dismissal retain the pointer. A different import cannot replace
+an unresolved pointer. A validated `notRecorded` result accepted by the active
+dialog clears that pointer and returns to a fresh preview; unknown/error keeps it
+queryable. Legacy pointers without an owner binding stay unknown rather than
+being assigned the current library identity. Opening the import dialog after
+restart offers the same manual query action without storing credentials or a
+second result ledger.

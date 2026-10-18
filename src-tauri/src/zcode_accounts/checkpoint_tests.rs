@@ -928,3 +928,138 @@ async fn review_rejected_native_connection_stays_rejected_after_timeout() {
         }
     }
 }
+
+#[test]
+fn catalog_v4_import_receipts_are_authenticated_and_readable() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let encoded = ProfileCatalog::default().seal(&vault, &native).unwrap();
+    let plaintext = vault
+        .open(&["file", PROFILE_FILE, "content"], &encoded)
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+    payload["version"] = serde_json::json!(4);
+    payload["import_receipts"] = serde_json::json!([]);
+    let encoded = vault
+        .seal(
+            &["file", PROFILE_FILE, "content"],
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+    assert!(ProfileCatalog::open(&encoded, &vault, &native).is_ok());
+}
+
+fn synthetic_import_receipt(id: uuid::Uuid) -> super::super::import_receipts::ImportReceipt {
+    super::super::import_receipts::ImportReceipt {
+        request_id: id.to_string(),
+        catalog_revision: "absent".into(),
+        rows: vec![super::super::import_receipts::ImportReceiptRow {
+            index: 0,
+            account_id: "a".repeat(64),
+            family: "zai".into(),
+            candidate_revision: "b".repeat(64),
+            update_duplicate: false,
+            outcome: super::super::transaction::CaptureCommitOutcome::Kept,
+        }],
+    }
+}
+#[test]
+fn import_receipts_upgrade_v1_v2_v3_without_losing_accounts_or_authentication() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let snapshot = native
+        .inspect(&super::super::native::tests::native_document(
+            super::super::core::OAuthFamily::Zai,
+            "migration",
+            "synthetic-only",
+        ))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(snapshot);
+    let encoded = catalog.seal(&vault, &native).unwrap();
+    let plain = vault
+        .open(&["file", PROFILE_FILE, "content"], &encoded)
+        .unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    for version in [1, 2, 3] {
+        let mut payload = original.clone();
+        payload["version"] = version.into();
+        if version == 1 {
+            payload.as_object_mut().unwrap().remove("unverified");
+        }
+        let old = vault
+            .seal(
+                &["file", PROFILE_FILE, "content"],
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+        let mut upgraded = ProfileCatalog::open(&old, &vault, &native).unwrap();
+        let receipt = synthetic_import_receipt(uuid::Uuid::new_v4());
+        upgraded.record_import(receipt.clone()).unwrap();
+        let encoded = upgraded.seal(&vault, &native).unwrap();
+        let reopened = ProfileCatalog::open(&encoded, &vault, &native).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened.import_receipt(&receipt.request_id), Some(&receipt));
+        let plain = vault
+            .open(&["file", PROFILE_FILE, "content"], &encoded)
+            .unwrap();
+        let mut upgraded_json: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(upgraded_json["version"], 4);
+        // A new field may not be disguised as a backwards-compatible v3 write.
+        upgraded_json["version"] = 3.into();
+        let mislabeled = vault
+            .seal(
+                &["file", PROFILE_FILE, "content"],
+                &serde_json::to_vec(&upgraded_json).unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            ProfileCatalog::open(&mislabeled, &vault, &native),
+            Err(CheckpointError::InvalidPayload)
+        ));
+        assert!(
+            ProfileCatalog::open(&encoded, &VaultContext::generate().unwrap(), &native).is_err()
+        );
+        let wrong =
+            NativeCipher::new("other-context", super::super::native::tests::TEST_SECRET).unwrap();
+        assert!(matches!(
+            ProfileCatalog::open(&encoded, &vault, &wrong),
+            Err(CheckpointError::WrongContext)
+        ));
+        let wrong_aad = vault
+            .seal(&["file", JOURNAL_FILE, "content"], &plain)
+            .unwrap();
+        assert!(ProfileCatalog::open(&wrong_aad, &vault, &native).is_err());
+    }
+}
+#[test]
+fn import_receipts_are_bounded_strict_and_never_evicted() {
+    let mut catalog = ProfileCatalog::default();
+    let first = synthetic_import_receipt(uuid::Uuid::new_v4());
+    catalog.record_import(first.clone()).unwrap();
+    assert_eq!(
+        catalog.record_import(first.clone()),
+        Err(CheckpointError::InvalidPayload)
+    );
+    for _ in 1..super::super::import_receipts::MAX_IMPORT_RECEIPTS {
+        catalog
+            .record_import(synthetic_import_receipt(uuid::Uuid::new_v4()))
+            .unwrap();
+    }
+    assert_eq!(
+        catalog.record_import(synthetic_import_receipt(uuid::Uuid::new_v4())),
+        Err(CheckpointError::ResourceLimit)
+    );
+    assert_eq!(catalog.import_receipt(&first.request_id), Some(&first));
+    let mut invalid = synthetic_import_receipt(uuid::Uuid::new_v4());
+    invalid.rows[0].index = 50;
+    assert_eq!(invalid.validate(), Err(CheckpointError::InvalidPayload));
+    invalid.rows[0].index = 0;
+    invalid.rows.push(invalid.rows[0].clone());
+    assert_eq!(invalid.validate(), Err(CheckpointError::InvalidPayload));
+    invalid.rows = vec![invalid.rows[0].clone(); 51];
+    assert_eq!(invalid.validate(), Err(CheckpointError::ResourceLimit));
+    let mut value = serde_json::to_value(&first).unwrap();
+    value["unexpected"] = true.into();
+    assert!(serde_json::from_value::<super::super::import_receipts::ImportReceipt>(value).is_err());
+}
