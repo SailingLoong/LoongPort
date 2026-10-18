@@ -850,10 +850,14 @@ mod tests {
     }
 
     #[test]
-    fn our_codex_toml_is_upstreams_minus_exactly_one_line() {
+    fn our_codex_toml_is_upstreams_minus_exactly_two_intentional_lines() {
         const DISPLAY: &str = "Pro tier";
         const BASE_URL: &str = "https://ops.example.example/v1";
         const MODEL: &str = "gpt-5-codex";
+        const UPSTREAM_ONLY_LINES: [&str; 2] = [
+            "requires_openai_auth = true",
+            "model_reasoning_effort = \"high\"",
+        ];
 
         // 上游那份 —— 走它自己的入口，不复制它的代码。
         let request = crate::deeplink::DeepLinkImportRequest {
@@ -874,11 +878,12 @@ mod tests {
 
         let ours = codex_config_toml(DISPLAY, BASE_URL, MODEL);
 
-        // 逐行比：上游的行去掉 `requires_openai_auth` 那一行之后，必须与我们的逐行相同。
+        // 仅这两处有意不同：托管凭证不走 ChatGPT 登录；新托管配置跟随服务默认，
+        // 不注入 high。只过滤这两个精确行，其余内容必须逐行相同。
         let upstream_lines: Vec<&str> = upstream_toml
             .lines()
-            .filter(|l| !l.contains("requires_openai_auth"))
             .map(|l| l.trim_end())
+            .filter(|l| !UPSTREAM_ONLY_LINES.contains(l))
             .collect();
         let our_lines: Vec<&str> = ours.lines().map(|l| l.trim_end()).collect();
 
@@ -898,19 +903,24 @@ mod tests {
             upstream_lines,
             "codex 模板与上游漂移了。\n  \
              我们的:\n{ours}\n  \
-             上游的（已滤掉 requires_openai_auth 行）:\n{}\n  \
+             上游的（已滤掉两处有意差异）:\n{}\n  \
              —— 要么上游加了新键我们没跟上（那要判断是否该跟），\
              要么我们改了不该改的地方。有意偏离请在这里写清并调整断言。",
             upstream_lines.join("\n")
         );
 
-        // 顺带钉住「差异恰好是那一行」这件事本身：上游哪天自己删了它，
-        // 我们这个例外就没有存在理由了，该收到通知。
-        assert!(
-            upstream_toml.contains("requires_openai_auth = true"),
-            "上游那份不再声明 requires_openai_auth —— 我们那条例外的前提消失了，\
-             可以直接复用上游模板，去掉 provision.rs 里这段手抄的副本"
-        );
+        // 每个例外在上游都必须恰好出现一次：上游删掉或改了其中一行时，
+        // 重新评估该差异，不能继续把过期的例外静默过滤掉。
+        for line in UPSTREAM_ONLY_LINES {
+            assert_eq!(
+                upstream_toml
+                    .lines()
+                    .filter(|l| l.trim_end() == line)
+                    .count(),
+                1,
+                "上游模板的例外前提已变化，应重新评估是否能直接复用：{line}"
+            );
+        }
     }
 
     #[test]

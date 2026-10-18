@@ -6769,7 +6769,10 @@ base_url = "https://production.api/v1"
             .unwrap()
             .remove("supports_reasoning_summaries");
         fill_template_fields_from_static(&mut template);
-        let settings = json!({"modelCatalog":{"models":[{"model":"gpt-6.1-sol"}]}});
+        let settings = json!({"modelCatalog":{"models":[
+            {"model":"gpt-6.1-sol"},
+            {"model":"declared-alias", "reasoningLevels":["low","medium","high","xhigh","max","ultra"], "defaultReasoningLevel":"high"}
+        ]}});
         let catalog = codex_model_catalog_from_specs(
             &codex_catalog_model_specs(&settings),
             &template,
@@ -6779,13 +6782,24 @@ base_url = "https://production.api/v1"
         );
         assert_eq!(catalog["models"][0]["support_verbosity"], false);
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
+        // Parser-required fields are schema defaults, not model capability facts.
         assert_eq!(
-            catalog["models"][0]["supported_reasoning_levels"]
+            catalog["models"][0]["supported_reasoning_levels"],
+            json!([])
+        );
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], Value::Null);
+        assert_eq!(
+            catalog["models"][1]["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
-                .len(),
-            6
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
         );
+        assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
+        assert_eq!(catalog["models"][1]["support_verbosity"], false);
+        assert_eq!(catalog["models"][1]["supports_reasoning_summaries"], true);
         assert_eq!(
             catalog["models"][0]["base_instructions"],
             template["base_instructions"]
@@ -11016,9 +11030,18 @@ base_url = "https://idle.example/v1"
                 assert_eq!(wire["reasoning_effort"], "high");
                 assert_eq!(wire["model"], "gpt-100");
             }
-            let switched = selected
-                .replace("gpt-100", "gpt-7")
-                .replace("\"high\"", "\"ultra\"");
+            // Config normalization preserves TOML spelling, including single quotes.
+            // Change fields structurally so this really exercises an invalid effort.
+            let mut switched_doc = selected.parse::<DocumentMut>().unwrap();
+            switched_doc["model"] = toml_edit::value("gpt-7");
+            switched_doc["model_reasoning_effort"] = toml_edit::value("ultra");
+            let switched = switched_doc.to_string();
+            let switched_doc = switched.parse::<DocumentMut>().unwrap();
+            assert_eq!(switched_doc["model"].as_str(), Some("gpt-7"));
+            assert_eq!(
+                switched_doc["model_reasoning_effort"].as_str(),
+                Some("ultra")
+            );
             let validation =
                 normalize_selected_model_reasoning(&provider, &switched, profile, true);
             if profile == CodexCatalogToolProfile::NativeResponses {
@@ -11027,6 +11050,12 @@ base_url = "https://idle.example/v1"
                 assert_eq!(validation.unwrap(), switched);
             }
             let chosen = switched.replace("ultra", "medium");
+            let chosen_doc = chosen.parse::<DocumentMut>().unwrap();
+            assert_eq!(chosen_doc["model"].as_str(), Some("gpt-7"));
+            assert_eq!(
+                chosen_doc["model_reasoning_effort"].as_str(),
+                Some("medium")
+            );
             assert_eq!(
                 normalize_selected_model_reasoning(&provider, &chosen, profile, true).unwrap(),
                 chosen
@@ -11044,13 +11073,75 @@ base_url = "https://idle.example/v1"
             .is_err());
             assert_eq!(explicit_body["reasoning"]["effort"], "high");
             explicit_body["reasoning"]["effort"] = json!("medium");
+            let validation = crate::proxy::providers::normalize_request_reasoning(
+                &provider,
+                &mut explicit_body,
+                true,
+            );
+            let declared_effort = if profile == CodexCatalogToolProfile::NativeResponses {
+                // This declaration edits gpt-100, not the switched gpt-7. Its
+                // verified low/high facts cannot be widened to medium locally.
+                assert!(
+                    validation.is_err(),
+                    "verified native Responses gpt-100 must reject a medium declaration"
+                );
+                assert_eq!(explicit_body["reasoning"]["effort"], "medium");
+                provider.settings_config["modelCatalog"]["models"][0]["reasoningLevels"] =
+                    json!(["low"]);
+                provider.settings_config["modelCatalog"]["models"][0]["defaultReasoningLevel"] =
+                    json!("low");
+                "low"
+            } else {
+                validation.unwrap();
+                "medium"
+            };
+            assert_eq!(
+                provider.settings_config["modelCatalog"]["models"][0]["model"],
+                "gpt-100"
+            );
+            explicit_body["reasoning"]["effort"] = json!("high");
+            assert!(
+                crate::proxy::providers::normalize_request_reasoning(
+                    &provider,
+                    &mut explicit_body,
+                    true,
+                )
+                .is_err(),
+                "the valid explicit declaration must restrict gpt-100 for {profile:?}"
+            );
+            assert_eq!(explicit_body["reasoning"]["effort"], "high");
+            explicit_body["reasoning"]["effort"] = json!(declared_effort);
             crate::proxy::providers::normalize_request_reasoning(
                 &provider,
                 &mut explicit_body,
                 true,
             )
             .unwrap();
-            assert_eq!(explicit_body["reasoning"]["effort"], "medium");
+            assert_eq!(explicit_body["reasoning"]["effort"], declared_effort);
+            let explicit_config =
+                format!("model='gpt-100'\nmodel_reasoning_effort='{declared_effort}'\n");
+            assert_eq!(
+                normalize_selected_model_reasoning(&provider, &explicit_config, profile, true)
+                    .unwrap(),
+                explicit_config
+            );
+            explicit_body["input"] = json!([{"role":"user","content":"explicit declaration"}]);
+            let wire = if profile == CodexCatalogToolProfile::ProxyChat {
+                let transport = crate::proxy::providers::resolve_codex_chat_reasoning_config(
+                    &provider,
+                    &explicit_body,
+                );
+                crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(explicit_body, transport.as_ref()).unwrap()
+            } else {
+                explicit_body
+            };
+            let wire: Value = serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
+            assert_eq!(wire["model"], "gpt-100");
+            if profile == CodexCatalogToolProfile::ProxyChat {
+                assert_eq!(wire["reasoning_effort"], declared_effort);
+            } else {
+                assert_eq!(wire["reasoning"]["effort"], declared_effort);
+            }
             println!("CODEX_FUTURE_ACCEPTANCE_CATALOG={catalog}");
         }
         let updated = reasoning_source_fixture(

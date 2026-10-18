@@ -311,8 +311,8 @@ mod tests {
         )
         .expect("rebuild");
         let toml_value: toml::Value = toml::from_str(defaults["config"].as_str().unwrap()).unwrap();
-        // 声明的参数键已退掉（reasoning 回到内置 high），sk/端点保留
-        assert_eq!(toml_value["model_reasoning_effort"].as_str(), Some("high"));
+        // 声明的参数键已退掉（reasoning 跟随服务默认，不注入 high），sk/端点保留
+        assert!(toml_value.get("model_reasoning_effort").is_none());
         assert_eq!(toml_value["model"].as_str(), Some("gpt-5.6-codex"));
         assert_eq!(
             toml_value["model_providers"]["custom"]["base_url"].as_str(),
