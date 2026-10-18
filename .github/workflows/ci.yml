@@ -346,6 +346,17 @@ jobs:
         # 不出现，原来的重试循环随之删除（它兜的就是这个链接坑）。
         shell: pwsh
         run: |
+          # Compilation can outlive the WSL instance's active lifetime. Re-enter
+          # the existing distro and verify both views before consuming its UNC.
+          wsl.exe --list --verbose
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect WSL distribution state" }
+          wsl.exe -d Ubuntu-24.04 -- bash -lc "test -d /tmp/cc-switch-windows-test-root && test -d /tmp/cc-switch-windows-test-root/home && test -d /tmp/cc-switch-windows-test-root/temp"
+          if ($LASTEXITCODE -ne 0) { throw "WSL test directories are unavailable before contract execution" }
+          foreach ($path in @($env:CC_SWITCH_WSL_TEST_DIR, $env:CC_SWITCH_TEST_HOME, $env:CC_SWITCH_WSL_TEST_TEMP)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+              throw "WSL UNC test directory is unavailable before contract execution: $path"
+            }
+          }
           $env:TEMP = $env:CC_SWITCH_WSL_TEST_TEMP
           $env:TMP = $env:CC_SWITCH_WSL_TEST_TEMP
           $exe = $env:CC_SWITCH_TEST_BIN
