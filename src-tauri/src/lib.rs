@@ -42,6 +42,8 @@ mod live;
 mod maintenance;
 mod mcp;
 // Pure mode models only; no startup/persistence/controller is registered.
+#[cfg(any(feature = "gui", test))]
+mod minimax_code;
 #[allow(dead_code)]
 mod mode;
 mod model_capabilities;
@@ -1978,6 +1980,14 @@ pub fn run() {
             // Pi native provider and session views
             commands::get_pi_current_state,
             commands::list_workbuddy_accounts,
+            commands::list_minimax_code_accounts,
+            commands::refresh_minimax_code_account,
+            commands::claim_minimax_code_today,
+            commands::recheck_minimax_code_claim,
+            commands::retire_minimax_code_account,
+            commands::begin_minimax_code_authorization,
+            commands::poll_minimax_code_authorization,
+            commands::cancel_minimax_code_authorization,
             commands::refresh_workbuddy_account,
             commands::refresh_all_workbuddy_accounts,
             commands::claim_workbuddy_today,
@@ -2324,6 +2334,7 @@ pub fn run() {
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             if code.is_some() {
                 zcode_accounts::claim_runtime::shutdown();
+                minimax_code::shutdown();
             }
             match classify_exit_request(*code) {
                 // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
@@ -2493,6 +2504,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     #[cfg(unix)]
     secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
+    minimax_code::shutdown();
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 
@@ -2905,6 +2917,7 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
     #[cfg(unix)]
     secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
+    minimax_code::shutdown();
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);
     let env = app_handle.env();

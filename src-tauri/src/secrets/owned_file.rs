@@ -40,7 +40,8 @@ pub(crate) const OPERATION_FILE: &str = "zcode_account_operations.json";
 pub(crate) const KEY_INTENT_FILE: &str = "zcode_oauth_key_intents.json";
 pub(crate) const BUNDLE_EXPORT_FILE: &str = "zcode_bundle_exports.json";
 pub(crate) const WORKBUDDY_FILE: &str = "workbuddy_accounts.json";
-const ENCRYPTED_FILES: [&str; 1] = [WORKBUDDY_FILE];
+pub(crate) const MINIMAX_CODE_FILE: &str = "minimax_code_accounts.json";
+const ENCRYPTED_FILES: [&str; 2] = [WORKBUDDY_FILE, MINIMAX_CODE_FILE];
 const ZCODE_FILES: [&str; 6] = [
     PROFILE_FILE,
     JOURNAL_FILE,

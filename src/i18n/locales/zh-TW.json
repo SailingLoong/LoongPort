@@ -434,7 +434,8 @@
       "beta": "Beta",
       "copilotDescription": "管理 GitHub Copilot 帳號",
       "codexOauthDescription": "管理 ChatGPT 帳號",
-      "xaiOauthDescription": "管理 xAI / Grok 帳號"
+      "xaiOauthDescription": "管理 xAI / Grok 帳號",
+      "minimaxCodeDescription": "管理 MiniMax Code 帳號與每日領取狀態"
     },
     "advanced": {
       "configDir": {
@@ -4860,6 +4861,62 @@
       "geminiSettings": "settings.json",
       "write": "將寫入",
       "unchanged": "不變"
+    }
+  },
+  "minimaxCode": {
+    "description": "透過 MiniMax Code 官方裝置授權登入。Token Plan 與 API Key 不能作為 Code 登入憑證。",
+    "region": "帳號地區",
+    "regions": {
+      "cn": "中國區",
+      "global": "國際區"
+    },
+    "add": "新增帳號或重新登入",
+    "reload": "重新讀取帳號",
+    "empty": "尚未新增 MiniMax Code 帳號。",
+    "enterCode": "在 MiniMax Code 官方授權頁輸入此裝置碼：",
+    "authorize": "開啟官方授權頁",
+    "expiresAt": "裝置授權到期：{{time}}",
+    "finishAuthorization": "我已授權，檢查登入",
+    "authorizationWaiting": "尚未完成授權，請在官方頁面完成後再次檢查。",
+    "refresh": "重新整理狀態",
+    "claim": "領取今日額度",
+    "recheck": "查證原操作",
+    "retire": "停用帳號",
+    "creditAmount": "已核驗領取額度：{{amount}}",
+    "startedAt": "提交時間：{{time}}",
+    "attempt": "操作編號：{{id}}",
+    "lastCheckedAt": "最近查證：{{time}}",
+    "unknownHint": "原操作結果未確認。請繼續查證；不會自動重送領取，也不會因切換帳號或日期而解除限制。",
+    "status": {
+      "unavailable": "暫不可領取",
+      "claimable": "可以領取",
+      "alreadyClaimed": "目前面板已領取",
+      "claimed": "領取結果已核驗",
+      "unknown": "領取結果未確認",
+      "needsLogin": "需要重新登入"
+    },
+    "operation": {
+      "pending": "原操作結果未確認（已記錄提交）",
+      "unknown": "原操作結果未確認",
+      "claimed": "原操作領取結果已核驗",
+      "alreadyClaimed": "原操作回傳已領取"
+    },
+    "observed": {
+      "claimable": "最近查證：目前面板可領取",
+      "alreadyClaimed": "最近查證：目前面板已領取；這不代表原操作已確認",
+      "unavailable": "最近查證：目前面板不可領取"
+    },
+    "errors": {
+      "storageUnavailable": "加密帳號記錄無法使用，請解鎖後重新讀取。",
+      "busy": "該帳號正在處理其他操作，請稍後重新讀取。",
+      "needsLogin": "帳號授權已失效，請重新登入。",
+      "unsupportedContext": "目前環境不支援 MiniMax Code 帳號。",
+      "staleIdentity": "帳號授權已變更，請重新讀取後操作。",
+      "invalidResponse": "無法確認操作結果，請重新讀取帳號狀態。",
+      "networkUnavailable": "網路請求未完成，請重新讀取或查證原操作。",
+      "expiredAuthorization": "裝置授權已過期，請取消後重新登入。",
+      "notClaimable": "該帳號目前不允許領取，請重新整理狀態。",
+      "authorizationCompleted": "授權已完成，帳號已儲存；本次取消未生效。請查看帳號清單。"
     }
   }
 }
