@@ -3620,7 +3620,9 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
                 })
                 .collect();
             let canonical = codex_canonical_efforts(&declared);
-            if !canonical.is_empty() {
+            // An explicit empty array is still a declaration. Unchanged inferred
+            // rows were excluded above; malformed nonempty rows are not empties.
+            if levels.is_empty() || !canonical.is_empty() {
                 obj.insert("reasoningLevels".into(), json!(canonical));
                 if let Some(default) = entry
                     .get("default_reasoning_level")
@@ -8878,6 +8880,359 @@ web_search = "disabled" # cc-switch:managed
 
     #[test]
     #[serial]
+    fn explicit_empty_canonical_choices_survive_save_reopen_without_capturing_inferred_empty() {
+        let _home = CodexLiveTestHome::new();
+        let mut mismatches = Vec::new();
+        for profile in [
+            CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::ProxyChat,
+        ] {
+            let config = "model='gpt-6-astra'\nmodel_reasoning_effort='medium'\nmodel_provider='fixture'\n[model_providers.fixture]\nbase_url='https://relay.invalid/v1'\nwire_api='responses'\n";
+            let settings = json!({"config":config,"apiFormat":if profile == CodexCatalogToolProfile::ProxyChat {"chat_completions"} else {"responses"},"modelCatalog":{"models":[
+                {"model":"gpt-6-astra","reasoningMode":"unknown","reasoningLevels":[]},
+                {"model":"private-astra-alias","displayName":"6 Astra"},
+                {"model":"gpt-6.1-sol"}
+            ]}});
+            let mut provider = crate::provider::Provider::with_id(
+                "synthetic".into(),
+                "Synthetic".into(),
+                settings.clone(),
+                None,
+            );
+            let plan = plan_codex_model_catalog(&settings, config, profile, &provider)
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan["models"][0]["supported_reasoning_levels"], json!([]));
+            assert!(!has_unchanged_codex_reasoning_projection(
+                &plan["models"][0]
+            ));
+            assert!(has_unchanged_codex_reasoning_projection(&plan["models"][1]));
+            let prepared = prepare_codex_config_text_with_model_catalog(
+                &settings,
+                config,
+                profile,
+                Some(&provider),
+            )
+            .unwrap();
+            crate::config::write_text_file(&get_codex_config_path(), &prepared).unwrap();
+            let saved = read_codex_config_text().unwrap();
+            let catalog: Value = read_json_file(&get_codex_model_catalog_path()).unwrap();
+            assert_eq!(catalog, plan);
+            let reopened =
+                build_simplified_catalog_from_texts(&saved, &catalog.to_string()).unwrap();
+            // Inferred empty/nonempty profiles must not turn into user declarations.
+            assert!(reopened["models"][1].get("reasoningLevels").is_none());
+            assert!(reopened["models"][2].get("reasoningLevels").is_none());
+            if reopened["models"][0].get("reasoningLevels") != Some(&json!([])) {
+                mismatches.push(format!("{profile:?}: explicit [] was lost on reopen"));
+            }
+            provider.settings_config["modelCatalog"] = reopened;
+            let cap = resolve_provider_model_capability(&provider, "gpt-6-astra");
+            if !cap.levels.is_empty() || cap.controls.effort {
+                mismatches.push(format!(
+                    "{profile:?}: reopened capability incorrectly restored {:?}",
+                    cap.levels
+                ));
+            }
+            eprintln!(
+                "EXPLICIT_EMPTY_REOPEN profile={profile:?} capability={}",
+                serde_json::to_string(&cap).unwrap()
+            );
+            assert_eq!(
+                normalize_selected_model_reasoning(&provider, &saved, profile, false).unwrap(),
+                saved
+            );
+            let second =
+                plan_codex_model_catalog(&provider.settings_config, &saved, profile, &provider)
+                    .unwrap()
+                    .unwrap();
+            if second["models"][0]["supported_reasoning_levels"] != json!([]) {
+                mismatches.push(format!("{profile:?}: second projection restored choices"));
+            }
+            // Invalid nonempty input is not an explicit empty declaration.
+            let mut malformed = catalog.clone();
+            malformed["models"][0]["supported_reasoning_levels"] =
+                json!([{"effort":"not-a-level"}]);
+            let parsed =
+                build_simplified_catalog_from_texts(&saved, &malformed.to_string()).unwrap();
+            assert!(parsed["models"][0].get("reasoningLevels").is_none());
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("; "));
+    }
+
+    #[test]
+    #[serial]
+    fn canonical_relay_new_effort_selection_reaches_saved_config_and_wire() {
+        let _home = CodexLiveTestHome::new();
+        for profile in [
+            CodexCatalogToolProfile::NativeResponses,
+            CodexCatalogToolProfile::ProxyChat,
+        ] {
+            for chosen in ["high", "xhigh"] {
+                let config = "model='gpt-6-astra'\nmodel_reasoning_effort='medium'\nmodel_provider='fixture'\n[model_providers.fixture]\nbase_url='https://relay.invalid/v1'\nwire_api='responses'\n";
+                let settings = json!({"config":config,"apiFormat":if profile == CodexCatalogToolProfile::ProxyChat {"chat_completions"} else {"responses"},"modelCatalog":{"models":[{"model":"gpt-6-astra"}]}});
+                let mut provider = crate::provider::Provider::with_id(
+                    "synthetic".into(),
+                    "Synthetic".into(),
+                    settings.clone(),
+                    None,
+                );
+                let initial = prepare_codex_config_text_with_model_catalog(
+                    &settings,
+                    config,
+                    profile,
+                    Some(&provider),
+                )
+                .unwrap();
+                let mut edit = initial.parse::<DocumentMut>().unwrap();
+                assert_eq!(edit["model_reasoning_effort"].as_str(), Some("medium"));
+                edit["model_reasoning_effort"] = toml_edit::value(chosen);
+                let edited = edit.to_string();
+                provider.settings_config["config"] = json!(edited);
+                let normalized =
+                    normalize_selected_model_reasoning(&provider, &edited, profile, false).unwrap();
+                let plan = plan_codex_model_catalog(
+                    &provider.settings_config,
+                    &normalized,
+                    profile,
+                    &provider,
+                )
+                .unwrap()
+                .unwrap();
+                let prepared = prepare_codex_config_text_with_model_catalog(
+                    &provider.settings_config,
+                    &normalized,
+                    profile,
+                    Some(&provider),
+                )
+                .unwrap();
+                crate::config::write_text_file(&get_codex_config_path(), &prepared).unwrap();
+                let saved = read_codex_config_text().unwrap();
+                let effort = saved.parse::<DocumentMut>().unwrap()["model_reasoning_effort"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert_eq!(effort, chosen);
+                assert_ne!(effort, "medium");
+                let catalog: Value = read_json_file(&get_codex_model_catalog_path()).unwrap();
+                assert_eq!(catalog, plan);
+                let reopened =
+                    build_simplified_catalog_from_texts(&saved, &catalog.to_string()).unwrap();
+                assert!(
+                    reopened["models"][0].get("reasoningLevels").is_none(),
+                    "inferred profile is not a user declaration"
+                );
+                provider.settings_config["modelCatalog"] = reopened;
+                let cap = resolve_provider_model_capability(&provider, "gpt-6-astra");
+                assert!(!cap.verified);
+                assert!(cap.levels.iter().any(|level| level == chosen));
+                let mut body = json!({"model":"gpt-6-astra","reasoning":{"effort":effort},"input":[{"role":"user","content":"Synthetic new choice"}]});
+                crate::proxy::providers::normalize_request_reasoning(&provider, &mut body, false)
+                    .unwrap();
+                let wire = if profile == CodexCatalogToolProfile::ProxyChat {
+                    let transport = crate::proxy::providers::resolve_codex_chat_reasoning_config(
+                        &provider, &body,
+                    );
+                    crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body,transport.as_ref()).unwrap()
+                } else {
+                    body
+                };
+                let wire: Value =
+                    serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
+                let wire_effort = if profile == CodexCatalogToolProfile::ProxyChat {
+                    &wire["reasoning_effort"]
+                } else {
+                    &wire["reasoning"]["effort"]
+                };
+                assert_eq!(wire_effort, chosen);
+                eprintln!("NEW_EFFORT profile={profile:?} initial=medium saved={chosen} serialized={wire_effort}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn canonical_profiles_survive_catalog_planning_save_reopen_and_request_wire() {
+        let _home = CodexLiveTestHome::new();
+        let levels = json!(["low", "medium", "high", "xhigh", "max", "ultra"]);
+        for (case, base, profile, declaration, template, model, expected) in [
+            (
+                "official-native",
+                "https://api.openai.com/v1",
+                CodexCatalogToolProfile::NativeResponses,
+                false,
+                false,
+                "gpt-6-astra",
+                levels.clone(),
+            ),
+            (
+                "relay-native",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::NativeResponses,
+                false,
+                false,
+                "gpt-6-astra",
+                levels.clone(),
+            ),
+            (
+                "relay-chat",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::ProxyChat,
+                false,
+                false,
+                "gpt-6-astra",
+                levels.clone(),
+            ),
+            (
+                "relay-chat-template-only",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::ProxyChat,
+                false,
+                true,
+                "gpt-6-astra",
+                levels.clone(),
+            ),
+            (
+                "relay-native-declared",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::NativeResponses,
+                true,
+                false,
+                "gpt-6-astra",
+                json!(["medium", "high"]),
+            ),
+            (
+                "relay-chat-declared",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::ProxyChat,
+                true,
+                false,
+                "gpt-6-astra",
+                json!(["medium", "high"]),
+            ),
+            (
+                "unknown-native-alias",
+                "https://relay.invalid/v1",
+                CodexCatalogToolProfile::NativeResponses,
+                false,
+                false,
+                "private-astra-alias",
+                json!([]),
+            ),
+        ] {
+            let config=format!("model='{model}'\nmodel_reasoning_effort='medium'\nmodel_provider='fixture'\n[model_providers.fixture]\nname='Synthetic diagnostic'\nbase_url='{base}'\nwire_api='responses'\n");
+            let mut settings = json!({"config":config,"apiFormat":if profile==CodexCatalogToolProfile::ProxyChat {"chat_completions"} else {"responses"},"modelCatalog":{"models":[
+                {"model":"gpt-5.6-sol","displayName":"5.6 Sol"},
+                {"model":model,"displayName":"6 Astra"},
+                {"model":"gpt-6-sol","displayName":"6 Sol"},
+                {"model":"gpt-6.1-sol","displayName":"6.1 Sol"}
+            ]}});
+            if declaration {
+                settings["modelCatalog"]["models"][1]["reasoningMode"] = json!("supported");
+                settings["modelCatalog"]["models"][1]["reasoningLevels"] =
+                    json!(["medium", "high"]);
+                settings["modelCatalog"]["models"][1]["defaultReasoningLevel"] = json!("medium");
+            }
+            let mut provider = crate::provider::Provider::with_id(
+                "synthetic".into(),
+                "Synthetic diagnostic".into(),
+                settings.clone(),
+                None,
+            );
+            if template {
+                provider.meta = Some(crate::provider::ProviderMeta {
+                    codex_chat_reasoning: crate::codex_reasoning::reasoning_template(
+                        "openaiChatEffort",
+                    ),
+                    ..Default::default()
+                });
+            }
+            let writer_plan = plan_codex_model_catalog(&settings, &config, profile, &provider)
+                .unwrap()
+                .unwrap();
+            let readonly_plan =
+                plan_codex_model_catalog_readonly(&settings, &config, profile, &provider)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                writer_plan, readonly_plan,
+                "real writer/read-only planner agreement: {case}"
+            );
+            let prepared = prepare_codex_config_text_with_model_catalog(
+                &settings,
+                &config,
+                profile,
+                Some(&provider),
+            )
+            .unwrap();
+            let catalog: Value = read_json_file(&get_codex_model_catalog_path()).unwrap();
+            assert_eq!(
+                catalog, writer_plan,
+                "real planner and file prepare agreement: {case}"
+            );
+            let selected = &catalog["models"][1];
+            let actual: Vec<_> = selected["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["effort"].as_str().unwrap())
+                .collect();
+            assert_eq!(json!(actual), expected, "{case}");
+            assert_eq!(selected["slug"], model);
+            assert_eq!(selected["display_name"], "6 Astra");
+            let normalized =
+                normalize_selected_model_reasoning(&provider, &prepared, profile, false).unwrap();
+            assert_eq!(
+                normalized, prepared,
+                "saved medium must remain byte-identical: {case}"
+            );
+            let reopened =
+                build_simplified_catalog_from_texts(&prepared, &catalog.to_string()).unwrap();
+            provider.settings_config["modelCatalog"] = reopened;
+            let capability = resolve_provider_model_capability(&provider, model);
+            let mut body = json!({"model":model,"reasoning":{"effort":"medium"},"input":[{"role":"user","content":"Synthetic diagnostic only"}]});
+            crate::proxy::providers::normalize_request_reasoning(&provider, &mut body, false)
+                .unwrap();
+            let wire = if profile == CodexCatalogToolProfile::ProxyChat {
+                let transport =
+                    crate::proxy::providers::resolve_codex_chat_reasoning_config(&provider, &body);
+                crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(body,transport.as_ref()).unwrap()
+            } else {
+                body
+            };
+            let wire: Value = serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
+            let wire_effort = if profile == CodexCatalogToolProfile::ProxyChat {
+                &wire["reasoning_effort"]
+            } else {
+                &wire["reasoning"]["effort"]
+            };
+            assert_eq!(wire_effort, "medium", "{case}");
+            assert!(
+                selected["base_instructions"].is_string(),
+                "legacy Codex schema: {case}"
+            );
+            assert!(
+                selected["supports_parallel_tool_calls"].is_boolean(),
+                "legacy Codex schema: {case}"
+            );
+            assert_eq!(capability.verified, case == "official-native", "{case}");
+            assert_eq!(capability.controls.effort, !actual.is_empty(), "{case}");
+            let expected_default = if declaration {
+                json!("medium")
+            } else if actual.is_empty() {
+                Value::Null
+            } else {
+                json!("low")
+            };
+            assert_eq!(
+                selected["default_reasoning_level"], expected_default,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn declared_gpt_alias_survives_save_reopen_switch_and_final_serialization() {
         let _home = CodexLiveTestHome::new();
         for profile in [
@@ -8917,7 +9272,7 @@ web_search = "disabled" # cc-switch:managed
                         .as_array()
                         .unwrap()
                         .len(),
-                    0
+                    6
                 );
             }
             let reopened =
@@ -11585,7 +11940,7 @@ base_url = "https://idle.example/v1"
     }
 
     #[test]
-    fn actual_upper_catalog_boundary_scopes_cache_to_native_endpoint() {
+    fn actual_upper_catalog_boundary_keeps_model_facts_on_unverified_relays() {
         let settings = json!({"modelCatalog":{"models":[{"model":"gpt-snapshot"}]}});
         for profile in [
             CodexCatalogToolProfile::NativeResponses,
@@ -11598,7 +11953,16 @@ base_url = "https://idle.example/v1"
                 None,
             )
             .unwrap();
-            assert_eq!(relay["models"][0]["supported_reasoning_levels"], json!([]));
+            assert_eq!(
+                relay["models"][0]["supported_reasoning_levels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry["effort"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["low", "high"]
+            );
+            assert_eq!(relay["models"][0]["default_reasoning_level"], "high");
         }
         let direct = reasoning_boundary_fixture(
             settings,

@@ -460,21 +460,29 @@ pub(crate) fn resolve(
     transport: Option<&CodexChatReasoningConfig>,
 ) -> Option<ReasoningCapabilities> {
     let hard_model_facts = official.as_ref().filter(|facts| facts.verified).cloned();
-    // Downgrade fresh name-only facts once, before applying endpoint constraints.
-    // A previous resolved result may enter through `declared` on the transport
-    // projection pass; its derived restrictions must survive that second pass.
-    let scope_fresh_facts = |mut facts: ReasoningCapabilities| {
+    // A versioned official model profile describes selectable client levels even
+    // when this endpoint is unverified. It must not become a hard relay limit.
+    // A resolved result may enter through `declared` on the transport projection
+    // pass; preserve its derived endpoint restrictions on that second pass.
+    let scope_official_facts = |mut facts: ReasoningCapabilities| {
         if facts.source == CapabilitySource::ExactProfile && !facts.verified {
-            facts.mode = ReasoningMode::Unknown;
-            facts.levels.clear();
-            facts.default_level = None;
             facts.request_levels = None;
         }
         facts
     };
     let mut capability = declared
-        .or_else(|| official.map(scope_fresh_facts))
-        .or_else(|| curated_capabilities(model).map(scope_fresh_facts))?;
+        .or_else(|| official.map(scope_official_facts))
+        .or_else(|| {
+            // Legacy name-only compatibility entries have no traced model source.
+            // The loader supplies versioned canonical seed facts via `official`.
+            curated_capabilities(model).map(|mut facts| {
+                facts.mode = ReasoningMode::Unknown;
+                facts.levels.clear();
+                facts.default_level = None;
+                facts.request_levels = None;
+                facts
+            })
+        })?;
     if let Some(hard_levels) = hard_model_facts
         .as_ref()
         .and_then(|facts| facts.request_levels.as_ref())
@@ -614,9 +622,7 @@ pub(crate) fn resolve(
             .push("Endpoint explicitly does not support thinking".into());
         capability.mode = ReasoningMode::Unsupported;
     }
-    if capability.conflicts.is_empty()
-        && (capability.source != CapabilitySource::ExactProfile || capability.verified)
-    {
+    if capability.conflicts.is_empty() {
         capability.controls.on = matches!(
             capability.mode,
             ReasoningMode::Toggle | ReasoningMode::Required | ReasoningMode::Supported
@@ -1049,6 +1055,95 @@ mod tests {
             .validate_intent(&ReasoningIntent::Effort("high".into()))
             .is_ok());
         assert!(!capability.controls.effort);
+    }
+
+    #[test]
+    fn official_profile_choices_do_not_verify_or_constrain_an_unknown_relay() {
+        let row = seed_official_model_facts()
+            .into_iter()
+            .find(|row| row["slug"] == "gpt-6-astra")
+            .unwrap();
+        let mut official = native_capabilities(&row).unwrap();
+        official.source = CapabilitySource::ExactProfile;
+        official.verified = false;
+        let transport = reasoning_template("openaiChatEffort").unwrap();
+        let capability = resolve(
+            "gpt-6-astra",
+            None,
+            Some(official.clone()),
+            Some(&transport),
+        )
+        .unwrap();
+        assert_eq!(
+            capability.levels,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(capability.default_level.as_deref(), Some("low"));
+        assert!(!capability.verified);
+        assert!(capability.controls.effort);
+        assert!(!capability.controls.on && !capability.controls.off);
+        // UI profile evidence is not proof that a relay rejects another explicit
+        // client choice. In particular, ultra is not an HTTP acceptance claim.
+        assert!(capability
+            .validate_intent(&ReasoningIntent::Effort("minimal".into()))
+            .is_ok());
+        let empty =
+            declared_capabilities(&json!({"reasoningMode":"unknown", "reasoningLevels":[]}));
+        let empty = resolve(
+            "gpt-6-astra",
+            empty,
+            Some(official.clone()),
+            Some(&transport),
+        )
+        .unwrap();
+        assert!(empty.levels.is_empty());
+        assert!(!empty.controls.effort);
+        assert!(empty
+            .validate_intent(&ReasoningIntent::Effort("medium".into()))
+            .is_ok());
+        official.verified = true;
+        let native = resolve("gpt-6-astra", None, Some(official), Some(&transport)).unwrap();
+        assert!(native
+            .validate_intent(&ReasoningIntent::Effort("minimal".into()))
+            .is_err());
+    }
+
+    #[test]
+    fn canonical_profile_choices_intersect_exact_endpoint_limits_on_both_passes() {
+        let row = seed_official_model_facts()
+            .into_iter()
+            .find(|row| row["slug"] == "gpt-6-astra")
+            .unwrap();
+        let mut official = native_capabilities(&row).unwrap();
+        official.source = CapabilitySource::ExactProfile;
+        official.verified = false;
+        let native = native_response_limits("https://api.deepseek.com/v1").unwrap();
+        let capability =
+            resolve("gpt-6-astra", None, Some(official.clone()), Some(&native)).unwrap();
+        assert_eq!(capability.levels, vec!["low", "high", "max"]);
+        assert!(!capability.verified);
+        assert!(capability.controls.effort);
+        assert!(capability
+            .validate_intent(&ReasoningIntent::Effort("ultra".into()))
+            .is_err());
+        let chat = chat_transport(
+            "Synthetic",
+            "https://api.deepseek.com/v1",
+            "gpt-6-astra",
+            None,
+            &json!({}),
+            Some(official),
+        )
+        .unwrap();
+        let capability = chat.resolved_capabilities.as_ref().unwrap();
+        assert_eq!(capability.levels, vec!["low", "high", "max"]);
+        assert!(!capability.verified);
+        assert!(capability
+            .validate_intent(&ReasoningIntent::Effort("ultra".into()))
+            .is_err());
+        assert!(
+            validate_transport_intent(&chat, &ReasoningIntent::Effort("ultra".into())).is_err()
+        );
     }
 
     #[test]
