@@ -47,6 +47,10 @@ pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
     {
         return Err(AppError::Config("secret.database_version_too_new".into()));
     }
+    if super::loongport_schema::read_stored_version(conn)? == 25 {
+        crate::paperclip::bindings::validate_schema(conn)?;
+        crate::paperclip::bindings::read_rows(conn)?;
+    }
     if super::loongport_schema::read_stored_version(conn)? >= 24 && stored_metadata(conn)?.is_none()
     {
         return Err(AppError::Config("secret.metadata_missing".into()));
@@ -130,6 +134,9 @@ pub(crate) fn upgrade_staging_for_target(
                 .map_err(crate::secrets::inventory::secret_error)
         })
         .transpose()?;
+    if let Some(source) = &source {
+        crate::secrets::inventory::validate_database(conn, source)?;
+    }
     Database::create_tables_on_conn(conn)?;
     if target == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
         Database::apply_upgrade_source_migrations_on_conn(conn)?;
@@ -174,9 +181,14 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
             if stored_metadata(&source)?.is_some() {
                 check_identity(&source, vault)?;
                 crate::secrets::inventory::validate_database(&source, vault)?;
-                drop(source);
-                crate::config::ensure_private_file(path)?;
-                return Connection::open(path).map_err(db_error);
+                if super::loongport_schema::read_stored_version(&source)?
+                    == super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+                {
+                    crate::config::ensure_private_file(path)?;
+                    return Connection::open(path).map_err(db_error);
+                }
+                // Authenticated historical data is migrated only in the private
+                // copy, after the active-checkpoint branch above has declined it.
             }
             copy(&source, &mut staged)?;
         }
@@ -208,14 +220,19 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
     let staged =
         Connection::open_with_flags(&stage_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(db_error)?;
+    preflight_connection(&staged)?;
     check_identity(&staged, vault)?;
     crate::secrets::inventory::validate_database(&staged, vault)?;
+    let mut working = Connection::open_in_memory().map_err(db_error)?;
+    copy(&staged, &mut working)?;
+    super::loongport_schema::apply(&working)?;
+    crate::secrets::inventory::validate_database(&working, vault)?;
     crate::config::ensure_private_file(path)?;
     let mut destination = Connection::open(path).map_err(db_error)?;
     destination
         .execute_batch("PRAGMA secure_delete=ON;")
         .map_err(db_error)?;
-    copy(&staged, &mut destination)?;
+    copy(&working, &mut destination)?;
     destination
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; VACUUM;")
         .map_err(db_error)?;
@@ -247,8 +264,9 @@ fn reopen_verified_upgrade(
         return Ok(None);
     };
     if Database::get_user_version(&captured.image)? != super::UPSTREAM4_SCHEMA_VERSION
-        || super::loongport_schema::read_stored_version(&captured.image)?
-            != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        || !crate::secrets::upgrade::checkpoint::supports_loongport_version(
+            super::loongport_schema::read_stored_version(&captured.image)?,
+        )
     {
         return Ok(None);
     }
@@ -377,6 +395,62 @@ pub(crate) fn migrate_backups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_native_authenticated_v24_startup_migrates_working_copy() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let path = dir.path().join("fixture.db");
+        let vault = VaultContext::generate().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
+        super::super::loongport_schema::apply(&conn).unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        stamp(&conn, &vault).unwrap();
+        drop(conn);
+        let reopened = prepare(&path, &vault).unwrap();
+        assert_eq!(
+            super::super::loongport_schema::read_stored_version(&reopened).unwrap(),
+            25
+        );
+        assert_eq!(
+            Database::get_user_version(&reopened).unwrap(),
+            super::super::UPSTREAM4_SOURCE_SCHEMA_VERSION
+        );
+        assert!(Database::table_exists(&reopened, "paperclip_run_bindings").unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_native_active_checkpoint_prevents_startup_schema_migration() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let root = crate::config::get_app_config_dir();
+        crate::config::ensure_private_directory(&root).unwrap();
+        let path = root.join(crate::config::DB_FILE_NAME);
+        let vault = VaultContext::generate().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
+        super::super::loongport_schema::apply(&conn).unwrap();
+        conn.execute_batch("DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1").unwrap();
+        stamp(&conn, &vault).unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let device = crate::live::engine::DeviceStore::for_device();
+        crate::config_file_io::ensure_private_directory(device.root()).unwrap();
+        std::fs::write(
+            device
+                .root()
+                .join(crate::secrets::upgrade::checkpoint::FILE),
+            b"retained-authentication-required",
+        )
+        .unwrap();
+        assert!(prepare(&path, &vault).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!root.join(".vault-migration.db").exists());
+    }
 
     /// 前代上游备份（无 LoongPort 计数、user_version 高于当前链）不得劫持
     /// 备份迁移：跳过、原样保留；同目录的正常备份照常加密。真机事故回归。

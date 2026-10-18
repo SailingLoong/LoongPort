@@ -185,6 +185,89 @@ pub struct RequestLogDetail {
     pub pricing_model: Option<String>,
 }
 
+/// Immutable projection of the original usage row. Unlike presentation reads,
+/// this preserves nullable fields and integer values without defaults/casts,
+/// and does not backfill, reprice, repair, join providers or create rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RawRequestLog {
+    pub request_id: String,
+    pub provider_id: String,
+    pub app_type: String,
+    pub model: String,
+    pub request_model: Option<String>,
+    pub pricing_model: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub input_token_semantics: i64,
+    pub input_cost_usd: String,
+    pub output_cost_usd: String,
+    pub cache_read_cost_usd: String,
+    pub cache_creation_cost_usd: String,
+    pub total_cost_usd: String,
+    pub cost_multiplier: Option<String>,
+    pub status_code: i64,
+    pub session_id: Option<String>,
+    pub data_source: Option<String>,
+    pub created_at: i64,
+    pub error_message: Option<String>,
+}
+
+impl Database {
+    #[cfg(test)]
+    pub(crate) fn get_request_detail_raw(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RawRequestLog>, AppError> {
+        let conn = lock_conn!(self.conn);
+        Self::get_request_detail_raw_on(&conn, request_id)
+    }
+
+    pub(crate) fn get_request_detail_raw_on(
+        conn: &Connection,
+        request_id: &str,
+    ) -> Result<Option<RawRequestLog>, AppError> {
+        conn.query_row(
+            "SELECT request_id, provider_id, app_type, model, request_model, pricing_model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    input_token_semantics, input_cost_usd, output_cost_usd, cache_read_cost_usd,
+                    cache_creation_cost_usd, total_cost_usd, cost_multiplier, status_code,
+                    session_id, data_source, created_at, error_message
+             FROM proxy_request_logs WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok(RawRequestLog {
+                    request_id: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    app_type: row.get(2)?,
+                    model: row.get(3)?,
+                    request_model: row.get(4)?,
+                    pricing_model: row.get(5)?,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    cache_read_tokens: row.get(8)?,
+                    cache_creation_tokens: row.get(9)?,
+                    input_token_semantics: row.get(10)?,
+                    input_cost_usd: row.get(11)?,
+                    output_cost_usd: row.get(12)?,
+                    cache_read_cost_usd: row.get(13)?,
+                    cache_creation_cost_usd: row.get(14)?,
+                    total_cost_usd: row.get(15)?,
+                    cost_multiplier: row.get(16)?,
+                    status_code: row.get(17)?,
+                    session_id: row.get(18)?,
+                    data_source: row.get(19)?,
+                    created_at: row.get(20)?,
+                    error_message: row.get(21)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("Read original usage row failed: {e}")))
+    }
+}
+
 /// 把 26 列的查询结果映射为 `RequestLogDetail`。
 ///
 /// 调用方的 SELECT **必须**按以下顺序返回 26 列：
@@ -2326,6 +2409,22 @@ pub(crate) fn find_model_pricing_row(
     conn: &Connection,
     model_id: &str,
 ) -> Result<Option<(String, String, String, String)>, AppError> {
+    Ok(find_model_pricing_match(conn, model_id)?.map(|row| {
+        (
+            row.input_cost_per_million,
+            row.output_cost_per_million,
+            row.cache_read_cost_per_million,
+            row.cache_creation_cost_per_million,
+        )
+    }))
+}
+
+/// Same lookup owner as ordinary accounting, retaining the exact row identity
+/// for session-scoped quote provenance. Never creates or refreshes prices.
+pub(crate) fn find_model_pricing_match(
+    conn: &Connection,
+    model_id: &str,
+) -> Result<Option<crate::services::model_pricing::ModelPricingInfo>, AppError> {
     let candidates = model_pricing_candidates(model_id);
     if candidates.is_empty() {
         return Ok(None);
@@ -2377,24 +2476,29 @@ pub(crate) fn is_placeholder_pricing_model(model_id: &str) -> bool {
     normalized.is_empty() || matches!(normalized.as_str(), "unknown" | "null" | "none")
 }
 
+fn pricing_info_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::services::model_pricing::ModelPricingInfo> {
+    Ok(crate::services::model_pricing::ModelPricingInfo {
+        model_id: row.get(0)?,
+        display_name: row.get(1)?,
+        input_cost_per_million: row.get(2)?,
+        output_cost_per_million: row.get(3)?,
+        cache_read_cost_per_million: row.get(4)?,
+        cache_creation_cost_per_million: row.get(5)?,
+    })
+}
+
 fn query_model_pricing_exact(
     conn: &Connection,
     model_id: &str,
-) -> Result<Option<(String, String, String, String)>, AppError> {
+) -> Result<Option<crate::services::model_pricing::ModelPricingInfo>, AppError> {
     conn.query_row(
-        "SELECT input_cost_per_million, output_cost_per_million,
+        "SELECT model_id, display_name, input_cost_per_million, output_cost_per_million,
                 cache_read_cost_per_million, cache_creation_cost_per_million
-         FROM model_pricing
-         WHERE model_id = ?1 COLLATE NOCASE",
+         FROM model_pricing WHERE model_id = ?1 COLLATE NOCASE",
         [model_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
+        pricing_info_from_row,
     )
     .optional()
     .map_err(|e| AppError::Database(format!("查询模型定价失败: {e}")))
@@ -2403,24 +2507,15 @@ fn query_model_pricing_exact(
 fn query_model_pricing_prefix(
     conn: &Connection,
     model_id: &str,
-) -> Result<Option<(String, String, String, String)>, AppError> {
+) -> Result<Option<crate::services::model_pricing::ModelPricingInfo>, AppError> {
     let pattern = format!("{model_id}-%");
     conn.query_row(
-        "SELECT input_cost_per_million, output_cost_per_million,
+        "SELECT model_id, display_name, input_cost_per_million, output_cost_per_million,
                 cache_read_cost_per_million, cache_creation_cost_per_million
-         FROM model_pricing
-         WHERE model_id LIKE ?1
-         ORDER BY LENGTH(model_id) ASC
-         LIMIT 1",
+         FROM model_pricing WHERE model_id LIKE ?1
+         ORDER BY LENGTH(model_id) ASC LIMIT 1",
         [pattern],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
+        pricing_info_from_row,
     )
     .optional()
     .map_err(|e| AppError::Database(format!("查询模型前缀定价失败: {e}")))
@@ -4771,6 +4866,10 @@ mod tests {
             [],
         )?;
 
+        // Budget provenance must retain the actual stored row identity, not
+        // the normalized lookup candidate introduced by NOCASE matching.
+        let matched = find_model_pricing_match(&conn, "glm-5.3-flash-exl3")?.unwrap();
+        assert_eq!(matched.model_id, "GLM-5.3-Flash-EXL3");
         let row = find_model_pricing_row(&conn, "GLM-5.3-Flash-EXL3")?;
         assert!(row.is_some(), "小写候选应能命中按大写入库的自定义定价行");
         let (input, output, ..) = row.unwrap();

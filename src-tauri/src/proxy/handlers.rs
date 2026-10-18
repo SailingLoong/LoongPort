@@ -990,7 +990,13 @@ async fn handle_responses_for_app(
     // function-call names (see the namespace-restore dispatch below).
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
+    let budget_route = extensions.get::<crate::paperclip::RouteBinding>().cloned();
     let forwarder = ctx.create_forwarder(&state);
+    let forwarder = if let Some(route) = &budget_route {
+        forwarder.with_request_identity(Some(route.identity.clone()))
+    } else {
+        forwarder
+    };
     let mut result = match forwarder
         .forward_with_retry(
             &app_type,
@@ -1018,6 +1024,10 @@ async fn handle_responses_for_app(
     ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let response = result.response;
+    if let Some(route) = budget_route {
+        return handle_budgeted_native_response(response, &ctx, &state, route, connection_guard)
+            .await;
+    }
 
     if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
         return handle_codex_anthropic_to_responses_transform(
@@ -3706,5 +3716,174 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         assert_eq!(body["error"]["provider"], "HCAI");
         assert_eq!(body["error"]["model"], "gpt-5.5");
         assert_eq!(body["error"]["endpoint"], "/responses");
+    }
+}
+
+/// The bounded native caller waits for the ORIGINAL UsageLogger acknowledgement.
+/// Ordinary handlers retain their existing asynchronous usage behavior.
+async fn handle_budgeted_native_response(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    route: crate::paperclip::RouteBinding,
+    _connection_guard: Option<ActiveConnectionGuard>,
+) -> Result<axum::response::Response, ProxyError> {
+    let (mut headers, status, bytes) =
+        read_decoded_body(response, ctx.tag, std::time::Duration::from_secs(30)).await?;
+    if !status.is_success() || bytes.len() > 32768 {
+        return Err(ProxyError::ForwardFailed(
+            "paperclip.bounded_response_unavailable".into(),
+        ));
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| ProxyError::ForwardFailed("paperclip.response_invalid".into()))?;
+    if usage_logging_enabled(state) && budget_usage_is_lossless(&value) {
+        // Lossless field validation above distinguishes explicit zero usage from
+        // missing usage; zero is an observed fact, not an estimated free request.
+        if let Some(usage) = TokenUsage::from_codex_response(&value) {
+            let evidence = route.evidence().map_err(|_| {
+                ProxyError::ForwardFailed("paperclip.send_evidence_unavailable".into())
+            })?;
+            let model = value["model"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&evidence.model);
+            if model != evidence.model {
+                return Err(ProxyError::ConfigError(
+                    "paperclip.response_model_changed".into(),
+                ));
+            }
+            let id = usage.dedup_request_id(super::usage::parser::dedup_scope_for_app(
+                ctx.app_type_str,
+                &ctx.provider.id,
+            ));
+            let logger = super::usage::logger::UsageLogger::new(&state.db);
+            // This is the only write for the bounded response; no generic async
+            // process_response is subsequently invoked for this branch.
+            match logger.log_with_calculation_confirmed(
+                id,
+                ctx.provider.id.clone(),
+                ctx.app_type_str.into(),
+                model.into(),
+                ctx.request_model.clone(),
+                evidence.model.clone(),
+                usage,
+                evidence.multiplier,
+                ctx.latency_ms(),
+                None,
+                status.as_u16(),
+                Some(ctx.session_id.clone()),
+                None,
+                false,
+                evidence.input_tokens,
+            ) {
+                Ok(row) => {
+                    if let Some(service) = state.service_owner.upgrade() {
+                        let _ = route.record_usage(&service, row);
+                    }
+                }
+                Err(error) => {
+                    log::warn!("[USG-001] Native usage confirmation unavailable");
+                    let _ = error;
+                }
+            }
+        }
+    }
+    // Save known original usage before rejecting failed/incomplete delivery.
+    // Neither a semantic failure nor a non-null error may become completed.
+    if value["status"] != "completed" || !value["error"].is_null() {
+        return Err(ProxyError::ForwardFailed(
+            "paperclip.response_incomplete".into(),
+        ));
+    }
+    strip_entity_headers_for_rebuilt_body(&mut headers);
+    strip_hop_by_hop_response_headers(&mut headers);
+    headers.remove(axum::http::header::CONTENT_TYPE);
+    let mut builder = axum::response::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|_| ProxyError::Internal("paperclip.response_unavailable".into()))
+}
+
+// Validate representability before invoking the original parser: its ordinary
+// callers preserve legacy coercions and diagnostics, neither is suitable here.
+fn budget_usage_is_lossless(value: &Value) -> bool {
+    let Some(usage) = value.get("usage").and_then(Value::as_object) else {
+        return false;
+    };
+    let integer = |v: &Value| v.as_u64().is_some_and(|n| n <= u64::from(u32::MAX));
+    if !["input_tokens", "output_tokens"]
+        .iter()
+        .all(|key| usage.get(*key).is_some_and(integer))
+    {
+        return false;
+    }
+    for key in [
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "prompt_cache_hit_tokens",
+        "total_tokens",
+    ] {
+        if usage.get(key).is_some_and(|v| !integer(v)) {
+            return false;
+        }
+    }
+    for key in ["input_tokens_details", "prompt_tokens_details"] {
+        if let Some(details) = usage.get(key) {
+            let Some(details) = details.as_object() else {
+                return false;
+            };
+            for key in ["cached_tokens", "cache_write_tokens"] {
+                if details.get(key).is_some_and(|v| !integer(v)) {
+                    return false;
+                }
+            }
+        }
+    }
+    value.get("id").is_some_and(|id| {
+        id.as_str().is_some_and(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        })
+    })
+}
+
+#[cfg(test)]
+mod paperclip_usage_boundary_tests {
+    use super::*;
+    #[test]
+    fn paperclip_usage_rejects_malformed_or_truncating_counts_without_parser_logging() {
+        let good =
+            serde_json::json!({"id":"resp_safe","usage":{"input_tokens":10,"output_tokens":2}});
+        assert!(budget_usage_is_lossless(&good));
+        for bad in [
+            Value::Null,
+            serde_json::json!("private echo"),
+            serde_json::json!(4294967296u64),
+            serde_json::json!(-1),
+        ] {
+            for path in ["/usage/input_tokens", "/usage/output_tokens"] {
+                let mut v = good.clone();
+                *v.pointer_mut(path).unwrap() = bad.clone();
+                assert!(!budget_usage_is_lossless(&v));
+            }
+            let mut v = good.clone();
+            v["usage"]["cache_read_input_tokens"] = bad.clone();
+            assert!(!budget_usage_is_lossless(&v));
+            let mut v = good.clone();
+            v["usage"]["input_tokens_details"] = serde_json::json!({"cached_tokens":bad});
+            assert!(!budget_usage_is_lossless(&v));
+        }
+        let mut v = good;
+        v["id"] = serde_json::json!("private task echo");
+        assert!(!budget_usage_is_lossless(&v));
     }
 }

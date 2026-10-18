@@ -34,6 +34,11 @@ impl Database {
 
     /// 在指定连接上创建表（供迁移和测试使用）
     pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
+        let loongport_version = super::loongport_schema::read_stored_version(conn)?;
+        if loongport_version >= 25 {
+            crate::paperclip::bindings::validate_schema(conn)?;
+            crate::paperclip::bindings::read_rows(conn)?;
+        }
         // 1. Providers 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS providers (
@@ -498,6 +503,12 @@ impl Database {
 
         // LoongPort：中转站余额快照（扣费对账）
         crate::relay::reconcile::create_table(conn)?;
+        // A retained v24 upgrade checkpoint owns its exact original identity.
+        // Only a genuinely fresh image gets the current table here; existing
+        // databases obtain it through the explicit LoongPort migration owner.
+        if loongport_version == 0 {
+            crate::paperclip::bindings::ensure_schema(conn)?;
+        }
 
         Ok(())
     }

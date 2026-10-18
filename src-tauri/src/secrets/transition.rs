@@ -5,6 +5,7 @@ use super::{
     key_store::{save_verified, KeyStore},
     owned_file::DeviceFile,
     session::{read_metadata, write_durable, write_metadata, LocalVault},
+    upgrade::SchemaVersions,
     VaultContext,
 };
 use crate::{
@@ -711,7 +712,7 @@ where
                 capture_skills(root, &id, &next, &mut manifest, &skills)?;
             }
         }
-        validate_stages(roots, &id, &next, &manifest)?;
+        let _ = validate_stages(roots, &id, &next, &manifest)?;
         device::validate_sources(roots, &manifest)?;
         hook(Checkpoint::Staged)?;
         if let Some(binding) = &manifest.database {
@@ -721,7 +722,7 @@ where
             }
         }
         if manifest.upgrade.is_some() {
-            validate_stages(roots, &id, &next, &manifest)?;
+            let _ = validate_stages(roots, &id, &next, &manifest)?;
             device::validate_sources(roots, &manifest)?;
             validate_upgrade_database(&conn, &manifest)?;
         }
@@ -750,6 +751,9 @@ where
         *original = Some(bytes);
     }
     hook(Checkpoint::Intent)?;
+    // SQLite page replacement bypasses row hooks, including same-key sync joins.
+    // Invalidate the original session's observations before publishing any pages.
+    db.invalidate_pricing_observations()?;
     finish(
         roots,
         &intent,
@@ -864,6 +868,7 @@ fn database_image(
     next: &VaultContext,
     manifest: &Manifest,
     primary: bool,
+    upgrade_versions: Option<SchemaVersions>,
 ) -> Result<Connection, AppError> {
     let mut memory = Connection::open_in_memory().map_err(db_error)?;
     memory
@@ -875,15 +880,21 @@ fn database_image(
     if integrity != "ok" {
         return Err(invalid());
     }
-    if manifest.upgrade.is_some() {
-        if Database::get_user_version(&memory)? != crate::database::UPSTREAM4_SCHEMA_VERSION
-            || crate::database::loongport_schema::read_stored_version(&memory)?
-                != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
-        {
-            return Err(invalid());
+    match (manifest.upgrade.as_ref(), upgrade_versions) {
+        (Some(_), Some(expected)) => {
+            // The checkpoint owner authenticated this exact historical target.
+            // Current schema constants cannot rewrite its recorded identity.
+            if Database::get_user_version(&memory)? != expected.upstream
+                || crate::database::loongport_schema::read_stored_version(&memory)?
+                    != expected.loongport
+            {
+                return Err(invalid());
+            }
         }
-    } else {
-        validate_database_version(&memory, manifest.database.as_ref(), primary)?;
+        (None, None) => {
+            validate_database_version(&memory, manifest.database.as_ref(), primary)?;
+        }
+        _ => return Err(invalid()),
     }
     vault::check_identity(&memory, next)?;
     inventory::validate_database(&memory, next)?;
@@ -929,7 +940,7 @@ fn bound_target_digest(
         .find(|(_, artifact)| matches!(artifact.destination, Destination::Database))
         .ok_or_else(invalid)?;
     let bytes = read_stage(root, id, index, artifact)?;
-    let image = database_image(&bytes, next, manifest, true)?;
+    let image = database_image(&bytes, next, manifest, true, None)?;
     Database::content_digest(&image)
 }
 
@@ -957,7 +968,7 @@ fn validate_stages(
     id: &str,
     next: &VaultContext,
     manifest: &Manifest,
-) -> Result<(), AppError> {
+) -> Result<Option<SchemaVersions>, AppError> {
     let root = roots.data;
     roots.validate()?;
     if manifest.upgrade.is_some() && manifest.database.is_some() {
@@ -973,7 +984,7 @@ fn validate_stages(
     {
         return Err(invalid());
     }
-    if let Some(binding) = &manifest.upgrade {
+    let upgrade_versions = if let Some(binding) = &manifest.upgrade {
         if !same_local(&manifest.previous, &manifest.next)
             || manifest.skills.is_some()
             || manifest.artifacts.iter().any(|a| {
@@ -1001,16 +1012,20 @@ fn validate_stages(
             }
         }
         let bytes = read_stage(root, id, checkpoint.0, checkpoint.1)?;
-        let (source, target) = crate::secrets::upgrade::checkpoint::validate_publication_payload(
-            roots.data,
-            &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
-            next,
-            &bytes,
-        )?;
+        let (source, target, versions) =
+            crate::secrets::upgrade::checkpoint::validate_publication_payload(
+                roots.data,
+                &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
+                next,
+                &bytes,
+            )?;
         if source != binding.source_database || target != binding.target_database {
             return Err(invalid());
         }
-    }
+        Some(versions)
+    } else {
+        None
+    };
     let mut destinations = std::collections::HashSet::new();
     let mut paths = std::collections::HashSet::new();
     #[cfg(unix)]
@@ -1058,6 +1073,7 @@ fn validate_stages(
                     next,
                     manifest,
                     matches!(artifact.destination, Destination::Database),
+                    upgrade_versions,
                 )?;
                 if let Some(binding) = &manifest.upgrade {
                     if Database::content_digest(&image)? != binding.target_database {
@@ -1096,7 +1112,7 @@ fn validate_stages(
             safe_relative(directory)?;
         }
     }
-    Ok(())
+    Ok(upgrade_versions)
 }
 fn validate_upgrade_database(conn: &Connection, manifest: &Manifest) -> Result<(), AppError> {
     if let Some(binding) = &manifest.upgrade {
@@ -1153,7 +1169,7 @@ fn finish(
     let root = roots.data;
     device::validate_bindings(roots, intent.version, manifest)?;
     validate_authorization(root, intent, manifest)?;
-    validate_stages(roots, &intent.id, next, manifest)?;
+    let upgrade_versions = validate_stages(roots, &intent.id, next, manifest)?;
     device::validate_sources(roots, manifest)?;
     let main_path = root.join(crate::config::DB_FILE_NAME);
     if manifest.database.is_some() {
@@ -1215,7 +1231,7 @@ fn finish(
         let bytes = read_stage(root, &intent.id, index, artifact)?;
         match &artifact.destination {
             Destination::Database => {
-                let memory = database_image(&bytes, next, manifest, true)?;
+                let memory = database_image(&bytes, next, manifest, true, upgrade_versions)?;
                 connection
                     .execute_batch("PRAGMA secure_delete=ON;")
                     .map_err(db_error)?;
@@ -1282,7 +1298,7 @@ fn finish(
         if Database::content_digest(connection)? != binding.target_database {
             return Err(AppError::Config("upgrade.source_changed".into()));
         }
-        validate_stages(roots, &intent.id, next, manifest)?;
+        let _ = validate_stages(roots, &intent.id, next, manifest)?;
         device::validate_installed_device_files(roots, intent.version, manifest, next)?;
         // SQLite keeps the old inode after an atomic path replacement. Read
         // the guarded destination afresh instead of trusting that handle.
@@ -1295,7 +1311,7 @@ fn finish(
         crate::database::inspection::verify_unchanged(&main_path, &installed.revision)?;
     }
     if manifest.database.is_some() {
-        validate_stages(roots, &intent.id, next, manifest)?;
+        let _ = validate_stages(roots, &intent.id, next, manifest)?;
         device::validate_installed_device_files(roots, intent.version, manifest, next)?;
         let target = bound_target_digest(root, &intent.id, next, manifest)?;
         if Database::content_digest(connection)? != target {
@@ -1635,6 +1651,107 @@ mod tests {
         }
     }
 
+    fn publish_native_checkpoint(source_version: i32, image_version: i32, recorded_version: i32) {
+        let fixture = Fixture::new();
+        let device = crate::live::engine::DeviceStore::for_device();
+        if source_version == 24 {
+            fixture.db.conn.lock().unwrap().execute_batch(
+                "DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;",
+            ).unwrap();
+        }
+        let vault = fixture.db.secrets.read().unwrap().clone();
+        let source_digest = Database::content_digest(&fixture.db.conn.lock().unwrap()).unwrap();
+        let id = crate::secrets::upgrade::checkpoint::create(&fixture.root, &device, &vault, &[])
+            .unwrap();
+        let checkpoint_path = device
+            .root()
+            .join(crate::secrets::upgrade::checkpoint::FILE);
+        let checkpoint_bytes = std::fs::read(&checkpoint_path).unwrap();
+        let descriptor = DeviceFile::registered(crate::secrets::upgrade::checkpoint::FILE).unwrap();
+        let result = install_upgrade_database(
+            &fixture.db,
+            &fixture.store,
+            device.root(),
+            |_, current, _| {
+                let image = crate::secrets::upgrade::checkpoint::stage(
+                    &fixture.root,
+                    &device,
+                    current,
+                    &id,
+                )?;
+                if image_version != source_version {
+                    if image_version == 25 {
+                        crate::database::loongport_schema::apply(&image)?;
+                    } else {
+                        image.execute_batch("DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;")?;
+                    }
+                }
+                Ok(image)
+            },
+            &mut |image, current| {
+                let decoded = descriptor.decode(current, &checkpoint_bytes)?;
+                let mut checkpoint: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+                checkpoint["published_database"] =
+                    serde_json::json!(Database::content_digest(image)?);
+                checkpoint["target_versions"]["loongport"] = serde_json::json!(recorded_version);
+                Ok(UpgradeCheckpointReplacement {
+                    source_digest: hash(&checkpoint_bytes),
+                    ciphertext: descriptor
+                        .encode(current, &serde_json::to_vec(&checkpoint).unwrap())?,
+                })
+            },
+            &mut |_| Ok(()),
+            None,
+        );
+        if source_version == image_version && source_version == recorded_version {
+            result.unwrap();
+            let conn = fixture.db.conn.lock().unwrap();
+            assert_eq!(
+                Database::get_user_version(&conn).unwrap(),
+                crate::database::UPSTREAM4_SCHEMA_VERSION
+            );
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+                source_version
+            );
+            drop(conn);
+            assert_eq!(
+                crate::secrets::upgrade::checkpoint::verified_database_id(
+                    &fixture.root,
+                    &device,
+                    &vault,
+                )
+                .unwrap()
+                .as_deref(),
+                Some(id.as_str())
+            );
+        } else {
+            assert!(result.is_err(), "mismatched checkpoint must not publish");
+            assert_eq!(
+                Database::content_digest(&fixture.db.conn.lock().unwrap()).unwrap(),
+                source_digest
+            );
+            assert_eq!(std::fs::read(checkpoint_path).unwrap(), checkpoint_bytes);
+        }
+        assert!(!fixture.root.join(INTENT).exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_transition_publishes_exact_authenticated_v24_and_v25_targets() {
+        for version in [24, 25] {
+            publish_native_checkpoint(version, version, version);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_transition_rejects_changed_image_and_forged_checkpoint_versions() {
+        for (source, image, recorded) in [(24, 25, 24), (25, 24, 25), (24, 24, 25), (25, 25, 24)] {
+            publish_native_checkpoint(source, image, recorded);
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn upstream4_transition_replays_schema20_with_original_journal() {
@@ -1676,7 +1793,10 @@ mod tests {
                 .unwrap();
             let value: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
             assert_eq!(value["database"]["upstream"], 20);
-            assert_eq!(value["database"]["loongport"], 24);
+            assert_eq!(
+                value["database"]["loongport"],
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            );
             assert_eq!(
                 value["database"]["sourceDatabase"].as_str().unwrap().len(),
                 64
@@ -1702,7 +1822,7 @@ mod tests {
             assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
             assert_eq!(
                 crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
-                24
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
             );
             vault::check_identity(&conn, &vault).unwrap();
             inventory::validate_database(&conn, &vault).unwrap();
