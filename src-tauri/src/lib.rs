@@ -25,9 +25,9 @@ mod diagnostics_export;
 mod diagnostics_snapshot;
 mod error;
 #[cfg(any(feature = "gui", test))]
-mod feedback_receipt;
-#[cfg(any(feature = "gui", test))]
 mod feedback_preview;
+#[cfg(any(feature = "gui", test))]
+mod feedback_receipt;
 mod gemini_config;
 mod gemini_mcp;
 mod grok_config;
