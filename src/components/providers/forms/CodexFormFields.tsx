@@ -148,7 +148,9 @@ interface CodexFormFieldsProps {
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 
-function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
+export function createCatalogRow(
+  seed?: Partial<CodexCatalogModel>,
+): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
     model: seed?.model ?? "",
@@ -163,8 +165,11 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
     ...(seed?.baseInstructions
       ? { baseInstructions: seed.baseInstructions }
       : {}),
-    ...(seed?.reasoningLevels && seed.reasoningLevels.length > 0
+    ...(seed?.reasoningLevels !== undefined
       ? { reasoningLevels: seed.reasoningLevels }
+      : {}),
+    ...(seed?.reasoningMode !== undefined
+      ? { reasoningMode: seed.reasoningMode }
       : {}),
     ...(seed?.defaultReasoningLevel
       ? { defaultReasoningLevel: seed.defaultReasoningLevel }
@@ -176,7 +181,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
 // so both sync effects can use the same equality definition. Hidden native-profile
 // fields are included so switching between providers with identical visible fields
 // but different base_instructions / tools / modalities still rebuilds the rows.
-function catalogRowsMatchModels(
+export function catalogRowsMatchModels(
   rows: CodexCatalogModel[],
   models: CodexCatalogModel[],
 ): boolean {
@@ -193,16 +198,17 @@ function catalogRowsMatchModels(
       (row.baseInstructions ?? "") === (incoming.baseInstructions ?? "") &&
       JSON.stringify(row.inputModalities ?? []) ===
         JSON.stringify(incoming.inputModalities ?? []) &&
-      JSON.stringify(row.reasoningLevels ?? []) ===
-        JSON.stringify(incoming.reasoningLevels ?? []) &&
+      JSON.stringify(row.reasoningLevels) ===
+        JSON.stringify(incoming.reasoningLevels) &&
+      row.reasoningMode === incoming.reasoningMode &&
       (row.defaultReasoningLevel ?? "") ===
         (incoming.defaultReasoningLevel ?? "")
     );
   });
 }
 
-// Reasoning effort levels Codex understands, in ascending depth order. The
-// backend drops unknown values, so the UI only offers canonical ones.
+// Manual declaration vocabulary, not evidence that a model supports any level.
+// The native resolver validates the selected declaration against its endpoint.
 const CODEX_REASONING_LEVELS = [
   "none",
   "minimal",
@@ -218,14 +224,18 @@ const CODEX_REASONING_LEVELS = [
 // values, so "back to Auto" needs a non-empty value mapped to undefined.
 const AUTO_DEFAULT_REASONING_LEVEL = "__auto__";
 
-function ReasoningLevelsEditor({
+export function ReasoningLevelsEditor({
   levels,
   defaultLevel,
   onLevelsChange,
   onDefaultLevelChange,
+  allowAutomatic = true,
+  ariaLabel,
 }: {
   levels?: string[];
   defaultLevel?: string;
+  allowAutomatic?: boolean;
+  ariaLabel?: string;
   onLevelsChange: (levels: string[] | undefined) => void;
   onDefaultLevelChange: (level: string | undefined) => void;
 }) {
@@ -244,7 +254,7 @@ function ReasoningLevelsEditor({
     const next = (CODEX_REASONING_LEVELS as readonly string[]).filter((item) =>
       picked.includes(item),
     );
-    onLevelsChange(next.length > 0 ? next : undefined);
+    onLevelsChange(next);
     if (defaultLevel && !next.includes(defaultLevel)) {
       onDefaultLevelChange(undefined);
     }
@@ -253,9 +263,9 @@ function ReasoningLevelsEditor({
   const triggerLabel =
     selected.length > 0
       ? selected.join(", ")
-      : t("codexConfig.reasoningLevelsNotSet", {
-          defaultValue: "Not set",
-        });
+      : levels !== undefined
+        ? t("codexConfig.reasoningLevelsEmpty", { defaultValue: "No levels" })
+        : t("codexConfig.reasoningLevelsNotSet", { defaultValue: "Not set" });
 
   return (
     <Popover modal open={open} onOpenChange={setOpen}>
@@ -264,6 +274,7 @@ function ReasoningLevelsEditor({
           type="button"
           role="combobox"
           aria-expanded={open}
+          aria-label={ariaLabel}
           className="flex h-9 w-full items-center justify-between gap-1 rounded-md border border-border-default bg-background px-3 py-1 text-sm shadow-sm focus:outline-none focus-visible:outline-none focus:border-border-default focus-visible:border-border-default focus:ring-0 focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <span
@@ -316,6 +327,22 @@ function ReasoningLevelsEditor({
             </CommandGroup>
           </CommandList>
         </Command>
+        {allowAutomatic && (
+          <div className="border-t border-border-default p-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={levels === undefined && defaultLevel === undefined}
+              onClick={() => {
+                onLevelsChange(undefined);
+                onDefaultLevelChange(undefined);
+              }}
+            >
+              {t("codexConfig.automaticReasoningLevels")}
+            </Button>
+          </div>
+        )}
         {selected.length > 0 && (
           <div className="border-t border-border-default p-2">
             <span className="text-xs text-muted-foreground">

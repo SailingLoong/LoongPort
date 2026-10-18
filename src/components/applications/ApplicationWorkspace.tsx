@@ -23,7 +23,10 @@ import {
 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
-import type { ApplicationOverview } from "@/lib/api/applicationOverview";
+import type {
+  ApplicationConfiguration,
+  ApplicationOverview,
+} from "@/lib/api/applicationOverview";
 import type {
   ApplicationRouting,
   ApplicationRoutingTier,
@@ -71,6 +74,8 @@ import {
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import { ApplicationInlineSelection } from "./ApplicationInlineSelection";
 import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
+import { ApplicationModelSettingsDialog } from "./ApplicationModelSettingsDialog";
+import { useTierEditGuard } from "@/components/relay/useTierEditGuard";
 
 /** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
 function ModelAvailability({
@@ -261,6 +266,20 @@ export function ApplicationWorkspace({
   const model = useApplicationOverview(appId, providers, onSwitchProvider);
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
+  const [modelSettingsBusy, setModelSettingsBusy] = useState(false);
+  const [modelSettingsTarget, setModelSettingsTarget] =
+    useState<ApplicationConfiguration | null>(null);
+  const refreshSettings = async () => {
+    await Promise.all([
+      client.invalidateQueries({ queryKey: ["providers", appId] }),
+      model.refetch(),
+      routing.refetch(),
+    ]);
+  };
+  const { requestEdit, editDialogs } = useTierEditGuard(appId, refreshSettings);
+  useEffect(() => {
+    setModelSettingsTarget(null);
+  }, [appId]);
   const draft = useApplicationRoutingDraft(routing.apply);
   const consumedRequest = useRef<string | null>(null);
   useEffect(() => {
@@ -412,7 +431,12 @@ export function ApplicationWorkspace({
   useImperativeHandle(ref, () => ({
     hasPendingChanges,
     // Existing write lifecycles only; candidate loading/read-only refetches do not block leaving.
-    submitting: saving || draft.submitting || routing.busy || model.busy,
+    submitting:
+      saving ||
+      draft.submitting ||
+      routing.busy ||
+      model.busy ||
+      modelSettingsBusy,
     discard: draft.discard,
   }));
   const modelCandidate =
@@ -680,7 +704,7 @@ export function ApplicationWorkspace({
     routing.isPending ||
     Boolean(routing.error) ||
     (chainEditing && (profilesQuery.isPending || Boolean(profilesQuery.error)));
-  const mutationBusy = orderBusy || writesBlocked;
+  const mutationBusy = orderBusy || writesBlocked || modelSettingsBusy;
   const failedReadTimes = [
     ...(model.error ? [model.dataUpdatedAt] : []),
     ...(profilesQuery.error ? [profilesQuery.dataUpdatedAt] : []),
@@ -1062,6 +1086,13 @@ export function ApplicationWorkspace({
                 void model.select(item, undefined, modelFilter ?? undefined);
               }
             }}
+            onModelSettings={
+              appId === "codex"
+                ? (item) => {
+                    if (!mutationBusy) setModelSettingsTarget(item);
+                  }
+                : undefined
+            }
             onOpenAccount={onOpenAccount}
             onBlockTier={(providerId, blocked) => {
               void routing
@@ -1121,6 +1152,33 @@ export function ApplicationWorkspace({
             </Button>
           </div>
         )}
+      {modelSettingsTarget && (
+        <ApplicationModelSettingsDialog
+          key={`${appId}:${modelSettingsTarget.providerId}`}
+          appId={appId}
+          providerId={modelSettingsTarget.providerId}
+          name={
+            modelSettingsTarget.configurationName ?? modelSettingsTarget.name
+          }
+          open
+          onOpenChange={(open) => {
+            if (!open) setModelSettingsTarget(null);
+          }}
+          onSaved={refreshSettings}
+          onBusyChange={setModelSettingsBusy}
+          onAdvanced={() =>
+            requestEdit({
+              providerId: modelSettingsTarget.providerId,
+              displayName:
+                modelSettingsTarget.configurationName ??
+                modelSettingsTarget.name,
+              isCurrent: modelSettingsTarget.presentation.isCurrent,
+              kind: modelSettingsTarget.source === "relay" ? "tier" : "vendor",
+            })
+          }
+        />
+      )}
+      {editDialogs}
       <ApplicationChangeConfirmDialog
         review={review}
         stale={Boolean(review && !review.isCurrent())}

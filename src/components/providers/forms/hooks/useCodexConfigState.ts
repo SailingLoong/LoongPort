@@ -60,6 +60,16 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
     : Array.isArray(item?.reasoning_levels)
       ? item.reasoning_levels
       : undefined;
+  const rawMode = item?.reasoningMode ?? item?.reasoning_mode;
+  const reasoningMode = [
+    "unknown",
+    "unsupported",
+    "toggle",
+    "required",
+    "supported",
+  ].includes(rawMode)
+    ? (rawMode as CodexCatalogModel["reasoningMode"])
+    : undefined;
   const defaultReasoningLevel =
     typeof item?.defaultReasoningLevel === "string"
       ? item.defaultReasoningLevel
@@ -87,9 +97,8 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
       : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(baseInstructions ? { baseInstructions } : {}),
-    ...(reasoningLevels && reasoningLevels.length > 0
-      ? { reasoningLevels }
-      : {}),
+    ...(reasoningLevels !== undefined ? { reasoningLevels } : {}),
+    ...(reasoningMode !== undefined ? { reasoningMode } : {}),
     ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
   };
 };

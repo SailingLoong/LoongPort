@@ -928,12 +928,17 @@ async fn provision_impl(
             // ⚠️ **已存在的记录只换 sk，不覆盖用户的编辑**：`save_provider` 是全量覆盖
             // `settings_config` 的，照写默认配置会把用户改过的模型名 / 自定义端点全冲掉 ——
             // 而他点「获取密钥」通常只是想刷新一下（照 `relay::provision_impl` 那段）。
+            let settings_guard = state
+                .proxy_service
+                .lock_switch_for_app(app_type.as_str())
+                .await;
             let existing = state
                 .db
                 .get_provider_by_id(&provider_id, app_type.as_str())
                 .ok()
                 .flatten();
 
+            let previous_for_settings = existing.clone();
             let mut settings_config = match existing {
                 Some(old) => {
                     let mut kept = old.settings_config;
@@ -954,7 +959,7 @@ async fn provision_impl(
             provision::refresh_model_catalog(vendor, &mut settings_config, defaults);
             crate::vendor::apply_plan_policy(vendor, bundle.plan.id_segment, &mut settings_config);
 
-            let provider = Provider {
+            let mut provider = Provider {
                 id: provider_id.clone(),
                 name: bundle.plan.display_name.to_string(),
                 settings_config,
@@ -977,12 +982,25 @@ async fn provision_impl(
                 available_models: None,
             };
 
-            state
-                .db
-                .save_provider(app_type.as_str(), &provider)
-                .map_err(|e| {
-                    AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str()))
-                })?;
+            let mut generated_settings = defaults.clone();
+            crate::vendor::apply_plan_policy(
+                vendor,
+                bundle.plan.id_segment,
+                &mut generated_settings,
+            );
+            let generated = Provider {
+                settings_config: generated_settings,
+                ..provider.clone()
+            };
+            crate::services::provider::model_settings::save_managed_refresh(
+                state,
+                app_type,
+                previous_for_settings.as_ref(),
+                &generated,
+                &mut provider,
+            )
+            .map_err(|e| AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str())))?;
+            drop(settings_guard);
             // 官网直连按官方价目计费，倍率恒为 1（中转站才有站点折扣）。
             // 不落倍率会被省心模式当「未知=最贵」垫底（2026-08-17 真实 smoke 实测）。
             state
@@ -1105,6 +1123,8 @@ fn vendor_reset_plan_config_impl(
             ))
         })?;
 
+    let settings_guard =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
     let existing = state
         .db
         .get_provider_by_id(provider_id, app_type.as_str())
@@ -1139,10 +1159,28 @@ fn vendor_reset_plan_config_impl(
     .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
     crate::vendor::apply_plan_policy(vendor, plan.id_segment, &mut defaults);
 
-    let restored = Provider {
+    let mut restored = Provider {
         settings_config: defaults,
         ..existing
     };
+    // Full reset intentionally retires all narrow overrides for this application.
+    if let Some(meta) = restored.meta.as_mut() {
+        if meta
+            .application_model_overrides
+            .as_ref()
+            .is_some_and(|v| v.transport)
+        {
+            meta.codex_chat_reasoning = None;
+        }
+        meta.application_model_overrides = None;
+    }
+    let generated = restored.clone();
+    crate::services::provider::model_settings::merge_managed_refresh(
+        &app_type,
+        None,
+        &generated,
+        &mut restored,
+    )?;
     state
         .db
         .save_provider(app_type.as_str(), &restored)
@@ -1153,6 +1191,8 @@ fn vendor_reset_plan_config_impl(
         .db
         .set_user_edited(app_type.as_str(), provider_id, false)
         .map_err(|e| AppError::Database(format!("清除已手工维护标记失败: {e}")))?;
+
+    drop(settings_guard);
 
     // 恢复的若正是当前在用的那条，落地文件要跟着走 —— 不刷的话 CLI 读到的仍是
     // 用户改坏的那份，而「恢复默认」恰恰是他在档位坏了时点的按钮。

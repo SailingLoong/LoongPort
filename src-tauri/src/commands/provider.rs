@@ -1750,6 +1750,79 @@ pub fn get_provider_edit_settings(
 // These commands expose only redacted editor DTOs. Parser/configuration errors
 // stay inside the existing provider owner, never in IPC error text.
 #[tauri::command]
+pub async fn get_application_model_settings(
+    app_handle: tauri::AppHandle,
+    app: String,
+    #[allow(non_snake_case)] providerId: String,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app)
+        .map_err(|_| "provider.modelSettings.unsupportedApplication".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "provider.modelSettings.ownerUnavailable".to_owned())?;
+        crate::services::provider::model_settings::read(state.inner(), &app, &providerId)
+            .map_err(crate::services::provider::model_settings::public_error)
+    })
+    .await
+    .map_err(|_| "provider.modelSettings.ownerUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn preview_application_model_settings(
+    app_handle: tauri::AppHandle,
+    app: String,
+    #[allow(non_snake_case)] providerId: String,
+    patch: crate::services::provider::model_settings::ModelSettingsPatch,
+    #[allow(non_snake_case)] requestId: String,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app)
+        .map_err(|_| "provider.modelSettings.unsupportedApplication".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "provider.modelSettings.ownerUnavailable".to_owned())?;
+        crate::services::provider::model_settings::preview(
+            state.inner(),
+            &app,
+            &providerId,
+            &patch,
+            &requestId,
+        )
+        .map_err(crate::services::provider::model_settings::public_error)
+    })
+    .await
+    .map_err(|_| "provider.modelSettings.ownerUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn confirm_application_model_settings(
+    app_handle: tauri::AppHandle,
+    app: String,
+    #[allow(non_snake_case)] providerId: String,
+    patch: crate::services::provider::model_settings::ModelSettingsPatch,
+    request: crate::mode::state::SaveRequest,
+) -> Result<serde_json::Value, String> {
+    let app = AppType::from_str(&app)
+        .map_err(|_| "provider.modelSettings.unsupportedApplication".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "provider.modelSettings.ownerUnavailable".to_owned())?;
+        crate::services::provider::model_settings::confirm(
+            state.inner(),
+            &app,
+            &providerId,
+            &patch,
+            request,
+        )
+        .map_err(crate::services::provider::model_settings::public_error)
+    })
+    .await
+    .map_err(|_| "provider.modelSettings.ownerUnavailable".to_owned())?
+}
+
+#[tauri::command]
 pub async fn preview_provider_edit(
     app_handle: tauri::AppHandle,
     app: String,

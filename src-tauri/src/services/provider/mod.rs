@@ -17,6 +17,7 @@ pub(crate) mod gemini_direct;
 mod gemini_direct_tests;
 pub(crate) mod grok_direct;
 mod live;
+pub(crate) mod model_settings;
 mod native;
 pub(crate) use native::service_configuration_revision;
 mod pi;

@@ -22,6 +22,7 @@ import {
   Check,
   GripVertical,
   RotateCcw,
+  SlidersHorizontal,
   Settings2,
 } from "lucide-react";
 import type { ApplicationConfiguration } from "@/lib/api/applicationOverview";
@@ -163,6 +164,7 @@ interface Props {
   onReorder: (ids: string[]) => void;
   onSelect: (item: ApplicationConfiguration) => void;
   onOpenAccount: (account: AccountRoute) => void;
+  onModelSettings?: (item: ApplicationConfiguration) => void;
   onBlockTier: (providerId: string, blocked: boolean) => void;
   onResetTierErrors: (providerId: string) => void;
 }
@@ -320,6 +322,7 @@ export function ApplicationTierTable(props: Props) {
                   busy={props.busy}
                   onSelect={props.onSelect}
                   onOpenAccount={props.onOpenAccount}
+                  onModelSettings={props.onModelSettings}
                   onBlockTier={props.onBlockTier}
                 />
               ))}
@@ -354,6 +357,7 @@ function TierRow({
   busy,
   onSelect,
   onOpenAccount,
+  onModelSettings,
   onBlockTier,
   onResetTierErrors,
 }: {
@@ -372,6 +376,7 @@ function TierRow({
   busy: boolean;
   onSelect: Props["onSelect"];
   onOpenAccount: Props["onOpenAccount"];
+  onModelSettings?: Props["onModelSettings"];
   onBlockTier: Props["onBlockTier"];
   onResetTierErrors: Props["onResetTierErrors"];
 }) {
@@ -516,6 +521,19 @@ function TierRow({
               : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
           )}
         >
+          {onModelSettings && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              disabled={busy}
+              aria-label={t("applications.modelSettings.open")}
+              title={t("applications.modelSettings.open")}
+              onClick={() => onModelSettings(item)}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+            </Button>
+          )}
           {item.account && (
             <Button
               size="icon"

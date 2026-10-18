@@ -33,7 +33,6 @@ pub fn codex_config_toml_with_wire(
     format!(
         r#"model_provider = "custom"
 model = {}
-model_reasoning_effort = "high"
 disable_response_storage = true
 
 [model_providers.custom]
@@ -1294,5 +1293,21 @@ mod tests {
             "Example Relay · Pro"
         );
         assert_eq!(provider_display_name("", "Pro"), "Pro");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn generated_codex_defaults_follow_service_reasoning() {
+    for wire in ["responses", "chat"] {
+        let text = codex_config_toml_with_wire(
+            "fixture",
+            "https://relay.example/v1",
+            "unknown-alias",
+            wire,
+        );
+        assert!(!text.contains("model_reasoning_effort"));
+        assert!(text.contains("disable_response_storage = true"));
+        assert!(text.contains("unknown-alias"));
     }
 }

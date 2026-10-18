@@ -23,6 +23,19 @@ const state = vi.hoisted(() => ({
   refetchRouting: vi.fn(),
   refetchProfiles: vi.fn(),
 }));
+vi.mock("../ApplicationModelSettingsDialog", () => ({
+  ApplicationModelSettingsDialog: ({
+    appId,
+    providerId,
+  }: {
+    appId: string;
+    providerId: string;
+  }) => (
+    <div role="dialog" aria-label="Model settings">
+      {appId}:{providerId}
+    </div>
+  ),
+}));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
     data: state.data,
@@ -182,6 +195,20 @@ beforeEach(() => {
   };
 });
 describe("application workspace", () => {
+  it("opens Codex model settings for the current relay tier without entering account management", async () => {
+    render(<ApplicationWorkspace {...props} />);
+    const row = screen.getByText("Standard").closest("tr")!;
+    await userEvent.click(
+      within(row).getByRole("button", {
+        name: "applications.modelSettings.open",
+      }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Model settings" }),
+    ).toHaveTextContent("codex:a");
+    expect(props.onOpenAccount).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     "keeps every tier directly selectable when failover is %s",
     async (enabled) => {

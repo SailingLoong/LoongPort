@@ -8499,3 +8499,7 @@ fn u01_reviewed_direct_pointer_change_with_identical_native_bytes_rejects_old_re
         native_before
     );
 }
+
+#[cfg(test)]
+#[path = "model_settings_controller_tests.rs"]
+mod model_settings_controller_tests;

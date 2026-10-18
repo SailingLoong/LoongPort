@@ -280,6 +280,9 @@ export type ClaudeApiFormat =
 // - "anthropic": native Anthropic Messages format, needs local routing to convert to Responses
 export type CodexApiFormat = "openai_responses" | "openai_chat" | "anthropic";
 
+export type CodexReasoningMode =
+  "unknown" | "unsupported" | "toggle" | "required" | "supported";
+
 export interface CodexCatalogModel {
   model: string;
   displayName?: string;
@@ -296,7 +299,9 @@ export interface CodexCatalogModel {
   // Per-model reasoning effort levels exposed in the generated Codex catalog
   // (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted the
   // backend uses known model capabilities; unknown models advertise no levels.
+  // An explicit [] suppresses fallback; it does not declare unsupported.
   reasoningLevels?: string[];
+  reasoningMode?: CodexReasoningMode;
   // Per-model default reasoning effort. Only meaningful together with
   // reasoningLevels; when omitted only an authoritative model default is used.
   // Unknown defaults remain unset so an existing user choice is not replaced.

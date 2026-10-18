@@ -63,7 +63,7 @@ describe("ProviderForm Codex catalog helpers", () => {
           reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
           defaultReasoningLevel: " xhigh ",
         },
-        // empty levels / whitespace default are dropped
+        // An explicit empty level list blocks automatic fallback; whitespace default is dropped.
         {
           model: "plain-model",
           reasoningLevels: [],
@@ -77,7 +77,7 @@ describe("ProviderForm Codex catalog helpers", () => {
         reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
         defaultReasoningLevel: "xhigh",
       },
-      { model: "plain-model" },
+      { model: "plain-model", reasoningLevels: [] },
     ]);
   });
 
@@ -175,5 +175,28 @@ describe("reasoning capability editing", () => {
       })?.effortParam,
     ).toBe("reasoning_effort");
     expect(normalizeCodexChatReasoningForSave({})).toBeUndefined();
+  });
+});
+
+describe("model reasoning declaration preservation", () => {
+  it.each(["unknown", "unsupported", "toggle", "required", "supported"])(
+    "round trips %s and explicit empty levels without inferring unsupported",
+    (mode) => {
+      const loaded = mapCodexCatalogModelForForm({
+        model: "alias",
+        reasoning_mode: mode,
+        reasoning_levels: [],
+      });
+      expect(normalizeCodexCatalogModelsForSave([loaded])).toEqual([
+        { model: "alias", reasoningMode: mode, reasoningLevels: [] },
+      ]);
+    },
+  );
+  it("does not add an empty list or a declaration when absent", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        mapCodexCatalogModelForForm({ model: "alias" }),
+      ]),
+    ).toEqual([{ model: "alias" }]);
   });
 });

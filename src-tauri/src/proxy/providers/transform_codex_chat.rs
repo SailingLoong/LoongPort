@@ -310,7 +310,7 @@ pub fn responses_to_chat_completions_with_reasoning(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, reasoning_config);
+    apply_reasoning_options(&mut result, &body, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -354,195 +354,128 @@ fn apply_reasoning_options(
     result: &mut Value,
     body: &Value,
     config: Option<&CodexChatReasoningConfig>,
-) {
+) -> Result<(), ProxyError> {
+    use crate::codex_reasoning::{request_intent, transport_can_disable, ReasoningIntent};
+    let intent = request_intent(body).map_err(ProxyError::TransformError)?;
     let Some(config) = config else {
-        // Unknown capabilities do not authorize model choices or erase an explicit
-        // client value: only convert the standard protocol field here.
-        if let Some(effort) = body.pointer("/reasoning/effort") {
-            result["reasoning_effort"] = effort.clone();
+        // Unknown does not establish support or erase the caller's explicit standard field.
+        match intent {
+            ReasoningIntent::Effort(effort) => result["reasoning_effort"] = json!(effort),
+            ReasoningIntent::Off => result["reasoning_effort"] = json!("none"),
+            ReasoningIntent::On => return Err(ProxyError::TransformError("Select an endpoint compatibility template before enabling thinking without an effort".into())),
+            ReasoningIntent::ServiceDefault => {},
         }
-        return;
+        return Ok(());
     };
-
-    let supports_effort = config.supports_effort.unwrap_or(false);
-    let supports_thinking = config.supports_thinking.unwrap_or(false) || supports_effort;
-    let Some(reasoning_enabled) = reasoning_requested(body) else {
-        return;
-    };
-
-    if supports_thinking {
-        match config
-            .thinking_param
-            .as_deref()
-            .unwrap_or("thinking")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "thinking" => {
-                result["thinking"] = json!({
-                    "type": if reasoning_enabled { "enabled" } else { "disabled" }
-                });
-            }
-            "enable_thinking" => {
-                result["enable_thinking"] = json!(reasoning_enabled);
-            }
-            "reasoning_split" => {
-                result["reasoning_split"] = json!(reasoning_enabled);
-            }
-            _ => {}
+    if let Some(capability) = &config.resolved_capabilities {
+        capability
+            .validate_intent(&intent)
+            .map_err(ProxyError::TransformError)?;
+    }
+    crate::codex_reasoning::validate_transport_intent(config, &intent)
+        .map_err(ProxyError::TransformError)?;
+    let effort_param = config.effort_param.as_deref().unwrap_or("reasoning_effort");
+    // Output exclusion is orthogonal to the thinking selection; never interpret it as off.
+    if effort_param == "reasoning.effort" {
+        if let Some(exclude) = body.pointer("/reasoning/exclude") {
+            result["reasoning"]["exclude"] = exclude.clone();
         }
     }
-
-    // effort_param 在 early return 之前算出：reasoning.effort 形态的「显式关闭」分支要用到。
-    let effort_param = config
-        .effort_param
-        .as_deref()
-        .unwrap_or("reasoning_effort")
-        .trim()
-        .to_ascii_lowercase();
-
-    if !reasoning_enabled {
-        // OpenRouter 原生 reasoning.effort 支持显式 "none"（语义：彻底关闭推理）。
-        // 上游显式发 effort=none/off/disabled（或 reasoning=null）时 reasoning_enabled 为 false，
-        // 直接 return 会丢失关闭意图——OpenRouter 部分模型默认开思考，不带字段无法关闭，
-        // 造成行为与成本偏差；故对该形态忠实转发 {"reasoning":{"effort":"none"}}。
-        // 有独立 thinking 开关的平台由上方字段关闭；只有 effort 参数的平台保留 none。
-        // 注意：完全不带 reasoning 字段时 reasoning_requested 返回 None 已提前 return，
-        // 不会走到这里，故只有上游「显式」表达关闭才透传 none。
-        if supports_effort && effort_param == "reasoning.effort" {
-            result["reasoning"] = json!({ "effort": "none" });
-        } else if supports_effort
-            && effort_param == "reasoning_effort"
-            && config.thinking_param.as_deref() == Some("none")
-        {
-            // This transport has no independent switch. Preserve the explicit
-            // disabled value even when model capabilities have not been declared.
-            result["reasoning_effort"] = json!("none");
-        }
-        return;
+    if matches!(intent, ReasoningIntent::ServiceDefault) {
+        return Ok(());
     }
-
-    if !supports_effort {
-        return;
+    let enabled = !matches!(intent, ReasoningIntent::Off);
+    if !enabled && !transport_can_disable(config) {
+        return Err(ProxyError::TransformError(
+            "This endpoint cannot encode an explicit thinking-off request".into(),
+        ));
     }
-
-    let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let Some(mapped) = map_reasoning_effort(
-        effort,
-        config.effort_value_mode.as_deref(),
-        config.effort_levels.as_deref(),
-    ) else {
-        return;
-    };
-
-    match effort_param.as_str() {
-        // OpenAI 风格顶层字段（DeepSeek 官方、OpenAI o-series 等）。
-        "reasoning_effort" => {
-            result["reasoning_effort"] = json!(mapped);
+    if enabled && config.supports_thinking == Some(false) && config.supports_effort == Some(false) {
+        return Err(ProxyError::TransformError(
+            "This endpoint explicitly does not support thinking".into(),
+        ));
+    }
+    let has_switch = config.supports_thinking == Some(true)
+        && match config.thinking_param.as_deref() {
+            Some("thinking") => {
+                result["thinking"] = json!({"type": if enabled {"enabled"} else {"disabled"}});
+                true
+            }
+            Some("enable_thinking") => {
+                result["enable_thinking"] = json!(enabled);
+                true
+            }
+            Some("reasoning_split") => {
+                result["reasoning_split"] = json!(enabled);
+                true
+            }
+            _ => false,
+        };
+    match intent {
+        ReasoningIntent::Off if !has_switch => match effort_param {
+            "reasoning.effort" => result["reasoning"]["effort"] = json!("none"),
+            "reasoning_effort" => result["reasoning_effort"] = json!("none"),
+            _ => {
+                return Err(ProxyError::TransformError(
+                    "Endpoint has no supported thinking-off field".into(),
+                ))
+            }
+        },
+        ReasoningIntent::Effort(effort) => {
+            if config.supports_effort == Some(false) {
+                return Err(ProxyError::TransformError("This endpoint supports no reasoning strength parameter; select its thinking switch or service default".into()));
+            }
+            let mapped = map_reasoning_effort(&effort, config.effort_value_mode.as_deref(), config.effort_levels.as_deref()).ok_or_else(|| ProxyError::TransformError(format!("Endpoint does not support reasoning effort {effort}; select a supported effort or service default")))?;
+            match effort_param {
+                "reasoning_effort" => result["reasoning_effort"] = json!(mapped),
+                "reasoning.effort" => result["reasoning"]["effort"] = json!(mapped),
+                _ => {
+                    return Err(ProxyError::TransformError(
+                        "Endpoint has no supported reasoning effort field".into(),
+                    ))
+                }
+            }
         }
-        // OpenRouter 原生归一化对象：reasoning.effort 会被 OpenRouter 翻译成各底层模型
-        // （OpenAI/Grok/Gemini/Anthropic）的正确推理参数，覆盖面比顶层 OpenAI 别名更全。
-        // 本转换从空对象构造、不残留原始 reasoning 对象，故不会出现 reasoning 与
-        // reasoning_effort 并存触发 400 的情况（参见 openclaw#24119）。
-        "reasoning.effort" => {
-            result["reasoning"] = json!({ "effort": mapped });
+        ReasoningIntent::On if !has_switch => {
+            if effort_param == "reasoning.effort" {
+                result["reasoning"]["enabled"] = json!(true);
+            } else if config
+                .resolved_capabilities
+                .as_ref()
+                .is_some_and(|capability| {
+                    capability.mode == crate::codex_reasoning::ReasoningMode::Required
+                })
+            { /* mandatory endpoint needs no switch */
+            } else {
+                return Err(ProxyError::TransformError("This endpoint requires an explicit effort; enabling thinking cannot silently select one".into()));
+            }
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn reasoning_requested(body: &Value) -> Option<bool> {
-    if let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) {
-        return Some(!matches!(
-            effort.trim().to_ascii_lowercase().as_str(),
-            "none" | "off" | "disabled"
-        ));
-    }
-
-    body.get("reasoning").map(|value| !value.is_null())
-}
-
+/// Preserve exact effort semantics. Unsupported values are rejected by the caller;
+/// they are never rounded, upgraded, or removed from a successful request.
 fn map_reasoning_effort<'a>(
-    effort: &str,
+    effort: &'a str,
     mode: Option<&str>,
-    effort_levels: Option<&'a [String]>,
+    effort_levels: Option<&[String]>,
 ) -> Option<&'a str> {
-    let effort = effort.trim().to_ascii_lowercase();
-    if matches!(effort.as_str(), "none" | "off" | "disabled") {
+    if effort == "none" {
         return None;
     }
-
-    // ultra 是 Codex 扩展档位：已知枚举的专用模式（deepseek/openrouter/low_high）
-    // 钳到自身最高合法档而非丢弃——丢弃会让"选最深思考"静默退化成"不带 effort"；
-    // passthrough 面向枚举未知的通用上游，档位由用户/预设的 reasoningLevels 声明
-    // 背书，与 max/xhigh 一样原值透传。
-    match mode.unwrap_or("passthrough") {
-        "deepseek" => match effort.as_str() {
-            "max" | "xhigh" | "ultra" => Some("max"),
-            _ => Some("high"),
-        },
-        "low_high" => match effort.as_str() {
-            "minimal" | "low" => Some("low"),
-            _ => Some("high"),
-        },
-        // OpenRouter effort 枚举为 xhigh|high|medium|low|minimal（无 max）。max 是
-        // Codex / 部分模型的扩展档位，对 OpenRouter 非法，会触发
-        // `400 reasoning_effort: Invalid option`（见 openclaw#77350）；钳到最高合法档
-        // xhigh，其余合法值透传，未知值丢弃以免被上游拒绝。
-        "openrouter" => match effort.as_str() {
-            "max" | "xhigh" | "ultra" => Some("xhigh"),
-            "high" => Some("high"),
-            "medium" => Some("medium"),
-            "low" => Some("low"),
-            "minimal" => Some("minimal"),
-            _ => None,
-        },
-        // OpenCode Zen：合法档位逐模型（表数据 = 供应商 modelCatalog 各条目的
-        // reasoningLevels，镜像 models.dev——glm-5.2 仅 high|max、deepseek-v4-flash
-        // 为 low|high|max、kimi-k3 仅 max），opencode 客户端也严格按模型声明发值，
-        // 故不能用统一并集映射。无表（模型未收录目录、或为 toggle/budget 型未声明
-        // effort）→ None，完全不发 reasoning_effort；有表 → 钳到「不小于请求的
-        // 最近合法档」，请求超出最高档则取最高合法档；请求值本身无法识别 → None
-        // （同其他模式的未知值丢弃策略）。
-        "zen" => {
-            let levels = effort_levels?;
-            let requested = zen_effort_rank(&effort)?;
-            levels
-                .iter()
-                .filter_map(|level| zen_effort_rank(level).map(|rank| (rank, level.as_str())))
-                .filter(|(rank, _)| *rank >= requested)
-                .min_by_key(|(rank, _)| *rank)
-                .or_else(|| {
-                    levels
-                        .iter()
-                        .filter_map(|level| {
-                            zen_effort_rank(level).map(|rank| (rank, level.as_str()))
-                        })
-                        .max_by_key(|(rank, _)| *rank)
-                })
-                .map(|(_, level)| level)
-        }
-        _ => match effort.as_str() {
-            "minimal" => Some("minimal"),
-            "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" => Some("high"),
-            "xhigh" => Some("xhigh"),
-            "max" => Some("max"),
-            "ultra" => Some("ultra"),
-            _ => None,
-        },
+    let config = CodexChatReasoningConfig {
+        supports_effort: Some(true),
+        effort_value_mode: mode.map(str::to_string),
+        ..Default::default()
+    };
+    if !crate::codex_reasoning::transport_allows_effort(&config, effort)
+        || effort_levels.is_some_and(|levels| !levels.iter().any(|level| level == effort))
+    {
+        return None;
     }
-}
-
-/// Codex 规范档位序（minimal < low < medium < high < xhigh < max < ultra），供 zen
-/// 逐模型钳制做大小比较；目录里的非法/扩展值（如 "none"）返回 None，查表时被滤掉。
-fn zen_effort_rank(effort: &str) -> Option<usize> {
-    crate::codex_reasoning::effort_rank(&effort.trim().to_ascii_lowercase())
-        .filter(|rank| *rank > 0)
+    Some(effort)
 }
 
 /// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
@@ -2072,17 +2005,14 @@ mod tests {
     }
 
     #[test]
-    fn disabled_effort_does_not_send_an_off_parameter() {
-        let input = json!({"model":"alias", "input":"hello", "reasoning":{"effort":"none"}});
+    fn unsupported_off_fails_instead_of_disappearing() {
         let config = CodexChatReasoningConfig {
             supports_effort: Some(false),
             supports_thinking: Some(false),
-            effort_param: Some("reasoning.effort".into()),
             ..Default::default()
         };
-        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-        assert!(result.get("reasoning").is_none());
-        assert!(result.get("reasoning_effort").is_none());
+        let input = json!({"model":"alias", "reasoning":{"effort":"none"}});
+        assert!(responses_to_chat_completions_with_reasoning(input, Some(&config)).is_err());
     }
 
     #[test]
@@ -2094,25 +2024,15 @@ mod tests {
     }
 
     #[test]
-    fn map_reasoning_effort_handles_ultra_per_mode() {
-        // passthrough 面向枚举未知的通用上游：ultra 与 max/xhigh 一样原值透传，
-        // 让声明了该档位的上游能收到用户选择。
+    fn map_reasoning_effort_never_clamps_ultra_to_another_level() {
         assert_eq!(map_reasoning_effort("ultra", None, None), Some("ultra"));
-        // 已知枚举的专用模式钳到自身最高合法档，而不是走 None 被静默丢弃。
+        for mode in ["deepseek", "low_high", "openrouter"] {
+            assert_eq!(map_reasoning_effort("ultra", Some(mode), None), None);
+        }
         assert_eq!(
-            map_reasoning_effort("ultra", Some("deepseek"), None),
-            Some("max")
+            map_reasoning_effort("VendorTier", None, None),
+            Some("VendorTier")
         );
-        assert_eq!(
-            map_reasoning_effort("ultra", Some("low_high"), None),
-            Some("high")
-        );
-        assert_eq!(
-            map_reasoning_effort("ultra", Some("openrouter"), None),
-            Some("xhigh")
-        );
-        // 真正的未知值仍然丢弃，防上游 400。
-        assert_eq!(map_reasoning_effort("turbo", None, None), None);
     }
 
     #[test]
@@ -2602,7 +2522,7 @@ mod tests {
         let input = json!({
             "model": "deepseek-v4-pro",
             "input": "hello",
-            "reasoning": {"effort": "xhigh"}
+            "reasoning": {"effort": "low"}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2612,12 +2532,14 @@ mod tests {
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["thinking"]["type"], "enabled");
-        assert_eq!(result["reasoning_effort"], "max");
+        assert_eq!(result["reasoning_effort"], "low");
     }
 
     #[test]
@@ -2654,14 +2576,15 @@ mod tests {
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
-        // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
-        // 且写进原生 reasoning 对象，而非顶层 reasoning_effort 别名。
+        // The exact accepted value is preserved in the native reasoning object.
         let input = json!({
             "model": "deepseek/deepseek-chat-v3.1",
             "input": "hello",
-            "reasoning": {"effort": "max"}
+            "reasoning": {"effort": "xhigh"}
         });
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
@@ -2696,6 +2619,8 @@ mod tests {
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let input = json!({
@@ -2722,6 +2647,8 @@ mod tests {
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let input = json!({
@@ -2738,135 +2665,101 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_clamps_zen_effort_to_model_declared_levels() {
-        // OpenCode Zen 平台形态 + 逐模型档位钳制（表数据镜像 models.dev：glm-5.2
-        // 仅声明 high|max）。锁定：统一并集映射会把 Codex 默认的 medium 发给只声明
-        // high|max 的 glm-5.2（恰好是预设默认模型），严格校验的网关会报错；
-        // 低档一律上钳到最近合法档，超出最高档（含 Codex 扩展档 ultra）取最高合法档。
+    fn responses_request_to_chat_validates_zen_effort_against_model_declared_levels() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec!["high".to_string(), "max".to_string()]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["high".into(), "max".into()]),
+            ..Default::default()
         };
-
-        for (input_effort, expected) in [
-            ("minimal", "high"),
-            ("low", "high"),
-            ("medium", "high"),
-            ("high", "high"),
-            ("xhigh", "max"),
-            ("max", "max"),
-            ("ultra", "max"),
-        ] {
-            let input = json!({
-                "model": "glm-5.2",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(
-                result["reasoning_effort"], expected,
-                "effort={input_effort}"
-            );
-            // 写成顶层 reasoning_effort；不发任何 thinking 字段
-            // （网关只认平台归一参数，不认厂商 thinking 形状）。
-            assert!(result.get("thinking").is_none());
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
     fn responses_request_to_chat_zen_preserves_low_when_model_declares_it() {
-        // deepseek-v4-flash 声明 low|high|max：low 合法原样透传，medium 上钳 high，
-        // xhigh 上钳 max——回归锁：旧 deepseek 厂商分支把非 max 一律归 high，
-        // 逐模型钳制不得比那更差，也不得发出声明外的值。
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec![
-                "low".to_string(),
-                "high".to_string(),
-                "max".to_string(),
-            ]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["low".into(), "high".into(), "max".into()]),
+            ..Default::default()
         };
-
-        for (input_effort, expected) in [
-            ("minimal", "low"),
-            ("low", "low"),
-            ("medium", "high"),
-            ("xhigh", "max"),
-        ] {
-            let input = json!({
-                "model": "deepseek-v4-flash",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(
-                result["reasoning_effort"], expected,
-                "effort={input_effort}"
-            );
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
-    fn responses_request_to_chat_zen_single_level_model_clamps_everything_to_max() {
-        // kimi-k3 仅声明 max（全模型交集不存在，统一映射覆盖不了它——必须逐模型）：
-        // 任何请求档都钳到 max。
+    fn responses_request_to_chat_zen_single_level_model_rejects_other_efforts() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: Some(vec!["max".to_string()]),
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            effort_levels: Some(vec!["max".into()]),
+            ..Default::default()
         };
-
-        for input_effort in ["minimal", "medium", "high", "max"] {
-            let input = json!({
-                "model": "kimi-k3",
-                "input": "hello",
-                "reasoning": {"effort": input_effort}
-            });
-            let result =
-                responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-            assert_eq!(result["reasoning_effort"], "max", "effort={input_effort}");
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+            let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if config
+                .effort_levels
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|level| level == effort)
+            {
+                assert_eq!(result.unwrap()["reasoning_effort"], effort);
+            } else {
+                assert!(result.is_err(), "{effort}");
+            }
         }
     }
 
     #[test]
-    fn responses_request_to_chat_omits_zen_effort_without_model_levels() {
-        // 模型未在目录声明 effort（toggle/budget 型如 glm-5.1、qwen 系，或目录未收录）
-        // → 完全不发 reasoning_effort，避免给严格校验的网关送无法核实的值。
+    fn responses_request_to_chat_preserves_zen_effort_without_model_levels() {
         let config = CodexChatReasoningConfig {
-            supports_thinking: Some(true),
             supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
+            thinking_param: Some("none".into()),
+            effort_param: Some("reasoning_effort".into()),
+            effort_value_mode: Some("zen".into()),
+            ..Default::default()
         };
-
-        let input = json!({
-            "model": "glm-5.1",
-            "input": "hello",
-            "reasoning": {"effort": "medium"}
-        });
-        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
-
-        assert!(result.get("reasoning_effort").is_none());
-        assert!(result.get("thinking").is_none());
+        let input = json!({"model":"alias", "reasoning":{"effort":"medium"}});
+        assert_eq!(
+            responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap()
+                ["reasoning_effort"],
+            "medium"
+        );
     }
 
     #[test]
@@ -2874,7 +2767,7 @@ mod tests {
         let input = json!({
             "model": "kimi-k2.6",
             "input": "hello",
-            "reasoning": {"effort": "high"}
+            "reasoning": {"enabled": true}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2884,6 +2777,8 @@ mod tests {
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -2897,7 +2792,7 @@ mod tests {
         let input = json!({
             "model": "qwen3-max",
             "input": "hello",
-            "reasoning": {"effort": "medium"}
+            "reasoning": {"enabled": true}
         });
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -2907,6 +2802,8 @@ mod tests {
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
             effort_levels: None,
+            resolved_capabilities: None,
+            transport_kind: None,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4886,5 +4783,336 @@ mod tests {
             "tools should be present from tool_search_output"
         );
         assert_eq!(result["tools"][0]["function"]["name"], "search_docs");
+    }
+    #[test]
+    fn deepseek_low_is_exact_in_catalog_and_wire() {
+        let settings = json!({"modelCatalog":{"models":[{"model":"relay-alias", "reasoningMode":"toggle", "reasoningLevels":["none","low","high","max"]}]}});
+        let config = crate::codex_reasoning::chat_transport(
+            "openai billing group",
+            "https://api.deepseek.com/v1",
+            "relay-alias",
+            None,
+            &settings,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config.effort_levels.as_ref().unwrap(),
+            &vec!["none", "low", "high", "max"]
+        );
+        for stream in [false, true] {
+            let mut result = json!({});
+            apply_reasoning_options(
+                &mut result,
+                &json!({"reasoning":{"effort":"low"},"stream":stream}),
+                Some(&config),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                json!({"thinking":{"type":"enabled"},"reasoning_effort":"low"})
+            );
+        }
+    }
+    #[test]
+    fn service_default_injects_nothing_and_explicit_off_is_encoded() {
+        let config = crate::codex_reasoning::infer_chat_transport(
+            "ignored",
+            "https://api.deepseek.com",
+            "unknown",
+        )
+        .unwrap();
+        let mut result = json!({});
+        apply_reasoning_options(&mut result, &json!({}), Some(&config)).unwrap();
+        assert_eq!(result, json!({}));
+        apply_reasoning_options(
+            &mut result,
+            &json!({"reasoning":{"effort":"none"}}),
+            Some(&config),
+        )
+        .unwrap();
+        assert_eq!(result, json!({"thinking":{"type":"disabled"}}));
+    }
+    #[test]
+    fn client_choice_wins_and_output_exclusion_is_not_off() {
+        use crate::codex_reasoning::{apply_app_default, request_intent, ReasoningIntent};
+        let mut request = json!({"reasoning":{"effort":"none","exclude":true}});
+        apply_app_default(&mut request, Some(&ReasoningIntent::Effort("max".into())));
+        assert_eq!(request_intent(&request).unwrap(), ReasoningIntent::Off);
+        let config = crate::codex_reasoning::infer_chat_transport(
+            "ignored",
+            "https://openrouter.ai/api/v1",
+            "alias",
+        )
+        .unwrap();
+        let mut result = json!({});
+        apply_reasoning_options(&mut result, &request, Some(&config)).unwrap();
+        assert_eq!(
+            result,
+            json!({"reasoning":{"effort":"none","exclude":true}})
+        );
+        let mut result = json!({});
+        apply_reasoning_options(
+            &mut result,
+            &json!({"reasoning":{"exclude":true}}),
+            Some(&config),
+        )
+        .unwrap();
+        assert_eq!(result, json!({"reasoning":{"exclude":true}}));
+    }
+    #[test]
+    fn app_default_is_used_only_without_client_choice_and_never_service_metadata() {
+        use crate::codex_reasoning::{apply_app_default, ReasoningIntent};
+        let mut body = json!({"reasoning":{"exclude":true}});
+        apply_app_default(&mut body, Some(&ReasoningIntent::Effort("low".into())));
+        assert_eq!(body["reasoning"]["effort"], "low");
+        let mut body = json!({"reasoning":{"effort":"default"}});
+        apply_app_default(&mut body, Some(&ReasoningIntent::Effort("max".into())));
+        assert_eq!(body["reasoning"]["effort"], "default");
+        let mut body = json!({});
+        apply_app_default(&mut body, None);
+        assert_eq!(body, json!({}));
+    }
+    #[test]
+    fn unknown_and_empty_and_unsupported_remain_distinct() {
+        use crate::codex_reasoning::{
+            resolve_settings_capability, CapabilitySource, ReasoningMode,
+        };
+        let unknown = resolve_settings_capability("alias", &json!({}), None, None);
+        assert_eq!(unknown.mode, ReasoningMode::Unknown);
+        assert_eq!(unknown.source, CapabilitySource::Unknown);
+        let empty = resolve_settings_capability(
+            "gpt-6-astra",
+            &json!({"modelCatalog":{"models":[{"model":"gpt-6-astra","reasoningLevels":[]}]}}),
+            None,
+            None,
+        );
+        assert_eq!(empty.mode, ReasoningMode::Unknown);
+        assert!(empty.levels.is_empty());
+        assert_eq!(empty.source, CapabilitySource::AppDeclaration);
+        let unsupported = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"unsupported","reasoningLevels":[]}),
+        )
+        .unwrap();
+        assert_eq!(unsupported.mode, ReasoningMode::Unsupported);
+        assert!(unsupported.levels.is_empty());
+    }
+    #[test]
+    fn toggle_only_never_becomes_high_and_required_never_becomes_off() {
+        use crate::codex_reasoning::{ReasoningIntent, ReasoningMode};
+        let cap = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"toggle","reasoningLevels":[]}),
+        )
+        .unwrap();
+        assert!(cap.levels.is_empty());
+        assert!(cap.validate_intent(&ReasoningIntent::On).is_ok());
+        assert!(cap.validate_intent(&ReasoningIntent::Off).is_ok());
+        let toggle_transport =
+            crate::codex_reasoning::reasoning_template("thinkingToggle").unwrap();
+        assert!(crate::codex_reasoning::validate_transport_intent(
+            &toggle_transport,
+            &ReasoningIntent::Effort("high".into())
+        )
+        .is_err());
+        let required = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningMode":"required","reasoningLevels":["high"]}),
+        )
+        .unwrap();
+        assert_eq!(required.mode, ReasoningMode::Required);
+        assert!(required.validate_intent(&ReasoningIntent::Off).is_err());
+        let old =
+            crate::codex_reasoning::declared_capabilities(&json!({"reasoningLevels":["high"]}))
+                .unwrap();
+        assert_eq!(old.mode, ReasoningMode::Supported);
+        assert!(old.validate_intent(&ReasoningIntent::Off).is_ok()); // Unknown switchability is not a client prohibition.
+    }
+    #[test]
+    fn contradictory_declarations_fail_before_wire() {
+        for declaration in [
+            json!({"reasoningMode":"unsupported","reasoningLevels":["high"]}),
+            json!({"reasoningMode":"required","reasoningLevels":["none","high"],"defaultReasoningLevel":"none"}),
+        ] {
+            let cap = crate::codex_reasoning::declared_capabilities(&declaration).unwrap();
+            assert!(!cap.conflicts.is_empty());
+            assert!(cap
+                .validate_intent(&crate::codex_reasoning::ReasoningIntent::Effort(
+                    "high".into()
+                ))
+                .is_err());
+        }
+        let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningLevels":["low","ultra"]}]}});
+        let config = crate::codex_reasoning::chat_transport(
+            "account",
+            "https://api.deepseek.com",
+            "alias",
+            None,
+            &settings,
+            None,
+        )
+        .unwrap();
+        assert!(!config
+            .resolved_capabilities
+            .as_ref()
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(apply_reasoning_options(
+            &mut json!({}),
+            &json!({"reasoning":{"effort":"ultra"}}),
+            Some(&config)
+        )
+        .is_err());
+    }
+    #[test]
+    fn unsupported_choices_fail_not_round_or_disappear() {
+        for (mode, bad) in [
+            ("deepseek", "medium"),
+            ("deepseek", "xhigh"),
+            ("openrouter", "ultra"),
+            ("low_high", "medium"),
+            ("zen", "low"),
+        ] {
+            let config = crate::provider::CodexChatReasoningConfig {
+                supports_effort: Some(true),
+                effort_value_mode: Some(mode.into()),
+                effort_param: Some("reasoning_effort".into()),
+                effort_levels: Some(vec!["high".into()]),
+                ..Default::default()
+            };
+            assert!(
+                apply_reasoning_options(
+                    &mut json!({}),
+                    &json!({"reasoning":{"effort":bad}}),
+                    Some(&config)
+                )
+                .is_err(),
+                "{mode} {bad}"
+            );
+        }
+        let disabled = crate::provider::CodexChatReasoningConfig {
+            supports_effort: Some(false),
+            supports_thinking: Some(false),
+            ..Default::default()
+        };
+        assert!(apply_reasoning_options(
+            &mut json!({}),
+            &json!({"reasoning":{"effort":"none"}}),
+            Some(&disabled)
+        )
+        .is_err());
+    }
+    #[test]
+    fn model_identity_is_exact_not_case_folded_or_suffix_guessed() {
+        assert!(crate::codex_reasoning::curated_capabilities("prefix/deepseek-v4-flash").is_none());
+        assert!(
+            crate::codex_reasoning::curated_capabilities("unlisted-deepseek-v4.1-flash").is_none()
+        );
+    }
+    #[test]
+    fn serialized_modes_are_stable_and_no_implicit_required_flag_exists() {
+        let cap = crate::codex_reasoning::declared_capabilities(
+            &json!({"reasoningLevels":["low","high"]}),
+        )
+        .unwrap();
+        let dto = serde_json::to_value(cap).unwrap();
+        assert_eq!(dto["mode"], "supported");
+        assert_eq!(dto["source"], "appDeclaration");
+        assert!(dto.get("required").is_none());
+    }
+    #[test]
+    fn unknown_display_levels_preserve_verified_request_constraints_through_chat_projection() {
+        for required in [false, true] {
+            let mut facts = crate::codex_reasoning::native_capabilities(
+                &json!({"supported_reasoning_levels":[{"effort":"high"}]}),
+            )
+            .unwrap();
+            if required {
+                facts.mode = crate::codex_reasoning::ReasoningMode::Required;
+            }
+            let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningMode":"unknown","reasoningLevels":[]}]}});
+            let template = crate::codex_reasoning::reasoning_template("openaiChatEffort");
+            let config = crate::codex_reasoning::chat_transport(
+                "fixture",
+                "https://relay.example/v1",
+                "alias",
+                template.as_ref(),
+                &settings,
+                Some(facts),
+            )
+            .unwrap();
+            let cap = config.resolved_capabilities.as_ref().unwrap();
+            assert!(cap.levels.is_empty() && !cap.controls.effort);
+            for effort in ["high", "low", "ultra", "none"] {
+                let input = json!({"model":"alias","input":"hello","reasoning":{"effort":effort}});
+                let result = responses_to_chat_completions_with_reasoning(input, Some(&config));
+                if effort == "high" || (!required && effort == "none") {
+                    assert_eq!(result.unwrap()["reasoning_effort"], effort);
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joined_empty_verified_metadata_does_not_deny_app_declared_effort() {
+        let facts =
+            crate::codex_reasoning::native_capabilities(&json!({"supported_reasoning_levels":[]}))
+                .unwrap();
+        let settings = json!({"modelCatalog":{"models":[{"model":"alias","reasoningMode":"supported","reasoningLevels":["high"]}]}});
+        let template = crate::codex_reasoning::reasoning_template("openaiChatEffort");
+        let config = crate::codex_reasoning::chat_transport(
+            "fixture",
+            "https://relay.example/v1",
+            "alias",
+            template.as_ref(),
+            &settings,
+            Some(facts),
+        )
+        .unwrap();
+        let cap = config.resolved_capabilities.as_ref().unwrap();
+        assert!(cap.conflicts.is_empty(), "{:?}", cap.conflicts);
+        let intent = crate::codex_reasoning::ReasoningIntent::Effort("high".into());
+        cap.validate_intent(&intent).unwrap();
+        crate::codex_reasoning::validate_transport_intent(&config, &intent).unwrap();
+        let input = json!({"model":"alias","input":"hello","reasoning":{"effort":"high"}});
+        let wire = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert_eq!(wire["reasoning_effort"], "high");
+    }
+    #[test]
+    fn joined_unverified_profile_cannot_erase_derived_endpoint_constraints() {
+        let mut template = crate::codex_reasoning::reasoning_template("deepseekChat").unwrap();
+        template.effort_value_mode = Some("passthrough".into());
+        let config = crate::codex_reasoning::chat_transport(
+            "fixture",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+            Some(&template),
+            &json!({}),
+            None,
+        )
+        .unwrap();
+        let cap = config.resolved_capabilities.as_ref().unwrap();
+        assert!(cap.levels.is_empty() && !cap.controls.effort && !cap.verified);
+        assert!(cap.conflicts.is_empty());
+        for effort in ["low", "high", "max", "ultra"] {
+            let intent = crate::codex_reasoning::ReasoningIntent::Effort(effort.into());
+            let cap_ok = cap.validate_intent(&intent).is_ok();
+            let transport_ok =
+                crate::codex_reasoning::validate_transport_intent(&config, &intent).is_ok();
+            assert_eq!(
+                cap_ok, transport_ok,
+                "{effort}: final capability and transport must agree"
+            );
+            assert_eq!(cap_ok, effort != "ultra");
+            let input =
+                json!({"model":"deepseek-v4-flash","input":"hello","reasoning":{"effort":effort}});
+            let wire = responses_to_chat_completions_with_reasoning(input, Some(&config));
+            if effort == "ultra" {
+                assert!(wire.is_err());
+            } else {
+                assert_eq!(wire.unwrap()["reasoning_effort"], effort);
+            }
+        }
     }
 }
