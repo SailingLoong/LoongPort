@@ -90,6 +90,15 @@ function ImportSession({
   >(null);
   const [error, setError] = useState<AccountError | null>(null);
   const [refreshFailed, setRefreshFailed] = useState(false);
+  const [originalRequest, setOriginalRequest] = useState<string | null>(() => {
+    try {
+      return zcodeAccountsApi.pendingBundleImport(libraryDataRoot);
+    } catch {
+      return null;
+    } // The pre-dispatch storage guard still fails closed.
+  });
+  const [recoveryUnknown, setRecoveryUnknown] = useState(false);
+  const [notRecorded, setNotRecorded] = useState(false);
   const [resultRows, setResultRows] = useState<
     { row: Row; outcome: Outcome }[]
   >([]);
@@ -168,6 +177,7 @@ function ImportSession({
   const selectionLocked = !!busy || checking || submitted;
   const canCheck =
     !!review &&
+    !originalRequest &&
     choices.length > 0 &&
     consent &&
     !busy &&
@@ -175,6 +185,7 @@ function ImportSession({
     !submitted;
   const canSave =
     !!review &&
+    !originalRequest &&
     checkProgress?.status === "ready" &&
     checkedSelection === selectionKey &&
     choices.length > 0 &&
@@ -186,6 +197,7 @@ function ImportSession({
       !alive.current ||
       inFlight.current ||
       review ||
+      originalRequest ||
       !file ||
       password.length === 0
     )
@@ -205,6 +217,7 @@ function ImportSession({
     inFlight.current = true;
     setBusy("preview");
     setError(null);
+    setNotRecorded(false);
     const version = generation.current;
     const inputPassword = password;
     const revision = catalogRevision;
@@ -361,12 +374,15 @@ function ImportSession({
     setSubmitted(true);
     setBusy("save");
     setError(null);
+    setOriginalRequest(review.preview.previewId);
+    setRecoveryUnknown(false);
     try {
       const outcomes = await zcodeAccountsApi.importBundle(
         libraryDataRoot,
         review.revision,
         review.preview.previewId,
         choices,
+        review.preview.ownerBinding,
       );
       if (
         !Array.isArray(outcomes) ||
@@ -381,8 +397,13 @@ function ImportSession({
           committed: false,
         };
       if (!current(version)) return;
+      setOriginalRequest(null);
       setResultRows(
         rows.map((row, index) => ({ row, outcome: outcomes[index] })),
+      );
+      zcodeAccountsApi.acknowledgeBundleImport(
+        libraryDataRoot,
+        review.preview.previewId,
       );
       try {
         await onImported();
@@ -391,9 +412,97 @@ function ImportSession({
       }
     } catch (cause) {
       if (current(version)) {
+        // Another window may have retained a different request before dispatch.
+        // Follow that existing pointer; absence/read failure never proves unsent.
+        try {
+          const pending = zcodeAccountsApi.pendingBundleImport(libraryDataRoot);
+          if (pending) setOriginalRequest(pending);
+        } catch {
+          // Keep the current unresolved ID and the original safe storage error.
+        }
         setResultRows(rows.map((row) => ({ row, outcome: "unknown" })));
         fail(cause);
       }
+    } finally {
+      if (current(version)) {
+        inFlight.current = false;
+        setBusy(null);
+      }
+    }
+  };
+  const queryOriginal = async () => {
+    if (!alive.current || !originalRequest || inFlight.current) return;
+    const version = generation.current;
+    inFlight.current = true;
+    setBusy("read");
+    setError(null);
+    setRecoveryUnknown(false);
+    try {
+      const result = await zcodeAccountsApi.bundleImportResult(
+        libraryDataRoot,
+        originalRequest,
+      );
+      if (!current(version)) return;
+      if (!result || result.status === "unknown") {
+        setRecoveryUnknown(true);
+        return;
+      }
+      if (result.status === "notRecorded") {
+        zcodeAccountsApi.acknowledgeBundleImport(
+          libraryDataRoot,
+          originalRequest,
+        );
+        setOriginalRequest(null);
+        setNotRecorded(true);
+        setSubmitted(false);
+        didSubmit.current = false;
+        lease.current = null;
+        setReview(null);
+        setResultRows([]);
+        clearFile();
+        invalidateCheck();
+        setSelected(new Set());
+        setUpdates(new Set());
+        try {
+          await onImported();
+        } catch {
+          if (current(version))
+            fail({
+              code: "zcode.account.catalog_changed",
+              remedy: "inspectAgain",
+              committed: false,
+            });
+        }
+        return;
+      }
+      didSubmit.current = true;
+      setSubmitted(true);
+      setOriginalRequest(null);
+      setResultRows(
+        result.rows.map(({ index, id, family, outcome }) => ({
+          row: {
+            index,
+            id,
+            family,
+            label: null,
+            duplicate: false,
+            ambiguous: false,
+            error: null,
+          },
+          outcome,
+        })),
+      );
+      zcodeAccountsApi.acknowledgeBundleImport(
+        libraryDataRoot,
+        originalRequest,
+      );
+      try {
+        await onImported();
+      } catch {
+        if (current(version)) setRefreshFailed(true);
+      }
+    } catch (cause) {
+      if (current(version)) fail(cause);
     } finally {
       if (current(version)) {
         inFlight.current = false;
@@ -444,7 +553,7 @@ function ImportSession({
                   id="zcode-bundle-file"
                   type="file"
                   accept=".zsb"
-                  disabled={!!busy || !!review}
+                  disabled={!!busy || !!review || !!originalRequest}
                   onChange={(event) => {
                     setFile(event.target.files?.[0] ?? null);
                     setError(null);
@@ -459,7 +568,7 @@ function ImportSession({
                   value={password}
                   autoComplete="off"
                   spellCheck={false}
-                  disabled={!!busy || !!review}
+                  disabled={!!busy || !!review || !!originalRequest}
                   onChange={(event) => setPassword(event.target.value)}
                 />
               </div>
@@ -655,6 +764,31 @@ function ImportSession({
               {copy("bundleSaving", "Saving the reviewed account sessions…")}
             </p>
           )}
+          {originalRequest && (!review || submitted) && (
+            <Button
+              variant="outline"
+              disabled={!!busy}
+              onClick={() => void queryOriginal()}
+            >
+              {copy("bundleQueryOriginal", "Query original result")}
+            </Button>
+          )}
+          {notRecorded && (
+            <p role="status" className="text-sm">
+              {copy(
+                "bundleNotRecorded",
+                "This authenticated library has no saved result for the request. The old preview cannot be reused. Select a bundle for a new review and confirmation.",
+              )}
+            </p>
+          )}
+          {recoveryUnknown && (
+            <p role="status" className="text-sm">
+              {copy(
+                "bundleReceiptUnknown",
+                "No original receipt is available. The import result is still unknown; this does not mean it failed. Do not repeat the import to recover its result.",
+              )}
+            </p>
+          )}
           {resultRows.length > 0 && (
             <>
               {resultRows.every((row) => row.outcome !== "unknown") && (
@@ -684,7 +818,9 @@ function ImportSession({
                 {resultRows.map(({ row, outcome }) => (
                   <li key={row.index}>
                     {row.index + 1}.{" "}
-                    {row.label || copy("bundleMaskedAccount", "Masked account")}{" "}
+                    {row.label ||
+                      row.id ||
+                      copy("bundleMaskedAccount", "Masked account")}{" "}
                     · {row.family} ·{" "}
                     {outcome === "saved"
                       ? copy("bundleResultSaved", "Saved")
@@ -718,7 +854,7 @@ function ImportSession({
             <p className="text-xs text-muted-foreground">
               {copy(
                 "bundleSubmittedHint",
-                "Closing this dialog does not undo a submitted import. If its response is unknown, inspect the saved accounts before another import.",
+                "Closing this dialog does not undo a submitted import. Use Query original result after a lost response, including after restarting LoongPort.",
               )}
             </p>
           )}
@@ -731,7 +867,9 @@ function ImportSession({
           </Button>
           {!review && !submitted && (
             <Button
-              disabled={!!busy || !file || password.length === 0}
+              disabled={
+                !!busy || !!originalRequest || !file || password.length === 0
+              }
               onClick={() => void preview()}
             >
               {copy("bundlePreview", "Preview account bundle")}

@@ -2017,6 +2017,7 @@ pub fn run() {
             commands::get_zcode_switch_operation,
             commands::preview_zcode_account_bundle,
             commands::import_zcode_account_bundle,
+            commands::get_zcode_bundle_import_result,
             commands::cancel_zcode_bundle_preview,
             commands::check_zcode_account_bundle,
             commands::get_zcode_bundle_check_progress,

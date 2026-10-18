@@ -470,6 +470,16 @@ pub(crate) async fn commit_bundle(
         .await
         .map_err(Into::into)
 }
+pub(crate) async fn bundle_import_result(
+    db: Arc<Database>,
+    data_root: Option<std::path::PathBuf>,
+    request_id: String,
+    owner_binding: Option<String>,
+) -> Result<super::import_receipts::ImportResult, PublicError> {
+    runtime::bundle_import_result(db, data_root, request_id, owner_binding)
+        .await
+        .map_err(Into::into)
+}
 pub(crate) async fn check_bundle(
     db: Arc<Database>,
     preview_id: String,

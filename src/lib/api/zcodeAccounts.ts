@@ -174,6 +174,7 @@ export interface CapturePreview {
 }
 export interface BundlePreview {
   previewId: string;
+  ownerBinding?: string;
   rows: {
     index: number;
     id: string | null;
@@ -182,6 +183,16 @@ export interface BundlePreview {
     duplicate: boolean;
     ambiguous: boolean;
     error: "invalidEntry" | "incompatibleCredentials" | null;
+  }[];
+}
+export interface BundleImportResult {
+  requestId: string;
+  status: "completed" | "notRecorded" | "unknown";
+  rows: {
+    index: number;
+    id: string;
+    family: "zai" | "bigmodel";
+    outcome: "saved" | "refreshed" | "kept";
   }[];
 }
 export interface BundleCheckProgress {
@@ -300,6 +311,122 @@ function forgetRequest(id: string) {
   } catch {
     /* Original result remains queryable in the encrypted vault. */
   }
+}
+
+// Nonsecret recovery pointers only. All completion facts remain in the vault.
+// Like switch pointers, keep one outstanding request per library, at most 16.
+const bundleRequestKey = "loongport:zcode-bundle-import-request-v1";
+type BundleRequest = {
+  requestId: string;
+  scope: string;
+  ownerBinding?: string;
+};
+const bundleScope = (dataRoot?: string) => JSON.stringify(dataRoot ?? null);
+function bundleRequests(): BundleRequest[] {
+  try {
+    const value: unknown = JSON.parse(
+      localStorage.getItem(bundleRequestKey) ?? "[]",
+    );
+    if (
+      !Array.isArray(value) ||
+      value.length > 16 ||
+      !value.every(
+        (item) =>
+          item &&
+          typeof item.requestId === "string" &&
+          item.requestId.length > 0 &&
+          item.requestId.length <= 64 &&
+          typeof item.scope === "string" &&
+          (item.ownerBinding === undefined ||
+            typeof item.ownerBinding === "string"),
+      )
+    )
+      throw new Error("invalid recovery pointers");
+    return value;
+  } catch {
+    throw {
+      code: "zcode.account.storage_failed",
+      remedy: "checkLocalStorage",
+      committed: false,
+    };
+  }
+}
+function rememberBundleRequest(
+  dataRoot: string | undefined,
+  requestId: string,
+  ownerBinding?: string,
+) {
+  const scope = bundleScope(dataRoot);
+  const existing = bundleRequests();
+  if (
+    existing.some(
+      (item) => item.scope === scope && item.requestId !== requestId,
+    )
+  )
+    throw {
+      code: "zcode.account.save_result_unknown",
+      remedy: "queryOriginal",
+      committed: false,
+    };
+  const items = existing.filter((item) => item.scope !== scope);
+  if (items.length >= 16)
+    throw {
+      code: "zcode.account.resource_limit",
+      remedy: "reviewSavedData",
+      committed: false,
+    };
+  try {
+    localStorage.setItem(
+      bundleRequestKey,
+      JSON.stringify([
+        ...items,
+        {
+          requestId,
+          scope,
+          ...(ownerBinding === undefined ? {} : { ownerBinding }),
+        },
+      ]),
+    );
+  } catch {
+    throw {
+      code: "zcode.account.storage_failed",
+      remedy: "checkLocalStorage",
+      committed: false,
+    };
+  }
+}
+function forgetBundleRequest(dataRoot: string | undefined, requestId: string) {
+  try {
+    localStorage.setItem(
+      bundleRequestKey,
+      JSON.stringify(
+        bundleRequests().filter(
+          (item) =>
+            item.scope !== bundleScope(dataRoot) ||
+            item.requestId !== requestId,
+        ),
+      ),
+    );
+  } catch {
+    /* Retaining a pointer is safe; it can only query an original receipt. */
+  }
+}
+function validImportOutcomes(
+  value: unknown,
+  count: number,
+): value is ("saved" | "refreshed" | "kept")[] {
+  return (
+    Array.isArray(value) &&
+    value.length === count &&
+    value.every((outcome) => ["saved", "refreshed", "kept"].includes(outcome))
+  );
+}
+function invalidImportResult(): never {
+  throw {
+    code: "zcode.account.saved_data_invalid",
+    remedy: "queryOriginal",
+    committed: false,
+  };
 }
 
 /** Static IPC error vocabulary: never expose backend messages, paths or tokens. */
@@ -706,6 +833,7 @@ export const zcodeAccountsApi = {
     });
     return {
       previewId: result.previewId,
+      ownerBinding: result.ownerBinding,
       rows: result.rows.map(
         ({ index, id, label, family, duplicate, ambiguous, error }) => ({
           index,
@@ -719,18 +847,101 @@ export const zcodeAccountsApi = {
       ),
     };
   },
-  importBundle: (
+  // Only the active consumer acknowledges an accepted original result.
+  // IPC completion alone is insufficient after a dialog has closed.
+  acknowledgeBundleImport: (
+    dataRoot: string | undefined,
+    requestId: string,
+  ): void => forgetBundleRequest(dataRoot, requestId),
+  pendingBundleImport: (dataRoot?: string): string | null =>
+    bundleRequests().find((item) => item.scope === bundleScope(dataRoot))
+      ?.requestId ?? null,
+  bundleImportResult: async (
+    dataRoot: string | undefined,
+    requestId: string,
+  ): Promise<BundleImportResult | null> => {
+    const result = await call<BundleImportResult | null>(
+      "get_zcode_bundle_import_result",
+      {
+        ...(dataRoot === undefined ? {} : { dataRoot }),
+        requestId,
+        ownerBinding:
+          bundleRequests().find(
+            (item) =>
+              item.scope === bundleScope(dataRoot) &&
+              item.requestId === requestId,
+          )?.ownerBinding ?? null,
+      },
+    );
+    // Legacy absence stays unknown. Only the authenticated backend can establish
+    // notRecorded after both physical ownership and preview liveness checks.
+    if (result === null) return null;
+    if (
+      result.requestId === requestId &&
+      ["notRecorded", "unknown"].includes(result.status) &&
+      Array.isArray(result.rows) &&
+      result.rows.length === 0
+    )
+      return { requestId, status: result.status, rows: [] };
+    if (
+      !result ||
+      result.requestId !== requestId ||
+      result.status !== "completed" ||
+      !Array.isArray(result.rows) ||
+      result.rows.length === 0 ||
+      result.rows.length > 50
+    )
+      return invalidImportResult();
+    const indices = new Set<number>();
+    const identities = new Set<string>();
+    for (const row of result.rows) {
+      if (
+        !row ||
+        !Number.isInteger(row.index) ||
+        row.index < 0 ||
+        row.index >= 50 ||
+        indices.has(row.index) ||
+        typeof row.id !== "string" ||
+        !/^[a-f0-9]{64}$/i.test(row.id) ||
+        identities.has(row.id) ||
+        !["zai", "bigmodel"].includes(row.family) ||
+        !validImportOutcomes([row.outcome], 1)
+      )
+        return invalidImportResult();
+      indices.add(row.index);
+      identities.add(row.id);
+    }
+    const publicResult = {
+      requestId: result.requestId,
+      status: result.status,
+      rows: result.rows.map(({ index, id, family, outcome }) => ({
+        index,
+        id,
+        family,
+        outcome,
+      })),
+    };
+    return publicResult;
+  },
+  importBundle: async (
     dataRoot: string | undefined,
     catalogRevision: string,
     previewId: string,
     selected: { index: number; updateDuplicate: boolean }[],
-  ): Promise<("saved" | "refreshed" | "kept")[]> =>
-    call("import_zcode_account_bundle", {
+    ownerBinding?: string,
+  ): Promise<("saved" | "refreshed" | "kept")[]> => {
+    // Persist the pointer before dispatch. A failed storage write must not submit.
+    rememberBundleRequest(dataRoot, previewId, ownerBinding);
+    const result = await call<unknown>("import_zcode_account_bundle", {
       ...(dataRoot === undefined ? {} : { dataRoot }),
       catalogRevision,
       previewId,
       selected,
-    }),
+    });
+    if (!validImportOutcomes(result, selected.length))
+      return invalidImportResult();
+    return result;
+  },
   checkBundle: async (
     previewId: string,
     selected: { index: number; updateDuplicate: boolean }[],

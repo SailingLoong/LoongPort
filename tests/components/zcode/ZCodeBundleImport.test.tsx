@@ -20,6 +20,9 @@ vi.mock("@/lib/api/zcodeAccounts", async (original) => ({
     checkBundle: vi.fn(),
     bundleCheck: vi.fn(),
     importBundle: vi.fn(),
+    pendingBundleImport: vi.fn(),
+    acknowledgeBundleImport: vi.fn(),
+    bundleImportResult: vi.fn(),
     cancelBundle: vi.fn(),
   },
 }));
@@ -102,6 +105,13 @@ const save = () =>
     }),
   );
 beforeEach(() => {
+  vi.mocked(zcodeAccountsApi.acknowledgeBundleImport).mockReset();
+  vi.mocked(zcodeAccountsApi.pendingBundleImport)
+    .mockReset()
+    .mockReturnValue(null);
+  vi.mocked(zcodeAccountsApi.bundleImportResult)
+    .mockReset()
+    .mockResolvedValue(null);
   vi.mocked(zcodeAccountsApi.previewBundle)
     .mockReset()
     .mockResolvedValue(previewResult);
@@ -122,6 +132,207 @@ beforeEach(() => {
     .mockResolvedValue(undefined);
 });
 describe("ZCode bundle import", () => {
+  it("recovers the retained request if another window claims the pointer before dispatch", async () => {
+    mount();
+    await preview();
+    await verify();
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "other-window-request",
+    );
+    vi.mocked(zcodeAccountsApi.importBundle).mockRejectedValue({
+      code: "zcode.account.save_result_unknown",
+      remedy: "queryOriginal",
+      committed: false,
+    });
+    save();
+    await screen.findByRole("button", { name: "Query original result" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Query original result" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.bundleImportResult).toHaveBeenCalledWith(
+        root,
+        "other-window-request",
+      ),
+    );
+    expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
+    expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+  });
+  it("permits a fresh preview only after authoritative notRecorded, without replaying the old request", async () => {
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "older-request",
+    );
+    vi.mocked(zcodeAccountsApi.bundleImportResult).mockResolvedValue({
+      requestId: "older-request",
+      status: "notRecorded",
+      rows: [],
+    });
+    const { onImported } = mount();
+    expect(screen.getByLabelText("Account bundle (.zsb)")).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    await screen.findByText(/This authenticated library has no saved result/);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Account bundle (.zsb)")).toBeEnabled(),
+    );
+    expect(zcodeAccountsApi.acknowledgeBundleImport).toHaveBeenCalledWith(
+      root,
+      "older-request",
+    );
+    expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+    expect(onImported).toHaveBeenCalledOnce();
+    await preview();
+    expect(
+      screen.getByRole("button", {
+        name: "Import selected into encrypted vault",
+      }),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.checkBundle).not.toHaveBeenCalled();
+  });
+
+  it("keeps closed late import success recoverable on reopening", async () => {
+    const pending = deferred<("saved" | "refreshed" | "kept")[]>();
+    vi.mocked(zcodeAccountsApi.importBundle).mockReturnValue(pending.promise);
+    const first = mount();
+    await preview();
+    await verify();
+    save();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close bundle import" }),
+    );
+    await act(async () => pending.resolve(["kept"]));
+    expect(first.onImported).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+    first.unmount();
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue("lease");
+    mount();
+    expect(
+      screen.getByRole("button", { name: "Query original result" }),
+    ).toBeEnabled();
+    expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
+  });
+  it("keeps unknown recovery and blocks a new preview from replacing it", async () => {
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "older-request",
+    );
+    mount();
+    expect(screen.getByLabelText("Account bundle (.zsb)")).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    await screen.findByText(/No original receipt is available/);
+    expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Account bundle (.zsb)")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Query original result" }),
+    ).toBeEnabled();
+  });
+  it("queries the original receipt after a lost reply without another import", async () => {
+    vi.mocked(zcodeAccountsApi.importBundle).mockRejectedValue(
+      new Error("lost reply"),
+    );
+    vi.mocked(zcodeAccountsApi.bundleImportResult).mockResolvedValue({
+      requestId: "lease",
+      status: "completed",
+      rows: [{ index: 0, id: "a".repeat(64), family: "zai", outcome: "kept" }],
+    });
+    const { onImported } = mount();
+    await preview();
+    await verify();
+    save();
+    await screen.findByText(/Unconfirmed/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    expect(
+      await screen.findByRole("list", {
+        name: "Last import results by account",
+      }),
+    ).toHaveTextContent("Kept existing");
+    await waitFor(() => expect(onImported).toHaveBeenCalledOnce());
+    expect(zcodeAccountsApi.bundleImportResult).toHaveBeenCalledWith(
+      root,
+      "lease",
+    );
+    expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
+    expect(zcodeAccountsApi.checkBundle).toHaveBeenCalledTimes(1);
+  });
+  it("recovers on a fresh dialog from its saved pointer without preview or checks", async () => {
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "prior-request",
+    );
+    vi.mocked(zcodeAccountsApi.bundleImportResult).mockResolvedValue({
+      requestId: "prior-request",
+      status: "completed",
+      rows: [
+        { index: 3, id: "b".repeat(64), family: "bigmodel", outcome: "saved" },
+      ],
+    });
+    const { onImported } = mount();
+    expect(zcodeAccountsApi.bundleImportResult).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    await screen.findByText(/Import completed: 1 saved/);
+    expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewBundle).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.checkBundle).not.toHaveBeenCalled();
+    expect(onImported).toHaveBeenCalledOnce();
+  });
+  it("keeps absent receipts unknown and never replays the import", async () => {
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "prior-request",
+    );
+    const { onImported } = mount();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    await screen.findByText(/No original receipt is available/);
+    expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+    expect(onImported).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Query original result" }),
+    ).toBeEnabled();
+  });
+  it("ignores a late receipt after closing and does not auto-submit on reopening", async () => {
+    const pending = deferred<
+      import("@/lib/api/zcodeAccounts").BundleImportResult | null
+    >();
+    vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+      "prior-request",
+    );
+    vi.mocked(zcodeAccountsApi.bundleImportResult).mockReturnValue(
+      pending.promise,
+    );
+    const { onImported } = mount();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original result" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close bundle import" }),
+    );
+    await act(async () =>
+      pending.resolve({
+        requestId: "prior-request",
+        status: "completed",
+        rows: [
+          { index: 0, id: "a".repeat(64), family: "zai", outcome: "saved" },
+        ],
+      }),
+    );
+    expect(onImported).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("polls only the owned verification and ignores its late result after cancellation", async () => {
     const pending = deferred<BundleCheckProgress>();
     vi.mocked(zcodeAccountsApi.checkBundle).mockResolvedValue(
@@ -204,6 +415,7 @@ describe("ZCode bundle import", () => {
         "catalog",
         "lease",
         [{ index: 0, updateDuplicate: false }],
+        undefined,
       ),
     );
   });
@@ -279,6 +491,25 @@ describe("ZCode bundle import", () => {
     ).not.toBeInTheDocument();
     expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
   });
+  it("keeps an original-result recovery action reachable after a lost import reply", async () => {
+    vi.mocked(zcodeAccountsApi.importBundle).mockRejectedValue(
+      new Error("lost synthetic response"),
+    );
+    const { onImported } = mount();
+    await preview();
+    await verify();
+    save();
+    expect(
+      await screen.findByRole("list", {
+        name: "Last import results by account",
+      }),
+    ).toHaveTextContent("Unconfirmed");
+    expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
+    expect(onImported).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Query original result" }),
+    ).toBeEnabled();
+  });
   it("preserves confirmed import when refreshing the list fails or its catalog revision changes", async () => {
     const { onImported, onClose, rerender } = mount();
     onImported.mockRejectedValue(new Error("private refresh"));
@@ -326,6 +557,7 @@ describe("ZCode bundle import", () => {
         "catalog",
         "lease",
         [{ index: 0, updateDuplicate: true }],
+        undefined,
       ),
     );
   });
@@ -397,6 +629,7 @@ describe("ZCode bundle import", () => {
         "catalog",
         "lease",
         [{ index: 1, updateDuplicate: false }],
+        undefined,
       ),
     );
   });
