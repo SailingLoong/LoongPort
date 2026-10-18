@@ -6,18 +6,26 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::path::Path;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) const ROOT: &str = "/Applications/Qoder.app";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) const HELPER: &str = "/Applications/Qoder.app/Contents/Resources/umid/runtime-info";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) const REQUIREMENT: &str = "anchor apple generic and identifier \"com.qoder.app\" and certificate leaf[subject.OU] = \"B6U242QL73\" and cdhash H\"03f94b883f04d5569777f583b345f8e03373c9e5\"";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) const HELPER_REQUIREMENT: &str = "anchor apple generic and identifier \"runtime-info\" and certificate leaf[subject.OU] = \"B6U242QL73\" and cdhash H\"80704babad49ae2dd9aec7b92cc4ef892da1d301\"";
 pub(super) struct Pin {
     pub path: &'static str,
     pub size: u64,
     pub sha256: &'static str,
 }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) const PINS: [Pin; 4] = [
     Pin {
         path: "Contents/Info.plist",
@@ -138,9 +146,11 @@ impl PinnedFile {
         Ok(())
     }
 }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) struct Installation {
     files: Vec<PinnedFile>,
 }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl Installation {
     pub(super) fn open() -> Result<Self, Dependency> {
         let root = Path::new(ROOT);
