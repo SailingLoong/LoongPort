@@ -771,7 +771,7 @@ impl<'a> VaultAccountStore<'a> {
                 .collect(),
         )
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn import_checked_profiles(
         &self,
         native: &NativeCipher,
