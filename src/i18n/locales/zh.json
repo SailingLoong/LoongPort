@@ -434,7 +434,8 @@
       "beta": "Beta",
       "copilotDescription": "管理 GitHub Copilot 账号",
       "codexOauthDescription": "管理 ChatGPT 账号",
-      "xaiOauthDescription": "管理 xAI / Grok 账号"
+      "xaiOauthDescription": "管理 xAI / Grok 账号",
+      "minimaxCodeDescription": "管理 MiniMax Code 账号与每日领取状态"
     },
     "advanced": {
       "configDir": {
@@ -4856,6 +4857,62 @@
       "geminiSettings": "settings.json",
       "write": "将写入",
       "unchanged": "不变"
+    }
+  },
+  "minimaxCode": {
+    "description": "通过 MiniMax Code 官方设备授权登录。Token Plan 和 API Key 不能作为 Code 登录凭据。",
+    "region": "账号地区",
+    "regions": {
+      "cn": "中国区",
+      "global": "国际区"
+    },
+    "add": "添加账号或重新登录",
+    "reload": "重新读取账号",
+    "empty": "尚未添加 MiniMax Code 账号。",
+    "enterCode": "在 MiniMax Code 官方授权页输入此设备码：",
+    "authorize": "打开官方授权页",
+    "expiresAt": "设备授权到期：{{time}}",
+    "finishAuthorization": "我已授权，检查登录",
+    "authorizationWaiting": "尚未完成授权，请在官方页面完成后再次检查。",
+    "refresh": "刷新状态",
+    "claim": "领取今日额度",
+    "recheck": "查证原操作",
+    "retire": "停用账号",
+    "creditAmount": "已核验领取额度：{{amount}}",
+    "startedAt": "提交时间：{{time}}",
+    "attempt": "操作编号：{{id}}",
+    "lastCheckedAt": "最近查证：{{time}}",
+    "unknownHint": "原操作结果未确认。请继续查证；不会自动重发领取，也不会因切换账号或日期而解除限制。",
+    "status": {
+      "unavailable": "暂不可领取",
+      "claimable": "可以领取",
+      "alreadyClaimed": "当前面板已领取",
+      "claimed": "领取结果已核验",
+      "unknown": "领取结果未确认",
+      "needsLogin": "需要重新登录"
+    },
+    "operation": {
+      "pending": "原操作结果未确认（已记录提交）",
+      "unknown": "原操作结果未确认",
+      "claimed": "原操作领取结果已核验",
+      "alreadyClaimed": "原操作返回已领取"
+    },
+    "observed": {
+      "claimable": "最近查证：当前面板可领取",
+      "alreadyClaimed": "最近查证：当前面板已领取；这不代表原操作已确认",
+      "unavailable": "最近查证：当前面板不可领取"
+    },
+    "errors": {
+      "storageUnavailable": "加密账号记录不可用，请解锁后重新读取。",
+      "busy": "该账号正在处理其他操作，请稍后重新读取。",
+      "needsLogin": "账号授权已失效，请重新登录。",
+      "unsupportedContext": "当前环境不支持 MiniMax Code 账号。",
+      "staleIdentity": "账号授权已变化，请重新读取后操作。",
+      "invalidResponse": "未能确认操作结果，请重新读取账号状态。",
+      "networkUnavailable": "网络请求未完成，请重新读取或查证原操作。",
+      "expiredAuthorization": "设备授权已过期，请取消后重新登录。",
+      "notClaimable": "该账号当前不允许领取，请刷新状态。",
+      "authorizationCompleted": "授权已完成，账号已保存；本次取消未生效。请查看账号列表。"
     }
   }
 }

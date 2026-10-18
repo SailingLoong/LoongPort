@@ -434,7 +434,8 @@
       "beta": "Beta",
       "copilotDescription": "GitHub Copilot アカウントを管理します",
       "codexOauthDescription": "ChatGPT アカウントを管理します",
-      "xaiOauthDescription": "xAI / Grok アカウントを管理します"
+      "xaiOauthDescription": "xAI / Grok アカウントを管理します",
+      "minimaxCodeDescription": "MiniMax Code アカウントと毎日の受取状況を管理"
     },
     "advanced": {
       "configDir": {
@@ -4856,6 +4857,62 @@
       "geminiSettings": "settings.json",
       "write": "書き込み予定",
       "unchanged": "変更なし"
+    }
+  },
+  "minimaxCode": {
+    "description": "MiniMax Code 公式のデバイス認証でログインします。Token Plan と API キーは Code のログイン資格情報ではありません。",
+    "region": "アカウントの地域",
+    "regions": {
+      "cn": "中国",
+      "global": "グローバル"
+    },
+    "add": "アカウント追加・再ログイン",
+    "reload": "アカウントを再読み込み",
+    "empty": "MiniMax Code アカウントはまだ追加されていません。",
+    "enterCode": "MiniMax Code の公式認証ページでこのデバイスコードを入力してください：",
+    "authorize": "公式認証ページを開く",
+    "expiresAt": "デバイス認証の有効期限：{{time}}",
+    "finishAuthorization": "認証の完了を確認",
+    "authorizationWaiting": "認証待ちです。公式ページで認証を完了してから再度確認してください。",
+    "refresh": "状態を更新",
+    "claim": "本日のクレジットを受け取る",
+    "recheck": "元の操作を照合",
+    "retire": "アカウントを無効化",
+    "creditAmount": "確認済みの受取クレジット：{{amount}}",
+    "startedAt": "送信日時：{{time}}",
+    "attempt": "操作 ID：{{id}}",
+    "lastCheckedAt": "最終照合：{{time}}",
+    "unknownHint": "元の操作結果は未確認です。照合を続けてください。受取要求は自動再送されず、アカウントや日付が変わっても制限は解除されません。",
+    "status": {
+      "unavailable": "現在受取不可",
+      "claimable": "受取可能",
+      "alreadyClaimed": "現在のパネルは受取済み",
+      "claimed": "受取結果を確認済み",
+      "unknown": "受取結果は未確認",
+      "needsLogin": "再ログインが必要"
+    },
+    "operation": {
+      "pending": "元の結果は未確認（送信を記録済み）",
+      "unknown": "元の操作結果は未確認",
+      "claimed": "元の受取結果を確認済み",
+      "alreadyClaimed": "元の操作は受取済みを返しました"
+    },
+    "observed": {
+      "claimable": "最新の照合：現在のパネルは受取可能",
+      "alreadyClaimed": "最新の照合：現在のパネルは受取済みです。元の操作結果の確認ではありません",
+      "unavailable": "最新の照合：現在のパネルは受取不可"
+    },
+    "errors": {
+      "storageUnavailable": "暗号化されたアカウント情報を利用できません。ロックを解除して再読み込みしてください。",
+      "busy": "このアカウントで別の操作を処理中です。しばらくしてから再読み込みしてください。",
+      "needsLogin": "認証が失効しました。再ログインしてください。",
+      "unsupportedContext": "この環境では MiniMax Code アカウントに対応していません。",
+      "staleIdentity": "アカウント認証が変わりました。再読み込みしてください。",
+      "invalidResponse": "操作結果を確認できませんでした。アカウントの状態を再読み込みしてください。",
+      "networkUnavailable": "通信が完了しませんでした。再読み込みするか、元の操作を照合してください。",
+      "expiredAuthorization": "デバイス認証の有効期限が切れました。キャンセルして再ログインしてください。",
+      "notClaimable": "現在このアカウントでは受け取れません。状態を更新してください。",
+      "authorizationCompleted": "キャンセルより先に認証が完了し、アカウントが保存されました。アカウント一覧を確認してください。"
     }
   }
 }

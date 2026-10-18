@@ -7,7 +7,7 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
@@ -31,6 +31,8 @@ pub struct SecretSession {
     _temporary_root: Option<tempfile::TempDir>,
     vault: RwLock<VaultContext>,
     blocked: AtomicBool,
+    // Volatile lease invalidation only; not a persistent account revision.
+    lifecycle_epoch: AtomicU64,
 }
 
 impl SecretSession {
@@ -128,6 +130,7 @@ impl SecretSession {
             _temporary_root: None,
             vault: RwLock::new(vault),
             blocked: AtomicBool::new(false),
+            lifecycle_epoch: AtomicU64::new(0),
         })
     }
 
@@ -143,6 +146,7 @@ impl SecretSession {
             _temporary_root: Some(directory),
             vault: RwLock::new(vault),
             blocked: AtomicBool::new(false),
+            lifecycle_epoch: AtomicU64::new(0),
         }))
     }
 
@@ -179,7 +183,17 @@ impl SecretSession {
     }
 
     pub(crate) fn set_blocked(&self, blocked: bool) {
+        if blocked {
+            self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         self.blocked.store(blocked, Ordering::Release);
+    }
+
+    /// Capture and recheck while holding the session read guard around the
+    /// protected operation. Unblocking must never revive an earlier lease.
+    #[cfg(any(feature = "gui", test))]
+    pub(crate) fn lifecycle_epoch(&self) -> u64 {
+        self.lifecycle_epoch.load(Ordering::Acquire)
     }
 
     /// Root of the application-owned credential storage for this session.
@@ -308,6 +322,32 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn lifecycle_epoch_invalidates_old_leases_without_reviving_on_unblock() {
+        let session = SecretSession::ephemeral().expect("session");
+        let original = {
+            let _guard = session.read().expect("initial read");
+            assert_eq!(session.lifecycle_epoch(), 0);
+            session.lifecycle_epoch()
+        };
+        {
+            let _guard = session.read().expect("unchanged read");
+            assert_eq!(session.lifecycle_epoch(), original);
+        }
+        session.set_blocked(false);
+        assert_eq!(session.lifecycle_epoch(), original);
+        session.set_blocked(true);
+        assert!(session.read().is_err());
+        let first_block = session.lifecycle_epoch();
+        assert_eq!(first_block, original + 1);
+        session.set_blocked(true);
+        assert_eq!(session.lifecycle_epoch(), first_block + 1);
+        session.set_blocked(false);
+        let _guard = session.read().expect("unblocked read");
+        assert_ne!(session.lifecycle_epoch(), original);
+        assert_eq!(session.lifecycle_epoch(), first_block + 1);
+    }
 
     #[derive(Default)]
     struct MemoryKeys(Mutex<HashMap<String, Vec<u8>>>);

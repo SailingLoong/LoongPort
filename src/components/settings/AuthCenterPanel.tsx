@@ -10,6 +10,7 @@ import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSectio
 import { RestoreOfficialLoginButton } from "@/components/relay/RestoreOfficialLoginButton";
 import type { ManagedAuthProvider } from "@/lib/api";
 import { XaiOAuthSection } from "@/components/providers/forms/XaiOAuthSection";
+import { MiniMaxCodeSection } from "@/components/providers/forms/MiniMaxCodeSection";
 import { ProviderIcon } from "@/components/ProviderIcon";
 
 interface AuthCenterPanelProps {
@@ -118,6 +119,23 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
             放这一节是因为语义对口：它做的就是「把 codex 从中转站切回 ChatGPT 官方」，
             而用户在 ChatGPT 里点「注销」是没用的（配的是 provider auth 模式）。 */}
         <RestoreOfficialLoginButton />
+      </section>
+
+      <section className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
+            <ProviderIcon icon="minimax" name="MiniMax Code" size={20} />
+          </div>
+          <div>
+            <h4 className="font-medium">MiniMax Code</h4>
+            <p className="text-sm text-muted-foreground">
+              {t("settings.authCenter.minimaxCodeDescription", {
+                defaultValue: "管理 MiniMax Code 账号与每日领取状态",
+              })}
+            </p>
+          </div>
+        </div>
+        <MiniMaxCodeSection />
       </section>
 
       <section

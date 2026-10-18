@@ -434,7 +434,8 @@
       "beta": "Beta",
       "copilotDescription": "Manage GitHub Copilot accounts",
       "codexOauthDescription": "Manage ChatGPT accounts",
-      "xaiOauthDescription": "Manage xAI / Grok accounts"
+      "xaiOauthDescription": "Manage xAI / Grok accounts",
+      "minimaxCodeDescription": "Manage MiniMax Code accounts and daily claim status"
     },
     "advanced": {
       "configDir": {
@@ -4856,6 +4857,62 @@
       "geminiSettings": "settings.json",
       "write": "Will write",
       "unchanged": "Unchanged"
+    }
+  },
+  "minimaxCode": {
+    "description": "Sign in through the official MiniMax Code device authorization flow. Token Plan and API keys are not Code login credentials.",
+    "region": "Account region",
+    "regions": {
+      "cn": "China",
+      "global": "Global"
+    },
+    "add": "Add account or sign in again",
+    "reload": "Reload accounts",
+    "empty": "No MiniMax Code accounts have been added.",
+    "enterCode": "Enter this device code on the official MiniMax Code authorization page:",
+    "authorize": "Open official authorization page",
+    "expiresAt": "Device authorization expires: {{time}}",
+    "finishAuthorization": "Check completed authorization",
+    "authorizationWaiting": "Authorization is still pending. Complete it on the official page, then check again.",
+    "refresh": "Refresh status",
+    "claim": "Claim today's credits",
+    "recheck": "Verify original operation",
+    "retire": "Deactivate account",
+    "creditAmount": "Verified claimed credits: {{amount}}",
+    "startedAt": "Submitted: {{time}}",
+    "attempt": "Operation ID: {{id}}",
+    "lastCheckedAt": "Last checked: {{time}}",
+    "unknownHint": "The original result is unconfirmed. Keep verifying; a claim is never automatically resent, and changing accounts or dates does not clear this restriction.",
+    "status": {
+      "unavailable": "Unavailable",
+      "claimable": "Available to claim",
+      "alreadyClaimed": "Current panel shows claimed",
+      "claimed": "Claim result verified",
+      "unknown": "Claim result unconfirmed",
+      "needsLogin": "Sign-in required"
+    },
+    "operation": {
+      "pending": "Original result unconfirmed (submission recorded)",
+      "unknown": "Original result unconfirmed",
+      "claimed": "Original claim result verified",
+      "alreadyClaimed": "Original operation returned already claimed"
+    },
+    "observed": {
+      "claimable": "Latest check: current panel is claimable",
+      "alreadyClaimed": "Latest check: current panel shows claimed; the original result is not thereby confirmed",
+      "unavailable": "Latest check: current panel is unavailable"
+    },
+    "errors": {
+      "storageUnavailable": "Encrypted account records are unavailable. Unlock them, then reload.",
+      "busy": "Another operation is running for this account. Reload shortly.",
+      "needsLogin": "Account authorization has expired. Sign in again.",
+      "unsupportedContext": "MiniMax Code accounts are unsupported in this environment.",
+      "staleIdentity": "Account authorization changed. Reload before continuing.",
+      "invalidResponse": "The operation result could not be confirmed. Reload account status.",
+      "networkUnavailable": "The network request did not complete. Reload or verify the original operation.",
+      "expiredAuthorization": "Device authorization expired. Cancel and sign in again.",
+      "notClaimable": "This account cannot claim now. Refresh its status.",
+      "authorizationCompleted": "Authorization completed and the account was saved before cancellation. Check the account list."
     }
   }
 }
