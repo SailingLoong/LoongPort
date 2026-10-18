@@ -539,6 +539,171 @@ fn retained_checkpoint_attached_recovery_rejects_dead_accept_loop() {
     let _ = reactor.block_on(runtime.proxy_service.stop());
 }
 
+// Generate the original controller's v1 journal without admitting an
+// unauthenticated historical database in production. Only fixture construction
+// borrows the real current schema inside a rollback-only savepoint; all review
+// and recovery still consume the original authenticated 20/24 database.
+fn original_attached_journal(
+    f: &Fixture,
+    runtime: &crate::store::AppState,
+    app: &AppType,
+    point: &str,
+    mut owner: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let db = &runtime.db;
+    let database_path = f.root.join(crate::config::DB_FILE_NAME);
+    let identity = database::inspection::file_revision(&database_path)
+        .unwrap()
+        .primary_identity()
+        .unwrap();
+    let original_digest = {
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            24
+        );
+        Database::content_digest(&conn).unwrap()
+    };
+    // These synthetic rows use the historical inline settings. The current
+    // vendor-reference canonicalizer must not change their saved-row digests.
+    for id in ["a", "b"] {
+        let row = db.get_provider_by_id(id, app.as_str()).unwrap().unwrap();
+        assert_eq!(
+            crate::services::vendor_source_binding::inventory_settings(&row).unwrap(),
+            row.settings_config
+        );
+    }
+    let checkpoint_path = f.device.root().join(checkpoint::FILE);
+    let checkpoint_bytes = std::fs::read(&checkpoint_path).unwrap();
+    let checkpoint_id =
+        checkpoint::verified_database_id(&f.root, &f.device, &db.secret_session().read().unwrap())
+            .unwrap()
+            .expect("original authenticated v24 publication");
+    let parked = checkpoint_path.with_extension("synthetic-parked");
+    std::fs::rename(&checkpoint_path, &parked).unwrap();
+
+    // The same real owner must fail closed at 20/24 without authentication.
+    // This negative case has no injected fault and cannot manufacture a journal.
+    let before = snapshot(f.home.path());
+    let denied = owner();
+    assert_eq!(
+        denied,
+        Err(AppError::Config("upgrade.future_version".into()).to_string())
+    );
+    assert!(!pending_exists(f, runtime, app));
+    assert_no_recovery_writes(
+        &before,
+        &snapshot(f.home.path()),
+        "missing checkpoint owner",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("SAVEPOINT synthetic_attached_owner")
+            .unwrap();
+        database::loongport_schema::apply(&conn).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            25
+        );
+    }
+    // Release the connection mutex before entering the unchanged native owner.
+    operation::failpoint::crash_at(Some(point));
+    let result = owner();
+    operation::failpoint::crash_at(None);
+    let journal_bytes = std::fs::read(f.device.state_path()).unwrap();
+    let pending = crate::mode::state::pending(
+        &f.device,
+        &db.secret_session().read().unwrap(),
+        app.as_str(),
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "ROLLBACK TO synthetic_attached_owner; RELEASE synthetic_attached_owner",
+        )
+        .unwrap();
+        assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            24
+        );
+        assert_eq!(Database::content_digest(&conn).unwrap(), original_digest);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='paperclip_run_bindings'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        database::inspection::verify_connection_primary_identity(&conn, &identity).unwrap();
+    }
+    std::fs::rename(&parked, &checkpoint_path).unwrap();
+    assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_bytes);
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &db.secret_session().read().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some(checkpoint_id.as_str())
+    );
+    assert_eq!(result, Err(format!("injected crash at {point}")));
+
+    // Schema rollback never rewrites the authenticated v1 journal or its
+    // original pre/planned digests. Validate those same bytes and saved-row
+    // fingerprints against the restored v24 inputs before recovery begins.
+    assert_eq!(std::fs::read(f.device.state_path()).unwrap(), journal_bytes);
+    let vault = db.secret_session().read().unwrap();
+    let live = crate::mode::state::load_app(&f.device, &vault, app.as_str()).unwrap();
+    assert_eq!(live.version, 1);
+    assert!(live.apps.get(app.as_str()).unwrap().last_save.is_none());
+    assert_eq!(
+        crate::mode::state::pending(&f.device, &vault, app.as_str()).unwrap(),
+        pending
+    );
+    let pending = pending.expect("original native owner journal");
+    assert_eq!(pending.published, point == "marked");
+    assert!(pending.target.save_request.is_none());
+    if let Some(contract) = pending
+        .target
+        .state
+        .as_ref()
+        .and_then(|state| state.contract.as_ref())
+    {
+        assert_eq!(contract.version, 1);
+    }
+    operation::validate_pending(
+        app.as_str(),
+        &pending,
+        &crate::mode::controller::files(app).unwrap(),
+    )
+    .unwrap();
+    operation::verify_saved_row(db, db.secret_session(), &vault, app, &pending.target).unwrap();
+    for file in &pending.files {
+        assert_eq!(
+            crate::live::engine::digest(
+                crate::live::engine::read_current(&file.path)
+                    .unwrap()
+                    .as_deref()
+            ),
+            file.pre
+        );
+        if let Some(staged) = &file.staged {
+            assert_eq!(
+                crate::live::engine::digest(
+                    crate::live::engine::read_current(staged)
+                        .unwrap()
+                        .as_deref()
+                ),
+                file.planned
+            );
+        }
+    }
+    result
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn retained_checkpoint_recovers_attached_exit_and_detach() {
@@ -559,23 +724,14 @@ fn retained_checkpoint_recovers_attached_exit_and_detach() {
                 .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
                 .unwrap();
             drop(context);
-            // Create an original pre-upgrade attached exit journal. Ordinary
-            // writes remain refused with a retained checkpoint; recovery does
-            // not relax that gate. Restore the identical fixture checkpoint
-            // before any review/recovery below.
-            let checkpoint_path = f.device.root().join(checkpoint::FILE);
-            let parked = checkpoint_path.with_extension("synthetic-parked");
-            std::fs::rename(&checkpoint_path, &parked).unwrap();
-            operation::failpoint::crash_at(Some(point));
-            let result = {
+            let result = original_attached_journal(&f, &runtime, &app, point, || {
                 let _locks =
                     reactor.block_on(runtime.proxy_service.lock_recovery_for_app(app.as_str()));
                 // This is the synchronous owner; do not wrap its Codex bridge
                 // in another Runtime::block_on (the GUI uses a blocking worker).
                 crate::mode::controller::exit_locked(&runtime.proxy_service, &app, keep_mode)
-            };
-            operation::failpoint::crash_at(None);
-            std::fs::rename(&parked, &checkpoint_path).unwrap();
+                    .map_err(|error| error.to_string())
+            });
             assert!(
                 result.is_err() && pending_exists(&f, &runtime, &app),
                 "exit fault missed: {result:?}"
@@ -770,8 +926,6 @@ fn retained_checkpoint_recovers_attached_route_and_row_owners() {
             drop(context);
             let checkpoint_path = f.device.root().join(checkpoint::FILE);
             let checkpoint = std::fs::read(&checkpoint_path).unwrap();
-            let parked = checkpoint_path.with_extension("synthetic-parked");
-            std::fs::rename(&checkpoint_path, &parked).unwrap();
             let previous = runtime
                 .db
                 .get_provider_by_id("a", app.as_str())
@@ -785,8 +939,7 @@ fn retained_checkpoint_recovers_attached_route_and_row_owners() {
             if effect == "save" {
                 planned.id = "a".into();
             }
-            operation::failpoint::crash_at(Some("marked"));
-            let result = {
+            let result = original_attached_journal(&f, &runtime, &app, "marked", || {
                 let _locks =
                     reactor.block_on(runtime.proxy_service.lock_recovery_for_app(app.as_str()));
                 if effect == "route" {
@@ -805,9 +958,7 @@ fn retained_checkpoint_recovers_attached_route_and_row_owners() {
                     )
                     .map_err(|error| error.to_string())
                 }
-            };
-            operation::failpoint::crash_at(None);
-            std::fs::rename(&parked, &checkpoint_path).unwrap();
+            });
             assert!(
                 result.is_err() && pending_exists(&f, &runtime, &app),
                 "{app:?}/{effect}: original journal missed: {result:?}"

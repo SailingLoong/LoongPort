@@ -1942,8 +1942,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn paperclip_native_released_checkpoint_migrates_same_database_only_after_release(
     ) -> Result<(), AppError> {
+        // Database initialization also checks the original device-local owner.
+        let _test_home = TestHomeGuard::new();
         let dir = crate::secrets::testing::tempdir().unwrap();
         let store = crate::secrets::testing::MemoryKeyStore::default();
         let session =
