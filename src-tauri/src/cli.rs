@@ -380,6 +380,7 @@ mod tests {
             directory: tempfile::TempDir,
             previous_test_home: Option<std::ffi::OsString>,
             previous_hermes_home: Option<std::ffi::OsString>,
+            previous_xdg_config_home: Option<std::ffi::OsString>,
         }
 
         impl TestHome {
@@ -387,12 +388,16 @@ mod tests {
                 let directory = tempfile::tempdir().unwrap();
                 let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
                 let previous_hermes_home = std::env::var_os("HERMES_HOME");
+                let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
                 std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
                 std::env::set_var("HERMES_HOME", directory.path().join(".hermes"));
+                // Keep OpenCode under the temporary home even when the host sets XDG.
+                std::env::remove_var("XDG_CONFIG_HOME");
                 Self {
                     directory,
                     previous_test_home,
                     previous_hermes_home,
+                    previous_xdg_config_home,
                 }
             }
         }
@@ -407,10 +412,16 @@ mod tests {
                     Some(value) => std::env::set_var("HERMES_HOME", value),
                     None => std::env::remove_var("HERMES_HOME"),
                 }
+                match self.previous_xdg_config_home.take() {
+                    Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
             }
         }
 
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
         let home = TestHome::new();
+        assert!(std::env::var_os("XDG_CONFIG_HOME").is_none());
         let app_root = crate::config::get_app_config_dir();
         assert!(!app_root.exists());
 
@@ -486,6 +497,27 @@ mod tests {
         assert!(
             !app_root.exists(),
             "standalone CLI must not create LoongPort state"
+        );
+
+        drop(home);
+        assert_eq!(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            previous_xdg_config_home
+        );
+
+        let panic = std::panic::catch_unwind(|| {
+            let _home = TestHome::new();
+            assert!(std::env::var_os("XDG_CONFIG_HOME").is_none());
+            panic!("exercise TestHome restoration on unwind");
+        })
+        .expect_err("the fixture body must panic");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"exercise TestHome restoration on unwind")
+        );
+        assert_eq!(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            previous_xdg_config_home
         );
     }
 }

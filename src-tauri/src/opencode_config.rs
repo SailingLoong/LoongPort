@@ -43,14 +43,47 @@ fn canonicalize_plugin_name(plugin_name: &str) -> String {
     plugin_name.to_string()
 }
 
-pub fn get_opencode_dir() -> PathBuf {
-    if let Some(override_dir) = get_opencode_override_dir() {
+fn resolve_opencode_dir(
+    override_dir: Option<PathBuf>,
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: &Path,
+) -> PathBuf {
+    if let Some(override_dir) = override_dir {
         return override_dir;
     }
 
-    crate::config::get_home_dir()
-        .join(".config")
-        .join("opencode")
+    // OpenCode uses Node's path.join for nonempty XDG_CONFIG_HOME values.
+    // Normalize lexically (including relative paths), without filesystem access.
+    if let Some(mut xdg) = xdg_config_home.filter(|value| !value.is_empty()) {
+        use std::path::Component;
+        xdg.push(std::path::MAIN_SEPARATOR_STR);
+        xdg.push("opencode");
+        let mut dir = PathBuf::new();
+        for component in Path::new(&xdg).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if matches!(dir.components().next_back(), Some(Component::Normal(_))) {
+                        dir.pop();
+                    } else if !dir.has_root() {
+                        dir.push(component.as_os_str());
+                    }
+                }
+                _ => dir.push(component.as_os_str()),
+            }
+        }
+        return dir;
+    }
+
+    home.join(".config").join("opencode")
+}
+
+pub fn get_opencode_dir() -> PathBuf {
+    resolve_opencode_dir(
+        get_opencode_override_dir(),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        &crate::config::get_home_dir(),
+    )
 }
 
 pub fn get_opencode_config_path() -> PathBuf {
@@ -328,21 +361,163 @@ pub fn remove_plugins_by_prefixes(path: &Path, prefixes: &[&str]) -> Result<bool
 mod tests {
     use super::*;
 
-    struct TestHomeGuard(Option<std::ffi::OsString>);
+    struct TestHomeGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
     impl TestHomeGuard {
         fn set(home: &std::path::Path) -> Self {
-            let guard = Self(std::env::var_os("CC_SWITCH_TEST_HOME"));
+            let guard = Self {
+                home: std::env::var_os("CC_SWITCH_TEST_HOME"),
+                xdg: std::env::var_os("XDG_CONFIG_HOME"),
+            };
+            std::env::remove_var("XDG_CONFIG_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", home);
             guard
         }
     }
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.home.take() {
                 Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+            match self.xdg.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
         }
+    }
+
+    #[test]
+    fn config_root_override_has_priority_over_xdg() {
+        let temp = tempfile::tempdir().unwrap();
+        let override_dir = temp.path().join("custom-opencode");
+        assert_eq!(
+            resolve_opencode_dir(Some(override_dir.clone()), Some("xdg".into()), temp.path()),
+            override_dir
+        );
+        assert!(!override_dir.exists());
+    }
+
+    #[test]
+    fn config_root_uses_nonempty_xdg_without_trimming_or_creating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let absolute = temp.path().join("xdg");
+        assert_eq!(
+            resolve_opencode_dir(None, Some(absolute.clone().into_os_string()), temp.path()),
+            absolute.join("opencode")
+        );
+        assert!(!absolute.exists());
+        for relative in ["relative-config", " ", " config "] {
+            assert_eq!(
+                resolve_opencode_dir(None, Some(relative.into()), temp.path()),
+                PathBuf::from(relative).join("opencode")
+            );
+        }
+    }
+
+    #[test]
+    fn config_root_empty_or_missing_xdg_keeps_legacy_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        for xdg in [None, Some("".into())] {
+            assert_eq!(
+                resolve_opencode_dir(None, xdg, temp.path()),
+                temp.path().join(".config").join("opencode")
+            );
+        }
+        assert!(!temp.path().join(".config").exists());
+    }
+
+    #[test]
+    fn xdg_root_lexically_matches_node_join() {
+        for (xdg, expected) in [
+            ("./a/../b", "b/opencode"),
+            ("a//b/../c/", "a/c/opencode"),
+            ("../../a/../b", "../../b/opencode"),
+            ("a/../../b", "../b/opencode"),
+            (".", "opencode"),
+            ("/../../b", "/b/opencode"),
+        ] {
+            assert_eq!(
+                resolve_opencode_dir(None, Some(xdg.into()), Path::new("unused-home")),
+                PathBuf::from(expected),
+                "XDG_CONFIG_HOME={xdg}"
+            );
+        }
+        let override_dir = PathBuf::from("custom/../override");
+        assert_eq!(
+            resolve_opencode_dir(
+                Some(override_dir.clone()),
+                Some("a/../b".into()),
+                Path::new("unused-home")
+            ),
+            override_dir
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn xdg_root_normalizes_windows_prefixes() {
+        for (xdg, expected) in [
+            (r"C:", r"C:\opencode"),
+            (r"C:\a\..\b", r"C:\b\opencode"),
+            (r"C:\..\..\b", r"C:\b\opencode"),
+            (r"C:a\..\b", r"C:b\opencode"),
+            (r"\\server\share\a\..\b", r"\\server\share\b\opencode"),
+        ] {
+            assert_eq!(
+                resolve_opencode_dir(None, Some(xdg.into()), Path::new("unused-home")),
+                PathBuf::from(expected)
+            );
+        }
+    }
+
+    fn seed_xdg_and_home(home: &Path, xdg: &Path) -> Vec<u8> {
+        write_config(
+            home,
+            r#"{"provider":{"home":{"name":"home"}},"mcp":{"home":{"command":["home"]}}}"#,
+        );
+        let dir = xdg.join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("opencode.json"), r#"{"provider":{"xdg":{"name":"xdg"}},"mcp":{"xdg":{"command":["xdg"]}},"theme":"keep"}"#).unwrap();
+        std::fs::read(home.join(".config/opencode/opencode.json")).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reads_existing_providers_and_mcp_from_xdg_config_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        let _guard = TestHomeGuard::set(&home);
+        seed_xdg_and_home(&home, &xdg);
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        assert!(get_providers().unwrap().contains_key("xdg"));
+        assert!(get_mcp_servers().unwrap().contains_key("xdg"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn setters_only_update_xdg_config_and_preserve_home_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        let _guard = TestHomeGuard::set(&home);
+        let original = seed_xdg_and_home(&home, &xdg);
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        set_provider("added", json!({"name":"added"})).unwrap();
+        set_mcp_server("added", json!({"command":["echo"]})).unwrap();
+        assert_eq!(
+            std::fs::read(home.join(".config/opencode/opencode.json")).unwrap(),
+            original
+        );
+        let actual = read_opencode_config_from_path(&xdg.join("opencode/opencode.json")).unwrap();
+        assert_eq!(actual["provider"]["added"]["name"], "added");
+        assert_eq!(actual["mcp"]["added"]["command"], json!(["echo"]));
+        assert_eq!(actual["theme"], "keep");
+        assert!(actual["provider"].get("xdg").is_some());
+        assert!(actual["mcp"].get("xdg").is_some());
     }
 
     fn write_config(home: &std::path::Path, content: &str) {
