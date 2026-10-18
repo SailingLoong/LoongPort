@@ -5,11 +5,21 @@ use super::parser::TokenUsage;
 use crate::database::{Database, PRICING_SOURCE_REQUEST, PRICING_SOURCE_RESPONSE};
 use crate::error::AppError;
 use crate::services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL};
-use crate::services::usage_stats::{find_model_pricing_row, is_placeholder_pricing_model};
+use crate::services::usage_stats::{
+    find_model_pricing_row, is_placeholder_pricing_model, RawRequestLog,
+};
 use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
+
+/// Transient proof of the exact original price row used by CostCalculator.
+/// Only the original usage row is durable; this is not another pricing ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CalculatedUsage {
+    pub row: RawRequestLog,
+    pub price_hash: String,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct UsageSemantic {
@@ -102,6 +112,16 @@ impl<'a> UsageLogger<'a> {
 
     /// 记录成功的请求
     pub fn log_request(&self, log: &RequestLog) -> Result<(), AppError> {
+        self.log_request_confirmed(log).map(|_| ())
+    }
+
+    /// Return the actual saved original row, including the effective dedup or
+    /// collision ID. A caller must verify ownership and calculated cost before
+    /// accepting this low-level acknowledgement as a budget receipt.
+    pub(crate) fn log_request_confirmed(
+        &self,
+        log: &RequestLog,
+    ) -> Result<RawRequestLog, AppError> {
         let conn = crate::database::lock_conn!(self.db.conn);
 
         let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
@@ -144,7 +164,7 @@ impl<'a> UsageLogger<'a> {
                 if data_source.as_deref().unwrap_or("proxy") == "proxy"
                     && existing_semantic == semantic =>
             {
-                return Ok(());
+                return Self::confirmed_row(&conn, &log.request_id);
             }
             Some(_) => {
                 let fallback = format!("{}:collision:{}", log.request_id, semantic.sha256());
@@ -154,7 +174,7 @@ impl<'a> UsageLogger<'a> {
                     if data_source.as_deref().unwrap_or("proxy") == "proxy"
                         && existing_semantic == semantic
                     {
-                        return Ok(());
+                        return Self::confirmed_row(&conn, &fallback);
                     }
                     return Err(AppError::Database(format!(
                         "usage collision fallback 主键发生 SHA-256 冲突: {fallback}"
@@ -223,7 +243,15 @@ impl<'a> UsageLogger<'a> {
             crate::usage_events::notify_log_recorded();
         }
 
-        Ok(())
+        Self::confirmed_row(&conn, &request_id)
+    }
+
+    fn confirmed_row(
+        conn: &rusqlite::Connection,
+        request_id: &str,
+    ) -> Result<RawRequestLog, AppError> {
+        Database::get_request_detail_raw_on(conn, request_id)?
+            .ok_or_else(|| AppError::Database("Original usage write was not confirmed".into()))
     }
 
     fn load_existing_semantic(
@@ -354,6 +382,37 @@ impl<'a> UsageLogger<'a> {
         }
     }
 
+    /// Checked original accounting configuration for native admission. The
+    /// caller supplies the original provider snapshot from this same connection.
+    /// Unlike UI/proxy fallback reads, this never inserts defaults or hides an
+    /// invalid/missing stored row. Provider overrides retain their precedence.
+    pub(crate) fn resolve_pricing_config_checked_on(
+        conn: &rusqlite::Connection,
+        provider: &crate::provider::Provider,
+        app_type: &str,
+    ) -> Result<(Decimal, String), AppError> {
+        let default_app_type = if app_type == "claude-desktop" {
+            "claude"
+        } else {
+            app_type
+        };
+        let (multiplier, source): (String, String) = conn.query_row(
+            "SELECT default_cost_multiplier, pricing_model_source FROM proxy_config WHERE app_type=?1",
+            [default_app_type], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| AppError::Database(format!("Original pricing configuration unavailable: {e}")))?;
+        let meta = provider.meta.as_ref();
+        let multiplier = meta
+            .and_then(|meta| meta.cost_multiplier.as_deref())
+            .unwrap_or(&multiplier);
+        let source = meta
+            .and_then(|meta| meta.pricing_model_source.as_deref())
+            .unwrap_or(&source);
+        Ok((
+            crate::database::validate_cost_multiplier(multiplier)?,
+            crate::database::validate_pricing_source(source)?.to_string(),
+        ))
+    }
+
     /// 获取有效的倍率与计费模式来源（供应商优先，未配置则回退全局默认）
     pub async fn resolve_pricing_config(
         &self,
@@ -469,23 +528,153 @@ impl<'a> UsageLogger<'a> {
         is_streaming: bool,
         local_input_tokens: u64,
     ) -> Result<(), AppError> {
-        let pricing = self.get_model_pricing(&pricing_model)?;
+        self.log_with_calculation_inner(
+            request_id,
+            provider_id,
+            app_type,
+            model,
+            request_model,
+            pricing_model,
+            usage,
+            cost_multiplier,
+            latency_ms,
+            first_token_ms,
+            status_code,
+            session_id,
+            provider_type,
+            is_streaming,
+            local_input_tokens,
+            false,
+        )
+        .map(|_| ())
+    }
+
+    /// Checked cost and ownership acknowledgement for native execution.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_with_calculation_confirmed(
+        &self,
+        request_id: String,
+        provider_id: String,
+        app_type: String,
+        model: String,
+        request_model: String,
+        pricing_model: String,
+        usage: TokenUsage,
+        cost_multiplier: Decimal,
+        latency_ms: u64,
+        first_token_ms: Option<u64>,
+        status_code: u16,
+        session_id: Option<String>,
+        provider_type: Option<String>,
+        is_streaming: bool,
+        local_input_tokens: u64,
+    ) -> Result<CalculatedUsage, AppError> {
+        self.log_with_calculation_inner(
+            request_id,
+            provider_id,
+            app_type,
+            model,
+            request_model,
+            pricing_model,
+            usage,
+            cost_multiplier,
+            latency_ms,
+            first_token_ms,
+            status_code,
+            session_id,
+            provider_type,
+            is_streaming,
+            local_input_tokens,
+            true,
+        )
+    }
+
+    /// 计算并记录请求
+    #[allow(clippy::too_many_arguments)]
+    fn log_with_calculation_inner(
+        &self,
+        request_id: String,
+        provider_id: String,
+        app_type: String,
+        model: String,
+        request_model: String,
+        pricing_model: String,
+        usage: TokenUsage,
+        cost_multiplier: Decimal,
+        latency_ms: u64,
+        first_token_ms: Option<u64>,
+        status_code: u16,
+        session_id: Option<String>,
+        provider_type: Option<String>,
+        is_streaming: bool,
+        local_input_tokens: u64,
+        require_confirmed_cost: bool,
+    ) -> Result<CalculatedUsage, AppError> {
+        let (pricing, price_hash) = if require_confirmed_cost {
+            let conn = crate::database::lock_conn!(self.db.conn);
+            match crate::services::usage_stats::find_model_pricing_match(&conn, &pricing_model)? {
+                Some(row) => {
+                    let hash = crate::services::model_pricing::pricing_row_hash(&row)?;
+                    let pricing = ModelPricing::from_strings(
+                        &row.input_cost_per_million,
+                        &row.output_cost_per_million,
+                        &row.cache_read_cost_per_million,
+                        &row.cache_creation_cost_per_million,
+                    )
+                    .map_err(|e| AppError::Database(format!("Invalid original pricing: {e}")))?;
+                    (Some(pricing), hash)
+                }
+                None => (None, String::new()),
+            }
+        } else {
+            (self.get_model_pricing(&pricing_model)?, String::new())
+        };
 
         let has_usage = usage.input_tokens > 0
             || usage.output_tokens > 0
             || usage.cache_read_tokens > 0
             || usage.cache_creation_tokens > 0;
 
+        if require_confirmed_cost && (pricing.is_none() || cost_multiplier < Decimal::ZERO) {
+            return Err(AppError::Config(
+                "Original usage or calculated pricing unavailable".into(),
+            ));
+        }
+
         if pricing.is_none() && has_usage && !is_placeholder_pricing_model(&pricing_model) {
             log::warn!("[USG-002] 模型定价未找到，成本将记录为 0: {pricing_model}");
         }
 
-        let cost = CostCalculator::try_calculate_for_app(
-            &app_type,
-            &usage,
-            pricing.as_ref(),
-            cost_multiplier,
-        );
+        if require_confirmed_cost
+            && pricing.as_ref().is_some_and(|pricing| {
+                [
+                    pricing.input_cost_per_million,
+                    pricing.output_cost_per_million,
+                    pricing.cache_read_cost_per_million,
+                    pricing.cache_creation_cost_per_million,
+                ]
+                .into_iter()
+                .any(|price| price < Decimal::ZERO)
+            })
+        {
+            return Err(AppError::Config(
+                "Original pricing contains a negative price".into(),
+            ));
+        }
+        let calculate = || {
+            CostCalculator::try_calculate_for_app(
+                &app_type,
+                &usage,
+                pricing.as_ref(),
+                cost_multiplier,
+            )
+        };
+        let cost = if require_confirmed_cost {
+            std::panic::catch_unwind(calculate)
+                .map_err(|_| AppError::Config("Original cost calculation overflowed".into()))?
+        } else {
+            calculate()
+        };
 
         let log = RequestLog {
             request_id,
@@ -507,13 +696,172 @@ impl<'a> UsageLogger<'a> {
             local_input_tokens,
         };
 
-        self.log_request(&log)
+        let saved = self.log_request_confirmed(&log)?;
+        if require_confirmed_cost && !Self::saved_matches_calculated_request(&saved, &log) {
+            return Err(AppError::Database(
+                "Effective usage dedup row does not match this priced attempt".into(),
+            ));
+        }
+        Ok(CalculatedUsage {
+            row: saved,
+            price_hash,
+        })
+    }
+
+    fn saved_matches_calculated_request(saved: &RawRequestLog, log: &RequestLog) -> bool {
+        let Some(cost) = &log.cost else {
+            return false;
+        };
+        let semantics = if crate::services::sql_helpers::is_cache_inclusive_app(&log.app_type) {
+            INPUT_TOKEN_SEMANTICS_TOTAL
+        } else {
+            INPUT_TOKEN_SEMANTICS_FRESH
+        };
+        saved.provider_id == log.provider_id
+            && saved.app_type == log.app_type
+            && saved.model == log.model
+            && saved.request_model.as_deref() == Some(log.request_model.as_str())
+            && saved.pricing_model.as_deref() == Some(log.pricing_model.as_str())
+            && saved.session_id == log.session_id
+            && saved.data_source.as_deref().unwrap_or("proxy") == "proxy"
+            && saved.input_token_semantics == semantics
+            && saved.input_tokens == i64::from(log.usage.input_tokens)
+            && saved.output_tokens == i64::from(log.usage.output_tokens)
+            && saved.cache_read_tokens == i64::from(log.usage.cache_read_tokens)
+            && saved.cache_creation_tokens == i64::from(log.usage.cache_creation_tokens)
+            && saved.status_code == i64::from(log.status_code)
+            && saved.error_message == log.error_message
+            && saved.cost_multiplier.as_deref() == Some(log.cost_multiplier.as_str())
+            && saved.input_cost_usd == cost.input_cost.to_string()
+            && saved.output_cost_usd == cost.output_cost.to_string()
+            && saved.cache_read_cost_usd == cost.cache_read_cost.to_string()
+            && saved.cache_creation_cost_usd == cost.cache_creation_cost.to_string()
+            && saved.total_cost_usd == cost.total_cost.to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_config_never_repairs_or_substitutes_errors() {
+        let db = Database::memory().unwrap();
+        let provider =
+            crate::provider::Provider::with_id("p".into(), "p".into(), serde_json::json!({}), None);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE proxy_config SET default_cost_multiplier='2.5', pricing_model_source='request' WHERE app_type='codex'", []).unwrap();
+        let (multiplier, source) =
+            UsageLogger::resolve_pricing_config_checked_on(&conn, &provider, "codex").unwrap();
+        assert_eq!(multiplier, Decimal::from_str("2.5").unwrap());
+        assert_eq!(source, "request");
+        conn.execute(
+            "UPDATE proxy_config SET default_cost_multiplier='broken' WHERE app_type='codex'",
+            [],
+        )
+        .unwrap();
+        assert!(UsageLogger::resolve_pricing_config_checked_on(&conn, &provider, "codex").is_err());
+        conn.execute("DELETE FROM proxy_config WHERE app_type='codex'", [])
+            .unwrap();
+        assert!(UsageLogger::resolve_pricing_config_checked_on(&conn, &provider, "codex").is_err());
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_config WHERE app_type='codex'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn checked_calculation_rejects_unpriced_usage_and_foreign_dedup() {
+        let db = Database::memory().unwrap();
+        let logger = UsageLogger::new(&db);
+        let call = |request_id: &str, pricing_model: &str, session: &str| {
+            logger.log_with_calculation_confirmed(
+                request_id.into(),
+                "provider-1".into(),
+                "codex".into(),
+                "gpt-5.6".into(),
+                "gpt-5.6".into(),
+                pricing_model.into(),
+                request_log("unused", 100).usage,
+                Decimal::ONE,
+                10,
+                None,
+                200,
+                Some(session.into()),
+                None,
+                false,
+                100,
+            )
+        };
+        assert!(call("unpriced", "missing-price", "run-1").is_err());
+        assert!(db.get_request_detail_raw("unpriced").unwrap().is_none());
+        let saved = call("priced", "gpt-5.6", "run-1").unwrap();
+        assert_ne!(saved.row.total_cost_usd, "0");
+        assert_eq!(saved, call("priced", "gpt-5.6", "run-1").unwrap());
+        assert!(call("priced", "gpt-5.6", "run-2").is_err());
+        assert_eq!(
+            Some(saved.row),
+            db.get_request_detail_raw("priced").unwrap()
+        );
+    }
+
+    #[test]
+    fn confirmed_logging_returns_effective_collision_and_original_saved_fields() {
+        let db = Database::memory().unwrap();
+        let logger = UsageLogger::new(&db);
+        let original = request_log("confirmed-id", 10);
+        let first = logger.log_request_confirmed(&original).unwrap();
+        assert_eq!(first.request_id, "confirmed-id");
+        let mut duplicate = original.clone();
+        duplicate.request_model = "different-alias".into();
+        duplicate.session_id = Some("other-run".into());
+        let dedup = logger.log_request_confirmed(&duplicate).unwrap();
+        assert_eq!(dedup.request_id, first.request_id);
+        assert_eq!(
+            dedup.request_model.as_deref(),
+            Some(original.request_model.as_str())
+        );
+        assert_eq!(dedup.session_id, original.session_id);
+        let collision = logger
+            .log_request_confirmed(&request_log("confirmed-id", 20))
+            .unwrap();
+        assert!(collision.request_id.starts_with("confirmed-id:collision:"));
+        let repeat = logger
+            .log_request_confirmed(&request_log("confirmed-id", 20))
+            .unwrap();
+        assert_eq!(collision, repeat);
+        assert_eq!(
+            Some(repeat.clone()),
+            db.get_request_detail_raw(&repeat.request_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn raw_readback_does_not_backfill_missing_costs() {
+        let db = Database::memory().unwrap();
+        let logger = UsageLogger::new(&db);
+        let saved = logger
+            .log_request_confirmed(&request_log("raw-unpriced", 1000))
+            .unwrap();
+        assert_eq!(saved.total_cost_usd, "0");
+        assert_eq!(
+            Some(saved),
+            db.get_request_detail_raw("raw-unpriced").unwrap()
+        );
+        let conn = db.conn.lock().unwrap();
+        let total: String = conn
+            .query_row(
+                "SELECT total_cost_usd FROM proxy_request_logs WHERE request_id='raw-unpriced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, "0");
+    }
 
     fn request_log(request_id: &str, input_tokens: u32) -> RequestLog {
         RequestLog {

@@ -98,6 +98,7 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 /// Device-local login sessions, logs, and runtime backups are excluded from sync.
 /// Their local rows are preserved when a downloaded snapshot is installed.
 const SYNC_SKIP_TABLES: &[&str] = &[
+    "paperclip_run_bindings",
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
@@ -381,6 +382,7 @@ impl Database {
         let source = VaultContext::from_key(expected.clone(), vault.export_key())
             .map_err(crate::secrets::inventory::secret_error)?;
         crate::secrets::inventory::validate_database(&connection, &source)?;
+        crate::paperclip::bindings::read_rows(&connection)?;
         crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
         super::vault::stamp(&connection, vault)?;
         Ok(ValidatedSyncSnapshot {
@@ -429,6 +431,7 @@ impl Database {
         Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
         crate::secrets::inventory::transform_database(&local, Some(current), next)?;
         Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
+        crate::paperclip::bindings::preserve_local(current_conn, &incoming.connection)?;
         crate::secrets::inventory::validate_database(&incoming.connection, next)?;
         Ok(incoming.connection)
     }
@@ -639,8 +642,16 @@ impl Database {
                 let staged_conn = lock_conn!(staged.conn);
                 Self::restore_tables(&main_conn, &staged_conn, preserve_tables)?;
             }
+            let preserved_bindings = {
+                let staged_conn = lock_conn!(staged.conn);
+                crate::paperclip::bindings::preserve_local(&main_conn, &staged_conn)?;
+                crate::paperclip::bindings::read_rows(&staged_conn)?
+            };
             prepare(&staged)?;
             let temp_conn = lock_conn!(staged.conn);
+            if crate::paperclip::bindings::read_rows(&temp_conn)? != preserved_bindings {
+                return Err(AppError::Config("paperclip.local_bindings_changed".into()));
+            }
             crate::secrets::inventory::validate_database(&temp_conn, vault)?;
             let backup_path = Self::backup_database_file_from_conn(
                 &backup_file_guard,
@@ -649,6 +660,7 @@ impl Database {
                 vault,
                 &[],
             )?;
+            self.invalidate_pricing_observations()?;
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "替换主数据库")?;
@@ -922,6 +934,92 @@ impl Database {
             |_, _| Ok(()),
         )?
         .ok_or_else(|| AppError::Config("backup.upgrade_database_missing".into()))
+    }
+
+    /// The retained upgrade must finish and release its exact historical
+    /// checkpoint before native schema migration can replace the live image.
+    pub(crate) fn migrate_released_checkpoint_schema(
+        &self,
+        device: &crate::live::engine::DeviceStore,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+        let backup_file_guard = lock_backup_file_operations()?;
+        let mut current = lock_conn!(self.conn);
+        self.verify_released_connection_identity(&current)?;
+        super::vault::preflight_connection(&current)?;
+        super::vault::check_identity(&current, vault)?;
+        crate::secrets::inventory::validate_database(&current, vault)?;
+        let version = super::loongport_schema::read_stored_version(&current)?;
+        if version == super::loongport_schema::LOONGPORT_SCHEMA_VERSION {
+            self.verify_released_connection_identity(&current)?;
+            crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+            return Ok(());
+        }
+        if version != 24 {
+            return Err(AppError::Config("upgrade.unsupported_source".into()));
+        }
+        let mut working = Connection::open_in_memory()?;
+        super::vault::copy(&current, &mut working)?;
+        super::loongport_schema::apply(&working)?;
+        crate::secrets::inventory::validate_database(&working, vault)?;
+        Self::backup_database_file_from_conn(
+            &backup_file_guard,
+            &current,
+            self.secrets.root(),
+            vault,
+            &[],
+        )?;
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+        self.verify_released_connection_identity(&current)?;
+        self.invalidate_pricing_observations()?;
+        {
+            let backup = Backup::new(&working, &mut current)?;
+            Self::complete_backup(&backup, "Publish native binding schema")?;
+        }
+        // Publication is complete only after reading the installed image through
+        // its original connection. Besides authenticating the actual result, this
+        // establishes its WAL read mark before a lost-response retry can observe it.
+        Self::verify_published_native_schema(&current, vault)?;
+        self.verify_released_connection_identity(&current)?;
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)
+    }
+
+    /// Read-only acceptance of the installed image, separate from explicit recovery.
+    pub(crate) fn verify_released_checkpoint_schema(
+        &self,
+        device: &crate::live::engine::DeviceStore,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+        let current = lock_conn!(self.conn);
+        Self::verify_published_native_schema(&current, vault)?;
+        self.verify_released_connection_identity(&current)?;
+        crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)
+    }
+
+    fn verify_released_connection_identity(&self, current: &Connection) -> Result<(), AppError> {
+        if Self::get_user_version(current)? != super::UPSTREAM4_SCHEMA_VERSION {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        let path = self.secrets.root().join(crate::config::DB_FILE_NAME);
+        let identity = super::inspection::file_revision(&path)?.primary_identity()?;
+        super::inspection::verify_connection_primary_identity(current, &identity)
+    }
+
+    fn verify_published_native_schema(
+        current: &Connection,
+        vault: &VaultContext,
+    ) -> Result<(), AppError> {
+        super::vault::preflight_connection(current)?;
+        super::vault::check_identity(current, vault)?;
+        crate::secrets::inventory::validate_database(current, vault)?;
+        if super::loongport_schema::read_stored_version(current)?
+            != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config("upgrade.source_changed".into()));
+        }
+        Ok(())
     }
 
     fn backup_database_file_locked(
@@ -1642,6 +1740,8 @@ impl Database {
                 &[backup_path.as_path()],
             )?;
             before_replace(safety_backup.as_deref())?;
+            crate::paperclip::bindings::preserve_local(&main_conn, &staging_conn)?;
+            self.invalidate_pricing_observations()?;
             let backup = Backup::new(&staging_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "恢复主数据库")?;
@@ -1765,6 +1865,140 @@ mod tests {
     use crate::settings::{get_settings, update_settings, AppSettings};
     use rusqlite::Connection;
     use serial_test::serial;
+
+    fn native_binding_fixture(db: &Database, run: &str) -> Result<(), AppError> {
+        use crate::paperclip::{
+            bindings::Scope,
+            contract::{self, Budget, Task},
+        };
+        let scope = Scope {
+            company_id: "company".into(),
+            task_id: "task".into(),
+            agent_id: "agent".into(),
+            run_id: run.into(),
+            resource_id: "pool".into(),
+            owner_id: "owner".into(),
+            snapshot_revision: "revision".into(),
+        };
+        let task = Task {
+            version: 3,
+            input: "nonpersistent-prompt-canary".into(),
+            model: "fixture-model".into(),
+            max_output_tokens: 128,
+            timeout_ms: 1000,
+            budget: Budget {
+                mode: "estimated".into(),
+                currency: "USD".into(),
+                limit_micros: 1000,
+            },
+        };
+        let binding = contract::binding(&scope, "codex", &task)?;
+        db.conn.lock()?.execute("INSERT INTO paperclip_run_bindings(owner,app,company,run,scope,binding,phase,receipt) VALUES('owner','codex','company',?1,?2,?3,'bound',NULL)", rusqlite::params![run,serde_json::to_string(&scope).unwrap(),binding.to_string()])?;
+        Ok(())
+    }
+
+    #[test]
+    fn paperclip_native_import_preserves_local_rows_and_discards_foreign_rows(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        native_binding_fixture(&db, "local")?;
+        let incoming = same_vault_database(&db)?;
+        native_binding_fixture(&incoming, "foreign")?;
+        let expected = crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?;
+        let sql = Database::dump_sql(&*incoming.conn.lock()?, &[])?;
+        db.import_sql_string(&sql)?;
+        assert_eq!(
+            crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?,
+            expected
+        );
+        assert!(
+            !Database::dump_sql(&*db.conn.lock()?, &[])?.contains("nonpersistent-prompt-canary")
+        );
+        let synced = Database::stage_import_sql(
+            &Database::dump_sql(&*db.conn.lock()?, super::SYNC_SKIP_TABLES)?,
+            true,
+        )?;
+        assert!(crate::paperclip::bindings::read_rows(&synced)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn paperclip_native_prepare_cannot_change_valid_local_phase() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        native_binding_fixture(&db, "local")?;
+        let sql = Database::dump_sql(&*db.conn.lock()?, &[])?;
+        let before = Database::content_digest(&*db.conn.lock()?)?;
+        assert!(db
+            .import_sql_string_from_cc_switch(&sql, &[], |staged| {
+                staged
+                    .conn
+                    .lock()?
+                    .execute("UPDATE paperclip_run_bindings SET phase='accepted'", [])?;
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn paperclip_native_released_checkpoint_migrates_same_database_only_after_release(
+    ) -> Result<(), AppError> {
+        // Database initialization also checks the original device-local owner.
+        let _test_home = TestHomeGuard::new();
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let store = crate::secrets::testing::MemoryKeyStore::default();
+        let session =
+            crate::secrets::session::SecretSession::open(&dir.path().join("root"), &store, None)?;
+        let db = Database::init_with_secrets(session)?;
+        Database::apply_upstream4_migrations_on_conn(&*db.conn.lock()?)?;
+        let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
+        crate::config_file_io::ensure_private_directory(device.root())?;
+        let checkpoint = device
+            .root()
+            .join(crate::secrets::upgrade::checkpoint::FILE);
+        std::fs::write(&checkpoint, b"retained-checkpoint").unwrap();
+        db.conn.lock()?.execute_batch("DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1")?;
+        let before = Database::content_digest(&*db.conn.lock()?)?;
+        let vault = db.secret_session().read()?;
+        assert!(db
+            .migrate_released_checkpoint_schema(&device, &vault)
+            .is_err());
+        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+        std::fs::remove_file(checkpoint).unwrap();
+        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        assert_eq!(
+            super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
+            25
+        );
+        crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?;
+        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        Ok(())
+    }
+
+    #[test]
+    fn paperclip_native_import_prepare_cannot_remove_local_bindings() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let sql = {
+            let conn = db.conn.lock()?;
+            Database::dump_sql(&conn, &[])?
+        };
+        let before = Database::content_digest(&*db.conn.lock()?)?;
+        let result = db.import_sql_string_from_cc_switch(&sql, &[], |staged| {
+            staged
+                .conn
+                .lock()?
+                .execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings")?;
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "prepare must not erase retained anti-replay evidence"
+        );
+        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+        Ok(())
+    }
 
     #[test]
     fn upgrade_fingerprint_tracks_all_logical_rows_and_ignores_page_layout() -> Result<(), AppError>

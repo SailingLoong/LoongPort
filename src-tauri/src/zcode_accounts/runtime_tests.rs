@@ -70,6 +70,12 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
         .await
         .unwrap();
     std::fs::remove_file(f.native_root.join("credentials.json")).unwrap();
+    write_durable(
+        &f.native_root.join("synthetic-sentinel"),
+        b"must remain unchanged",
+    )
+    .unwrap();
+    let before_native = native_file_contents(&f);
     let before_files = std::fs::read_dir(&f.native_root)
         .unwrap()
         .map(|p| p.unwrap().file_name())
@@ -85,7 +91,7 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
     ] {
         assert!(!safe.contains(forbidden));
     }
-    let before = std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap();
+    let (before, before_payload) = catalog_image(&f);
     let input = || BundleCommitInput {
         revision: status.revision.clone(),
         preview_id: p.preview_id.clone(),
@@ -98,14 +104,21 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
         commit_bundle(f.db.clone(), f.probe.clone(), f.contracts.clone(), input()).await,
         Ok(vec![CaptureCommitOutcome::Kept])
     );
+    let (committed, committed_payload) = catalog_image(&f);
+    assert_ne!(committed, before);
+    let receipt = assert_only_import_receipt_added(&before_payload, &committed_payload);
+    // This legacy helper creates its own request ID; only the production library
+    // entrypoint below binds the preview ID and returns its receipt on replay.
+    assert_kept_receipt(&f, &receipt, &status.revision, false);
     assert_eq!(
         commit_bundle(f.db.clone(), f.probe.clone(), f.contracts.clone(), input()).await,
         Err(RuntimeError::Transaction(TransactionError::SourceChanged))
     );
-    assert_eq!(
-        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
-        before
-    );
+    assert_eq!(catalog_image(&f).0, committed);
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    let update_revision = status.revision.clone();
     let p = import_preview(&f, status.revision.clone(), 1).await;
     assert_eq!(
         commit_bundle(
@@ -129,10 +142,11 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
         .unwrap();
     // The legacy fixture has no capability evidence. An explicit update must
     // not replace a previously verified account with an unchecked candidate.
-    assert_eq!(
-        std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap(),
-        before
-    );
+    let (updated, updated_payload) = catalog_image(&f);
+    assert_ne!(updated, committed);
+    let update_receipt = assert_only_import_receipt_added(&committed_payload, &updated_payload);
+    assert_ne!(update_receipt.request_id, receipt.request_id);
+    assert_kept_receipt(&f, &update_receipt, &update_revision, true);
     assert!(
         status
             .profiles
@@ -148,6 +162,7 @@ async fn runtime_bundle_vault_only_keep_update_and_replay_never_read_native_cred
             .collect::<std::collections::BTreeSet<_>>(),
         before_files
     );
+    assert_eq!(native_file_contents(&f), before_native);
 }
 
 #[tokio::test]
@@ -1695,3 +1710,307 @@ async fn runtime_coordinated_missing_source_does_not_exhaust_unknown_capacity_an
         Ok(SwitchOutcome::Switched)
     );
 }
+
+// BEGIN RECEIPT RUNTIME REGRESSIONS
+fn native_file_contents(f: &Fixture) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
+    std::fs::read_dir(&f.native_root)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+fn catalog_image(f: &Fixture) -> (Vec<u8>, serde_json::Value) {
+    let bytes = std::fs::read(f.db.secret_session().root().join(PROFILE_FILE)).unwrap();
+    let payload = super::super::checkpoint::open_payload(
+        std::str::from_utf8(&bytes).unwrap(),
+        PROFILE_FILE,
+        &f.db.secret_session().read().unwrap(),
+    )
+    .unwrap();
+    (bytes, payload)
+}
+
+fn assert_only_import_receipt_added(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> super::super::import_receipts::ImportReceipt {
+    let mut before = before.clone();
+    let mut after = after.clone();
+    assert!(matches!(before["version"].as_u64(), Some(2..=4)));
+    assert_eq!(after["version"], 4);
+    before.as_object_mut().unwrap().remove("version");
+    after.as_object_mut().unwrap().remove("version");
+    let previous = before
+        .as_object_mut()
+        .unwrap()
+        .remove("import_receipts")
+        .unwrap_or_else(|| serde_json::json!([]));
+    let receipts = after
+        .as_object_mut()
+        .unwrap()
+        .remove("import_receipts")
+        .unwrap();
+    let previous = previous.as_array().unwrap();
+    let receipts = receipts.as_array().unwrap();
+    assert_eq!(receipts.len(), previous.len() + 1);
+    assert_eq!(&receipts[..previous.len()], previous);
+    // Full authenticated account payload equality includes credentials, identities,
+    // verification flags, details/evidence, context and existing login receipts.
+    assert_eq!(after, before);
+    let receipt: super::super::import_receipts::ImportReceipt =
+        serde_json::from_value(receipts.last().unwrap().clone()).unwrap();
+    receipt.validate().unwrap();
+    receipt
+}
+
+fn assert_kept_receipt(
+    f: &Fixture,
+    receipt: &super::super::import_receipts::ImportReceipt,
+    revision: &str,
+    update_duplicate: bool,
+) {
+    use sha2::{Digest, Sha256};
+    let context =
+        VerifiedContext::assess(f.probe.observation.lock().unwrap().clone(), &f.contracts).unwrap();
+    let candidate = context.cipher().unwrap().inspect(&f.fresh).unwrap();
+    let digest = Sha256::digest(candidate.scoped_document().to_bytes().unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(receipt.matches_request(revision, &[(0, update_duplicate)]));
+    assert_eq!(
+        receipt.rows,
+        vec![super::super::import_receipts::ImportReceiptRow {
+            index: 0,
+            account_id: f.a.opaque_id(),
+            family: "zai".into(),
+            candidate_revision: digest,
+            update_duplicate,
+            outcome: CaptureCommitOutcome::Kept,
+        }]
+    );
+}
+
+// Exercise the real review/check state machine. Only official HTTP responses are
+// synthetic; no receipt, CAS, ciphertext, commit or result lookup is replaced.
+async fn finish_synthetic_library_check(f: &Fixture, preview_id: &str, choices: Vec<ImportChoice>) {
+    use super::super::official::*;
+    struct Offline;
+    impl OfficialTransport for Offline {
+        fn send(&self, _: OfficialRequest) -> TransportFuture<'_> {
+            Box::pin(async {
+                Ok(OfficialResponse {
+                    status: 503,
+                    body: Zeroizing::new(b"{}".to_vec()),
+                })
+            })
+        }
+    }
+    let id = preview_id.to_owned();
+    let (lease, context) = run_owned(f.db.clone(), move |db| {
+        let now = std::time::Instant::now();
+        let mut reviews = import_reviews().lock().unwrap();
+        let binding = reviews.review_binding(&id, now).unwrap();
+        let context = reviews.review_context(&id, now).unwrap();
+        require_library_binding(db, &context, &binding)?;
+        let lease = reviews.begin_check(&id, &binding, choices, now).unwrap();
+        Ok((lease, context))
+    })
+    .await
+    .unwrap();
+    let native = context.cipher().unwrap();
+    let mut reports = Vec::new();
+    for (index, account) in &lease.accounts {
+        let report = super::super::session_checks::check_session(
+            &OfficialClient::new(Offline),
+            &native,
+            account,
+            Some("3.14.4"),
+            100,
+            &|| Ok(()),
+        )
+        .await
+        .unwrap();
+        reports.push((*index, report));
+    }
+    run_owned(f.db.clone(), move |_| {
+        import_reviews()
+            .lock()
+            .unwrap()
+            .finish_check(&lease, reports)
+            .unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_library_kept_receipt_replay_and_conflicts_are_read_only() {
+    use super::super::native_context::{library_context, test_library_context::Scope};
+    let f = Fixture::new();
+    let home = f._temporary.path();
+    let scope = Scope::new(home, &f.native_root);
+    let selected = Some(f.native_root.clone());
+    let context = library_context(selected.as_deref()).unwrap();
+    assert_eq!(
+        context.context_id(),
+        VerifiedContext::assess(f.probe.observation.lock().unwrap().clone(), &f.contracts,)
+            .unwrap()
+            .context_id()
+    );
+    // Exact-root only, with no default/sibling synthetic fallback.
+    #[cfg(not(target_os = "macos"))]
+    for unregistered in [None, Some(f.native_root.join("unregistered"))] {
+        assert!(matches!(
+            library_context(unregistered.as_deref()),
+            Err(BlockedReason::UnsupportedPlatform)
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sibling = f.native_root.join("unregistered");
+        let fallback = library_context(Some(&sibling)).unwrap();
+        let synthetic = super::super::library_context::LibraryContext::from_os_identity(
+            home.to_str().unwrap(),
+            "synthetic-user",
+            &sibling,
+        )
+        .unwrap();
+        assert_ne!(fallback.context_id(), synthetic.context_id());
+    }
+    let status = account_status(f.db.clone(), f.probe.clone(), f.contracts.clone())
+        .await
+        .unwrap();
+    std::fs::remove_file(f.native_root.join("credentials.json")).unwrap();
+    write_durable(
+        &f.native_root.join("synthetic-sentinel"),
+        b"must remain unchanged",
+    )
+    .unwrap();
+    let before_native = native_file_contents(&f);
+    let before_files = std::fs::read_dir(&f.native_root)
+        .unwrap()
+        .map(|p| p.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let (before, before_payload) = catalog_image(&f);
+    let p = preview_library_bundle(
+        f.db.clone(),
+        selected.clone(),
+        BundlePreviewInput {
+            revision: status.revision.clone(),
+            file: synthetic_bundle(&f, 1),
+            password: Zeroizing::new("synthetic-password".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let input = || BundleCommitInput {
+        revision: status.revision.clone(),
+        preview_id: p.preview_id.clone(),
+        selected: vec![ImportChoice {
+            index: 0,
+            update_duplicate: false,
+        }],
+    };
+    finish_synthetic_library_check(&f, &p.preview_id, input().selected).await;
+    let pending = bundle_import_result(
+        f.db.clone(),
+        selected.clone(),
+        p.preview_id.clone(),
+        Some(p.owner_binding.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pending.status,
+        super::super::import_receipts::ImportResultStatus::Unknown
+    );
+    assert_eq!(catalog_image(&f).0, before);
+    assert_eq!(
+        commit_library_bundle(f.db.clone(), selected.clone(), input()).await,
+        Ok(vec![CaptureCommitOutcome::Kept])
+    );
+    let (committed, committed_payload) = catalog_image(&f);
+    assert_ne!(committed, before);
+    let receipt = assert_only_import_receipt_added(&before_payload, &committed_payload);
+    assert_eq!(receipt.request_id, p.preview_id);
+    assert_kept_receipt(&f, &receipt, &status.revision, false);
+    let result = bundle_import_result(
+        f.db.clone(),
+        selected.clone(),
+        p.preview_id.clone(),
+        Some(p.owner_binding.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(result).unwrap(),
+        serde_json::json!({
+            "requestId":p.preview_id, "status":"completed",
+            "rows":[{"index":0,"id":f.a.opaque_id(),"family":"zai","outcome":"kept"}],
+        })
+    );
+    assert_eq!(catalog_image(&f).0, committed);
+    assert_eq!(
+        commit_library_bundle(f.db.clone(), selected.clone(), input()).await,
+        Ok(vec![CaptureCommitOutcome::Kept])
+    );
+    assert_eq!(catalog_image(&f).0, committed);
+    let mut conflicts = vec![input(), input(), input()];
+    conflicts[0].revision = "absent".into();
+    conflicts[1].selected[0].index = 1;
+    conflicts[2].selected[0].update_duplicate = true;
+    for conflict in conflicts {
+        assert_eq!(
+            commit_library_bundle(f.db.clone(), selected.clone(), conflict).await,
+            Err(RuntimeError::Transaction(
+                TransactionError::OperationAlreadyKnown
+            ))
+        );
+        assert_eq!(catalog_image(&f).0, committed);
+    }
+    // Query shares the real runtime owner: it cannot read while that owner is held.
+    let lock = crate::services::sync_protocol::sync_mutex().lock().await;
+    let mut query = Box::pin(bundle_import_result(
+        f.db.clone(),
+        selected.clone(),
+        p.preview_id.clone(),
+        Some(p.owner_binding),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut query)
+            .await
+            .is_err()
+    );
+    drop(lock);
+    assert_eq!(
+        query.await.unwrap().status,
+        super::super::import_receipts::ImportResultStatus::Completed
+    );
+    assert_eq!(catalog_image(&f).0, committed);
+    assert_eq!(
+        std::fs::read_dir(&f.native_root)
+            .unwrap()
+            .map(|p| p.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        before_files
+    );
+    assert_eq!(native_file_contents(&f), before_native);
+    drop(scope);
+    #[cfg(not(target_os = "macos"))]
+    assert!(matches!(
+        library_context(selected.as_deref()),
+        Err(BlockedReason::UnsupportedPlatform)
+    ));
+    #[cfg(target_os = "macos")]
+    assert_ne!(
+        library_context(selected.as_deref()).unwrap().context_id(),
+        context.context_id()
+    );
+}
+// END RECEIPT RUNTIME REGRESSIONS

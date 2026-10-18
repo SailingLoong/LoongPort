@@ -3,7 +3,7 @@ use crate::error::AppError;
 use crate::maintenance::config::MODELS_DEV_REFRESH_INTERVAL;
 use crate::services::model_pricing::{
     get_models_dev_sync_state, record_models_dev_sync_result, update_model_pricing_batch,
-    ModelPricingInfo, ModelsDevSyncConfig,
+    update_observed_models_dev_pricing, ModelPricingInfo, ModelsDevSyncConfig,
 };
 use chrono::Utc;
 use rust_decimal::{Decimal, RoundingStrategy};
@@ -51,6 +51,10 @@ pub struct ModelsDevEntry {
     pub cache_read: String,
     pub cache_write: String,
     pub is_common: bool,
+    /// Only the parser of an actual source fetch can establish this. Never
+    /// deserialize UI/import claims of complete USD pricing as provenance.
+    #[serde(skip)]
+    budget_pricing_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +85,7 @@ struct ModelsDevModel {
 
 #[derive(Debug, Deserialize)]
 struct ModelsDevCost {
+    currency: Option<String>,
     input: Option<Box<RawValue>>,
     output: Option<Box<RawValue>>,
     cache_read: Option<Box<RawValue>>,
@@ -147,22 +152,48 @@ fn is_json_number(value: Option<&RawValue>) -> bool {
     })
 }
 
-fn price_string(value: Option<&RawValue>) -> String {
-    let Some(number) = value.filter(|value| is_json_number(Some(value))) else {
-        return "0".to_string();
-    };
-    let Ok(parsed) =
-        Decimal::from_str(number.get()).or_else(|_| Decimal::from_scientific(number.get()))
-    else {
-        return "0".to_string();
-    };
-    if parsed <= Decimal::ZERO || parsed >= Decimal::from(1_000_000_000_000_u64) {
-        return "0".to_string();
+fn checked_price_string(value: Option<&RawValue>) -> Option<String> {
+    let number = value.filter(|value| is_json_number(Some(value)))?;
+    let parsed = Decimal::from_str(number.get())
+        .or_else(|_| Decimal::from_scientific(number.get()))
+        .ok()?;
+    if parsed < Decimal::ZERO || parsed >= Decimal::from(1_000_000_000_000_u64) {
+        return None;
     }
-    parsed
-        .round_dp_with_strategy(6, RoundingStrategy::MidpointAwayFromZero)
-        .normalize()
-        .to_string()
+    if parsed > Decimal::ZERO
+        && parsed.round_dp_with_strategy(6, RoundingStrategy::MidpointAwayFromZero) == Decimal::ZERO
+    {
+        return None;
+    }
+    Some(
+        parsed
+            .round_dp_with_strategy(6, RoundingStrategy::MidpointAwayFromZero)
+            .normalize()
+            .to_string(),
+    )
+}
+
+fn price_string(value: Option<&RawValue>) -> String {
+    checked_price_string(value).unwrap_or_else(|| "0".into())
+}
+
+fn supports_budget_pricing(cost: Option<&ModelsDevCost>) -> bool {
+    // Source contract declares all four token prices in USD:
+    // https://github.com/anomalyco/models.dev/blob/dev/README.md
+    // Do not confer provenance on the UI's missing/invalid -> zero fallback.
+    cost.is_some_and(|cost| {
+        cost.currency
+            .as_deref()
+            .is_none_or(|currency| currency == "USD")
+            && [
+                &cost.input,
+                &cost.output,
+                &cost.cache_read,
+                &cost.cache_write,
+            ]
+            .into_iter()
+            .all(|value| checked_price_string(value.as_deref()).is_some())
+    })
 }
 
 fn common_family(provider_id: &str, model_id: &str) -> Option<&'static str> {
@@ -233,6 +264,7 @@ fn parse_entries(json: &str) -> Result<Vec<ModelsDevEntry>, AppError> {
             }
             let model_name = model.name.clone().unwrap_or_else(|| model_id.clone());
             entries.push(ModelsDevEntry {
+                budget_pricing_supported: supports_budget_pricing(model.cost.as_ref()),
                 key: format!("{provider_id}/{model_id}"),
                 provider_id: provider_id.clone(),
                 provider_name: provider_name.clone(),
@@ -412,8 +444,18 @@ where
         let selected = selected.into_iter().cloned().collect::<Vec<_>>();
         let pricing = to_model_pricing(&selected)?;
         let imported = pricing.len();
-        let changed = update_model_pricing_batch(&db, pricing)?;
+        // Match to_model_pricing's first selected normalized-ID winner exactly;
+        // a later complete row must not authenticate an earlier incomplete row.
+        let mut seen = BTreeSet::new();
+        let supported_ids = selected
+            .iter()
+            .filter_map(|entry| {
+                let id = normalize_model_id(&entry.model_id);
+                (seen.insert(id.clone()) && entry.budget_pricing_supported).then_some(id)
+            })
+            .collect::<BTreeSet<_>>();
         let synced_at = Utc::now().timestamp_millis();
+        let changed = update_observed_models_dev_pricing(&db, pricing, &supported_ids, synced_at)?;
         record_models_dev_sync_result(&db, Some(synced_at), None)?;
 
         Ok(ModelsDevSyncResult {
@@ -437,6 +479,16 @@ where
 
 pub async fn sync_pricing(db: Arc<Database>, force: bool) -> Result<ModelsDevSyncResult, AppError> {
     sync_pricing_with_fetch(db, force, fetch_entries).await
+}
+
+/// Synthetic source for module/native-owner tests only. Uses the same parser,
+/// current selection, writer and observation boundary; never a provider call.
+#[cfg(test)]
+pub(crate) async fn sync_pricing_for_test(
+    db: Arc<Database>,
+    json: &str,
+) -> Result<ModelsDevSyncResult, AppError> {
+    sync_pricing_with_fetch(db, true, || async { parse_entries(json) }).await
 }
 
 #[cfg(test)]
@@ -517,6 +569,78 @@ mod tests {
 
     fn fixture_entries() -> Vec<ModelsDevEntry> {
         parse_entries(include_str!("fixtures/models-dev-sample.json")).expect("parse fixture")
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn successful_source_sync_observes_exact_row_and_manual_import_does_not() {
+        let _home = TestHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        save_sync_config(&db, false, vec!["openai/gpt-5"], None);
+        let result =
+            sync_pricing_for_test(db.clone(), include_str!("fixtures/models-dev-sample.json"))
+                .await
+                .unwrap();
+        let now = result.synced_at.unwrap();
+        let observed =
+            crate::services::model_pricing::observed_pricing(&db, "OpenAI/GPT-5", now).unwrap();
+        assert_eq!(observed.model_id, "gpt-5");
+        assert_eq!(observed.observation.observed_at_ms, now);
+        assert_eq!(observed.observation.currency, "USD");
+        import_pricing(
+            &db,
+            fixture_entries()
+                .into_iter()
+                .filter(|entry| entry.key == "openai/gpt-5")
+                .collect(),
+        )
+        .unwrap();
+        assert!(crate::services::model_pricing::observed_pricing(&db, "gpt-5", now).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn incomplete_source_and_failed_fetch_cannot_create_observations() {
+        let _home = TestHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        save_sync_config(&db, false, vec!["relay/custom-model"], None);
+        let result =
+            sync_pricing_for_test(db.clone(), include_str!("fixtures/models-dev-sample.json"))
+                .await
+                .unwrap();
+        assert!(crate::services::model_pricing::observed_pricing(
+            &db,
+            "custom-model",
+            result.synced_at.unwrap()
+        )
+        .is_err());
+        assert!(sync_pricing_with_fetch(db.clone(), true, || async {
+            Err(AppError::Config("synthetic fetch failure".into()))
+        })
+        .await
+        .is_err());
+        assert!(crate::services::model_pricing::observed_pricing(
+            &db,
+            "custom-model",
+            Utc::now().timestamp_millis()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn incomplete_or_foreign_currency_prices_do_not_gain_budget_provenance() {
+        let entries = parse_entries(r#"{"openai":{"models":{
+            "complete":{"cost":{"input":1,"output":2,"cache_read":0,"cache_write":0}},
+            "missing":{"cost":{"input":1,"output":2}},
+            "foreign":{"cost":{"input":1,"output":2,"cache_read":0,"cache_write":0,"currency":"CNY"}},
+            "invalid":{"cost":{"input":-1,"output":2,"cache_read":0,"cache_write":0}}
+        }}}"#).unwrap();
+        for entry in entries {
+            assert_eq!(entry.budget_pricing_supported, entry.model_id == "complete");
+            let serialized = serde_json::to_string(&entry).unwrap();
+            let imported: ModelsDevEntry = serde_json::from_str(&serialized).unwrap();
+            assert!(!imported.budget_pricing_supported);
+        }
     }
 
     #[test]

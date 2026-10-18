@@ -481,6 +481,13 @@ impl ProxyServer {
     }
 }
 
+impl ProxyServer {
+    #[cfg(any(unix, test))]
+    pub(crate) fn paperclip_router(&self) -> axum::Router {
+        self.build_router()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -193,11 +193,17 @@ fn sync_join_rejects_unknown_schema_and_normal_import_accepts20() {
                 .conn
                 .lock()
                 .unwrap()
-                .execute("UPDATE loongport_schema_version SET version=25", [])
+                .execute(
+                    "UPDATE loongport_schema_version SET version=?1",
+                    [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
+                )
                 .unwrap();
             staged
                 .connection
-                .execute("UPDATE loongport_schema_version SET version=25", [])
+                .execute(
+                    "UPDATE loongport_schema_version SET version=?1",
+                    [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
+                )
                 .unwrap();
         }
         let before = Database::content_digest(&local.conn.lock().unwrap()).unwrap();

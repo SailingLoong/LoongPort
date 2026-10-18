@@ -26,6 +26,13 @@ pub(super) struct Review {
 #[derive(Default)]
 pub(super) struct Reviews(HashMap<String, Review>);
 impl Reviews {
+    /// Observe only: querying a result must not cancel, consume or prune previews.
+    pub fn is_active(&self, id: &str, now: Instant) -> bool {
+        self.0
+            .get(id)
+            .is_some_and(|review| now.saturating_duration_since(review.issued) < LIFETIME)
+    }
+
     pub fn issue(
         &mut self,
         binding: Binding,

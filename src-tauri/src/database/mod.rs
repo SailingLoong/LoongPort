@@ -96,6 +96,8 @@ pub(crate) use lock_conn;
 /// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
 pub struct Database {
     pub(crate) conn: ConnectionMutex,
+    pub(crate) pricing_observations:
+        std::sync::Arc<crate::services::model_pricing::PricingObservations>,
     pub(crate) secrets: std::sync::Arc<crate::secrets::session::SecretSession>,
 }
 
@@ -106,6 +108,19 @@ pub(crate) struct ConnectionMutex {
     secrets: std::sync::Arc<crate::SecretSession>,
 }
 impl ConnectionMutex {
+    #[cfg(any(unix, test))]
+    pub(crate) fn paperclip_try_lock(
+        &self,
+    ) -> Result<Option<std::sync::MutexGuard<'_, Connection>>, AppError> {
+        let conn = match self.inner.try_lock() {
+            Ok(conn) => conn,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(_) => return Err(AppError::Database("Database lock unavailable".into())),
+        };
+        self.secrets.ensure_available()?;
+        Ok(Some(conn))
+    }
+
     /// Passive diagnostics must not wait behind a business transaction. Keep
     /// the same session denial and returned guard as the original lock owner.
     #[cfg(any(feature = "gui", test))]
@@ -127,14 +142,25 @@ impl ConnectionMutex {
     }
 }
 
-fn register_db_change_hook(conn: &Connection) -> Result<(), AppError> {
+fn register_db_change_hook(
+    conn: &Connection,
+    observations: std::sync::Arc<crate::services::model_pricing::PricingObservations>,
+    notify_changes: bool,
+) -> Result<(), AppError> {
     conn.update_hook(Some(
-        |action: Action, _database: &str, table: &str, _row_id: i64| match action {
+        move |action: Action, _database: &str, table: &str, _row_id: i64| match action {
             Action::SQLITE_INSERT | Action::SQLITE_UPDATE | Action::SQLITE_DELETE => {
-                #[cfg(feature = "gui")]
-                crate::services::webdav_auto_sync::notify_db_changed(table);
-                #[cfg(feature = "gui")]
-                crate::services::s3_auto_sync::notify_db_changed(table);
+                if table == "model_pricing" || table == "loongport_vault" {
+                    // Includes direct SQL edits and edits later rolled back. A
+                    // new authoritative fetch is required after any mutation.
+                    let _ = observations.invalidate();
+                }
+                if notify_changes {
+                    #[cfg(feature = "gui")]
+                    crate::services::webdav_auto_sync::notify_db_changed(table);
+                    #[cfg(feature = "gui")]
+                    crate::services::s3_auto_sync::notify_db_changed(table);
+                }
             }
             _ => {}
         },
@@ -166,13 +192,28 @@ impl Database {
         conn: Connection,
         secrets: std::sync::Arc<crate::SecretSession>,
     ) -> Self {
+        let pricing_observations =
+            std::sync::Arc::new(crate::services::model_pricing::PricingObservations::default());
+        match register_db_change_hook(&conn, pricing_observations.clone(), false) {
+            Ok(()) => pricing_observations
+                .hook_registered
+                .store(true, std::sync::atomic::Ordering::Release),
+            Err(error) => log::warn!("Pricing observation invalidation unavailable: {error}"),
+        }
         Self {
+            pricing_observations,
             conn: ConnectionMutex {
                 inner: Mutex::new(conn),
                 secrets: secrets.clone(),
             },
             secrets,
         }
+    }
+
+    /// SQLite Backup replaces pages without row update hooks. Restore/import
+    /// owners must call this while holding the live connection, before apply.
+    pub(crate) fn invalidate_pricing_observations(&self) -> Result<(), AppError> {
+        self.pricing_observations.invalidate()
     }
 
     /// Opaque credential context for adapters sharing this database's lifecycle.
@@ -209,8 +250,11 @@ impl Database {
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
-        register_db_change_hook(&conn)?;
         let db = Self::from_connection(conn, secrets);
+        {
+            let conn = lock_conn!(db.conn);
+            register_db_change_hook(&conn, db.pricing_observations.clone(), true)?;
+        }
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
@@ -267,9 +311,12 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
-        register_db_change_hook(&conn)?;
 
         let db = Self::from_connection(conn, crate::secrets::session::SecretSession::ephemeral()?);
+        {
+            let conn = lock_conn!(db.conn);
+            register_db_change_hook(&conn, db.pricing_observations.clone(), true)?;
+        }
         db.create_tables()?;
         // 与 `init` / 导入路径一致地把 LoongPort 的版本号 stamp 上。
         //

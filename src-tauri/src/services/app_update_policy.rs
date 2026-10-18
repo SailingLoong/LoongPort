@@ -334,7 +334,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_download_without_first_byte_ends_at_the_idle_deadline() {
         let (_tx, rx) = watch::channel(0);
         let result = bounded_download(
@@ -342,17 +342,22 @@ mod tests {
             rx,
             Duration::from_millis(5),
             Duration::from_secs(1),
-        )
-        .await;
-        assert!(matches!(result, Err(DownloadFailure::Stalled)));
+        );
+        tokio::pin!(result);
+        assert!(futures::poll!(&mut result).is_pending());
+        tokio::time::advance(Duration::from_millis(5)).await;
+        assert!(matches!(result.await, Err(DownloadFailure::Stalled)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn duplicate_progress_does_not_extend_the_idle_deadline() {
         let (tx, rx) = watch::channel(0);
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_sent = sent.clone();
         let repeated = async move {
             loop {
                 tx.send_replace(0);
+                sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::task::yield_now().await;
             }
             #[allow(unreachable_code)]
@@ -363,12 +368,26 @@ mod tests {
             rx,
             Duration::from_millis(5),
             Duration::from_secs(1),
-        )
-        .await;
-        assert!(matches!(result, Err(DownloadFailure::Stalled)));
+        );
+        tokio::pin!(result);
+        assert!(futures::poll!(&mut result).is_pending());
+        let mut previous = observed_sent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(previous > 0);
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(futures::poll!(&mut result).is_pending());
+            let current = observed_sent.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                current > previous,
+                "progress was delivered before the deadline"
+            );
+            previous = current;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(result.await, Err(DownloadFailure::Stalled)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_continuous_download_can_outlive_one_idle_period() {
         let (tx, rx) = watch::channel(0);
         let transfer = async move {
@@ -383,19 +402,30 @@ mod tests {
             rx,
             Duration::from_millis(20),
             Duration::from_secs(1),
-        )
-        .await;
-        assert_eq!(result.unwrap(), "verified bytes");
+        );
+        tokio::pin!(result);
+        assert!(futures::poll!(&mut result).is_pending());
+        // Poll every delivered chunk so scheduler latency is not confused with
+        // a download that actually stopped making progress.
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(5)).await;
+            assert!(futures::poll!(&mut result).is_pending());
+        }
+        tokio::time::advance(Duration::from_millis(5)).await;
+        assert_eq!(result.await.unwrap(), "verified bytes");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn continuous_progress_cannot_escape_the_total_budget() {
         let (tx, rx) = watch::channel(0);
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_sent = sent.clone();
         let transfer = async move {
             let mut n = 0;
             loop {
                 n += 1;
                 tx.send_replace(n);
+                sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::task::yield_now().await;
             }
             #[allow(unreachable_code)]
@@ -406,9 +436,23 @@ mod tests {
             rx,
             Duration::from_secs(1),
             Duration::from_millis(5),
-        )
-        .await;
-        assert!(matches!(result, Err(DownloadFailure::TimedOut)));
+        );
+        tokio::pin!(result);
+        assert!(futures::poll!(&mut result).is_pending());
+        let mut previous = observed_sent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(previous > 0);
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(futures::poll!(&mut result).is_pending());
+            let current = observed_sent.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                current > previous,
+                "progress was delivered before the deadline"
+            );
+            previous = current;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(result.await, Err(DownloadFailure::TimedOut)));
     }
 
     #[tokio::test]

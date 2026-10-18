@@ -40,6 +40,7 @@ pub mod integration_test_support;
 mod lightweight;
 #[cfg(all(target_os = "linux", feature = "gui"))]
 mod linux_fix;
+pub(crate) mod paperclip;
 // Dormant upstream primitives: remove the scoped allowance when verified
 // live/mode integration supplies runtime consumers. Do not add writer calls here.
 #[allow(dead_code)]
@@ -47,6 +48,8 @@ mod live;
 mod maintenance;
 mod mcp;
 // Pure mode models only; no startup/persistence/controller is registered.
+#[cfg(any(feature = "gui", test))]
+mod minimax_code;
 #[allow(dead_code)]
 mod mode;
 mod model_capabilities;
@@ -1982,6 +1985,14 @@ pub fn run() {
             // Pi native provider and session views
             commands::get_pi_current_state,
             commands::list_workbuddy_accounts,
+            commands::list_minimax_code_accounts,
+            commands::refresh_minimax_code_account,
+            commands::claim_minimax_code_today,
+            commands::recheck_minimax_code_claim,
+            commands::retire_minimax_code_account,
+            commands::begin_minimax_code_authorization,
+            commands::poll_minimax_code_authorization,
+            commands::cancel_minimax_code_authorization,
             commands::refresh_workbuddy_account,
             commands::refresh_all_workbuddy_accounts,
             commands::claim_workbuddy_today,
@@ -2022,6 +2033,7 @@ pub fn run() {
             commands::get_zcode_switch_operation,
             commands::preview_zcode_account_bundle,
             commands::import_zcode_account_bundle,
+            commands::get_zcode_bundle_import_result,
             commands::cancel_zcode_bundle_preview,
             commands::check_zcode_account_bundle,
             commands::get_zcode_bundle_check_progress,
@@ -2327,6 +2339,7 @@ pub fn run() {
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             if code.is_some() {
                 zcode_accounts::claim_runtime::shutdown();
+                minimax_code::shutdown();
             }
             match classify_exit_request(*code) {
                 // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
@@ -2354,6 +2367,8 @@ pub fn run() {
                 //   - 100ms 落盘等待：重启前的 DB 写入均为命令驱动、此刻已完成，
                 //     与所有 Tauri 应用默认重启路径的行为一致，无需额外等待
                 ExitRequestAction::DeferToTauriRestart => {
+                    #[cfg(unix)]
+                    secrets::startup::paperclip_ready::stop_for_app(app_handle);
                     log::info!("收到重启请求 (code={code:?})，交由 Tauri 默认重启流程 re-exec");
                     return;
                 }
@@ -2491,7 +2506,10 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(unix)]
+    secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
+    minimax_code::shutdown();
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 
@@ -2901,7 +2919,10 @@ pub fn destroy_single_instance_lock(app_handle: &tauri::AppHandle) {
 /// 图标，而 macOS 的 NSStatusItem 操作要求主线程；`set_visible(false)` 走
 /// `run_item_main_thread` 代理，跨线程安全（见 `remove_tray_icon_before_exit`）。
 pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
+    #[cfg(unix)]
+    secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
+    minimax_code::shutdown();
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);
     let env = app_handle.env();

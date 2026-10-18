@@ -132,3 +132,7 @@ pub(crate) use zcode_claim::*;
 mod workbuddy;
 #[cfg(feature = "gui")]
 pub(crate) use workbuddy::*;
+#[cfg(feature = "gui")]
+mod minimax_code;
+#[cfg(feature = "gui")]
+pub(crate) use minimax_code::*;

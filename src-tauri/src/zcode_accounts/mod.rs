@@ -20,6 +20,7 @@ pub mod core;
 pub(crate) mod desktop_text;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 pub(crate) mod discovery_paths;
+pub(crate) mod import_receipts;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod import_reviews;
 pub(crate) mod key_intent;

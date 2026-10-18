@@ -150,6 +150,8 @@ indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
 sha2 = "0.11"
+# Official public MiniMax Code attribution wire, not credential encryption.
+md-5 = "=0.11.0"
 # sha2 0.11 的输出类型（hybrid-array）不再实现 `LowerHex`，hex 编码统一走这个。
 hex = "0.4"
 # Ed25519 验签（远端配置的签名校验，见 `relay::remote_config`）。
@@ -220,6 +222,8 @@ panic = "unwind"
 strip = "symbols"
 
 [dev-dependencies]
+# Deterministic deadline tests; release Tokio features remain unchanged.
+tokio = { version = "1", features = ["test-util"] }
 serial_test = "4"
 tempfile = "3"
 tauri = { version = "2.8.2", features = ["test"] }

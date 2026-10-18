@@ -138,16 +138,24 @@ impl Database {
     /// Read-only change receipt for the existing encrypted configuration owner.
     /// Hash ciphertext without opening credentials or returning stored values.
     pub(crate) fn configuration_catalog_revision(&self, app: &str) -> Result<String, AppError> {
-        use std::hash::{Hash, Hasher};
         let conn = lock_conn!(self.conn);
+        Self::configuration_catalog_revision_on_connection(&conn, app)
+    }
+    pub(crate) fn configuration_catalog_revision_on_connection(
+        conn: &rusqlite::Connection,
+        app: &str,
+    ) -> Result<String, AppError> {
+        use std::hash::{Hash, Hasher};
+
         let mut statement = conn.prepare(
-            "SELECT id, settings_config, meta FROM providers WHERE app_type=?1 ORDER BY id",
+            "SELECT id, settings_config, meta, website_url FROM providers WHERE app_type=?1 ORDER BY id",
         )?;
         let rows = statement.query_map([app], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -1076,6 +1084,12 @@ impl Database {
     /// 用于只需要做存在性检查的场景（如 additive 模式的 live 同步去重）。
     pub fn get_provider_ids(&self, app_type: &str) -> Result<HashSet<String>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::get_provider_ids_on_connection(&conn, app_type)
+    }
+    pub(crate) fn get_provider_ids_on_connection(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<HashSet<String>, AppError> {
         let mut stmt = conn
             .prepare("SELECT id FROM providers WHERE app_type = ?1")
             .map_err(|e| AppError::Database(e.to_string()))?;

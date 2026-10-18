@@ -54,6 +54,15 @@ pub(crate) async fn import_zcode_account_bundle(
     .await
 }
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_zcode_bundle_import_result(
+    state: State<'_, AppState>,
+    data_root: Option<std::path::PathBuf>,
+    request_id: String,
+    owner_binding: Option<String>,
+) -> Result<crate::zcode_accounts::import_receipts::ImportResult, PublicError> {
+    api::bundle_import_result(state.db.clone(), data_root, request_id, owner_binding).await
+}
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn check_zcode_account_bundle(
     state: State<'_, AppState>,
     preview_id: String,

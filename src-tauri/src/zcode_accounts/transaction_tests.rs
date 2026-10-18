@@ -2682,10 +2682,30 @@ async fn failed_incoming_check_cannot_erase_existing_ready_complete_session() {
             .unwrap(),
         vec![CaptureCommitOutcome::Kept]
     );
-    assert_eq!(
-        before,
-        fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap()
+    let after = fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap();
+    // The kept account is unchanged, but its completed import now has a receipt.
+    assert_ne!(before, after);
+    let original = ProfileCatalog::open(
+        std::str::from_utf8(&before).unwrap(),
+        &fixture.vault,
+        &fixture.native,
+    )
+    .unwrap();
+    let retained = ProfileCatalog::open(
+        std::str::from_utf8(&after).unwrap(),
+        &fixture.vault,
+        &fixture.native,
+    )
+    .unwrap();
+    assert!(
+        original.get(&fixture.b).unwrap().scoped_document()
+            == retained.get(&fixture.b).unwrap().scoped_document()
     );
+    assert!(retained.connection_ready(
+        retained.get(&fixture.b).unwrap(),
+        &fixture.native,
+        super::super::checkpoint::ConnectionKind::Coding
+    ));
 }
 #[tokio::test]
 async fn native_recapture_preserves_nonce_stable_evidence_and_withdraws_only_changed_key() {
@@ -3167,4 +3187,435 @@ async fn io_checked_bundle_preserves_whole_session_and_allows_coding_without_bus
         .unwrap()
         .iter()
         .all(|method| *method == OfficialMethod::Get));
+}
+
+fn receipt_incoming(f: &Fixture, who: &str, token: &str, update: bool) -> IncomingProfile {
+    IncomingProfile {
+        snapshot: f
+            .native
+            .inspect(&native_document(OAuthFamily::Zai, who, token))
+            .unwrap(),
+        update_duplicate: update,
+        evidence: None,
+        origin: super::super::checkpoint::IdentitySource::PackageDeclared,
+    }
+}
+#[test]
+fn import_receipt_recovers_lost_reply_after_reopening_without_replaying_or_rewriting() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let id = uuid::Uuid::new_v4().to_string();
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let revision = local.catalog_status(&f.native).unwrap().revision;
+    let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+    // Drop the successful result, exactly the response-loss boundary.
+    local
+        .import_reviewed_profiles(
+            &f.native,
+            &revision,
+            &id,
+            &[2, 5],
+            vec![
+                receipt_incoming(&f, "new", "new-secret", false),
+                receipt_incoming(&f, "a", "ignored-secret", false),
+            ],
+        )
+        .unwrap();
+    let committed = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let reopened = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let receipt = reopened.import_receipt(&f.native, &id).unwrap().unwrap();
+    assert_eq!(
+        receipt.outcomes(),
+        vec![CaptureCommitOutcome::Saved, CaptureCommitOutcome::Kept]
+    );
+    assert_eq!(
+        receipt.rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+        vec![2, 5]
+    );
+    assert!(receipt.matches_request(&revision, &[(2, false), (5, false)]));
+    assert!(!receipt.matches_request(&revision, &[(2, true), (5, false)]));
+    assert_eq!(
+        committed,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(
+        native_before,
+        fs::read(f.native_root.path().join("credentials.json")).unwrap()
+    );
+    assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    assert!(reopened
+        .import_receipt(&f.native, &uuid::Uuid::new_v4().to_string())
+        .unwrap()
+        .is_none());
+    // A later unrelated catalog change cannot rewrite the historical result.
+    reopened
+        .set_profile_label(
+            &f.native,
+            &reopened.catalog_status(&f.native).unwrap().revision,
+            &f.a.opaque_id(),
+            Some("later".into()),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.import_receipt(&f.native, &id).unwrap(),
+        Some(receipt)
+    );
+}
+#[test]
+fn import_receipt_all_kept_is_persisted_and_identical_retry_is_read_only() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let revision = local.catalog_status(&f.native).unwrap().revision;
+    let id = uuid::Uuid::new_v4().to_string();
+    let item = || receipt_incoming(&f, "a", "kept-candidate", false);
+    // Reuse the identical candidate bytes; AES nonce regeneration is different content.
+    let snapshot = item().snapshot;
+    let items = || {
+        vec![IncomingProfile {
+            snapshot: snapshot.clone(),
+            update_duplicate: false,
+            evidence: None,
+            origin: super::super::checkpoint::IdentitySource::PackageDeclared,
+        }]
+    };
+    let before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    assert_eq!(
+        local
+            .import_reviewed_profiles(&f.native, &revision, &id, &[0], items())
+            .unwrap(),
+        vec![CaptureCommitOutcome::Kept]
+    );
+    let saved = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    assert_ne!(before, saved);
+    assert_eq!(
+        local
+            .import_reviewed_profiles(&f.native, &revision, &id, &[0], items())
+            .unwrap(),
+        vec![CaptureCommitOutcome::Kept]
+    );
+    assert_eq!(
+        saved,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(
+        local.import_reviewed_profiles(
+            &f.native,
+            &revision,
+            &id,
+            &[0],
+            vec![receipt_incoming(&f, "a", "other-content", false)]
+        ),
+        Err(TransactionError::OperationAlreadyKnown)
+    );
+    assert_eq!(
+        local.import_reviewed_profiles(&f.native, &revision, &id, &[1], items()),
+        Err(TransactionError::OperationAlreadyKnown)
+    );
+    assert_eq!(
+        saved,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+}
+#[test]
+fn import_receipt_rejects_invalid_and_stale_requests_before_any_publication() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let revision = local.catalog_status(&f.native).unwrap().revision;
+    for (id, rev, indices) in [
+        ("not-uuid".into(), revision.clone(), vec![0]),
+        (uuid::Uuid::new_v4().to_string(), "absent".into(), vec![0]),
+        (uuid::Uuid::new_v4().to_string(), revision.clone(), vec![50]),
+    ] {
+        assert!(local
+            .import_reviewed_profiles(
+                &f.native,
+                &rev,
+                &id,
+                &indices,
+                vec![receipt_incoming(&f, "new", "candidate", false)]
+            )
+            .is_err());
+        assert_eq!(
+            before,
+            fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+        );
+    }
+}
+
+#[test]
+fn import_receipt_capacity_failure_leaves_both_accounts_and_receipts_unchanged() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let first = uuid::Uuid::new_v4().to_string();
+    local
+        .import_reviewed_profiles(
+            &f.native,
+            &local.catalog_status(&f.native).unwrap().revision,
+            &first,
+            &[0],
+            vec![receipt_incoming(&f, "a", "kept", false)],
+        )
+        .unwrap();
+    let mut catalog = f.catalog();
+    let template = catalog.import_receipt(&first).unwrap().clone();
+    for _ in 1..super::super::import_receipts::MAX_IMPORT_RECEIPTS {
+        let mut receipt = template.clone();
+        receipt.request_id = uuid::Uuid::new_v4().to_string();
+        catalog.record_import(receipt).unwrap();
+    }
+    write_durable(
+        &f.vault_root.path().join(PROFILE_FILE),
+        catalog.seal(&f.vault, &f.native).unwrap().as_bytes(),
+    )
+    .unwrap();
+    let before = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let next = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        local.import_reviewed_profiles(
+            &f.native,
+            &local.catalog_status(&f.native).unwrap().revision,
+            &next,
+            &[0],
+            vec![receipt_incoming(&f, "new-capacity", "candidate", false)]
+        ),
+        Err(TransactionError::Checkpoint(CheckpointError::ResourceLimit))
+    );
+    assert_eq!(
+        before,
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(
+        local.import_receipt(&f.native, &first).unwrap(),
+        Some(template)
+    );
+    assert!(local.import_receipt(&f.native, &next).unwrap().is_none());
+}
+const IMPORT_CRASH_REQUEST: &str = "fb401c49-bc2a-4a60-af4c-55317a30eae0";
+#[test]
+#[ignore = "invoked only by the synthetic import response-loss subprocess test"]
+fn synthetic_import_receipt_crash_child() {
+    use std::io::Read;
+    assert_eq!(
+        std::env::var("LOONGPORT_ZCODE_SYNTHETIC_CHILD").as_deref(),
+        Ok("1")
+    );
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take(16384)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let input: ChildInput = serde_json::from_slice(&bytes).unwrap();
+    let vault = VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap();
+    let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+    let local = VaultAccountStore::new(&input.vault_root, &vault).unwrap();
+    let snapshot = native
+        .inspect(&native_document(
+            OAuthFamily::Zai,
+            if input.checkpoint == 0 {
+                "new-crash"
+            } else {
+                "a"
+            },
+            "synthetic-only",
+        ))
+        .unwrap();
+    local
+        .import_reviewed_profiles(
+            &native,
+            &local.catalog_status(&native).unwrap().revision,
+            IMPORT_CRASH_REQUEST,
+            &[4],
+            vec![IncomingProfile {
+                snapshot,
+                update_duplicate: false,
+                evidence: None,
+                origin: super::super::checkpoint::IdentitySource::PackageDeclared,
+            }],
+        )
+        .unwrap();
+    // Commit has completed, but no IPC result and no Rust destructors run.
+    std::process::exit(76);
+}
+#[test]
+fn import_receipt_actual_process_exit_before_reply_recovers_saved_and_all_kept_results() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for checkpoint in [0, 1] {
+        let f = Fixture::new(OAuthFamily::Zai);
+        let native_before = fs::read(f.native_root.path().join("credentials.json")).unwrap();
+        let input = ChildInput {
+            native_root: f.native_root.path().into(),
+            vault_root: f.vault_root.path().into(),
+            metadata: f.vault.metadata().clone(),
+            key: f.vault.export_key().to_vec(),
+            checkpoint,
+        };
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "zcode_accounts::transaction::tests::synthetic_import_receipt_crash_child",
+                "--nocapture",
+            ])
+            .env("LOONGPORT_ZCODE_SYNTHETIC_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&input).unwrap());
+        child.stdin.take().unwrap().write_all(&bytes).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(76),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let vault =
+            VaultContext::from_key(f.vault.metadata().clone(), f.vault.export_key()).unwrap();
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        let reopened = VaultAccountStore::new(f.vault_root.path(), &vault).unwrap();
+        let before_query = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+        let receipt = reopened
+            .import_receipt(&native, IMPORT_CRASH_REQUEST)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.rows[0].index, 4);
+        assert_eq!(
+            receipt.outcomes(),
+            vec![if checkpoint == 0 {
+                CaptureCommitOutcome::Saved
+            } else {
+                CaptureCommitOutcome::Kept
+            }]
+        );
+        assert_eq!(
+            before_query,
+            fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap()
+        );
+        assert_eq!(
+            native_before,
+            fs::read(f.native_root.path().join("credentials.json")).unwrap()
+        );
+        assert!(!f.vault_root.path().join(JOURNAL_FILE).exists());
+    }
+}
+
+#[tokio::test]
+async fn import_resolution_distinguishes_live_preview_prewrite_failure_and_unknown_owner() {
+    use super::super::{
+        capture_reviews::Binding,
+        import_receipts::ImportResultStatus,
+        import_reviews::{ImportChoice, Reviews},
+    };
+    let f = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let revision = local.catalog_status(&f.native).unwrap().revision;
+    let owner = local.import_owner_binding(&f.native).unwrap();
+    let snapshot = receipt_incoming(&f, "new-resolution", "synthetic", false).snapshot;
+    let binding = Binding {
+        vault_root: f.vault_root.path().into(),
+        vault_id: f.vault.metadata().vault_id.clone(),
+        key_id: f.vault.metadata().key_id.clone(),
+        vault_revision: f.vault.metadata().revision,
+        context_revision: TEST_CONTEXT.into(),
+        catalog_revision: revision.clone(),
+    };
+    let mut reviews = Reviews::default();
+    let now = std::time::Instant::now();
+    let id = reviews.issue(binding.clone(), vec![Some(snapshot.clone())], now);
+    let selected = vec![ImportChoice {
+        index: 0,
+        update_duplicate: false,
+    }];
+    let lease = reviews
+        .begin_check(&id, &binding, selected.clone(), now)
+        .unwrap();
+    let report = checked_report(&f.native, &snapshot, true).await;
+    reviews.finish_check(&lease, vec![(0, report)]).unwrap();
+    // Query wins scheduling before a queued commit: do not release the pointer.
+    assert_eq!(
+        local
+            .resolve_import(&f.native, &id, Some(&owner), reviews.is_active(&id, now))
+            .unwrap()
+            .status,
+        ImportResultStatus::Unknown
+    );
+    assert!(reviews.is_active(&id, now));
+    assert!(reviews
+        .consume_checked(&id, &binding, &selected, now)
+        .is_some());
+    // The actual original transaction fails before publish, after preview consume.
+    assert_eq!(
+        local.import_reviewed_profiles(
+            &f.native,
+            "absent",
+            &id,
+            &[0],
+            vec![receipt_incoming(&f, "new-resolution", "synthetic", false)]
+        ),
+        Err(TransactionError::CatalogChanged)
+    );
+    assert_eq!(
+        local
+            .resolve_import(&f.native, &id, Some(&owner), reviews.is_active(&id, now))
+            .unwrap()
+            .status,
+        ImportResultStatus::NotRecorded
+    );
+    assert!(reviews
+        .consume_checked(&id, &binding, &selected, now)
+        .is_none());
+    assert_eq!(
+        local
+            .resolve_import(&f.native, &id, None, false)
+            .unwrap()
+            .status,
+        ImportResultStatus::Unknown
+    );
+    assert_eq!(
+        local
+            .resolve_import(&f.native, &id, Some("different-owner"), false)
+            .unwrap()
+            .status,
+        ImportResultStatus::Unknown
+    );
+    // A fresh request must be issued; it cannot reuse the consumed capability.
+    let fresh = reviews.issue(binding.clone(), vec![Some(snapshot)], now);
+    assert_ne!(fresh, id);
+    // Expired previews are observed without mutation and cannot commit later.
+    let expired = now + std::time::Duration::from_secs(601);
+    assert!(!reviews.is_active(&fresh, expired));
+    assert!(reviews.is_active(&fresh, now));
+    assert!(reviews
+        .consume_checked(&fresh, &binding, &selected, expired)
+        .is_none());
+    assert_eq!(
+        local
+            .resolve_import(&f.native, &fresh, Some(&owner), false)
+            .unwrap()
+            .status,
+        ImportResultStatus::NotRecorded
+    );
+    // Authentication failure is never normalized into notRecorded.
+    let bytes = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
+    write_durable(
+        &f.vault_root.path().join(PROFILE_FILE),
+        b"corrupt synthetic envelope",
+    )
+    .unwrap();
+    assert!(local
+        .resolve_import(&f.native, &id, Some(&owner), false)
+        .is_err());
+    write_durable(&f.vault_root.path().join(PROFILE_FILE), &bytes).unwrap();
+    let other = Fixture::new(OAuthFamily::Zai);
+    let other_store = VaultAccountStore::new(other.vault_root.path(), &other.vault).unwrap();
+    assert_eq!(
+        other_store
+            .resolve_import(&other.native, &id, Some(&owner), false)
+            .unwrap()
+            .status,
+        ImportResultStatus::Unknown
+    );
 }

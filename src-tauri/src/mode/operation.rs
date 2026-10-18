@@ -1275,17 +1275,58 @@ fn unverified_files(pending: &Pending) -> Result<Vec<PathBuf>, AppError> {
 // original operation owner, sharing the generic transaction above.
 
 /// The persisted schema is the existing migration fact, not a second feature flag.
+/// Classification precedes acquiring an AppWrite/session guard. Callers must not
+/// hold a session guard: historical checkpoint classification acquires it once.
 pub(crate) fn uses_upstream4_schema(db: &Database) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-    let version = Database::get_user_version(&conn)?;
-    let modern = uses_upstream4_version(version, crate::database::SCHEMA_VERSION)?;
-    if modern
-        && crate::database::loongport_schema::read_stored_version(&conn)?
-            != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
-    {
+    let stored = {
+        let conn = lock_conn!(db.conn);
+        let version = Database::get_user_version(&conn)?;
+        if !uses_upstream4_version(version, crate::database::SCHEMA_VERSION)? {
+            return Ok(false);
+        }
+        crate::database::loongport_schema::read_stored_version(&conn)?
+    };
+    if stored == crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION {
+        return Ok(true);
+    }
+    // Only the original authenticated v24 publication may temporarily retain
+    // its identity while per-app completion/archive runs. This is classification,
+    // never app admission; the existing AppWrite checks still prove each write.
+    if stored != 24 || !crate::secrets::upgrade::checkpoint::supports_loongport_version(stored) {
         return Err(AppError::Config("upgrade.future_version".into()));
     }
-    Ok(modern)
+    use crate::database::inspection;
+    let session = db.secret_session();
+    let root = session.root();
+    if crate::config::get_app_config_dir() != root {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    // Preserve the original vault -> connection lock order. The first connection
+    // guard above must be released before acquiring this session guard.
+    let vault = session.read()?;
+    let conn = lock_conn!(db.conn);
+    if Database::get_user_version(&conn)? != crate::database::UPSTREAM4_SCHEMA_VERSION
+        || crate::database::loongport_schema::read_stored_version(&conn)? != stored
+    {
+        return Err(AppError::Config("upgrade.source_changed".into()));
+    }
+    crate::database::vault::check_identity(&conn, &vault)?;
+    let database_path = root.join(crate::config::DB_FILE_NAME);
+    let database_revision = inspection::file_revision(&database_path)?;
+    let identity = database_revision.primary_identity()?;
+    inspection::verify_connection_primary_identity(&conn, &identity)?;
+    let device = DeviceStore::for_device();
+    let checkpoint_path = device
+        .root()
+        .join(crate::secrets::upgrade::checkpoint::FILE);
+    let checkpoint_revision = inspection::file_revision(&checkpoint_path)?;
+    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, &vault)?.is_none() {
+        return Err(AppError::Config("upgrade.future_version".into()));
+    }
+    inspection::verify_connection_primary_identity(&conn, &identity)?;
+    inspection::verify_unchanged(&database_path, &database_revision)?;
+    inspection::verify_unchanged(&checkpoint_path, &checkpoint_revision)?;
+    Ok(true)
 }
 
 // Pure comparison keeps the active startup ceiling distinct from the target

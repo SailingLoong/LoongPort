@@ -771,17 +771,149 @@ impl<'a> VaultAccountStore<'a> {
                 .collect(),
         )
     }
+    #[cfg(all(test, unix))]
     pub(crate) fn import_checked_profiles(
         &self,
         native: &NativeCipher,
         revision: &str,
         items: Vec<IncomingProfile>,
     ) -> Result<Vec<CaptureCommitOutcome>, TransactionError> {
-        if items.is_empty() || items.len() > 50 {
+        let indices: Vec<_> = (0..items.len()).collect();
+        self.import_reviewed_profiles(
+            native,
+            revision,
+            &uuid::Uuid::new_v4().to_string(),
+            &indices,
+            items,
+        )
+    }
+    pub(crate) fn import_owner_binding(
+        &self,
+        native: &NativeCipher,
+    ) -> Result<String, TransactionError> {
+        self.validate_root()?;
+        let meta = self.vault.metadata();
+        let identity = serde_json::to_vec(&(
+            self.root,
+            self.root_id,
+            &meta.vault_id,
+            &meta.key_id,
+            meta.revision,
+            native.context(),
+        ))
+        .map_err(|_| TransactionError::Storage)?;
+        Ok(format!(
+            "sha256:{}",
+            URL_SAFE_NO_PAD.encode(hash(&identity))
+        ))
+    }
+    /// Caller holds the original physical owner while observing review liveness.
+    /// NotRecorded describes this authenticated current library, never history.
+    pub(crate) fn resolve_import(
+        &self,
+        native: &NativeCipher,
+        request_id: &str,
+        owner_binding: Option<&str>,
+        review_active: bool,
+    ) -> Result<super::import_receipts::ImportResult, TransactionError> {
+        use super::import_receipts::{ImportResult, ImportResultStatus};
+        if owner_binding != Some(self.import_owner_binding(native)?.as_str()) {
+            return Ok(ImportResult::unresolved(
+                request_id,
+                ImportResultStatus::Unknown,
+            ));
+        }
+        match self.import_receipt(native, request_id)? {
+            Some(receipt) => Ok(receipt.into()),
+            None => Ok(ImportResult::unresolved(
+                request_id,
+                if review_active {
+                    ImportResultStatus::Unknown
+                } else {
+                    ImportResultStatus::NotRecorded
+                },
+            )),
+        }
+    }
+    pub(crate) fn import_receipt(
+        &self,
+        native: &NativeCipher,
+        request_id: &str,
+    ) -> Result<Option<super::import_receipts::ImportReceipt>, TransactionError> {
+        if uuid::Uuid::parse_str(request_id).is_err() {
+            return Err(CheckpointError::InvalidPayload.into());
+        }
+        let before = self.read(Role::Profiles)?;
+        let catalog = self.import_catalog(native, &catalog_revision(before.as_deref()))?;
+        self.expect(Role::Profiles, before.as_ref())?;
+        Ok(catalog.import_receipt(request_id).cloned())
+    }
+    pub(crate) fn import_reviewed_profiles(
+        &self,
+        native: &NativeCipher,
+        revision: &str,
+        request_id: &str,
+        indices: &[usize],
+        items: Vec<IncomingProfile>,
+    ) -> Result<Vec<CaptureCommitOutcome>, TransactionError> {
+        if items.is_empty()
+            || items.len() > super::bundle_limits::MAX_BUNDLE_ACCOUNTS
+            || items.len() != indices.len()
+        {
             return Err(CheckpointError::ResourceLimit.into());
         }
         let before = self.read(Role::Profiles)?;
-        let mut catalog = self.import_catalog(native, revision)?;
+        let current_revision = catalog_revision(before.as_deref());
+        let mut catalog = self.import_catalog(native, &current_revision)?;
+        if current_revision != revision && catalog.import_receipt(request_id).is_none() {
+            return Err(TransactionError::CatalogChanged);
+        }
+        let mut receipt = super::import_receipts::ImportReceipt {
+            request_id: request_id.into(),
+            catalog_revision: revision.into(),
+            rows: items
+                .iter()
+                .zip(indices)
+                .map(|(item, index)| {
+                    let candidate_revision = Sha256::digest(
+                        item.snapshot
+                            .scoped_document()
+                            .to_bytes()
+                            .map_err(CheckpointError::Core)?,
+                    )
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                    Ok(super::import_receipts::ImportReceiptRow {
+                        index: *index,
+                        account_id: item.snapshot.identity().opaque_id(),
+                        family: match item.snapshot.identity().family() {
+                            super::core::OAuthFamily::Zai => "zai",
+                            super::core::OAuthFamily::BigModel => "bigmodel",
+                        }
+                        .into(),
+                        candidate_revision,
+                        update_duplicate: item.update_duplicate,
+                        outcome: CaptureCommitOutcome::Kept,
+                    })
+                })
+                .collect::<Result<Vec<_>, CheckpointError>>()?,
+        };
+        receipt.validate()?;
+        if let Some(original) = catalog.import_receipt(request_id) {
+            let mut compare = receipt.clone();
+            for (row, saved) in compare.rows.iter_mut().zip(&original.rows) {
+                row.outcome = saved.outcome;
+            }
+            if original != &compare {
+                return Err(TransactionError::OperationAlreadyKnown);
+            }
+            self.expect(Role::Profiles, before.as_ref())?;
+            return Ok(original.outcomes());
+        }
+        if current_revision != revision {
+            return Err(TransactionError::CatalogChanged);
+        }
         let journal = self.read(Role::Journal)?;
         let recovery = self.read(Role::Recovery)?;
         if journal.is_some() || self.open_ledger(recovery.as_deref())?.needs_confirmation() {
@@ -814,15 +946,12 @@ impl<'a> VaultAccountStore<'a> {
                 });
             }
         }
-        if outcomes
-            .iter()
-            .all(|outcome| *outcome == CaptureCommitOutcome::Kept)
-        {
-            self.expect(Role::Profiles, before.as_ref())?;
-            self.expect(Role::Journal, journal.as_ref())?;
-            self.expect(Role::Recovery, recovery.as_ref())?;
-            return Ok(outcomes);
+        for (row, outcome) in receipt.rows.iter_mut().zip(&outcomes) {
+            row.outcome = *outcome;
         }
+        // Even all-kept batches need a durable result. The receipt and account
+        // changes are committed by the same CAS/publication below, never a sidecar.
+        catalog.record_import(receipt)?;
         // Authenticate every candidate and enforce catalog capacity before any IO.
         let encoded = catalog.seal(self.vault, native)?;
         self.expect(Role::Journal, journal.as_ref())?;

@@ -1,14 +1,18 @@
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Transaction};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicI64, Ordering},
+    Mutex, OnceLock,
+};
 
 const MODEL_PRICING_FILE_NAME: &str = "model-pricing.json";
 const MODEL_PRICING_FILE_VERSION: u32 = 1;
@@ -17,6 +21,122 @@ static MODEL_PRICING_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn file_lock() -> &'static Mutex<()> {
     MODEL_PRICING_FILE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Transient proof owned by the actual Database session, never persisted in the
+/// price file or used as a second price store. Six hours is local estimate
+/// validity policy, not a guarantee from the catalog publisher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PricingObservation {
+    pub source: String,
+    pub currency: String,
+    pub observed_at_ms: i64,
+    pub row_hash: String,
+}
+
+#[derive(Default)]
+pub(crate) struct PricingObservations {
+    pub(crate) hook_registered: AtomicBool,
+    rows: Mutex<BTreeMap<String, PricingObservation>>,
+    data_version: AtomicI64,
+}
+
+impl PricingObservations {
+    pub(crate) fn invalidate(&self) -> Result<(), AppError> {
+        self.rows
+            .lock()
+            .map_err(|_| AppError::Database("Pricing observation lock unavailable".into()))?
+            .clear();
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ObservedModelPricing {
+    #[cfg(test)]
+    pub model_id: String,
+    pub pricing: crate::proxy::usage::calculator::ModelPricing,
+    pub observation: PricingObservation,
+}
+
+pub(crate) fn pricing_row_hash(row: &ModelPricingInfo) -> Result<String, AppError> {
+    let bytes = serde_json::to_vec(row).map_err(|e| AppError::Config(e.to_string()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+pub(crate) fn observed_pricing(
+    db: &Database,
+    model: &str,
+    now_ms: i64,
+) -> Result<ObservedModelPricing, AppError> {
+    let conn = lock_conn!(db.conn);
+    observed_pricing_on(db, &conn, model, now_ms)
+}
+
+/// Must be called with this Database's connection guard, retaining the same
+/// price/config snapshot used for admission. No refresh or file import occurs.
+pub(crate) fn observed_pricing_on(
+    db: &Database,
+    conn: &Connection,
+    model: &str,
+    now_ms: i64,
+) -> Result<ObservedModelPricing, AppError> {
+    if !db
+        .pricing_observations
+        .hook_registered
+        .load(Ordering::Acquire)
+    {
+        return Err(AppError::Config(
+            "Pricing provenance invalidation unavailable".into(),
+        ));
+    }
+    let data_version: i64 = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+    if data_version != db.pricing_observations.data_version.load(Ordering::Acquire) {
+        db.invalidate_pricing_observations()?;
+        return Err(AppError::Config(
+            "Pricing provenance invalidated by an external database change".into(),
+        ));
+    }
+    let row = crate::services::usage_stats::find_model_pricing_match(conn, model)?
+        .ok_or_else(|| AppError::Config("Model pricing unavailable".into()))?;
+    let observation = db
+        .pricing_observations
+        .rows
+        .lock()
+        .map_err(|_| AppError::Database("Pricing observation lock unavailable".into()))?
+        .get(&row.model_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::Config("Model pricing has no source observation in this session".into())
+        })?;
+    let max_age_ms =
+        i64::try_from(crate::maintenance::config::MODELS_DEV_REFRESH_INTERVAL.as_millis())
+            .map_err(|_| AppError::Config("Pricing freshness interval overflow".into()))?;
+    now_ms
+        .checked_sub(observation.observed_at_ms)
+        .filter(|age| *age >= 0 && *age < max_age_ms)
+        .ok_or_else(|| {
+            AppError::Config("Model pricing observation expired or is in the future".into())
+        })?;
+    if observation.currency != "USD" || observation.row_hash != pricing_row_hash(&row)? {
+        return Err(AppError::Config(
+            "Model pricing observation no longer matches the original row".into(),
+        ));
+    }
+    let row = normalize_pricing(row)?;
+    let pricing = crate::proxy::usage::calculator::ModelPricing::from_strings(
+        &row.input_cost_per_million,
+        &row.output_cost_per_million,
+        &row.cache_read_cost_per_million,
+        &row.cache_creation_cost_per_million,
+    )
+    .map_err(|e| AppError::Config(format!("Invalid observed model pricing: {e}")))?;
+    Ok(ObservedModelPricing {
+        #[cfg(test)]
+        model_id: row.model_id,
+        pricing,
+        observation,
+    })
 }
 
 fn default_true() -> bool {
@@ -386,6 +506,7 @@ fn update_model_pricing_batch_inner(
     db: &Database,
     entries: Vec<ModelPricingInfo>,
     backfill_all: bool,
+    observed: Option<(&BTreeSet<String>, i64)>,
 ) -> Result<usize, AppError> {
     if entries.is_empty() {
         return Ok(0);
@@ -424,6 +545,8 @@ fn update_model_pricing_batch_inner(
             .retain(|model_id| !updated_ids.contains(model_id));
 
         let mut conn = lock_conn!(db.conn);
+        // A same-value manual save/import must invalidate network provenance too.
+        db.invalidate_pricing_observations()?;
         let transaction = conn.transaction()?;
         let mut changed = 0;
         for entry in &entries {
@@ -431,6 +554,39 @@ fn update_model_pricing_batch_inner(
         }
         write_file_unlocked(&file)?;
         transaction.commit()?;
+        if let Some((supported_ids, observed_at_ms)) = observed {
+            if observed_at_ms < 0
+                || !db
+                    .pricing_observations
+                    .hook_registered
+                    .load(Ordering::Acquire)
+            {
+                return Err(AppError::Config(
+                    "Pricing source observation unavailable".into(),
+                ));
+            }
+            let data_version: i64 = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+            db.pricing_observations
+                .data_version
+                .store(data_version, Ordering::Release);
+            let mut rows =
+                db.pricing_observations.rows.lock().map_err(|_| {
+                    AppError::Database("Pricing observation lock unavailable".into())
+                })?;
+            for entry in &entries {
+                if supported_ids.contains(&entry.model_id) {
+                    rows.insert(
+                        entry.model_id.clone(),
+                        PricingObservation {
+                            source: "https://models.dev/api.json".into(),
+                            currency: "USD".into(),
+                            observed_at_ms,
+                            row_hash: pricing_row_hash(entry)?,
+                        },
+                    );
+                }
+            }
+        }
         changed
     };
 
@@ -451,14 +607,25 @@ fn update_model_pricing_batch_inner(
 }
 
 pub fn update_model_pricing(db: &Database, entry: ModelPricingInfo) -> Result<usize, AppError> {
-    update_model_pricing_batch_inner(db, vec![entry], false)
+    update_model_pricing_batch_inner(db, vec![entry], false, None)
 }
 
 pub fn update_model_pricing_batch(
     db: &Database,
     entries: Vec<ModelPricingInfo>,
 ) -> Result<usize, AppError> {
-    update_model_pricing_batch_inner(db, entries, true)
+    update_model_pricing_batch_inner(db, entries, true, None)
+}
+
+/// Called only by the successful original catalog-fetch path. Generic manual
+/// import/update never obtains source provenance, even for identical prices.
+pub(super) fn update_observed_models_dev_pricing(
+    db: &Database,
+    entries: Vec<ModelPricingInfo>,
+    supported_ids: &BTreeSet<String>,
+    observed_at_ms: i64,
+) -> Result<usize, AppError> {
+    update_model_pricing_batch_inner(db, entries, true, Some((supported_ids, observed_at_ms)))
 }
 
 pub fn delete_model_pricing(db: &Database, model_id: &str) -> Result<(), AppError> {
@@ -483,6 +650,7 @@ pub fn delete_model_pricing(db: &Database, model_id: &str) -> Result<(), AppErro
     }
 
     let mut conn = lock_conn!(db.conn);
+    db.invalidate_pricing_observations()?;
     let transaction = conn.transaction()?;
     transaction.execute(
         "DELETE FROM model_pricing WHERE model_id = ?1",
@@ -522,6 +690,69 @@ mod tests {
             cache_read_cost_per_million: "0.1".to_string(),
             cache_creation_cost_per_million: "1.5".to_string(),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn observations_are_session_scoped_fresh_and_invalidated_by_edits() {
+        with_test_home(|db, _| {
+            let entry = sample_pricing();
+            update_model_pricing_batch(db, vec![entry.clone()]).unwrap();
+            let now = 10_000_000;
+            assert!(observed_pricing(db, &entry.model_id, now).is_err());
+            update_observed_models_dev_pricing(
+                db,
+                vec![entry.clone()],
+                &BTreeSet::from([entry.model_id.clone()]),
+                now,
+            )
+            .unwrap();
+            let observed = observed_pricing(db, &entry.model_id, now).unwrap();
+            assert_eq!(observed.model_id, entry.model_id);
+            assert_eq!(observed.observation.currency, "USD");
+            assert!(observed_pricing(db, &entry.model_id, now - 1).is_err());
+            assert!(observed_pricing(
+                db,
+                &entry.model_id,
+                now + crate::maintenance::config::MODELS_DEV_REFRESH_INTERVAL.as_millis() as i64
+            )
+            .is_err());
+            let other = Database::memory().unwrap();
+            assert!(observed_pricing(&other, &entry.model_id, now).is_err());
+            // Even a same-value manual save cannot retain network provenance.
+            update_model_pricing(db, entry.clone()).unwrap();
+            assert!(observed_pricing(db, &entry.model_id, now).is_err());
+            update_observed_models_dev_pricing(
+                db,
+                vec![entry.clone()],
+                &BTreeSet::from([entry.model_id.clone()]),
+                now,
+            )
+            .unwrap();
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE model_pricing SET input_cost_per_million='99' WHERE model_id=?1",
+                    [&entry.model_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE model_pricing SET input_cost_per_million=?1 WHERE model_id=?2",
+                    params![entry.input_cost_per_million, entry.model_id],
+                )
+                .unwrap();
+            }
+            assert!(observed_pricing(db, &entry.model_id, now).is_err());
+            update_observed_models_dev_pricing(
+                db,
+                vec![entry.clone()],
+                &BTreeSet::from([entry.model_id.clone()]),
+                now,
+            )
+            .unwrap();
+            db.invalidate_pricing_observations().unwrap();
+            assert!(observed_pricing(db, &entry.model_id, now).is_err());
+        });
     }
 
     #[test]

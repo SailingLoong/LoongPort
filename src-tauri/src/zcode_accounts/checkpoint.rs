@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 pub(super) const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROFILES: usize = 64;
-const MAX_LOGIN_RECEIPTS: usize = 1024;
+pub(super) const MAX_LOGIN_RECEIPTS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckpointError {
@@ -46,6 +46,8 @@ struct CatalogPayload {
     login_receipts: Option<Vec<LoginReceipt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     details: Option<BTreeMap<String, ProfileDetails>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    import_receipts: Option<Vec<super::import_receipts::ImportReceipt>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,10 +144,34 @@ pub(crate) struct ProfileCatalog {
     profiles: BTreeMap<AccountIdentity, AccountSnapshot>,
     unverified: BTreeSet<AccountIdentity>,
     login_receipts: Vec<LoginReceipt>,
+    import_receipts: Vec<super::import_receipts::ImportReceipt>,
     details: BTreeMap<AccountIdentity, ProfileDetails>,
 }
 
 impl ProfileCatalog {
+    pub(crate) fn import_receipt(
+        &self,
+        request_id: &str,
+    ) -> Option<&super::import_receipts::ImportReceipt> {
+        self.import_receipts
+            .iter()
+            .find(|receipt| receipt.request_id == request_id)
+    }
+    pub(crate) fn record_import(
+        &mut self,
+        receipt: super::import_receipts::ImportReceipt,
+    ) -> Result<(), CheckpointError> {
+        receipt.validate()?;
+        if self.import_receipt(&receipt.request_id).is_some() {
+            return Err(CheckpointError::InvalidPayload);
+        }
+        if self.import_receipts.len() >= super::import_receipts::MAX_IMPORT_RECEIPTS {
+            return Err(CheckpointError::ResourceLimit);
+        }
+        self.import_receipts.push(receipt);
+        Ok(())
+    }
+
     pub(crate) fn login_receipt(&self, request_id: &str) -> Option<&LoginReceipt> {
         self.login_receipts
             .iter()
@@ -439,7 +465,9 @@ impl ProfileCatalog {
         }
         seal_payload(
             &CatalogPayload {
-                version: if self.login_receipts.is_empty() && self.details.is_empty() {
+                version: if !self.import_receipts.is_empty() {
+                    4
+                } else if self.login_receipts.is_empty() && self.details.is_empty() {
                     2
                 } else {
                     3
@@ -456,6 +484,8 @@ impl ProfileCatalog {
                         })
                         .collect()
                 }),
+                import_receipts: (!self.import_receipts.is_empty())
+                    .then(|| self.import_receipts.clone()),
                 login_receipts: (!self.login_receipts.is_empty())
                     .then(|| self.login_receipts.clone()),
                 context: native.context().into(),
@@ -486,9 +516,13 @@ impl ProfileCatalog {
             &payload.unverified,
             &payload.login_receipts,
             &payload.details,
+            &payload.import_receipts,
         ) {
             // v1 predates bundle import; all records came from admitted capture.
-            (1, None, None, None) | (2, Some(_), None, None) | (3, Some(_), _, _) => (),
+            (1, None, None, None, None)
+            | (2, Some(_), None, None, None)
+            | (3, Some(_), _, _, None)
+            | (4, Some(_), _, _, Some(_)) => (),
             _ => return Err(CheckpointError::InvalidPayload),
         }
         if payload.profiles.len() > MAX_PROFILES {
@@ -544,6 +578,13 @@ impl ProfileCatalog {
         }
         for receipt in receipts {
             catalog.record_login(receipt)?;
+        }
+        let imports = payload.import_receipts.unwrap_or_default();
+        if imports.len() > super::import_receipts::MAX_IMPORT_RECEIPTS {
+            return Err(CheckpointError::ResourceLimit);
+        }
+        for receipt in imports {
+            catalog.record_import(receipt)?;
         }
         Ok(catalog)
     }

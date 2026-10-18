@@ -13,17 +13,19 @@ use std::time::Duration;
 /// 全局 HTTP 客户端实例
 static GLOBAL_CLIENT: OnceCell<RwLock<HttpClients>> = OnceCell::new();
 
-// Both policies share the existing proxy/TLS configuration owner and update lock.
+// All request profiles share the existing proxy/TLS configuration owner and update lock.
 #[derive(Clone)]
 struct HttpClients {
     ordinary: Client,
     authenticated: Client,
+    budgeted_authenticated: Client,
 }
 
 fn build_clients(proxy_url: Option<&str>) -> Result<HttpClients, String> {
     Ok(HttpClients {
         ordinary: build_client(proxy_url)?,
         authenticated: build_authenticated_client(proxy_url)?,
+        budgeted_authenticated: build_budgeted_authenticated_client(proxy_url)?,
     })
 }
 
@@ -217,6 +219,27 @@ pub fn get_authenticated() -> Result<Client, String> {
     authenticated_client_from(GLOBAL_CLIENT.get())
 }
 
+/// Explicit profile for a budget-authorized provider request.
+/// Uses the same proxy/TLS settings, but never follows redirects or retries a
+/// protocol NACK implicitly. A redirect is returned as its original 3xx response;
+/// the request owner must not treat it as a successful provider completion.
+/// Configuration/lock errors fail closed, just as for other credentialed requests.
+pub fn get_budgeted_authenticated() -> Result<Client, String> {
+    budgeted_authenticated_client_from(GLOBAL_CLIENT.get())
+}
+
+fn budgeted_authenticated_client_from(
+    lock: Option<&RwLock<HttpClients>>,
+) -> Result<Client, String> {
+    match lock {
+        Some(lock) => lock
+            .read()
+            .map(|clients| clients.budgeted_authenticated.clone())
+            .map_err(|_| "Failed to get budgeted HTTP client: lock poisoned".to_string()),
+        None => build_budgeted_authenticated_client(None),
+    }
+}
+
 fn authenticated_client_from(lock: Option<&RwLock<HttpClients>>) -> Result<Client, String> {
     match lock {
         Some(lock) => lock
@@ -260,8 +283,8 @@ fn same_origin(left: &url::Url, right: &url::Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn build_authenticated_client(proxy_url: Option<&str>) -> Result<Client, String> {
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
+fn authenticated_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
         if attempt
             .previous()
             .first()
@@ -272,14 +295,43 @@ fn build_authenticated_client(proxy_url: Option<&str>) -> Result<Client, String>
         } else {
             attempt.error("authenticated request cannot redirect across origins")
         }
-    });
-    build_client_with_redirect(proxy_url, policy)
+    })
+}
+
+fn build_authenticated_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    build_client_with_redirect(proxy_url, authenticated_redirect_policy())
+}
+
+fn budgeted_authenticated_client_builder(
+    proxy_url: Option<&str>,
+) -> Result<reqwest::ClientBuilder, String> {
+    // Only this explicit request profile changes the upstream defaults. Ordinary
+    // clients retain their redirect policy and protocol-NACK retry behavior.
+    Ok(
+        client_builder_with_redirect(proxy_url, reqwest::redirect::Policy::none())?
+            .retry(reqwest::retry::never()),
+    )
+}
+
+fn build_budgeted_authenticated_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    budgeted_authenticated_client_builder(proxy_url)?
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
 fn build_client_with_redirect(
     proxy_url: Option<&str>,
     policy: reqwest::redirect::Policy,
 ) -> Result<Client, String> {
+    client_builder_with_redirect(proxy_url, policy)?
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+fn client_builder_with_redirect(
+    proxy_url: Option<&str>,
+    policy: reqwest::redirect::Policy,
+) -> Result<reqwest::ClientBuilder, String> {
     let mut builder = Client::builder()
         .redirect(policy)
         .timeout(Duration::from_secs(600))
@@ -325,9 +377,7 @@ fn build_client_with_redirect(
         }
     }
 
-    builder
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+    Ok(builder)
 }
 
 fn system_proxy_points_to_loopback() -> bool {
@@ -529,7 +579,11 @@ mod tests {
         let proxy = MockServer::spawn().await;
         for apply in [init, apply_proxy, update_proxy] {
             apply(Some(&proxy.base_url)).unwrap();
-            for client in [get(), get_authenticated().unwrap()] {
+            for client in [
+                get(),
+                get_authenticated().unwrap(),
+                get_budgeted_authenticated().unwrap(),
+            ] {
                 client
                     .get("http://authenticated-redirect.invalid/resource")
                     .header("x-private-token", "fake-proxy-canary")
@@ -542,22 +596,27 @@ mod tests {
                 Some(proxy.base_url.as_str())
             );
         }
-        assert_eq!(proxy.received().len(), 6);
+        assert_eq!(proxy.received().len(), 9);
         assert!(proxy
             .received()
             .iter()
             .all(|request| request.headers["x-private-token"] == "fake-proxy-canary"));
         assert!(apply_proxy(Some("invalid-scheme://127.0.0.1:1")).is_err());
-        get_authenticated()
-            .unwrap()
-            .get("http://authenticated-redirect.invalid/still-configured")
-            .send()
-            .await
-            .unwrap();
+        for client in [
+            get(),
+            get_authenticated().unwrap(),
+            get_budgeted_authenticated().unwrap(),
+        ] {
+            client
+                .get("http://authenticated-redirect.invalid/still-configured")
+                .send()
+                .await
+                .unwrap();
+        }
         assert_eq!(
             proxy.received().len(),
-            7,
-            "invalid update must leave the configured pair intact"
+            12,
+            "invalid update must leave all configured profiles intact"
         );
         assert!(build_clients(Some("socks5://127.0.0.1:1080")).is_ok());
         assert!(build_clients(Some("https://127.0.0.1:7890")).is_ok());
@@ -607,18 +666,26 @@ mod tests {
         let port = url::Url::parse(&proxy.base_url).unwrap().port().unwrap();
         set_proxy_port(port);
         let pair = build_clients(None).unwrap();
-        for client in [pair.ordinary, pair.authenticated] {
+        for client in [
+            pair.ordinary,
+            pair.authenticated,
+            pair.budgeted_authenticated,
+        ] {
             client
                 .get(format!("{}/direct", target.base_url))
                 .send()
                 .await
                 .unwrap();
         }
-        assert_eq!(target.received().len(), 2);
+        assert_eq!(target.received().len(), 3);
         assert!(proxy.received().is_empty(), "must bypass own proxy port");
         set_proxy_port(if port == 1 { 2 } else { 1 });
         let pair = build_clients(None).unwrap();
-        for client in [pair.ordinary, pair.authenticated] {
+        for client in [
+            pair.ordinary,
+            pair.authenticated,
+            pair.budgeted_authenticated,
+        ] {
             client
                 .get("http://authenticated-redirect.invalid/system-proxy")
                 .send()
@@ -627,9 +694,187 @@ mod tests {
         }
         assert_eq!(
             proxy.received().len(),
-            2,
-            "both policies must retain external system proxy"
+            3,
+            "all profiles must retain external system proxy"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn budgeted_redirect_does_not_follow_same_or_cross_origin() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        let target = MockServer::spawn().await;
+        let clients = RwLock::new(build_clients(None).unwrap());
+        let client = budgeted_authenticated_client_from(Some(&clients)).unwrap();
+        for status in [301, 302, 303, 307, 308] {
+            for origin in [&source, &target] {
+                source.clear();
+                target.clear();
+                source.redirect("/start", status, &format!("{}/final", origin.base_url));
+                let response = client
+                    .post(format!("{}/start", source.base_url))
+                    .header("x-private-token", "fake-budgeted-canary")
+                    .body("synthetic-request")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(source.received().len(), 1, "no implicit second send");
+                assert!(target.received().is_empty());
+                let request = &source.received()[0];
+                assert_eq!(request.method, reqwest::Method::POST);
+                assert_eq!(request.body.as_ref(), b"synthetic-request");
+                assert_eq!(request.headers["x-private-token"], "fake-budgeted-canary");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn budgeted_redirect_uninitialized_fallback_is_constrained() {
+        use crate::proxy::redirect_test_support::MockServer;
+        let source = MockServer::spawn().await;
+        source.redirect("/start", 307, &format!("{}/final", source.base_url));
+        let response = budgeted_authenticated_client_from(None)
+            .unwrap()
+            .post(format!("{}/start", source.base_url))
+            .body("synthetic-request")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(source.received().len(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn budgeted_poisoned_lock_fails_closed() {
+        let lock = RwLock::new(build_clients(None).unwrap());
+        let _ = std::panic::catch_unwind(|| {
+            let _write = lock.write().unwrap();
+            panic!("synthetic lock poisoning");
+        });
+        assert!(budgeted_authenticated_client_from(Some(&lock)).is_err());
+    }
+
+    // A minimal HTTP/2 peer sends a real REFUSED_STREAM protocol NACK for every
+    // HEADERS frame. Counting streams distinguishes reqwest's default two extra
+    // retries from a never-retry profile, without a live provider or new crate.
+    struct ProtocolNackServer {
+        base_url: String,
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl ProtocolNackServer {
+        async fn spawn() -> Self {
+            use std::sync::atomic::Ordering;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind synthetic HTTP/2 NACK peer");
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = requests.clone();
+            let task = tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (mut socket, _) = accepted.unwrap();
+                            let requests = observed.clone();
+                            connections.spawn(async move {
+                                let mut preface = [0_u8; 24];
+                                socket.read_exact(&mut preface).await.unwrap();
+                                assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                                // SETTINGS, no settings overrides.
+                                socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+                                loop {
+                                    let mut header = [0_u8; 9];
+                                    if socket.read_exact(&mut header).await.is_err() {
+                                        return;
+                                    }
+                                    let len = (usize::from(header[0]) << 16)
+                                        | (usize::from(header[1]) << 8)
+                                        | usize::from(header[2]);
+                                    assert!(len <= 16_384, "fixture uses default frame size");
+                                    let mut payload = vec![0; len];
+                                    socket.read_exact(&mut payload).await.unwrap();
+                                    match header[3] {
+                                        4 if header[4] & 1 == 0 => {
+                                            // Acknowledge the client's SETTINGS.
+                                            socket.write_all(&[0, 0, 0, 4, 1, 0, 0, 0, 0]).await.unwrap();
+                                        }
+                                        1 => {
+                                            requests.fetch_add(1, Ordering::SeqCst);
+                                            // RST_STREAM, same stream ID, REFUSED_STREAM (7).
+                                            let reset = [0, 0, 4, 3, 0, header[5], header[6], header[7], header[8], 0, 0, 0, 7];
+                                            socket.write_all(&reset).await.unwrap();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            });
+                        }
+                        finished = connections.join_next(), if !connections.is_empty() => {
+                            finished.unwrap().unwrap();
+                        }
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                task,
+            }
+        }
+    }
+
+    impl Drop for ProtocolNackServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn assert_protocol_nack_attempts(builder: reqwest::ClientBuilder, expected: usize) {
+        use std::sync::atomic::Ordering;
+        let peer = ProtocolNackServer::spawn().await;
+        // Only the local fixture uses plaintext prior-knowledge HTTP/2. The
+        // production factory's TLS and protocol negotiation remain unchanged.
+        let client = builder
+            .http2_prior_knowledge()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let error = client
+            .post(format!("{}/completion", peer.base_url))
+            .body("synthetic-request")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(!error.is_timeout(), "expected protocol NACK, got {error:?}");
+        assert!(format!("{error:?}").contains("REFUSED_STREAM"), "{error:?}");
+        assert_eq!(peer.requests.load(Ordering::SeqCst), expected);
+    }
+
+    #[tokio::test]
+    async fn ordinary_profiles_retain_protocol_nack_retries() {
+        for policy in [
+            reqwest::redirect::Policy::default(),
+            authenticated_redirect_policy(),
+        ] {
+            assert_protocol_nack_attempts(client_builder_with_redirect(None, policy).unwrap(), 3)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn budgeted_profile_does_not_retry_protocol_nacks() {
+        assert_protocol_nack_attempts(budgeted_authenticated_client_builder(None).unwrap(), 1)
+            .await;
     }
 
     #[test]
