@@ -10,6 +10,15 @@ import type {
   ManagedAuthDeviceCodeResponse,
 } from "@/lib/api";
 
+type AuthSession = {
+  provider: ManagedAuthProvider;
+  domain?: string;
+  deviceCode?: string;
+  pollInFlight: boolean;
+  cancelIssued?: boolean;
+  cancelGeneration?: number;
+};
+
 type PollingState = "idle" | "polling" | "success" | "error";
 
 export function useManagedAuth(
@@ -25,9 +34,12 @@ export function useManagedAuth(
     useState<ManagedAuthDeviceCodeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
-    null,
-  );
+  const mountedRef = useRef(false);
+  const generationRef = useRef(0);
+  const sessionRef = useRef<AuthSession | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+
+  const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const {
@@ -47,9 +59,9 @@ export function useManagedAuth(
   });
 
   const stopPolling = useCallback(() => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
+    if (pollingTimerRef.current) {
+      clearTimeout(pollingTimerRef.current);
+      pollingTimerRef.current = null;
     }
     if (pollingTimeoutRef.current) {
       clearTimeout(pollingTimeoutRef.current);
@@ -57,15 +69,74 @@ export function useManagedAuth(
     }
   }, []);
 
+  const cancelDeviceFlow = useCallback(
+    async (session: AuthSession) => {
+      if (!session.deviceCode || session.cancelIssued) return;
+      session.cancelIssued = true;
+      try {
+        await authApi.authCancelLogin(
+          session.provider,
+          session.deviceCode,
+          session.domain,
+        );
+        // Cancellation may lose to an already committed account. Re-read the
+        // original account owner; never delete an account to fake cancellation.
+        await queryClient.invalidateQueries({
+          queryKey: ["managed-auth-status", session.provider],
+        });
+      } catch (e) {
+        if (
+          mountedRef.current &&
+          !sessionRef.current &&
+          generationRef.current === session.cancelGeneration
+        ) {
+          setPollingState("error");
+          setError(
+            `Login cancellation could not be confirmed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    },
+    [queryClient],
+  );
+
+  const invalidateSession = useCallback(() => {
+    const session = sessionRef.current;
+    sessionRef.current = null;
+    generationRef.current += 1;
+    stopPolling();
+    if (session) {
+      session.cancelGeneration = generationRef.current;
+      void cancelDeviceFlow(session);
+    }
+  }, [stopPolling, cancelDeviceFlow]);
+
   useEffect(() => {
+    mountedRef.current = true;
+    generationRef.current += 1;
+    // Provider/domain changes and unmount also invalidate async continuations.
+    setIsStarting(false);
+    setPollingState("idle");
+    setDeviceCode(null);
+    setError(null);
     return () => {
-      stopPolling();
+      mountedRef.current = false;
+      invalidateSession();
     };
-  }, [stopPolling]);
+  }, [authProvider, githubDomain, invalidateSession]);
 
   const startLoginMutation = useMutation({
-    mutationFn: () => authApi.authStartLogin(authProvider, githubDomain),
-    onSuccess: async (response) => {
+    mutationFn: (session: AuthSession) =>
+      authApi.authStartLogin(session.provider, session.domain),
+    onSuccess: async (response, session) => {
+      const ownsSession = () => sessionRef.current === session;
+      session.deviceCode = response.device_code;
+      if (!ownsSession()) {
+        // A cancelled start can return a newly registered backend flow later.
+        await cancelDeviceFlow(session);
+        return;
+      }
+      setIsStarting(false);
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
@@ -75,62 +146,75 @@ export function useManagedAuth(
       } catch (e) {
         console.debug("[ManagedAuth] Failed to copy user code:", e);
       }
-
+      if (!ownsSession()) return;
       try {
         await settingsApi.openExternal(response.verification_uri);
       } catch (e) {
         console.debug("[ManagedAuth] Failed to open browser:", e);
       }
+      if (!ownsSession()) return;
 
-      // Add a small buffer on top of GitHub's suggested interval to avoid
-      // hitting slow_down responses too aggressively during device polling.
       const interval = Math.max((response.interval || 5) + 3, 8) * 1000;
       const expiresAt = Date.now() + response.expires_in * 1000;
-
+      const expire = () => {
+        if (!ownsSession()) return;
+        invalidateSession();
+        setPollingState("error");
+        setError("Device code expired. Please try again.");
+      };
       const pollOnce = async () => {
+        if (!ownsSession() || session.pollInFlight) return;
         if (Date.now() > expiresAt) {
-          stopPolling();
-          setPollingState("error");
-          setError("Device code expired. Please try again.");
+          expire();
           return;
         }
-
+        session.pollInFlight = true;
         try {
           const newAccount = await authApi.authPollForAccount(
-            authProvider,
+            session.provider,
             response.device_code,
-            githubDomain,
+            session.domain,
           );
+          if (!ownsSession()) return;
           if (newAccount) {
             stopPolling();
             setPollingState("success");
             await refetchStatus();
+            if (!ownsSession()) return;
             await queryClient.invalidateQueries({ queryKey });
+            if (!ownsSession()) return;
+            sessionRef.current = null;
             setPollingState("idle");
             setDeviceCode(null);
           }
         } catch (e) {
+          if (!ownsSession()) return;
           const errorMessage = e instanceof Error ? e.message : String(e);
           if (
             !errorMessage.includes("pending") &&
             !errorMessage.includes("slow_down")
           ) {
-            stopPolling();
+            invalidateSession();
             setPollingState("error");
             setError(errorMessage);
           }
+        } finally {
+          session.pollInFlight = false;
+          if (ownsSession()) {
+            pollingTimerRef.current = setTimeout(pollOnce, interval);
+          }
         }
       };
-
+      pollingTimeoutRef.current = setTimeout(
+        expire,
+        response.expires_in * 1000,
+      );
       void pollOnce();
-      pollingIntervalRef.current = setInterval(pollOnce, interval);
-      pollingTimeoutRef.current = setTimeout(() => {
-        stopPolling();
-        setPollingState("error");
-        setError("Device code expired. Please try again.");
-      }, response.expires_in * 1000);
     },
-    onError: (e) => {
+    onError: (e, session) => {
+      if (sessionRef.current !== session) return;
+      invalidateSession();
+      setIsStarting(false);
       setPollingState("error");
       setError(e instanceof Error ? e.message : String(e));
     },
@@ -192,23 +276,34 @@ export function useManagedAuth(
   });
 
   const startAuth = useCallback(() => {
+    // Claim synchronously: repeated clicks before React renders still coalesce.
+    if (sessionRef.current) return;
+    const session: AuthSession = {
+      provider: authProvider,
+      domain: githubDomain,
+      pollInFlight: false,
+    };
+    sessionRef.current = session;
+    generationRef.current += 1;
+    setIsStarting(true);
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-    stopPolling();
-    startLoginMutation.mutate();
-  }, [startLoginMutation, stopPolling]);
+    startLoginMutation.mutate(session);
+  }, [authProvider, githubDomain, startLoginMutation]);
 
   const cancelAuth = useCallback(() => {
-    stopPolling();
+    invalidateSession();
+    setIsStarting(false);
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-  }, [stopPolling]);
+  }, [invalidateSession]);
 
   const logout = useCallback(() => {
+    cancelAuth();
     logoutMutation.mutate();
-  }, [logoutMutation]);
+  }, [cancelAuth, logoutMutation]);
 
   const removeAccount = useCallback(
     (accountId: string) => {
@@ -242,7 +337,7 @@ export function useManagedAuth(
     deviceCode,
     error,
     isPolling: pollingState === "polling",
-    isAddingAccount: startLoginMutation.isPending || pollingState === "polling",
+    isAddingAccount: isStarting || pollingState === "polling",
     isRemovingAccount: removeAccountMutation.isPending,
     isSettingDefaultAccount: setDefaultAccountMutation.isPending,
     startAuth,
