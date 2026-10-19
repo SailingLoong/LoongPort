@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -21,6 +21,9 @@ const target = {
   canSelect: true,
   selection: { kind: "relay" },
 } as ApplicationConfiguration;
+// The hook invalidates its query when the providers object changes. Keep this
+// fixture stable so query notifications cannot trigger a refetch/render loop.
+const providers = {};
 const decision = { choice: "manage" as const, revision: "catalog-v1" };
 const catalog = {
   ownership: "unclaimedExternal" as const,
@@ -78,13 +81,14 @@ it.each(["legacy", "native"] as const)(
       throw new Error(`Unexpected command ${command}`);
     });
     const { result } = renderHook(
-      () => useApplicationOverview("codex", {}, vi.fn()),
+      () => useApplicationOverview("codex", providers, vi.fn()),
       { wrapper },
     );
     await act(async () => {
       await result.current.select(target, undefined, "model-b");
     });
     expect(result.current.catalog).toEqual(catalog);
+    expect(applicationOverviewApi.get).toHaveBeenCalledTimes(1);
     await act(async () => {
       await result.current.previewCatalog(decision);
     });
@@ -92,9 +96,8 @@ it.each(["legacy", "native"] as const)(
       "apply_application_routing",
     ]);
     expect(result.current.confirmation).toBe("B");
-    await act(async () => {
-      await result.current.confirm(false, decision);
-    });
+    act(() => result.current.confirm(false, decision));
+    await waitFor(() => expect(result.current.busy).toBe(false));
     expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
       "apply_application_routing",
       "prepare_application_routing_request",
@@ -113,6 +116,7 @@ it.each(["legacy", "native"] as const)(
         : { request: native }),
     });
     expect(result.current.confirmation).toBeNull();
+    expect(applicationOverviewApi.get).toHaveBeenCalledTimes(2);
   },
 );
 
@@ -123,16 +127,15 @@ it("keeps a backend-rejected legacy catalog confirmation failed without replay o
     throw new Error(`Unexpected write or query ${command}`);
   });
   const { result } = renderHook(
-    () => useApplicationOverview("codex", {}, vi.fn()),
+    () => useApplicationOverview("codex", providers, vi.fn()),
     { wrapper },
   );
   await act(async () => {
     await result.current.select(target, undefined, "model-b");
   });
   expect(result.current.confirmation).toBe("B");
-  await act(async () => {
-    await result.current.confirm(false, decision);
-  });
+  act(() => result.current.confirm(false, decision));
+  await waitFor(() => expect(result.current.busy).toBe(false));
   expect(result.current.confirmation).toBeNull();
   expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
     "prepare_application_routing_request",

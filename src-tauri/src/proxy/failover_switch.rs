@@ -15,6 +15,12 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+type SwitchGateForTest = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// 故障转移切换管理器
 ///
 /// 负责处理故障转移成功后的供应商切换，确保 UI 能够直观反映当前使用的供应商。
@@ -27,14 +33,7 @@ pub struct FailoverSwitchManager {
     #[cfg(test)]
     spawned_for_test: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     #[cfg(test)]
-    switch_gate_for_test: Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                tokio::sync::oneshot::Receiver<()>,
-            )>,
-        >,
-    >,
+    switch_gate_for_test: Arc<std::sync::Mutex<Option<SwitchGateForTest>>>,
 }
 
 impl FailoverSwitchManager {
