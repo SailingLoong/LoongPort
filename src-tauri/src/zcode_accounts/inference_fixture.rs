@@ -310,7 +310,7 @@ impl Lease {
         body: Value,
         timeout: Duration,
         fixture: &FixtureTransport,
-    ) -> Result<ProxyResponse, ProxyError> {
+    ) -> Result<DispatchResponse, ProxyError> {
         fixture.matches(&self).map_err(owner_error)?;
         self.dispatch_with(body, timeout, fixture).await
     }

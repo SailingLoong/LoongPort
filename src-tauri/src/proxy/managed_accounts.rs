@@ -260,9 +260,8 @@ impl PreparedAccount {
             }
             #[cfg(any(not(test), unix))]
             AccountLease::ZCode(lease) => {
-                let fence = lease.clone();
                 #[cfg(all(test, unix))]
-                let response = {
+                let result = {
                     let fixture = _extensions
                         .get::<crate::zcode_accounts::inference::FixtureTransport>()
                         .ok_or_else(|| {
@@ -273,11 +272,12 @@ impl PreparedAccount {
                     lease.dispatch_fixture(body, timeout, fixture).await?
                 };
                 #[cfg(not(test))]
-                let response = lease.dispatch(body, timeout).await?;
+                let result = lease.dispatch(body, timeout).await?;
                 #[cfg(any(not(test), unix))]
                 {
+                    let fence = result.fence;
                     Ok((
-                        response,
+                        result.response,
                         ResponseLease::new(move || {
                             let fence = fence.clone();
                             async move {

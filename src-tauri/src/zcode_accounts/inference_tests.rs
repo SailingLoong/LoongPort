@@ -211,7 +211,7 @@ async fn two_existing_accounts_supply_their_own_start_jwt_and_preserve_messages(
             .await
             .unwrap();
         assert_eq!(
-            out.bytes_with_limit(1024).await.unwrap(),
+            out.response.bytes_with_limit(1024).await.unwrap(),
             Bytes::from_static(b"fixture-body")
         );
     }
@@ -269,10 +269,13 @@ async fn success_headers_are_normalized_and_never_echo_credentials_or_cookies() 
         .dispatch_with(body(), Duration::from_secs(3), &net)
         .await
         .unwrap();
-    assert_eq!(response.headers().len(), 1);
-    assert_eq!(response.headers()["content-type"], "application/json");
+    assert_eq!(response.response.headers().len(), 1);
     assert_eq!(
-        response.bytes_with_limit(1024).await.unwrap(),
+        response.response.headers()["content-type"],
+        "application/json"
+    );
+    assert_eq!(
+        response.response.bytes_with_limit(1024).await.unwrap(),
         "normal answer"
     );
 }
@@ -341,7 +344,7 @@ async fn current_start_jwt_is_blocked_across_every_chunk_split_and_buffered_body
             .dispatch_with(body(), Duration::from_secs(3), &net)
             .await
             .unwrap();
-        let mut stream = Box::pin(response.bytes_stream());
+        let mut stream = Box::pin(response.response.bytes_stream());
         let mut emitted = Vec::new();
         let mut blocked = false;
         while let Some(chunk) = stream.next().await {
@@ -375,6 +378,7 @@ async fn current_start_jwt_is_blocked_across_every_chunk_split_and_buffered_body
         .dispatch_with(body(), Duration::from_secs(3), &net)
         .await
         .unwrap()
+        .response
         .bytes_with_limit(1024)
         .await
         .is_err());
@@ -422,9 +426,9 @@ async fn unauthorized_is_one_send_no_refresh_and_blocks_same_credentials_on_reac
         .dispatch_with(body(), Duration::from_secs(3), &net)
         .await
         .unwrap();
-    assert_eq!(out.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(out.response.status(), http::StatusCode::UNAUTHORIZED);
     assert!(
-        !String::from_utf8_lossy(&out.bytes_with_limit(1024).await.unwrap())
+        !String::from_utf8_lossy(&out.response.bytes_with_limit(1024).await.unwrap())
             .contains("fixture-body")
     );
     assert_eq!(net.calls.lock().unwrap().len(), 1);
@@ -443,7 +447,10 @@ async fn rate_limit_does_not_mark_credentials_invalid_or_retry_locally() {
         .dispatch_with(body(), Duration::from_secs(3), &net)
         .await
         .unwrap();
-    assert_eq!(out.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(out.response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(out.fence.check().await, Ok(()));
+    let _ = out.response.bytes_with_limit(1024).await.unwrap();
+    assert_eq!(out.fence.check().await, Ok(()));
     assert_eq!(net.calls.lock().unwrap().len(), 1);
     assert!(f.lease(0).await.is_ok());
 }
@@ -502,7 +509,7 @@ async fn response_body_is_fenced_after_headers_and_catalog_retirement() {
         .unwrap();
     f.mutate(|catalog, _| *catalog = ProfileCatalog::default())
         .await;
-    assert!(out.bytes_with_limit(1024).await.is_err());
+    assert!(out.response.bytes_with_limit(1024).await.is_err());
 }
 #[tokio::test]
 async fn wrong_context_cannot_borrow_the_selected_vault_authority() {
@@ -661,4 +668,170 @@ async fn expired_global_jwt_never_falls_back_to_fresh_account_jwt() {
     })
     .await;
     assert!(matches!(f.lease(0).await, Err(Failure::NeedsLogin)));
+}
+
+#[tokio::test]
+async fn rejection_fence_tracks_only_its_own_write_and_never_revives_request_leases() {
+    let f = Fixture::new(u64::MAX);
+    let lease = f.lease(0).await.unwrap();
+    let original = lease.clone();
+    let previously_acquired_other = f.lease(1).await.unwrap();
+    let net = TransportFixture::default();
+    net.responses.lock().unwrap().push_back(response(401));
+    let result = lease
+        .dispatch_with(body(), Duration::ZERO, &net)
+        .await
+        .unwrap();
+    assert_eq!(result.response.status(), http::StatusCode::UNAUTHORIZED);
+    assert_ne!(
+        result.fence.lease.binding.catalog_revision,
+        original.binding.catalog_revision
+    );
+    let updated = &result.fence.lease.binding;
+    let before = &original.binding;
+    assert_eq!(updated.vault_id, before.vault_id);
+    assert_eq!(updated.key_id, before.key_id);
+    assert_eq!(updated.vault_revision, before.vault_revision);
+    assert_eq!(updated.epoch, before.epoch);
+    assert_eq!(updated.account_id, before.account_id);
+    assert_eq!(updated.session_binding, before.session_binding);
+    assert_eq!(
+        result.fence.lease.context.context_id(),
+        original.context.context_id()
+    );
+    let committed = std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap();
+    // Both the status check and the post-error-body check are read-only.
+    assert_eq!(result.fence.check().await, Ok(()));
+    let sanitized = result.response.bytes_with_limit(1024).await.unwrap();
+    assert!(!String::from_utf8_lossy(&sanitized).contains(&f.tokens[0]));
+    assert!(!String::from_utf8_lossy(&sanitized).contains("fixture-body"));
+    assert_eq!(result.fence.check().await, Ok(()));
+    assert_eq!(
+        committed,
+        std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap()
+    );
+    assert_eq!(original.check().await, Err(Failure::StaleIdentity));
+    assert_eq!(
+        previously_acquired_other.check().await,
+        Err(Failure::StaleIdentity)
+    );
+    assert!(original
+        .dispatch_with(body(), Duration::ZERO, &net)
+        .await
+        .is_err());
+    assert_eq!(net.calls.lock().unwrap().len(), 1);
+    assert!(matches!(f.lease(0).await, Err(Failure::NeedsLogin)));
+    assert!(f.lease(1).await.is_ok());
+}
+
+async fn reject_with_fence(f: &Fixture, index: usize) -> DispatchResponse {
+    let net = TransportFixture::default();
+    net.responses.lock().unwrap().push_back(response(401));
+    let result = f
+        .lease(index)
+        .await
+        .unwrap()
+        .dispatch_with(body(), Duration::ZERO, &net)
+        .await
+        .unwrap();
+    assert_eq!(result.response.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(result.fence.check().await, Ok(()));
+    assert_eq!(net.calls.lock().unwrap().len(), 1);
+    result
+}
+
+#[tokio::test]
+async fn rejection_fence_remains_closed_after_external_catalog_retirement() {
+    let f = Fixture::new(u64::MAX);
+    let result = reject_with_fence(&f, 0).await;
+    f.mutate(|catalog, _| *catalog = ProfileCatalog::default())
+        .await;
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+}
+
+#[tokio::test]
+async fn rejection_fence_remains_closed_after_lock_and_unlock() {
+    let f = Fixture::new(u64::MAX);
+    let result = reject_with_fence(&f, 0).await;
+    f.session.set_blocked(true);
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+    f.session.set_blocked(false);
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+    assert!(f.lease(1).await.is_ok());
+}
+
+#[tokio::test]
+async fn rejection_fence_cannot_adopt_same_identity_relogin() {
+    let f = Fixture::new(u64::MAX);
+    let result = reject_with_fence(&f, 0).await;
+    replace_start_token(&f, &jwt(u64::MAX, "new-login-after-rejection")).await;
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+    assert!(f.lease(0).await.is_ok());
+}
+
+#[tokio::test]
+async fn rejection_fence_cannot_adopt_another_profiles_catalog_write() {
+    let f = Fixture::new(u64::MAX);
+    let result = reject_with_fence(&f, 0).await;
+    let other = f.ids[1].clone();
+    f.mutate(|catalog, native| {
+        let identity = catalog
+            .profiles()
+            .find(|snapshot| snapshot.identity().opaque_id() == other)
+            .unwrap()
+            .identity()
+            .clone();
+        catalog
+            .set_label(&identity, native, Some("Changed other profile".into()))
+            .unwrap();
+    })
+    .await;
+    let changed = std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap();
+    assert_eq!(result.fence.check().await, Err(Failure::StaleIdentity));
+    assert_eq!(
+        changed,
+        std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap()
+    );
+    assert!(matches!(f.lease(0).await, Err(Failure::NeedsLogin)));
+    assert!(f.lease(1).await.is_ok());
+}
+
+#[tokio::test]
+async fn separate_account_rejections_never_advance_an_earlier_response_fence() {
+    let f = Fixture::new(u64::MAX);
+    let first = reject_with_fence(&f, 0).await;
+    let second = reject_with_fence(&f, 1).await;
+    assert_eq!(first.fence.check().await, Err(Failure::StaleIdentity));
+    assert_eq!(second.fence.check().await, Ok(()));
+    assert!(matches!(f.lease(0).await, Err(Failure::NeedsLogin)));
+    assert!(matches!(f.lease(1).await, Err(Failure::NeedsLogin)));
+}
+
+#[tokio::test]
+async fn late_unauthorized_after_lock_unlock_does_not_publish_rejection() {
+    let f = Fixture::new(u64::MAX);
+    let net = Arc::new(Delayed401 {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let request_net = net.clone();
+    let lease = f.lease(0).await.unwrap();
+    let request = tokio::spawn(async move {
+        lease
+            .dispatch_with(body(), Duration::ZERO, request_net.as_ref())
+            .await
+    });
+    net.started.notified().await;
+    f.session.set_blocked(true);
+    f.session.set_blocked(false);
+    let before = std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap();
+    net.release.notify_one();
+    assert!(request.await.unwrap().is_err());
+    assert_eq!(
+        before,
+        std::fs::read(f.session.root().join(PROFILE_FILE)).unwrap()
+    );
+    assert!(f.lease(0).await.is_ok());
+    assert!(f.lease(1).await.is_ok());
 }

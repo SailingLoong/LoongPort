@@ -35,16 +35,33 @@ pub(crate) enum Failure {
     StorageUnavailable,
 }
 
-/// Non-secret, non-serializable request capability. The original forwarder must
-/// retain a clone as its final downstream response fence, including conversions
-/// that buffer or prime this adapter's response. A chunk fence alone is not an
-/// end-to-end guarantee once a downstream owner has buffered those chunks.
+/// Non-secret, non-serializable request capability. Dispatch consumes this
+/// authority and returns a separate read-only response fence; an acquired lease
+/// is not automatically advanced by a response-owned catalog transition.
 #[derive(Clone)]
 pub(crate) struct Lease {
     session: Arc<SecretSession>,
     context: LibraryContext,
     binding: Binding,
 }
+/// Retain this owner-issued fence through final buffering, priming and conversion.
+pub(crate) struct DispatchResponse {
+    pub response: ProxyResponse,
+    pub fence: ResponseFence,
+}
+
+/// Read-only authority for this response. Only a verified rejection performed
+/// by this dispatch may replace its catalog revision; request leases stay stale.
+#[derive(Clone)]
+pub(crate) struct ResponseFence {
+    lease: Lease,
+}
+impl ResponseFence {
+    pub(crate) async fn check(&self) -> Result<(), Failure> {
+        self.lease.check().await
+    }
+}
+
 #[derive(Clone)]
 struct Binding {
     vault_id: String,
@@ -294,15 +311,15 @@ impl Lease {
         self,
         body: Value,
         timeout: Duration,
-    ) -> Result<ProxyResponse, ProxyError> {
+    ) -> Result<DispatchResponse, ProxyError> {
         self.dispatch_with(body, timeout, &OfficialTransport).await
     }
     async fn dispatch_with<T: StreamTransport>(
-        self,
+        mut self,
         body: Value,
         timeout: Duration,
         transport: &T,
-    ) -> Result<ProxyResponse, ProxyError> {
+    ) -> Result<DispatchResponse, ProxyError> {
         if !body.is_object()
             || !body.get("messages").is_some_and(Value::is_array)
             || body
@@ -388,21 +405,36 @@ impl Lease {
         if response.status() == http::StatusCode::UNAUTHORIZED {
             // Never refresh, replay, create a key, or silently select an account.
             // Late 401 after replacement may not contaminate a newer session.
-            self.with_current(|store, native, snapshot| {
-                self.reject_current(store, native, snapshot)
-            })
-            .await
-            .map_err(owner_error)?;
-            return Ok(safe_error_response(response));
+            let committed_revision = self
+                .with_current(|store, native, snapshot| {
+                    self.reject_current(store, native, snapshot)
+                })
+                .await
+                .map_err(owner_error)?;
+            // This exact revision is the verified result of our own rejection
+            // CAS, never a lookup of the latest catalog. All identity and epoch
+            // facts stay unchanged, and only the response fence receives it.
+            self.binding.catalog_revision = committed_revision;
+            return Ok(DispatchResponse {
+                response: safe_error_response(response),
+                fence: ResponseFence { lease: self },
+            });
         }
         self.check().await.map_err(owner_error)?;
         if !response.status().is_success() {
-            return Ok(safe_error_response(response));
+            return Ok(DispatchResponse {
+                response: safe_error_response(response),
+                fence: ResponseFence { lease: self },
+            });
         }
-        self.fence_response(
+        let fence = ResponseFence {
+            lease: self.clone(),
+        };
+        let response = self.fence_response(
             response,
             response_guard.ok_or_else(|| owner_error(Failure::StorageUnavailable))?,
-        )
+        )?;
+        Ok(DispatchResponse { response, fence })
     }
 
     fn reject_current(
@@ -410,7 +442,7 @@ impl Lease {
         store: &VaultAccountStore<'_>,
         native: &NativeCipher,
         snapshot: &AccountSnapshot,
-    ) -> Result<(), Failure> {
+    ) -> Result<String, Failure> {
         let catalog = store
             .import_catalog(native, &self.binding.catalog_revision)
             .map_err(|_| Failure::StaleIdentity)?;
@@ -428,7 +460,7 @@ impl Lease {
                 &self.binding.account_id,
                 report,
             )
-            .map(|_| ())
+            .map(|status| status.revision)
             .map_err(|_| Failure::StaleIdentity)
     }
 

@@ -452,35 +452,37 @@ async fn zcode_router_fixture_missing_or_cross_root_is_zero_http() {
 
 #[tokio::test]
 async fn zcode_401_marks_only_selected_original_owner_needs_login_then_falls_back() {
-    let fixture = ZCodeRouterFixture::new(UpstreamBehavior::FirstUnauthorized).await;
-    let response = fixture.request(false).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(std::str::from_utf8(&collect(response).await)
-        .unwrap()
-        .contains(TEXT));
-    let calls = fixture.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2);
-    assert_wire(&calls[0], &fixture.synthetic_tokens[0]);
-    assert_wire(&calls[1], &fixture.synthetic_tokens[1]);
-    assert_eq!(
-        Lease::acquire_fixture(
+    for stream in [false, true, false, true] {
+        let fixture = ZCodeRouterFixture::new(UpstreamBehavior::FirstUnauthorized).await;
+        let response = fixture.request(stream).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(std::str::from_utf8(&collect(response).await)
+            .unwrap()
+            .contains(TEXT));
+        let calls = fixture.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_wire(&calls[0], &fixture.synthetic_tokens[0]);
+        assert_wire(&calls[1], &fixture.synthetic_tokens[1]);
+        assert_eq!(
+            Lease::acquire_fixture(
+                fixture.db.secrets.clone(),
+                &fixture.account_ids[0],
+                "fixture-check",
+                &fixture.transport
+            )
+            .await
+            .err(),
+            Some(Failure::NeedsLogin)
+        );
+        assert!(Lease::acquire_fixture(
             fixture.db.secrets.clone(),
-            &fixture.account_ids[0],
+            &fixture.account_ids[1],
             "fixture-check",
             &fixture.transport
         )
         .await
-        .err(),
-        Some(Failure::NeedsLogin)
-    );
-    assert!(Lease::acquire_fixture(
-        fixture.db.secrets.clone(),
-        &fixture.account_ids[1],
-        "fixture-check",
-        &fixture.transport
-    )
-    .await
-    .is_ok());
-    assert_eq!(fixture.transport.attempts(), 2);
-    fixture.assert_idle().await;
+        .is_ok());
+        assert_eq!(fixture.transport.attempts(), 2);
+        fixture.assert_idle().await;
+    }
 }
