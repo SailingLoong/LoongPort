@@ -3,7 +3,9 @@
 use super::*;
 use crate::provider::{Provider, ProviderMeta};
 use crate::services::provider::qoder_daily::http::{CredentialSource, PatDeclaration};
-use crate::services::provider::qoder_http_auth::{EstablishIntent, Established, TokenPair};
+use crate::services::provider::qoder_http_auth::{
+    Established, IdentityAction, IdentityActionRequest, PreparedIdentityAction, TokenPair,
+};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -287,9 +289,17 @@ impl HttpFixture {
                         .generation,
                     source: CredentialSource::InternationalQoderPat,
                 };
-                let lease = db
-                    .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
+                let request = IdentityActionRequest {
+                    declaration,
+                    action: IdentityAction::Establish,
+                };
+                let prepared = db
+                    .qoder_http_prepare_identity_action(&request, now)
                     .unwrap();
+                let PreparedIdentityAction::Establish { receipt, .. } = prepared else {
+                    panic!("fresh fixture must prepare identity establishment");
+                };
+                let lease = db.qoder_http_reserve_identity_action(receipt).unwrap();
                 db.qoder_http_publish_establish(
                     &lease,
                     Established {

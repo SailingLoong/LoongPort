@@ -256,9 +256,17 @@ async fn refused_refresh_remains_unknown_and_never_falls_back_to_pat_exchange() 
     let transport = server.transport();
     let (db, declaration) = owner();
     let now = chrono::Utc::now().timestamp_millis();
-    let lease = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let request = IdentityActionRequest {
+        declaration,
+        action: IdentityAction::Establish,
+    };
+    let PreparedIdentityAction::Establish { receipt, .. } = db
+        .qoder_http_prepare_identity_action(&request, now)
+        .unwrap()
+    else {
+        panic!("initial setup must reserve")
+    };
+    let lease = db.qoder_http_reserve_identity_action(receipt).unwrap();
     db.qoder_http_publish_establish(
         &lease,
         Established {
@@ -319,15 +327,22 @@ async fn missing_uid_does_not_publish_an_unbound_token() {
         Reply::json(200, serde_json::json!({"email":"ignored@example.invalid"})),
     ]);
     let (db, declaration) = owner();
-    assert!(establish(
-        &db,
-        &declaration,
-        EstablishIntent::SameIdentity,
-        &server.transport(),
-        || chrono::Utc::now().timestamp_millis()
-    )
-    .await
-    .is_err());
+    assert!(matches!(
+        perform_identity_action_admitted(
+            &db,
+            IdentityActionRequest {
+                declaration,
+                action: IdentityAction::Establish
+            },
+            &server.transport(),
+            |_| async { panic!("initial setup cannot ask twice") },
+            || chrono::Utc::now().timestamp_millis()
+        )
+        .await,
+        IdentityActionResult::Failed {
+            code: IdentityFailureCode::OutcomeUnknown
+        }
+    ));
     assert!(db
         .qoder_http_acquire(&source(&db), chrono::Utc::now().timestamp_millis())
         .is_err());

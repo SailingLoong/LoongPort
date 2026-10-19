@@ -3,7 +3,6 @@ use crate::secrets::{
     inventory::{open_db, seal_db},
     VaultContext,
 };
-use crate::services::provider::qoder_daily::http::PatDeclaration;
 use crate::services::provider::qoder_http_auth::*;
 use crate::{database::Database, error::AppError, provider::Provider};
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
@@ -142,6 +141,56 @@ fn snapshot(record: &Record, epoch: u64) -> Result<RequestSnapshot, AppError> {
     ))
 }
 
+// Shared original reservation body: explicit recovery changes admission, not
+// the identity/PAT owner or how establishment gets its durable lease.
+fn next_establishment(
+    source: SourceBinding,
+    previous: Option<&Record>,
+    epoch: u64,
+    pat: Zeroizing<String>,
+    intent: EstablishIntent,
+) -> Result<(Record, EstablishLease), AppError> {
+    let generation = previous
+        .map(Record::next_generation)
+        .transpose()?
+        .unwrap_or(1);
+    let (identity, mut machine_id) = previous
+        .map(Record::identity_and_machine)
+        .unwrap_or_else(|| (None, uuid::Uuid::new_v4().to_string()));
+    let expected_uid = match intent {
+        EstablishIntent::SameIdentity => identity.map(|i| i.uid),
+        EstablishIntent::Rebind { previous_uid } => {
+            if identity.as_ref().map(|i| i.uid.as_str()) != Some(previous_uid.as_str()) {
+                return Err(denied("rebind_subject_changed"));
+            }
+            machine_id = uuid::Uuid::new_v4().to_string();
+            None
+        }
+    };
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let record = Record::new(
+        source.clone(),
+        generation,
+        Phase::Establishing {
+            attempt_id: attempt_id.clone(),
+            expected_uid: expected_uid.clone(),
+            machine_id: machine_id.clone(),
+        },
+    );
+    let lease = EstablishLease {
+        stamp: Stamp {
+            source,
+            generation,
+            vault_epoch: epoch,
+        },
+        attempt_id,
+        expected_uid,
+        machine_id,
+        pat,
+    };
+    Ok((record, lease))
+}
+
 impl Database {
     /// All owner operations have the existing lock order: vault, connection,
     /// immediate transaction. The returned lease never contains a lock guard.
@@ -172,71 +221,6 @@ impl Database {
         }
         tx.commit()?;
         Ok(result)
-    }
-
-    pub(crate) fn qoder_http_begin_establish(
-        &self,
-        declaration: &PatDeclaration,
-        intent: EstablishIntent,
-    ) -> Result<EstablishLease, AppError> {
-        self.with_qoder_http(
-            &declaration.provider_id,
-            |tx, vault, epoch, _, source, pat| {
-                source.admit(declaration)?;
-                let (raw, previous) = read_on(tx, vault, &source.provider_id)?;
-                if let Some(previous) = &previous {
-                    source_matches(previous, &source)?;
-                    if matches!(
-                        previous.phase,
-                        Phase::Establishing { .. } | Phase::RefreshPending { .. }
-                    ) {
-                        return Err(denied("attempt_in_progress"));
-                    }
-                }
-                let generation = previous
-                    .as_ref()
-                    .map(Record::next_generation)
-                    .transpose()?
-                    .unwrap_or(1);
-                let (identity, mut machine_id) = previous
-                    .as_ref()
-                    .map(Record::identity_and_machine)
-                    .unwrap_or_else(|| (None, uuid::Uuid::new_v4().to_string()));
-                let expected_uid = match intent {
-                    EstablishIntent::SameIdentity => identity.map(|i| i.uid),
-                    EstablishIntent::Rebind { previous_uid } => {
-                        if identity.as_ref().map(|i| i.uid.as_str()) != Some(previous_uid.as_str())
-                        {
-                            return Err(denied("rebind_subject_changed"));
-                        }
-                        machine_id = uuid::Uuid::new_v4().to_string();
-                        None
-                    }
-                };
-                let attempt_id = uuid::Uuid::new_v4().to_string();
-                let record = Record::new(
-                    source.clone(),
-                    generation,
-                    Phase::Establishing {
-                        attempt_id: attempt_id.clone(),
-                        expected_uid: expected_uid.clone(),
-                        machine_id: machine_id.clone(),
-                    },
-                );
-                publish_on(tx, vault, &source.provider_id, &raw, &record)?;
-                Ok(EstablishLease {
-                    stamp: Stamp {
-                        source,
-                        generation,
-                        vault_epoch: epoch,
-                    },
-                    attempt_id,
-                    expected_uid,
-                    machine_id,
-                    pat,
-                })
-            },
-        )
     }
 
     pub(crate) fn qoder_http_acquire(
@@ -296,6 +280,127 @@ impl Database {
             );
             publish_on(tx, vault, provider_id, &raw, &pending)?;
             Ok(Acquisition::Refresh(lease))
+        })
+    }
+
+    pub(crate) fn qoder_http_identity_context(
+        &self,
+        provider_id: &str,
+        now_ms: i64,
+    ) -> Result<IdentityContext, AppError> {
+        self.with_qoder_http(provider_id, |tx, vault, _, _, source, _| {
+            let (_, record) = read_on(tx, vault, provider_id)?;
+            if let Some(record) = &record {
+                source_matches(record, &source)?;
+            }
+            Ok(IdentityContext::from_record(
+                &source,
+                record.as_ref(),
+                now_ms,
+            ))
+        })
+    }
+
+    /// Read-only private preparation; no confirmation token or credential leaves
+    /// the existing service task. The source is loaded from the original row.
+    pub(crate) fn qoder_http_prepare_identity_action(
+        &self,
+        request: &IdentityActionRequest,
+        now_ms: i64,
+    ) -> Result<PreparedIdentityAction, AppError> {
+        if now_ms < 0 {
+            return Err(denied("clock_invalid"));
+        }
+        self.with_qoder_http(
+            &request.declaration.provider_id,
+            |tx, vault, epoch, provider, source, _| {
+                source.admit(&request.declaration)?;
+                let (_, record) = read_on(tx, vault, &source.provider_id)?;
+                if let Some(record) = &record {
+                    source_matches(record, &source)?;
+                }
+                let context = IdentityContext::from_record(&source, record.as_ref(), now_ms);
+                let (intent, confirmation) = match request.action {
+                    IdentityAction::Establish => match context.status {
+                        IdentityStatus::Ready | IdentityStatus::RefreshNeeded => {
+                            return Ok(PreparedIdentityAction::Complete(context))
+                        }
+                        IdentityStatus::Unestablished | IdentityStatus::ReestablishRequired => {
+                            (EstablishIntent::SameIdentity, None)
+                        }
+                        _ => return Ok(PreparedIdentityAction::Changed(context)),
+                    },
+                    IdentityAction::Recover => {
+                        if !matches!(
+                            context.status,
+                            IdentityStatus::Pending | IdentityStatus::Unknown
+                        ) {
+                            return Ok(PreparedIdentityAction::Changed(context));
+                        }
+                        (
+                            EstablishIntent::SameIdentity,
+                            Some(IdentityConfirmation {
+                                kind: IdentityConfirmationKind::Recover,
+                                provider_name: provider.name,
+                            }),
+                        )
+                    }
+                    IdentityAction::Rebind => {
+                        let Some(identity) =
+                            record.as_ref().and_then(|r| r.identity_and_machine().0)
+                        else {
+                            return Ok(PreparedIdentityAction::Changed(context));
+                        };
+                        (
+                            EstablishIntent::Rebind {
+                                previous_uid: identity.uid,
+                            },
+                            Some(IdentityConfirmation {
+                                kind: IdentityConfirmationKind::Rebind,
+                                provider_name: provider.name,
+                            }),
+                        )
+                    }
+                };
+                Ok(PreparedIdentityAction::Establish {
+                    receipt: IdentityActionReceipt {
+                        source,
+                        vault_epoch: epoch,
+                        generation: record.as_ref().map(|r| r.generation),
+                        phase: IdentityPhaseStamp::of(record.as_ref()),
+                        intent,
+                    },
+                    confirmation,
+                })
+            },
+        )
+    }
+
+    /// Exact receipt validation and replacement with Establishing are ONE
+    /// original transaction. Never compose abandon_attempt then begin_establish.
+    pub(crate) fn qoder_http_reserve_identity_action(
+        &self,
+        receipt: IdentityActionReceipt,
+    ) -> Result<EstablishLease, AppError> {
+        let provider_id = receipt.source.provider_id.clone();
+        self.with_qoder_http(&provider_id, |tx, vault, epoch, _, source, pat| {
+            if source != receipt.source {
+                return Err(denied("source_changed"));
+            }
+            let (raw, record) = read_on(tx, vault, &provider_id)?;
+            if let Some(record) = &record {
+                source_matches(record, &source)?;
+            }
+            if epoch != receipt.vault_epoch
+                || record.as_ref().map(|r| r.generation) != receipt.generation
+                || IdentityPhaseStamp::of(record.as_ref()) != receipt.phase
+            {
+                return Err(denied("stale_owner"));
+            }
+            let (next, lease) =
+                next_establishment(source, record.as_ref(), epoch, pat, receipt.intent)?;
+            publish_on(tx, vault, &provider_id, &raw, &next)?;
+            Ok(lease)
         })
     }
 
@@ -409,47 +514,6 @@ impl Database {
                 publish_on(tx, vault, &source.provider_id, &raw, &record)
             },
         )
-    }
-
-    /// Capture the exact pending attempt BEFORE asking for user recovery
-    /// confirmation. This receipt has no frontend serialization or token fields.
-    pub(crate) fn qoder_http_prepare_recovery(
-        &self,
-        declaration: &PatDeclaration,
-    ) -> Result<RecoveryReceipt, AppError> {
-        self.with_qoder_http(
-            &declaration.provider_id,
-            |tx, vault, epoch, _, source, _| {
-                source.admit(declaration)?;
-                let (_, record) = read_on(tx, vault, &source.provider_id)?;
-                let record = record.ok_or_else(|| denied("reestablish_required"))?;
-                source_matches(&record, &source)?;
-                let attempt_id = match &record.phase {
-                    Phase::Establishing { attempt_id, .. }
-                    | Phase::RefreshPending { attempt_id, .. } => attempt_id.clone(),
-                    _ => return Err(denied("no_pending_attempt")),
-                };
-                Ok(RecoveryReceipt {
-                    stamp: Stamp {
-                        source,
-                        generation: record.generation,
-                        vault_epoch: epoch,
-                    },
-                    attempt_id,
-                })
-            },
-        )
-    }
-
-    /// Only an explicit confirmation tied to this captured receipt may abandon
-    /// a submitted attempt. Source, original epoch, generation AND attempt ID
-    /// are checked under the original transaction. Late approval cannot affect
-    /// a newer attempt on the same Provider/PAT.
-    pub(crate) fn qoder_http_abandon_attempt(
-        &self,
-        receipt: &RecoveryReceipt,
-    ) -> Result<(), AppError> {
-        self.qoder_http_mark_unknown(&receipt.stamp, &receipt.attempt_id)
     }
 
     pub(crate) fn check_qoder_http_snapshot(

@@ -111,7 +111,7 @@ impl ProviderRouter {
                 qoder_http_auth::AcquireError::PreflightMissingSource => {
                     super::ProxyError::AuthError("qoder_auth_required".into())
                 }
-                qoder_http_auth::AcquireError::NonRetryable(..) => {
+                qoder_http_auth::AcquireError::NonRetryable => {
                     super::ProxyError::Internal("qoder.http_auth.unavailable".into())
                 }
             })?,

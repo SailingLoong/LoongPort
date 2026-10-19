@@ -2517,3 +2517,112 @@ pub async fn claim_qoder_daily_credits(
     .await
     .map_err(|_| "Qoder 领取任务失败，请重新打开后仅查询结果".to_owned())?
 }
+
+/// Safe original-Provider status only. Closed admission is enforced before even
+/// obtaining application state, including a direct IPC invocation.
+#[tauri::command]
+pub async fn qoder_http_identity_context<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    provider_id: String,
+) -> crate::services::provider::qoder_http_auth::IdentityContext {
+    use crate::services::provider::qoder_http_auth as owner;
+    if !owner::PRODUCTION_ADMISSION {
+        return owner::IdentityContext::unavailable(provider_id);
+    }
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => return owner::IdentityContext::unavailable(provider_id),
+    };
+    let fallback_id = provider_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        owner::identity_context(&db, &provider_id, chrono::Utc::now().timestamp_millis())
+    })
+    .await
+    .unwrap_or_else(|_| owner::IdentityContext::unavailable(fallback_id))
+}
+
+/// One explicit foreground action. Only exceptional recovery/rebind uses a
+/// native confirmation, and the original owner retains its private receipt.
+#[tauri::command]
+pub async fn qoder_http_identity_action<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    request: crate::services::provider::qoder_http_auth::IdentityActionRequest,
+) -> crate::services::provider::qoder_http_auth::IdentityActionResult {
+    use crate::services::provider::qoder_http_auth as owner;
+    if !owner::PRODUCTION_ADMISSION {
+        return owner::IdentityActionResult::unavailable();
+    }
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => return owner::IdentityActionResult::unavailable(),
+    };
+    let transport = match owner::transport::FixedInternationalTransport::new() {
+        Ok(transport) => transport,
+        Err(_) => return owner::IdentityActionResult::unavailable(),
+    };
+    owner::perform_identity_action(
+        &db,
+        request,
+        &transport,
+        move |summary| {
+            let app = app_handle.clone();
+            async move {
+                // No database/vault guard exists here. Closing/X/Esc and a
+                // failed dialog task all mean cancellation, never approval.
+                tauri::async_runtime::spawn_blocking(move || {
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                    let (message, accept) = match summary.kind {
+                        owner::IdentityConfirmationKind::Recover => (
+                            format!("供应商“{}”上次身份请求的结果尚未确认。继续将放弃这一次本地尝试，并用当前已声明的国际版 PAT 重新建立身份。不会重发旧刷新请求。", summary.provider_name),
+                            "重新建立身份",
+                        ),
+                        owner::IdentityConfirmationKind::Rebind => (
+                            format!("确定更换供应商“{}”绑定的推理身份吗？这会退役当前派生凭据，使用当前已声明的国际版 PAT 验证新身份，并生成新的推理设备标识。", summary.provider_name),
+                            "更换身份",
+                        ),
+                    };
+                    app.dialog().message(message).title("Qoder 推理身份")
+                        .kind(MessageDialogKind::Warning)
+                        .buttons(MessageDialogButtons::OkCancelCustom(accept.into(), "取消".into()))
+                        .blocking_show()
+                }).await.unwrap_or(false)
+            }
+        },
+        || chrono::Utc::now().timestamp_millis(),
+    ).await
+}
+
+#[cfg(test)]
+mod qoder_identity_command_tests {
+    use super::*;
+    use crate::services::provider::qoder_http_auth::{
+        IdentityActionRequest, IdentityActionResult, IdentityFailureCode, IdentityStatus,
+    };
+
+    #[tokio::test]
+    async fn closed_backend_gate_returns_safe_context_without_app_state() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let context =
+            qoder_http_identity_context(app.handle().clone(), "synthetic-provider".into()).await;
+        assert_eq!(context.status, IdentityStatus::Unavailable);
+        assert_eq!(context.credential_generation, "");
+        assert!(context.expires_at_ms.is_none());
+        assert!(context.allowed_actions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_invoke_cannot_bypass_closed_backend_gate_or_trigger_dialog() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let request: IdentityActionRequest = serde_json::from_value(serde_json::json!({"declaration":{"providerId":"synthetic-provider","credentialGeneration":"synthetic-generation","source":"internationalQoderPat"},"action":"recover"})).unwrap();
+        assert!(matches!(
+            qoder_http_identity_action(app.handle().clone(), request).await,
+            IdentityActionResult::Failed {
+                code: IdentityFailureCode::Unavailable
+            }
+        ));
+    }
+}

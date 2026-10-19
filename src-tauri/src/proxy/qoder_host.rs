@@ -226,13 +226,13 @@ impl Drop for QoderHost {
                     }
                     let _ = child.wait().await;
                 };
-                if tokio::time::timeout(STOP_GRACE, graceful).await.is_err() {
-                    if !matches!(
+                if tokio::time::timeout(STOP_GRACE, graceful).await.is_err()
+                    && !matches!(
                         tokio::time::timeout(STOP_GRACE, child.kill()).await,
                         Ok(Ok(()))
-                    ) {
-                        log::warn!("Qoder worker cleanup could not confirm child reaping");
-                    }
+                    )
+                {
+                    log::warn!("Qoder worker cleanup could not confirm child reaping");
                 }
             });
         }

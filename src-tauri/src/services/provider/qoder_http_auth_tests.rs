@@ -56,10 +56,30 @@ fn pair(tag: &str, expires: i64) -> TokenPair {
         expires_at_ms: expires,
     }
 }
+// Synthetic setup uses the same production preparation/reservation seam.
+fn prepare_action_receipt(
+    db: &Database,
+    declaration: &PatDeclaration,
+    action: IdentityAction,
+) -> Result<IdentityActionReceipt, AppError> {
+    let request = IdentityActionRequest {
+        declaration: declaration.clone(),
+        action,
+    };
+    match db.qoder_http_prepare_identity_action(&request, NOW)? {
+        PreparedIdentityAction::Establish { receipt, .. } => Ok(receipt),
+        _ => Err(denied("test_action_did_not_reserve")),
+    }
+}
+fn reserve_action(
+    db: &Database,
+    declaration: &PatDeclaration,
+    action: IdentityAction,
+) -> Result<EstablishLease, AppError> {
+    db.qoder_http_reserve_identity_action(prepare_action_receipt(db, declaration, action)?)
+}
 fn establish_ready(db: &Database, declaration: &PatDeclaration, expires: i64) -> RequestSnapshot {
-    let lease = db
-        .qoder_http_begin_establish(declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let lease = reserve_action(db, declaration, IdentityAction::Establish).unwrap();
     db.qoder_http_publish_establish(
         &lease,
         Established {
@@ -97,16 +117,13 @@ fn has_code<T>(result: Result<T, AppError>, expected: &str) {
         .to_string()
         .contains(&format!("qoder.http_auth.{expected}")));
 }
-fn has_acquire_code<T>(result: Result<T, AcquireError>, expected: &str) {
-    let Err(AcquireError::NonRetryable(failure)) = result else {
-        panic!("expected non-retryable owner failure");
-    };
-    has_code::<()>(Err(failure.cause), expected);
+fn has_non_retryable<T>(result: Result<T, AcquireError>) {
+    assert!(matches!(result, Err(AcquireError::NonRetryable)));
 }
 
 #[test]
 fn admission_stays_closed_and_source_is_explicit_international() {
-    assert!(!PRODUCTION_ADMISSION);
+    const { assert!(!PRODUCTION_ADMISSION) };
     let (db, mut declaration) = fixture();
     has_code(
         db.qoder_http_acquire(&source(&db), NOW),
@@ -114,7 +131,7 @@ fn admission_stays_closed_and_source_is_explicit_international() {
     );
     declaration.credential_generation = "stale-generation".into();
     has_code(
-        db.qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity),
+        reserve_action(&db, &declaration, IdentityAction::Establish),
         "source_declaration_required",
     );
     assert!(plaintext(&db).is_empty());
@@ -122,9 +139,7 @@ fn admission_stays_closed_and_source_is_explicit_international() {
 #[test]
 fn complete_identity_is_published_once_and_public_provider_never_contains_derived_fields() {
     let (db, declaration) = fixture();
-    let lease = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let lease = reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
     has_code(
         db.qoder_http_acquire(&source(&db), NOW),
         "attempt_in_progress",
@@ -143,7 +158,7 @@ fn complete_identity_is_published_once_and_public_provider_never_contains_derive
     assert_eq!(snapshot.uid(), "synthetic-uid");
     assert_eq!(snapshot.machine_id(), lease.machine_id);
     assert_eq!(snapshot.region(), "international");
-    assert_eq!(snapshot.origin(), ORIGIN);
+    assert_eq!(snapshot.stamp.source.origin, ORIGIN);
     db.check_qoder_http_snapshot(&snapshot, NOW).unwrap();
     let provider = db.get_provider_by_id(ID, "codex").unwrap().unwrap();
     for public in [
@@ -200,14 +215,14 @@ fn refresh_is_single_flight_and_pending_contains_no_replayable_token() {
         .unwrap();
     assert_eq!(after.uid(), before.uid());
     assert_eq!(after.machine_id(), before.machine_id());
-    assert!(after.generation() > before.generation());
+    assert!(after.stamp.generation > before.stamp.generation);
     has_code(
         db.qoder_http_publish_refresh(&lease, pair("late", NOW + 600_000), NOW),
         "stale_owner",
     );
 }
 #[test]
-fn crash_reopen_cannot_replay_pending_and_explicit_abandon_rejects_late_result() {
+fn crash_reopen_cannot_replay_pending_and_explicit_recovery_rejects_late_result() {
     let (db, declaration) = fixture();
     let first = establish_ready(&db, &declaration, NOW + 1);
     let Acquisition::Refresh(lease) = db.qoder_http_acquire(&source(&db), NOW).unwrap() else {
@@ -220,15 +235,15 @@ fn crash_reopen_cannot_replay_pending_and_explicit_abandon_rejects_late_result()
         reopened.qoder_http_acquire(&source(&reopened), NOW),
         "attempt_in_progress",
     );
-    let recovery = reopened.qoder_http_prepare_recovery(&declaration).unwrap();
-    reopened.qoder_http_abandon_attempt(&recovery).unwrap();
+    let recovery =
+        prepare_action_receipt(&reopened, &declaration, IdentityAction::Recover).unwrap();
+    let retry = reopened
+        .qoder_http_reserve_identity_action(recovery)
+        .unwrap();
     has_code(
         reopened.qoder_http_publish_refresh(&lease, pair("late", NOW + 600_000), NOW),
         "stale_owner",
     );
-    let retry = reopened
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
     assert_eq!(retry.machine_id, first.machine_id());
     has_code(
         reopened.qoder_http_publish_establish(
@@ -259,9 +274,7 @@ fn unknown_refresh_requires_explicit_establishment_and_preserves_identity() {
         db.qoder_http_publish_refresh(&lease, pair("late", NOW + 600_000), NOW),
         "stale_owner",
     );
-    let retry = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let retry = reserve_action(&db, &declaration, IdentityAction::Recover).unwrap();
     assert_eq!(retry.expected_uid.as_deref(), Some(before.uid()));
     assert_eq!(retry.machine_id, before.machine_id());
 }
@@ -269,23 +282,16 @@ fn unknown_refresh_requires_explicit_establishment_and_preserves_identity() {
 fn explicit_rebind_requires_current_subject_and_creates_new_cosy_identity() {
     let (db, declaration) = fixture();
     let before = establish_ready(&db, &declaration, NOW + 600_000);
+    let mut invalid = prepare_action_receipt(&db, &declaration, IdentityAction::Rebind).unwrap();
+    // The public action cannot supply a UID; still fence a corrupted private intent.
+    invalid.intent = EstablishIntent::Rebind {
+        previous_uid: "wrong".into(),
+    };
     has_code(
-        db.qoder_http_begin_establish(
-            &declaration,
-            EstablishIntent::Rebind {
-                previous_uid: "wrong".into(),
-            },
-        ),
+        db.qoder_http_reserve_identity_action(invalid),
         "rebind_subject_changed",
     );
-    let lease = db
-        .qoder_http_begin_establish(
-            &declaration,
-            EstablishIntent::Rebind {
-                previous_uid: before.uid().into(),
-            },
-        )
-        .unwrap();
+    let lease = reserve_action(&db, &declaration, IdentityAction::Rebind).unwrap();
     let after = db
         .qoder_http_publish_establish(
             &lease,
@@ -302,9 +308,7 @@ fn explicit_rebind_requires_current_subject_and_creates_new_cosy_identity() {
 #[test]
 fn source_edit_clears_private_record_in_owner_save_and_rejects_late_exchange() {
     let (db, declaration) = fixture();
-    let lease = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let lease = reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
     let mut provider = db.get_provider_by_id(ID, "codex").unwrap().unwrap();
     provider.settings_config["env"]["OPENAI_API_KEY"] = "synthetic-new-pat".into();
     db.save_provider("codex", &provider).unwrap();
@@ -450,8 +454,7 @@ fn actual_sql_import_retires_ready_refresh_unknown_and_establishing_states() {
     for state in ["ready", "refresh", "unknown", "establishing"] {
         let (db, declaration) = fixture();
         if state == "establishing" {
-            db.qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-                .unwrap();
+            reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
         } else {
             establish_ready(&db, &declaration, NOW + 1);
             if state != "ready" {
@@ -527,10 +530,11 @@ async fn awaiting_network_holds_no_vault_or_database_lock_and_concurrent_refresh
         // These would deadlock if any guard crossed the network await.
         drop(db.secrets.write().unwrap());
         drop(db.conn.lock().unwrap());
-        has_acquire_code(
-            acquire(&db, &selected_provider(&db), &transport, || NOW).await,
+        has_code(
+            db.qoder_http_acquire(&source(&db), NOW),
             "attempt_in_progress",
         );
+        has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         transport.release.notify_one();
     };
@@ -551,10 +555,11 @@ async fn dropping_submitted_future_does_not_replay_refresh() {
     let mut future = Box::pin(acquire(&db, &selected, &transport, || NOW));
     tokio::select! { _=transport.entered.notified()=>{}, _=&mut future=>panic!("response must still be pending") }
     drop(future);
-    has_acquire_code(
-        acquire(&db, &selected_provider(&db), &transport, || NOW).await,
+    has_code(
+        db.qoder_http_acquire(&source(&db), NOW),
         "attempt_in_progress",
     );
+    has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     assert!(!plaintext(&db).contains("synthetic-refresh"));
 }
@@ -604,7 +609,11 @@ async fn source_removed_after_refresh_submission_remains_non_retryable(fail: boo
         transport.release.notify_one();
     };
     let (result, ()) = tokio::join!(request, edit);
-    has_acquire_code(result, "source_required");
+    has_code(
+        SourceBinding::from_provider(&selected_provider(&db)),
+        "source_required",
+    );
+    has_non_retryable(result);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     assert!(plaintext(&db).is_empty());
 }
@@ -621,7 +630,7 @@ async fn late_failure_after_pat_clear_cannot_be_reclassified_as_missing_prefligh
 
 #[test]
 fn acquisition_error_debug_never_exposes_the_private_cause() {
-    let error = AcquireError::non_retryable(AppError::Config("synthetic-private-cause".into()));
+    let error = AcquireError::preflight(AppError::Config("synthetic-private-cause".into()));
     assert_eq!(format!("{error:?}"), "NonRetryable");
 }
 
@@ -648,16 +657,13 @@ fn original_provider_save_initializes_source_revision_without_any_campaign_or_de
             .unwrap()
             .is_empty()
     );
-    db.qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
 }
 
 #[test]
 fn access_only_exchange_is_usable_but_never_submits_an_empty_refresh() {
     let (db, declaration) = fixture();
-    let lease = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
+    let lease = reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
     let mut tokens = pair("access-only", NOW + 600_000);
     tokens.refresh_token.clear();
     let snapshot = db
@@ -683,18 +689,17 @@ fn access_only_exchange_is_usable_but_never_submits_an_empty_refresh() {
 }
 
 #[test]
-fn delayed_recovery_confirmation_cannot_abandon_a_new_attempt_on_the_same_source() {
+fn delayed_recovery_confirmation_cannot_replace_a_new_attempt_on_the_same_source() {
     let (db, declaration) = fixture();
-    let first = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
-    let stale_receipt = db.qoder_http_prepare_recovery(&declaration).unwrap();
+    let first = reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
+    let stale_receipt = prepare_action_receipt(&db, &declaration, IdentityAction::Recover).unwrap();
     db.qoder_http_mark_unknown(&first.stamp, &first.attempt_id)
         .unwrap();
-    let second = db
-        .qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
-    has_code(db.qoder_http_abandon_attempt(&stale_receipt), "stale_owner");
+    let second = reserve_action(&db, &declaration, IdentityAction::Recover).unwrap();
+    has_code(
+        db.qoder_http_reserve_identity_action(stale_receipt),
+        "stale_owner",
+    );
     db.qoder_http_publish_establish(
         &second,
         Established {
@@ -708,12 +713,14 @@ fn delayed_recovery_confirmation_cannot_abandon_a_new_attempt_on_the_same_source
 #[test]
 fn recovery_confirmation_is_invalid_after_original_vault_epoch_changes() {
     let (db, declaration) = fixture();
-    db.qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
-    let receipt = db.qoder_http_prepare_recovery(&declaration).unwrap();
+    reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
+    let receipt = prepare_action_receipt(&db, &declaration, IdentityAction::Recover).unwrap();
     db.secrets.set_blocked(true);
     db.secrets.set_blocked(false);
-    has_code(db.qoder_http_abandon_attempt(&receipt), "stale_owner");
+    has_code(
+        db.qoder_http_reserve_identity_action(receipt),
+        "stale_owner",
+    );
     has_code(
         db.qoder_http_acquire(&source(&db), NOW),
         "attempt_in_progress",
@@ -746,11 +753,17 @@ fn selected_owner_fence_does_not_decrypt_an_unrelated_corrupt_provider() {
 #[test]
 fn recovery_receipt_cannot_be_consumed_twice() {
     let (db, declaration) = fixture();
-    db.qoder_http_begin_establish(&declaration, EstablishIntent::SameIdentity)
-        .unwrap();
-    let receipt = db.qoder_http_prepare_recovery(&declaration).unwrap();
-    db.qoder_http_abandon_attempt(&receipt).unwrap();
-    has_code(db.qoder_http_abandon_attempt(&receipt), "stale_owner");
+    reserve_action(&db, &declaration, IdentityAction::Establish).unwrap();
+    let receipt = prepare_action_receipt(&db, &declaration, IdentityAction::Recover).unwrap();
+    // Both receipts capture the exact same pending generation/attempt. The
+    // owned first receipt cannot be reused in Rust; an equivalent second one
+    // must also fail the original transaction CAS after the first consumes it.
+    let duplicate = prepare_action_receipt(&db, &declaration, IdentityAction::Recover).unwrap();
+    db.qoder_http_reserve_identity_action(receipt).unwrap();
+    has_code(
+        db.qoder_http_reserve_identity_action(duplicate),
+        "stale_owner",
+    );
 }
 
 #[test]
@@ -790,7 +803,11 @@ async fn stale_selected_provider_cannot_spend_the_new_sources_near_expiry_refres
     )
     .await
     .expect("stale selection must fail before the waiting transport");
-    has_acquire_code(result, "selected_source_changed");
+    has_code(
+        db.qoder_http_acquire(&SourceBinding::from_provider(&selected).unwrap().0, NOW),
+        "selected_source_changed",
+    );
+    has_non_retryable(result);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     assert_eq!(plaintext(&db), before);
     assert!(matches!(

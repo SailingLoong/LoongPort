@@ -254,13 +254,6 @@ pub(crate) struct Stamp {
     pub(crate) generation: u64,
     pub(crate) vault_epoch: u64,
 }
-/// Backend-private receipt captured when requesting explicit recovery approval.
-/// A delayed approval may only retire this exact attempt, never the current one.
-pub(crate) struct RecoveryReceipt {
-    pub(crate) stamp: Stamp,
-    pub(crate) attempt_id: String,
-}
-
 pub(crate) struct EstablishLease {
     pub(crate) stamp: Stamp,
     pub(crate) attempt_id: String,
@@ -303,15 +296,6 @@ impl RequestSnapshot {
     pub(crate) fn region(&self) -> &'static str {
         "international"
     }
-    pub(crate) fn origin(&self) -> &'static str {
-        ORIGIN
-    }
-    pub(crate) fn generation(&self) -> u64 {
-        self.stamp.generation
-    }
-    pub(crate) fn source_generation(&self) -> &str {
-        &self.stamp.source.credential_generation
-    }
     pub(crate) fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
@@ -340,38 +324,11 @@ pub(crate) struct Established {
     pub(crate) tokens: TokenPair,
 }
 
-/// This service performs no automatic PAT fallback or background exchange.
-/// Cancellation during await leaves a durable non-replayable attempt.
-pub(crate) async fn establish(
-    db: &Database,
-    declaration: &PatDeclaration,
-    intent: EstablishIntent,
-    transport: &dyn AuthTransport,
-    now_ms: impl Fn() -> i64,
-) -> Result<RequestSnapshot, AppError> {
-    let lease = db.qoder_http_begin_establish(declaration, intent)?;
-    let response = transport
-        .exchange_and_identify(&lease.pat, &lease.machine_id)
-        .await;
-    match response {
-        Ok(response) => db.qoder_http_publish_establish(&lease, response, now_ms()),
-        Err(()) => {
-            db.qoder_http_mark_unknown(&lease.stamp, &lease.attempt_id)?;
-            Err(denied("outcome_unknown_reestablish_required"))
-        }
-    }
-}
 /// Retry eligibility is a stage fact, not a string category. A missing PAT
 /// observed after a submitted refresh must never authorize another candidate.
 pub(crate) enum AcquireError {
     PreflightMissingSource,
-    NonRetryable(AcquireFailure),
-}
-pub(crate) struct AcquireFailure {
-    // Retained inside the owner only; never expose a post-submission cause as a
-    // retry hint or serialize it to a caller. Tests can inspect the exact cause.
-    #[allow(dead_code)]
-    cause: AppError,
+    NonRetryable,
 }
 impl AcquireError {
     fn preflight(cause: AppError) -> Self {
@@ -380,18 +337,15 @@ impl AcquireError {
         {
             Self::PreflightMissingSource
         } else {
-            Self::non_retryable(cause)
+            Self::NonRetryable
         }
-    }
-    fn non_retryable(cause: AppError) -> Self {
-        Self::NonRetryable(AcquireFailure { cause })
     }
 }
 impl std::fmt::Debug for AcquireError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::PreflightMissingSource => "PreflightMissingSource",
-            Self::NonRetryable(_) => "NonRetryable",
+            Self::NonRetryable => "NonRetryable",
         })
     }
 }
@@ -418,13 +372,11 @@ pub(crate) async fn acquire(
             match response {
                 Ok(tokens) => db
                     .qoder_http_publish_refresh(&lease, tokens, now_ms())
-                    .map_err(AcquireError::non_retryable),
+                    .map_err(|_| AcquireError::NonRetryable),
                 Err(()) => {
                     db.qoder_http_mark_unknown(&lease.stamp, &lease.attempt_id)
-                        .map_err(AcquireError::non_retryable)?;
-                    Err(AcquireError::non_retryable(denied(
-                        "outcome_unknown_reestablish_required",
-                    )))
+                        .map_err(|_| AcquireError::NonRetryable)?;
+                    Err(AcquireError::NonRetryable)
                 }
             }
         }
@@ -454,3 +406,340 @@ pub(crate) fn check_selected_provider(
 
 #[path = "qoder_http_auth/transport.rs"]
 pub(crate) mod transport;
+
+// The only frontend projection. Private credentials/receipts never implement
+// frontend serialization or appear inside one of these explicitly safe DTOs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum IdentityAction {
+    Establish,
+    Recover,
+    Rebind,
+}
+pub(crate) struct IdentityActionRequest {
+    pub(crate) declaration: PatDeclaration,
+    pub(crate) action: IdentityAction,
+}
+impl<'de> Deserialize<'de> for IdentityActionRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            declaration: PatDeclaration,
+            action: IdentityAction,
+        }
+        // Even an invalid enum value must not be echoed as a transport/IPC error.
+        let wire = Wire::deserialize(deserializer)
+            .map_err(|_| serde::de::Error::custom("qoder.http_identity.invalid_request"))?;
+        Ok(Self {
+            declaration: wire.declaration,
+            action: wire.action,
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum IdentityStatus {
+    Unavailable,
+    Unestablished,
+    Ready,
+    RefreshNeeded,
+    ReestablishRequired,
+    Pending,
+    Unknown,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityContext {
+    pub(crate) provider_id: String,
+    pub(crate) credential_generation: String,
+    pub(crate) status: IdentityStatus,
+    pub(crate) expires_at_ms: Option<i64>,
+    pub(crate) allowed_actions: Vec<IdentityAction>,
+}
+impl IdentityContext {
+    pub(crate) fn unavailable(provider_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            credential_generation: String::new(),
+            status: IdentityStatus::Unavailable,
+            expires_at_ms: None,
+            allowed_actions: Vec::new(),
+        }
+    }
+    fn ready(source: &SourceBinding, expires_at_ms: i64, refreshable: bool, now_ms: i64) -> Self {
+        let status = if expires_at_ms > now_ms.saturating_add(REFRESH_MARGIN_MS) {
+            IdentityStatus::Ready
+        } else if refreshable {
+            IdentityStatus::RefreshNeeded
+        } else {
+            IdentityStatus::ReestablishRequired
+        };
+        let mut allowed_actions = if status == IdentityStatus::ReestablishRequired {
+            vec![IdentityAction::Establish]
+        } else {
+            Vec::new()
+        };
+        allowed_actions.push(IdentityAction::Rebind);
+        Self {
+            provider_id: source.provider_id.clone(),
+            credential_generation: source.credential_generation.clone(),
+            status,
+            expires_at_ms: Some(expires_at_ms),
+            allowed_actions,
+        }
+    }
+    pub(crate) fn from_record(
+        source: &SourceBinding,
+        record: Option<&Record>,
+        now_ms: i64,
+    ) -> Self {
+        let (status, expires_at_ms, mut allowed_actions) = match record.map(|r| &r.phase) {
+            None => (
+                IdentityStatus::Unestablished,
+                None,
+                vec![IdentityAction::Establish],
+            ),
+            Some(Phase::Ready { tokens, .. }) => {
+                return Self::ready(
+                    source,
+                    tokens.expires_at_ms,
+                    !tokens.refresh_token.trim().is_empty(),
+                    now_ms,
+                );
+            }
+            Some(Phase::Establishing { .. } | Phase::RefreshPending { .. }) => {
+                (IdentityStatus::Pending, None, vec![IdentityAction::Recover])
+            }
+            Some(Phase::Unknown { .. }) => {
+                (IdentityStatus::Unknown, None, vec![IdentityAction::Recover])
+            }
+        };
+        if record.is_some_and(|r| r.identity_and_machine().0.is_some()) {
+            allowed_actions.push(IdentityAction::Rebind);
+        }
+        Self {
+            provider_id: source.provider_id.clone(),
+            credential_generation: source.credential_generation.clone(),
+            status,
+            expires_at_ms,
+            allowed_actions,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IdentityFailureCode {
+    Unavailable,
+    SourceChanged,
+    OwnerChanged,
+    InvalidSource,
+    StateChanged,
+    IdentityRebindRequired,
+    OutcomeUnknown,
+}
+impl IdentityFailureCode {
+    fn from_error(error: &AppError) -> Self {
+        match error {
+            AppError::Config(code) => match code.strip_prefix("qoder.http_auth.") {
+                Some(
+                    "source_changed" | "source_declaration_required" | "selected_source_changed",
+                ) => Self::SourceChanged,
+                Some("stale_owner") => Self::OwnerChanged,
+                Some(
+                    "unsupported_source"
+                    | "external_source_untracked"
+                    | "source_generation_required"
+                    | "source_required",
+                ) => Self::InvalidSource,
+                Some("identity_rebind_required") => Self::IdentityRebindRequired,
+                Some("attempt_in_progress" | "no_pending_attempt" | "rebind_subject_changed") => {
+                    Self::StateChanged
+                }
+                Some("outcome_unknown_reestablish_required" | "invalid_token_response") => {
+                    Self::OutcomeUnknown
+                }
+                _ => Self::Unavailable,
+            },
+            _ => Self::Unavailable,
+        }
+    }
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum IdentityActionResult {
+    Completed { context: IdentityContext },
+    Changed { context: IdentityContext },
+    Cancelled,
+    Failed { code: IdentityFailureCode },
+}
+impl IdentityActionResult {
+    pub(crate) fn unavailable() -> Self {
+        Self::Failed {
+            code: IdentityFailureCode::Unavailable,
+        }
+    }
+    fn error(error: &AppError) -> Self {
+        Self::Failed {
+            code: IdentityFailureCode::from_error(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum IdentityConfirmationKind {
+    Recover,
+    Rebind,
+}
+pub(crate) struct IdentityConfirmation {
+    pub(crate) kind: IdentityConfirmationKind,
+    pub(crate) provider_name: String,
+}
+#[derive(PartialEq, Eq)]
+pub(crate) enum IdentityPhaseStamp {
+    Absent,
+    Establishing(String),
+    Ready,
+    RefreshPending(String),
+    Unknown(String),
+}
+impl IdentityPhaseStamp {
+    pub(crate) fn of(record: Option<&Record>) -> Self {
+        match record.map(|r| &r.phase) {
+            None => Self::Absent,
+            Some(Phase::Ready { .. }) => Self::Ready,
+            Some(Phase::Establishing { attempt_id, .. }) => Self::Establishing(attempt_id.clone()),
+            Some(Phase::RefreshPending { attempt_id, .. }) => {
+                Self::RefreshPending(attempt_id.clone())
+            }
+            Some(Phase::Unknown { attempt_id, .. }) => Self::Unknown(attempt_id.clone()),
+        }
+    }
+}
+/// Never serialized, cloned or retained in a registry. Absence and phase are
+/// fenced as well as generation so a completed attempt invalidates old consent.
+pub(crate) struct IdentityActionReceipt {
+    pub(crate) source: SourceBinding,
+    pub(crate) vault_epoch: u64,
+    pub(crate) generation: Option<u64>,
+    pub(crate) phase: IdentityPhaseStamp,
+    pub(crate) intent: EstablishIntent,
+}
+pub(crate) enum PreparedIdentityAction {
+    Complete(IdentityContext),
+    Changed(IdentityContext),
+    Establish {
+        receipt: IdentityActionReceipt,
+        confirmation: Option<IdentityConfirmation>,
+    },
+}
+
+pub(crate) fn identity_context(db: &Database, provider_id: &str, now_ms: i64) -> IdentityContext {
+    if !PRODUCTION_ADMISSION {
+        return IdentityContext::unavailable(provider_id);
+    }
+    identity_context_admitted(db, provider_id, now_ms)
+        .unwrap_or_else(|_| IdentityContext::unavailable(provider_id))
+}
+fn identity_context_admitted(
+    db: &Database,
+    provider_id: &str,
+    now_ms: i64,
+) -> Result<IdentityContext, AppError> {
+    if now_ms < 0 {
+        return Err(denied("clock_invalid"));
+    }
+    // Only the original source revision initializer is shared with Daily.
+    // Never call its device-dependent ClaimContext or perform a campaign action.
+    qoder_daily::initialize_provider(db, provider_id)?;
+    db.qoder_http_identity_context(provider_id, now_ms)
+}
+
+pub(crate) async fn perform_identity_action<F, C>(
+    db: &Database,
+    request: IdentityActionRequest,
+    transport: &dyn AuthTransport,
+    confirm: C,
+    now_ms: impl Fn() -> i64,
+) -> IdentityActionResult
+where
+    C: FnOnce(IdentityConfirmation) -> F,
+    F: Future<Output = bool>,
+{
+    if !PRODUCTION_ADMISSION {
+        return IdentityActionResult::unavailable();
+    }
+    perform_identity_action_admitted(db, request, transport, confirm, now_ms).await
+}
+async fn perform_identity_action_admitted<F, C>(
+    db: &Database,
+    request: IdentityActionRequest,
+    transport: &dyn AuthTransport,
+    confirm: C,
+    now_ms: impl Fn() -> i64,
+) -> IdentityActionResult
+where
+    C: FnOnce(IdentityConfirmation) -> F,
+    F: Future<Output = bool>,
+{
+    let prepared = match db.qoder_http_prepare_identity_action(&request, now_ms()) {
+        Ok(prepared) => prepared,
+        Err(error) => return IdentityActionResult::error(&error),
+    };
+    let (receipt, confirmation) = match prepared {
+        PreparedIdentityAction::Complete(context) => {
+            return IdentityActionResult::Completed { context }
+        }
+        PreparedIdentityAction::Changed(context) => {
+            return IdentityActionResult::Changed { context }
+        }
+        PreparedIdentityAction::Establish {
+            receipt,
+            confirmation,
+        } => (receipt, confirmation),
+    };
+    // Preparation released every guard. No refresh/PAT is in the confirmation.
+    if let Some(summary) = confirmation {
+        if !confirm(summary).await {
+            return IdentityActionResult::Cancelled;
+        }
+    }
+    let lease = match db.qoder_http_reserve_identity_action(receipt) {
+        Ok(lease) => lease,
+        Err(error) => return IdentityActionResult::error(&error),
+    };
+    // One reservation, one exchange/identify, no automatic retry or refresh.
+    let response = transport
+        .exchange_and_identify(&lease.pat, &lease.machine_id)
+        .await;
+    match response {
+        Ok(response) => {
+            let now = now_ms();
+            // Safe result is derived from this exact response, not a later row
+            // lookup that could borrow another source after publication.
+            let context = IdentityContext::ready(
+                &lease.stamp.source,
+                response.tokens.expires_at_ms,
+                !response.tokens.refresh_token.trim().is_empty(),
+                now,
+            );
+            match db.qoder_http_publish_establish(&lease, response, now) {
+                Ok(_) => IdentityActionResult::Completed { context },
+                Err(error) => {
+                    let _ = db.qoder_http_mark_unknown(&lease.stamp, &lease.attempt_id);
+                    IdentityActionResult::error(&error)
+                }
+            }
+        }
+        Err(()) => {
+            let _ = db.qoder_http_mark_unknown(&lease.stamp, &lease.attempt_id);
+            IdentityActionResult::Failed {
+                code: IdentityFailureCode::OutcomeUnknown,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "qoder_http_identity_tests.rs"]
+mod identity_tests;

@@ -16,6 +16,7 @@ import type { AppId } from "@/lib/api";
 import { authApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
+import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
 import { ProviderActions } from "@/components/providers/ProviderActions";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -78,6 +79,16 @@ interface ProviderCardProps {
   isStateChangeProtected?: boolean;
   onSetAsDefault?: (modelId?: string) => void;
 }
+
+// This existing backend-owned source revision only invalidates the identity view.
+// The action declaration still comes from the freshly read identity context.
+const readQoderSourceGeneration = (provider: Provider): string | undefined => {
+  const state = (provider.meta as { qoderCampaignState?: unknown } | undefined)
+    ?.qoderCampaignState;
+  if (!state || typeof state !== "object" || !("generation" in state))
+    return undefined;
+  return typeof state.generation === "string" ? state.generation : undefined;
+};
 
 const extractApiUrl = (provider: Provider, fallbackText: string) => {
   if (provider.notes?.trim()) {
@@ -633,10 +644,17 @@ export function ProviderCard({
           <div className="flex-shrink-0">
             {appId === "codex" &&
               provider.meta?.providerType === "qoder_sdk" && (
-                <QoderDailyClaim
-                  providerId={provider.id}
-                  disabled={mutationsDisabled}
-                />
+                <div className="flex flex-wrap gap-2">
+                  <QoderInferenceIdentity
+                    providerId={provider.id}
+                    sourceGeneration={readQoderSourceGeneration(provider)}
+                    disabled={mutationsDisabled}
+                  />
+                  <QoderDailyClaim
+                    providerId={provider.id}
+                    disabled={mutationsDisabled}
+                  />
+                </div>
               )}
             <ProviderActions
               mutationsDisabled={mutationsDisabled}

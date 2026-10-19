@@ -435,7 +435,7 @@ impl Database {
                 )?);
                 if let Some(meta) = &mut provider.meta {
                     meta.custom_endpoints =
-                        Self::get_endpoints_on_connection(&conn, vault, id, app_type)?;
+                        Self::get_endpoints_on_connection(conn, vault, id, app_type)?;
                 }
                 Ok(Some(provider))
             }

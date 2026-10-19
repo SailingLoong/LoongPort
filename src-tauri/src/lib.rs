@@ -1905,6 +1905,8 @@ pub fn run() {
             commands::get_provider_edit_settings,
             commands::qoder_daily_claim_context,
             commands::claim_qoder_daily_credits,
+            commands::qoder_http_identity_context,
+            commands::qoder_http_identity_action,
             commands::get_application_model_settings,
             commands::preview_application_model_settings,
             commands::confirm_application_model_settings,
