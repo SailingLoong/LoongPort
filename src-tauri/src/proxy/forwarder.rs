@@ -83,8 +83,11 @@ fn validate_codex_official_authorization(
     }
 }
 
+use super::response_lease::ResponseLease;
+
 pub struct ForwardResult {
     pub response: ProxyResponse,
+    pub(crate) response_lease: Option<ResponseLease>,
     pub provider: Provider,
     /// 本次成功尝试的开始时刻（latency/first_token 归因锚点，
     /// 见 [`RequestContext::attempt_started_at`]）。故障转移链上它晚于请求
@@ -118,6 +121,7 @@ pub struct ForwardError {
 /// 不需要每条出口路径都手动调用。
 pub(crate) struct ActiveConnectionGuard {
     status: Arc<RwLock<ProxyStatus>>,
+    response_lease: Option<ResponseLease>,
 }
 
 impl ActiveConnectionGuard {
@@ -126,7 +130,40 @@ impl ActiveConnectionGuard {
             let mut s = status.write().await;
             s.active_connections = s.active_connections.saturating_add(1);
         }
-        Self { status }
+        Self {
+            status,
+            response_lease: None,
+        }
+    }
+
+    pub(crate) async fn check_response_lease(&self) -> Result<(), std::io::Error> {
+        match &self.response_lease {
+            Some(lease) => lease.check().await.map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+            }),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn into_buffered_body(self, bytes: Bytes) -> axum::body::Body {
+        axum::body::Body::from_stream(async_stream::stream! {
+            let guard = self;
+            match guard.check_response_lease().await {
+                Ok(()) => yield Ok::<Bytes, std::io::Error>(bytes),
+                Err(error) => yield Err(error),
+            }
+        })
+    }
+}
+
+pub(crate) fn final_buffered_body(
+    guard: Option<ActiveConnectionGuard>,
+    bytes: impl Into<Bytes>,
+) -> axum::body::Body {
+    let bytes = bytes.into();
+    match guard {
+        Some(guard) => guard.into_buffered_body(bytes),
+        None => axum::body::Body::from(bytes),
     }
 }
 
@@ -178,6 +215,8 @@ pub struct RequestForwarder {
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
     streaming_first_byte_timeout: std::time::Duration,
+    /// SDK stream silence timeout, kept from the existing application config.
+    streaming_idle_timeout: std::time::Duration,
     /// 单个客户端请求最多尝试的 provider 数。
     ///
     /// 由 `AppProxyConfig.max_retries` (UI: "请求失败时的重试次数, 0-10") 派生：
@@ -263,6 +302,7 @@ impl RequestForwarder {
         response: ProxyResponse,
         claude_api_format: Option<String>,
         outbound_model: Option<String>,
+        response_lease: Option<ResponseLease>,
     ) -> ForwardResult {
         // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；HalfOpen
         // 探测仍同步等待，保证 permit 与熔断状态及时释放。
@@ -299,6 +339,7 @@ impl RequestForwarder {
             attempt_started_at,
             claude_api_format,
             outbound_model,
+            response_lease,
             connection_guard: None,
         }
     }
@@ -319,7 +360,7 @@ impl RequestForwarder {
         session_id: String,
         session_client_provided: bool,
         streaming_first_byte_timeout: u64,
-        _streaming_idle_timeout: u64,
+        streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
@@ -351,6 +392,7 @@ impl RequestForwarder {
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
             ),
+            streaming_idle_timeout: std::time::Duration::from_secs(streaming_idle_timeout),
             max_attempts,
             model_alignment,
         }
@@ -534,7 +576,7 @@ impl RequestForwarder {
         extensions: Extensions,
         providers: Vec<Provider>,
     ) -> Result<ForwardResult, ForwardError> {
-        let guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
+        let mut guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
         {
             let mut s = self.status.write().await;
             s.total_requests = s.total_requests.saturating_add(1);
@@ -549,6 +591,7 @@ impl RequestForwarder {
         // 在流式 body 的 future 内才真正 drop。
         // Err 路径：guard 在函数 scope 内随返回值落地时自动 drop。
         result.map(|mut fr| {
+            guard.response_lease = fr.response_lease.take();
             fr.connection_guard = Some(guard);
             fr
         })
@@ -628,6 +671,26 @@ impl RequestForwarder {
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
+            if let Err(error) = super::managed_accounts::validate_capabilities(provider, &body) {
+                last_error = Some(error);
+                last_provider = Some(provider.clone());
+                continue;
+            }
+            // Capability routing happens before an account attempt/permit. A
+            // tool/media/history mismatch is not a credential or quota failure.
+            if super::qoder_http::enabled(provider) {
+                let admission =
+                    if !matches!(app_type, AppType::Codex) || method != http::Method::POST {
+                        Err(ProxyError::InvalidRequest("unsupported_qoder_input".into()))
+                    } else {
+                        self.prepare_qoder_request(app_type, provider, endpoint, &body)
+                    };
+                if let Err(error) = admission {
+                    last_error = Some(error);
+                    last_provider = Some(provider.clone());
+                    continue;
+                }
+            }
             // 同账号已被致命失败拉黑：跳过（不占尝试次数，也不动熔断器）
             if provider
                 .failover_account_key()
@@ -735,7 +798,7 @@ impl RequestForwarder {
                 )
                 .await
             {
-                Ok((response, claude_api_format, outbound_model)) => {
+                Ok((response, claude_api_format, outbound_model, response_lease)) => {
                     let result = self
                         .finish_provider_success(
                             app_type_str,
@@ -746,6 +809,7 @@ impl RequestForwarder {
                             response,
                             claude_api_format,
                             outbound_model,
+                            response_lease,
                         )
                         .await;
                     return Ok(result);
@@ -850,7 +914,12 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format, outbound_model)) => {
+                                Ok((
+                                    response,
+                                    claude_api_format,
+                                    outbound_model,
+                                    response_lease,
+                                )) => {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
@@ -864,6 +933,7 @@ impl RequestForwarder {
                                             response,
                                             claude_api_format,
                                             outbound_model,
+                                            response_lease,
                                         )
                                         .await;
                                     return Ok(result);
@@ -926,7 +996,12 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format, outbound_model)) => {
+                                Ok((
+                                    response,
+                                    claude_api_format,
+                                    outbound_model,
+                                    response_lease,
+                                )) => {
                                     log::info!(
                                         "[{app_type_str}] [ToolCarrier] Carrier-stripped retry succeeded"
                                     );
@@ -940,6 +1015,7 @@ impl RequestForwarder {
                                             response,
                                             claude_api_format,
                                             outbound_model,
+                                            response_lease,
                                         )
                                         .await;
                                     return Ok(result);
@@ -1035,7 +1111,12 @@ impl RequestForwarder {
                                     )
                                     .await
                                 {
-                                    Ok((response, claude_api_format, outbound_model)) => {
+                                    Ok((
+                                        response,
+                                        claude_api_format,
+                                        outbound_model,
+                                        response_lease,
+                                    )) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
                                         self.record_success_result(
                                             &provider.id,
@@ -1082,6 +1163,7 @@ impl RequestForwarder {
                                             attempt_started_at,
                                             claude_api_format,
                                             outbound_model,
+                                            response_lease,
                                             connection_guard: None,
                                         });
                                     }
@@ -1193,7 +1275,12 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format, outbound_model)) => {
+                                Ok((
+                                    response,
+                                    claude_api_format,
+                                    outbound_model,
+                                    response_lease,
+                                )) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
                                     self.record_success_result(
                                         &provider.id,
@@ -1235,6 +1322,7 @@ impl RequestForwarder {
                                         attempt_started_at,
                                         claude_api_format,
                                         outbound_model,
+                                        response_lease,
                                         connection_guard: None,
                                     });
                                 }
@@ -1437,7 +1525,15 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
         free_only: &mut bool,
-    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+    ) -> Result<
+        (
+            ProxyResponse,
+            Option<String>,
+            Option<String>,
+            Option<ResponseLease>,
+        ),
+        ProxyError,
+    > {
         let result = self
             .forward_attempt(
                 app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
@@ -1455,6 +1551,132 @@ impl RequestForwarder {
         result
     }
 
+    fn prepare_qoder_request(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<Value, ProxyError> {
+        // Check the original input as well as provider overrides: a local
+        // override must not erase requested tools or unsupported history.
+        super::qoder_http::chat_request(body, endpoint)?;
+        let (mut mapped, _, _, _) =
+            super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
+        if let Some(model) = self.router.preferred_model(app_type.as_str(), provider) {
+            mapped["model"] = Value::String(model);
+        } else {
+            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped);
+        }
+        if let Some(overrides) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+        {
+            apply_local_proxy_body_overrides(&mut mapped, overrides);
+        }
+        let chat = super::qoder_http::chat_request(&mapped, endpoint)?;
+        if chat["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .is_none()
+        {
+            return Err(ProxyError::InvalidRequest("invalid_model".into()));
+        }
+        Ok(chat)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_qoder(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        extensions: &Extensions,
+        adapter: &dyn ProviderAdapter,
+        free_only: &mut bool,
+    ) -> Result<
+        (
+            ProxyResponse,
+            Option<String>,
+            Option<String>,
+            Option<ResponseLease>,
+        ),
+        ProxyError,
+    > {
+        // Recheck the resolved owner at the actual output boundary. An HTTP
+        // free origin cannot establish free pricing for a separate SDK task.
+        let chat = self.prepare_qoder_request(app_type, provider, endpoint, body)?;
+        super::free_models::enforce(
+            free_only,
+            body,
+            &chat,
+            "",
+            super::free_models::configured(&provider.settings_config),
+        )?;
+        let auth = adapter
+            .extract_auth(provider)
+            .filter(|auth| !auth.api_key.is_empty())
+            .ok_or_else(|| ProxyError::AuthError("qoder_auth_required".into()))?;
+        #[cfg(test)]
+        let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
+        #[cfg(not(test))]
+        let test_host: Option<super::qoder_host::HostConfig> = {
+            let _ = extensions;
+            None
+        };
+        let host = if let Some(host) = test_host {
+            host
+        } else {
+            let worker = (|| {
+                #[cfg(feature = "gui")]
+                if let Some(app) = &self.app_handle {
+                    use tauri::Manager;
+                    if let Ok(resources) = app.path().resource_dir() {
+                        let path = resources.join("qoder/worker.mjs");
+                        if path.is_file() {
+                            return Some(path);
+                        }
+                    }
+                }
+                #[cfg(debug_assertions)]
+                {
+                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../scripts/qoder/worker.mjs");
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+                None
+            })()
+            .ok_or_else(|| ProxyError::ConfigError("qoder_runtime_unavailable".into()))?;
+            let node = tokio::task::spawn_blocking(crate::commands::locate_node_runtime)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .ok_or_else(|| ProxyError::ConfigError("qoder_runtime_node_unavailable".into()))?;
+            let root = crate::config::get_app_config_dir().join("runtimes/qoder/1.0.53");
+            super::qoder_runtime::resolve_runtime(node, worker, root)
+                .await
+                .map_err(|_| ProxyError::ConfigError("qoder_runtime_admission_failed".into()))?
+        };
+        let outbound_model = chat["model"].as_str().map(str::to_owned);
+        let dispatch = super::qoder_http::Dispatch {
+            host,
+            account_id: provider.id.clone(),
+            access_token: auth.api_key,
+            first_byte_timeout: self.streaming_first_byte_timeout.as_secs(),
+            idle_timeout: self.streaming_idle_timeout.as_secs(),
+            non_streaming_timeout: self.non_streaming_timeout.as_secs(),
+        };
+        // No second guard, account selection, or retry loop. Once the SDK is
+        // started its unclassified errors are terminal for this client request.
+        super::qoder_http::forward(chat, dispatch)
+            .await
+            .map(|response| (response, None, outbound_model, None))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn forward_attempt(
         &self,
@@ -1467,25 +1689,50 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
         free_only: &mut bool,
-    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+    ) -> Result<
+        (
+            ProxyResponse,
+            Option<String>,
+            Option<String>,
+            Option<ResponseLease>,
+        ),
+        ProxyError,
+    > {
         let budget_binding = extensions.get::<RouteBinding>();
         if budget_binding.is_some_and(RouteBinding::has_sent) {
             return Err(ProxyError::ConfigError(
                 "paperclip.automatic_retry_blocked".into(),
             ));
         }
+        // Snapshot original authorization before resolving the actual key.
+        let vendor_fence = self.router.vendor_response_fence(app_type, provider)?;
         // Re-read the account owner at the output boundary, including cached routes.
         let resolved = self
             .router
             .resolve_vendor_auth(app_type, provider)
             .map_err(|_| {
-                ProxyError::AuthError("Service source authentication unavailable".into())
+                if vendor_fence.is_some() {
+                    ProxyError::Internal("vendor_response.authorization_changed".into())
+                } else {
+                    ProxyError::AuthError("Service source authentication unavailable".into())
+                }
             })?;
+        if let Some(fence) = &vendor_fence {
+            fence.check()?;
+        }
         let provider = &resolved;
+        let managed_account = super::managed_accounts::selected(provider);
         if budget_binding.is_some() {
             // Reject alternate transports before OAuth refresh, ACP session
             // creation, or format-conversion work can perform network activity.
             ensure_budgeted_native_path(app_type, method, provider, endpoint, body, headers)?;
+        }
+        if super::qoder_http::enabled(provider) {
+            return self
+                .forward_qoder(
+                    app_type, provider, endpoint, body, extensions, adapter, free_only,
+                )
+                .await;
         }
         if super::providers::workbuddy_acp::enabled(provider) {
             // ACP has no verified free-price route. Preserve the request's
@@ -1501,10 +1748,27 @@ impl RequestForwarder {
                 app_type, method, provider, endpoint, body,
             )
             .await
-            .map(|response| (response, None, None));
+            .map(|response| (response, None, None, None));
         }
-        // 使用适配器提取 base_url
-        let mut base_url = adapter.extract_base_url(provider)?;
+        let prepared_account = match managed_account.as_ref() {
+            Some((kind, account_id)) => Some(
+                super::managed_accounts::PreparedAccount::acquire(
+                    self.router.managed_secret_session(),
+                    *kind,
+                    account_id,
+                    &self.session_id,
+                    extensions,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        // Managed account endpoints come from the selected owner/region, never
+        // from an editable base URL or a second account acquisition.
+        let mut base_url = match &prepared_account {
+            Some(prepared) => prepared.base_url().to_string(),
+            None => adapter.extract_base_url(provider)?,
+        };
 
         let is_full_url = provider
             .meta
@@ -1809,10 +2073,13 @@ impl RequestForwarder {
             }
         }
         let resolved_claude_api_format = if adapter.name() == "Claude" {
-            Some(
-                self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
-                    .await,
-            )
+            Some(match &prepared_account {
+                Some(prepared) => prepared.api_format().to_string(),
+                None => {
+                    self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
+                        .await
+                }
+            })
         } else {
             None
         };
@@ -2124,7 +2391,9 @@ impl RequestForwarder {
         // 获取认证头（提前准备，用于内联替换），同时保留仅用于日志脱敏的
         // 精确认证材料。实际日志永远不输出这些值。
         let mut log_secrets: Vec<String> = Vec::new();
-        let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
+        let mut auth_headers = if managed_account.is_some() {
+            Vec::new()
+        } else if let Some(mut auth) = adapter.extract_auth(provider) {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
                 if let Some(manager) = self
@@ -2747,8 +3016,48 @@ impl RequestForwarder {
             }
         }
 
+        // Test-only sealed owner transport is checked after the original vendor
+        // credential resolver and before either transport can send any bytes.
+        #[cfg(all(test, feature = "gui"))]
+        let vendor_fixture = super::opencode_vendor_fixture::prepare_output(
+            extensions,
+            &self.router.managed_secret_session(),
+            provider,
+            &url,
+        )?;
+        #[cfg(all(test, feature = "gui"))]
+        if vendor_fixture.is_some() && !is_socks_proxy && preserve_exact_header_case {
+            return Err(ProxyError::ConfigError(
+                "synthetic_vendor_transport_unavailable".into(),
+            ));
+        }
+
         // 发送请求
-        let response = if is_socks_proxy || !preserve_exact_header_case {
+        if let Some(fence) = &vendor_fence {
+            fence.check()?;
+        }
+        let mut response_lease = vendor_fence.map(|fence| {
+            ResponseLease::new(move || {
+                let fence = fence.clone();
+                async move { fence.check() }
+            })
+        });
+        let response_result = async {
+        let response = if let Some(prepared) = prepared_account {
+            if method != http::Method::POST
+                || !prepared.accepts_endpoint(effective_endpoint.as_str())
+            {
+                return Err(ProxyError::InvalidRequest(
+                    "Managed account requires its supported inference route".into(),
+                ));
+            }
+            let owner_body = prepared.prepare_body(filtered_body.clone(), body);
+            let (response, fence) = prepared
+                .dispatch(owner_body, timeout, extensions)
+                .await?;
+            response_lease = Some(fence);
+            response
+        } else if is_socks_proxy || !preserve_exact_header_case {
             // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
             // 连接池，避免 raw TCP/TLS path 每次请求都重新握手。SOCKS5 也只能走 reqwest。
             log::debug!(
@@ -2760,7 +3069,14 @@ impl RequestForwarder {
                 super::http_client::get_authenticated()
             }
             .map_err(ProxyError::ForwardFailed)?;
-            let mut request = client.request(method.clone(), &url);
+            #[cfg(all(test, feature = "gui"))]
+            let (client, request_url) = match vendor_fixture.as_ref() {
+                Some(fixture) => (fixture.client(), fixture.url()),
+                None => (client, url.as_str()),
+            };
+            #[cfg(not(all(test, feature = "gui")))]
+            let request_url = url.as_str();
+            let mut request = client.request(method.clone(), request_url);
             if request_is_streaming {
                 // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
                 // 的首包/静默期超时控制，避免长流被总时长误杀。
@@ -2811,48 +3127,74 @@ impl RequestForwarder {
             )
             .await?
         };
+        Ok::<_, ProxyError>(response)
+        }.await;
+        if let Some(lease) = &response_lease {
+            lease.check().await?;
+        }
+        let response = response_result?;
 
         // 检查响应状态
         let status = response.status();
 
         if status.is_success() {
-            let mut response = self
-                .prepare_success_response_for_failover(response, request_is_streaming)
-                .await?;
-            // Streaming requests normally return SSE. If a compatible gateway
-            // explicitly returns JSON instead, buffer and validate it inside the retry
-            // loop as well so a 2xx Anthropic error envelope can still fail over. Do
-            // not buffer unknown content types: some gateways omit the SSE header.
-            if codex_responses_to_anthropic && (!request_is_streaming || response.is_json()) {
-                response = self
-                    .validate_codex_anthropic_success_response(response)
+            let prepared = async {
+                let mut response = self
+                    .prepare_success_response_for_failover(response, request_is_streaming)
                     .await?;
-            } else if budget_binding.is_none()
-                && matches!(
-                    resolved_claude_api_format.as_deref(),
-                    Some("openai_responses")
-                )
-            {
-                if !request_is_streaming || response.is_json() {
-                    // Claude→Responses gateways can also return a semantic failure in an
-                    // HTTP 2xx Response object. Validate buffered/JSON bodies inside the
-                    // retry loop so an early failure can still select another provider.
-                    response = self.validate_responses_success_response(response).await?;
-                } else {
-                    // Delay committing the downstream stream until the upstream emits
-                    // either productive output or a valid non-failure terminal event.
-                    // A response.failed/error before output remains failover-safe.
-                    response = self.validate_responses_stream_start(response).await?;
+                // Streaming requests normally return SSE. If a compatible gateway
+                // explicitly returns JSON instead, buffer and validate it inside the retry
+                // loop as well so a 2xx Anthropic error envelope can still fail over. Do
+                // not buffer unknown content types: some gateways omit the SSE header.
+                if codex_responses_to_anthropic && (!request_is_streaming || response.is_json()) {
+                    response = self
+                        .validate_codex_anthropic_success_response(response)
+                        .await?;
+                } else if budget_binding.is_none()
+                    && matches!(
+                        resolved_claude_api_format.as_deref(),
+                        Some("openai_responses")
+                    )
+                {
+                    if !request_is_streaming || response.is_json() {
+                        // Claude→Responses gateways can also return a semantic failure in an
+                        // HTTP 2xx Response object. Validate buffered/JSON bodies inside the
+                        // retry loop so an early failure can still select another provider.
+                        response = self.validate_responses_success_response(response).await?;
+                    } else {
+                        // Delay committing the downstream stream until the upstream emits
+                        // either productive output or a valid non-failure terminal event.
+                        // A response.failed/error before output remains failover-safe.
+                        response = self.validate_responses_stream_start(response).await?;
+                    }
                 }
+                Ok::<_, ProxyError>(response)
             }
-            Ok((response, resolved_claude_api_format, outbound_model))
+            .await;
+            // An owner may invalidate a response while prime/buffer or a
+            // protocol validator consumes it. Check before exposing either
+            // buffered data OR a transport-shaped error to the retry owner.
+            if let Some(lease) = &response_lease {
+                lease.check().await?;
+            }
+            let response = prepared?;
+            Ok((
+                response,
+                resolved_claude_api_format,
+                outbound_model,
+                response_lease,
+            ))
         } else {
             let status_code = status.as_u16();
             // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
             let encoding = get_content_encoding(response.headers());
-            let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+            let raw_result = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await;
+            if let Some(lease) = &response_lease {
+                lease.check().await?;
+            }
+            let raw = raw_result?;
             let decoded = match encoding {
                 Some(encoding) => {
                     match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
@@ -3192,6 +3534,27 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        if super::qoder_http::enabled(provider) {
+            // These exact local failures occur before SDK task admission. The
+            // worker does not expose trustworthy 401/429/permission categories;
+            // generic errors, timeouts and partial output must never replay.
+            return match error {
+                ProxyError::AuthError(code) if code == "qoder_auth_required" => {
+                    ErrorCategory::Retryable
+                }
+                ProxyError::ConfigError(code)
+                    if matches!(
+                        code.as_str(),
+                        "qoder_runtime_unavailable"
+                            | "qoder_runtime_node_unavailable"
+                            | "qoder_runtime_admission_failed"
+                    ) =>
+                {
+                    ErrorCategory::Retryable
+                }
+                _ => ErrorCategory::NonRetryable,
+            };
+        }
         if super::providers::workbuddy_acp::enabled(provider) {
             return ErrorCategory::NonRetryable;
         }
@@ -4361,6 +4724,7 @@ mod tests {
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
             non_streaming_timeout,
             streaming_first_byte_timeout,
+            streaming_idle_timeout: Duration::ZERO,
             max_attempts: 1,
             model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         }
@@ -6233,5 +6597,79 @@ mod tests {
         });
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));
+    }
+}
+
+#[cfg(test)]
+mod managed_response_lease_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    async fn guarded(valid: Arc<AtomicBool>) -> ActiveConnectionGuard {
+        let mut guard =
+            ActiveConnectionGuard::acquire(Arc::new(RwLock::new(ProxyStatus::default()))).await;
+        guard.response_lease = Some(ResponseLease::new(move || {
+            let valid = valid.clone();
+            async move {
+                if valid.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(ProxyError::Internal(
+                        "managed account no longer available".into(),
+                    ))
+                }
+            }
+        }));
+        guard
+    }
+
+    #[tokio::test]
+    async fn buffered_body_rechecks_account_after_response_construction() {
+        let valid = Arc::new(AtomicBool::new(true));
+        let body = final_buffered_body(
+            Some(guarded(valid.clone()).await),
+            Bytes::from_static(b"private result"),
+        );
+        valid.store(false, Ordering::SeqCst);
+        assert!(axum::body::to_bytes(body, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn buffered_body_preserves_valid_account_result() {
+        let body = final_buffered_body(
+            Some(guarded(Arc::new(AtomicBool::new(true))).await),
+            Bytes::from_static(b"expected result"),
+        );
+        assert_eq!(
+            axum::body::to_bytes(body, 1024).await.unwrap(),
+            "expected result"
+        );
+    }
+
+    #[tokio::test]
+    async fn transformed_stream_rechecks_before_replaying_primed_chunk() {
+        use crate::relay::model_verification::passive::PassiveIngress;
+        let valid = Arc::new(AtomicBool::new(true));
+        let guard = guarded(valid.clone()).await;
+        let (ingress, _receiver) = PassiveIngress::channel(1);
+        // Represents the existing transformer's already-produced output, not
+        // another upstream request or account fixture.
+        let input = futures::stream::iter([Ok(Bytes::from_static(b"data: transformed\n\n"))]);
+        let stream = super::super::response_processor::create_logged_passthrough_stream(
+            input,
+            "LeaseTest",
+            None,
+            super::super::handler_context::StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            Some(guard),
+            None,
+            ingress,
+        );
+        tokio::pin!(stream);
+        valid.store(false, Ordering::SeqCst);
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
     }
 }

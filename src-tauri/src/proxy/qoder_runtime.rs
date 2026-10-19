@@ -11,38 +11,6 @@ pub enum RuntimeError {
     SdkLoadFailed,
     SdkRuntimeMissing,
 }
-impl RuntimeError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::NodeUnavailable => "qoder_node_unavailable",
-            Self::NodeVersionUnsupported => "qoder_node_version_unsupported",
-            Self::SdkMissing => "qoder_sdk_missing",
-            Self::SdkVersionUnsupported => "qoder_sdk_version_unsupported",
-            Self::SdkPathInvalid => "qoder_sdk_path_invalid",
-            Self::SdkLoadFailed => "qoder_sdk_load_failed",
-            Self::SdkRuntimeMissing => "qoder_sdk_runtime_missing",
-        }
-    }
-    pub fn message(&self) -> &'static str {
-        match self {
-            Self::NodeUnavailable => "Qoder requires an available Node.js executable.",
-            Self::NodeVersionUnsupported => "Qoder requires Node.js 22 or newer.",
-            Self::SdkMissing => {
-                "Install Qoder SDK 1.0.53 in the application's external runtime directory."
-            }
-            Self::SdkVersionUnsupported => {
-                "Qoder requires SDK 1.0.53 and its matching official Worker runtime."
-            }
-            Self::SdkPathInvalid => {
-                "Qoder SDK files must remain inside the application's runtime directory."
-            }
-            Self::SdkLoadFailed => "Qoder SDK could not load; repair its official dependencies.",
-            Self::SdkRuntimeMissing => {
-                "Qoder Worker runtime is incomplete; repair the official SDK installation."
-            }
-        }
-    }
-}
 pub async fn resolve_runtime(
     node: PathBuf,
     worker: PathBuf,

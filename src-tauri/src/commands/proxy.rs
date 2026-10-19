@@ -71,10 +71,25 @@ pub async fn set_proxy_takeover_for_app(
     state: tauri::State<'_, AppState>,
     app_type: String,
     enabled: bool,
+    initial_route: Option<crate::mode::controller::InitialProxyRoute>,
 ) -> Result<(), String> {
     state
         .proxy_service
-        .set_takeover_for_app(&app_type, enabled)
+        .set_takeover_for_app_with_initial_route(&app_type, enabled, initial_route)
+        .await
+}
+
+/// Prepare an explicit first route using original mode/native revision evidence.
+#[tauri::command]
+pub async fn prepare_proxy_takeover_request(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    provider_id: String,
+    request_id: String,
+) -> Result<crate::mode::state::SaveRequest, String> {
+    state
+        .proxy_service
+        .prepare_proxy_takeover_request(&app_type, &provider_id, &request_id)
         .await
 }
 

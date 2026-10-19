@@ -189,6 +189,41 @@ struct CredentialBindings {
     coding: Option<[u8; 32]>,
 }
 impl SessionCheckReport {
+    /// A rejected inference credential is an authentication fact, not proof of
+    /// exhausted quota or an unavailable subscription. Keep unrelated evidence.
+    pub(crate) fn start_auth_rejected(
+        native: &NativeCipher,
+        snapshot: &AccountSnapshot,
+        previous: Option<&Self>,
+        checked_at: u64,
+    ) -> Self {
+        let credentials = Credentials::load(native, snapshot);
+        let mut report = previous
+            .map(|old| old.retain_matching(native, snapshot))
+            .unwrap_or_else(|| Self::unverified(snapshot, &credentials));
+        let source = credentials.source(credentials.start_index);
+        report.display.start = StartCheck {
+            check: CheckResult {
+                state: CheckState::Unavailable,
+                reason: Some(CheckReason::AuthRejected),
+                checked_at: Some(checked_at),
+                source,
+                latest_failure: None,
+            },
+            entitlement: EntitlementState::Unknown,
+            effective_at_seconds: None,
+            quota: unknown(CheckReason::AuthRejected, source, Some(checked_at)),
+            server_time_seconds: None,
+            plans: Vec::new(),
+            buckets: Vec::new(),
+        };
+        report
+    }
+
+    pub(crate) fn start_needs_login(&self) -> bool {
+        self.display.start.check.reason == Some(CheckReason::AuthRejected)
+    }
+
     pub(crate) fn display(&self) -> SessionCheckDisplay {
         self.display.clone()
     }
@@ -1079,3 +1114,41 @@ fn parse_coding_quota(
 #[cfg(test)]
 #[path = "session_checks_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod inference_auth_tests {
+    use super::super::native::tests::{native_document, TEST_CONTEXT, TEST_SECRET};
+    use super::*;
+
+    #[test]
+    fn inference_auth_failure_preserves_other_credentials_and_never_claims_zero_balance() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        let snapshot = native
+            .inspect(&native_document(
+                OAuthFamily::Zai,
+                "fixture-account",
+                "fixture-secret",
+            ))
+            .unwrap();
+        let credentials = Credentials::load(&native, &snapshot);
+        let mut previous = SessionCheckReport::unverified(&snapshot, &credentials);
+        previous.display.business.check = accepted(Some(CredentialSource::BusinessToken), 1);
+        previous.display.coding.check = accepted(Some(CredentialSource::CodingKey), 2);
+        previous.display.start.check = accepted(Some(CredentialSource::GlobalStartJwt), 3);
+        previous.display.start.entitlement = EntitlementState::Available;
+        let rejected =
+            SessionCheckReport::start_auth_rejected(&native, &snapshot, Some(&previous), 4);
+        assert!(rejected.start_needs_login());
+        assert_eq!(rejected.display.business, previous.display.business);
+        assert_eq!(rejected.display.coding, previous.display.coding);
+        assert_eq!(
+            rejected.display.start.entitlement,
+            EntitlementState::Unknown
+        );
+        assert_eq!(rejected.display.start.quota.state, CheckState::Unknown);
+        assert!(rejected.display.start.buckets.is_empty());
+        assert!(rejected
+            .preserve_previous_acceptance(&previous, &native, &snapshot)
+            .start_needs_login());
+    }
+}

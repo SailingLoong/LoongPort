@@ -1020,12 +1020,46 @@ fn valid_digest(value: &Option<String>) -> bool {
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
     if let Some(request) = &target.save_request {
         request.validate()?;
-        if op
-            != (if request.scope == state::SaveScope::CodexCatalogRestore {
-                state::op::CATALOG
-            } else {
-                state::op::APPLY
-            })
+        let explicit_enter =
+            op == state::op::ENTER && request.scope == state::SaveScope::ApplicationRouting;
+        if request.scope == state::SaveScope::ApplicationRouting && !explicit_enter {
+            if let Some(route) = target
+                .state
+                .as_ref()
+                .and_then(|mode| mode.proxy_route.as_deref())
+            {
+                if matches!(app, "claude" | "codex")
+                    && request.draft_digest
+                        == crate::mode::controller::proxy_enter_digest(app, route)?
+                {
+                    return Err(invalid_pending());
+                }
+            }
+        }
+        if explicit_enter {
+            let mode = target.state.as_ref().ok_or_else(invalid_pending)?;
+            let route = mode.proxy_route.as_deref().ok_or_else(invalid_pending)?;
+            if !matches!(app, "claude" | "codex")
+                || mode.mode != Some(state::Mode::Proxy)
+                || !mode.attached
+                || target.pointer.is_some()
+                || target.saved_row.is_some()
+                || target.model_preference.is_some()
+                || target.routing_order.is_some()
+                || target.stack.is_some()
+                || !target.extra.is_empty()
+                || request.draft_digest != crate::mode::controller::proxy_enter_digest(app, route)?
+            {
+                return Err(invalid_pending());
+            }
+        }
+        if !explicit_enter
+            && op
+                != (if request.scope == state::SaveScope::CodexCatalogRestore {
+                    state::op::CATALOG
+                } else {
+                    state::op::APPLY
+                })
         {
             return Err(invalid_pending());
         }
@@ -2105,3 +2139,51 @@ pub(crate) fn admit_metadata_write(
 #[cfg(test)]
 #[path = "operation_model_settings_scope_tests.rs"]
 mod model_settings_scope_tests;
+
+#[cfg(test)]
+mod bootstrap_receipt_tests {
+    use super::*;
+    fn target() -> PendingTarget {
+        let mut target = PendingTarget::mode(state::ModeState {
+            mode: Some(state::Mode::Proxy),
+            attached: true,
+            proxy_route: Some("chosen".into()),
+            ..Default::default()
+        });
+        target.save_request = Some(state::SaveRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            scope: state::SaveScope::ApplicationRouting,
+            provider_id: None,
+            draft_digest: crate::mode::controller::proxy_enter_digest("claude", "chosen").unwrap(),
+            revision: "a".repeat(64),
+        });
+        target
+    }
+    #[test]
+    fn enter_receipt_is_exactly_scoped_and_other_operations_cannot_reuse_it() {
+        let target = target();
+        assert!(validate_operation("claude", state::op::ENTER, &target).is_ok());
+        for op in [
+            state::op::APPLY,
+            state::op::ATTACH,
+            state::op::ROUTE,
+            state::op::EXIT,
+        ] {
+            assert!(validate_operation("claude", op, &target).is_err());
+        }
+        assert!(validate_operation("codex", state::op::ENTER, &target).is_err());
+        let mut changed = target.clone();
+        changed.state.as_mut().unwrap().proxy_route = Some("other".into());
+        assert!(validate_operation("claude", state::op::ENTER, &changed).is_err());
+        let mut changed = target.clone();
+        changed.pointer = Some("chosen".into());
+        assert!(validate_operation("claude", state::op::ENTER, &changed).is_err());
+        let mut changed = target.clone();
+        changed.state.as_mut().unwrap().attached = false;
+        assert!(validate_operation("claude", state::op::ENTER, &changed).is_err());
+        let mut ordinary = target;
+        ordinary.save_request.as_mut().unwrap().draft_digest = "b".repeat(64);
+        assert!(validate_operation("claude", state::op::ENTER, &ordinary).is_err());
+        assert!(validate_operation("claude", state::op::APPLY, &ordinary).is_ok());
+    }
+}

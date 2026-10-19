@@ -215,6 +215,8 @@ pub(crate) async fn finish<T: Transport>(
         .find(|r| r.account.id(&binding.vault_id) == account_id)
     {
         row.account = account;
+        // This is the legacy check-in grant; never revive a prior inference grant.
+        row.inference = None;
     } else {
         rows.push(SavedAccount::new(account));
     }

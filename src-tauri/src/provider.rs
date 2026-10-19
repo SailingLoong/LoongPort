@@ -90,6 +90,21 @@ impl Provider {
             || self.is_codex_oauth()
             || self.is_xai_oauth()
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
+            || self
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.auth_binding.as_ref())
+                .is_some_and(|binding| {
+                    binding.source == AuthBindingSource::ManagedAccount
+                        && matches!(
+                            binding.auth_provider.as_deref(),
+                            Some("workbuddy" | "minimax_code" | "zcode_start_plan" | "trae")
+                        )
+                        && binding
+                            .account_id
+                            .as_deref()
+                            .is_some_and(|id| !id.trim().is_empty())
+                })
     }
 
     /// 账号级故障域：同站同账号的托管档共享同一份凭证与余额 —— 一家吃到

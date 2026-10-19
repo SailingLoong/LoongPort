@@ -191,7 +191,7 @@ impl SecretSession {
 
     /// Capture and recheck while holding the session read guard around the
     /// protected operation. Unblocking must never revive an earlier lease.
-    #[cfg(any(feature = "gui", test))]
+    #[cfg(any(feature = "gui", feature = "test-hooks", test))]
     pub(crate) fn lifecycle_epoch(&self) -> u64 {
         self.lifecycle_epoch.load(Ordering::Acquire)
     }

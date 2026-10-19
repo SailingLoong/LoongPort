@@ -1,5 +1,6 @@
-//! Chat Completions text-only dispatch for an already selected Qoder account.
+//! Text-only Qoder SDK transport, consumed by the original per-provider pool.
 use super::qoder_host::{HostConfig, QoderHost};
+use super::{error::ProxyError, hyper_client::ProxyResponse};
 use axum::{
     body::Body,
     http::StatusCode,
@@ -8,6 +9,202 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
+
+pub(crate) fn enabled(provider: &crate::provider::Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("qoder_sdk")
+}
+
+fn unsupported() -> ProxyError {
+    ProxyError::InvalidRequest("unsupported_qoder_input".into())
+}
+
+fn no_tools(body: &Value) -> bool {
+    body.get("tools")
+        .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+        && body
+            .get("tool_choice")
+            .is_none_or(|value| matches!(value.as_str(), Some("none" | "auto")))
+        && body.get("previous_response_id").is_none()
+}
+
+fn plain_message(message: &Value, responses: bool) -> bool {
+    let Some(object) = message.as_object() else {
+        return false;
+    };
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "role" | "content" | "type" | "id" | "status"))
+        || !matches!(
+            message["role"].as_str(),
+            Some("system" | "developer" | "user" | "assistant")
+        )
+        || message.get("type").is_some_and(|value| value != "message")
+    {
+        return false;
+    }
+    if message["content"].is_string() {
+        return true;
+    }
+    responses
+        && message["content"].as_array().is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    part.as_object().is_some_and(|object| {
+                        object
+                            .keys()
+                            .all(|key| matches!(key.as_str(), "type" | "text"))
+                    }) && matches!(
+                        part["type"].as_str(),
+                        Some("input_text" | "output_text" | "text")
+                    ) && part["text"].is_string()
+                })
+        })
+}
+
+/// Check the original request before any permissive general conversion can
+/// discard unknown tools/media/history. This is candidate capability admission,
+/// not an account-health failure. No query or credential access occurs here.
+pub(crate) fn chat_request(body: &Value, endpoint: &str) -> Result<Value, ProxyError> {
+    let endpoint = endpoint.split('?').next().unwrap_or(endpoint);
+    let responses = matches!(endpoint, "/responses" | "/v1/responses");
+    if !responses && !matches!(endpoint, "/chat/completions" | "/v1/chat/completions") {
+        return Err(unsupported());
+    }
+    let Some(object) = body.as_object() else {
+        return Err(unsupported());
+    };
+    if !no_tools(body)
+        || body.get("stream").is_some_and(|value| !value.is_boolean())
+        || object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "model" | "stream" | "input" | "instructions" | "messages" | "tools" | "tool_choice"
+            // Existing untrusted executable/auth hints remain inert, never a
+            // source of credentials, SDK options or paths.
+            | "options" | "nodePath" | "sdkRoot"
+            )
+        })
+    {
+        return Err(unsupported());
+    }
+    if !responses {
+        let messages = body["messages"]
+            .as_array()
+            .filter(|messages| !messages.is_empty())
+            .ok_or_else(unsupported)?;
+        if body.get("input").is_some()
+            || body.get("instructions").is_some()
+            || !messages.iter().all(|message| plain_message(message, false))
+            || messages.last().and_then(|message| message["role"].as_str()) != Some("user")
+        {
+            return Err(unsupported());
+        }
+        return Ok(body.clone());
+    }
+    if body.get("messages").is_some()
+        || body
+            .get("instructions")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Err(unsupported());
+    }
+    let inputs = match &body["input"] {
+        Value::String(_) => vec![body["input"].clone()],
+        Value::Array(items)
+            if !items.is_empty() && items.iter().all(|item| plain_message(item, true)) =>
+        {
+            items.clone()
+        }
+        _ => return Err(unsupported()),
+    };
+    // Reuse the mature text/content converter one message at a time. Its batch
+    // compatibility pass collapses all system/developer turns to the head;
+    // Qoder accepts ordered history, so neither reorder nor role collapse is valid.
+    let mut envelope = body.clone();
+    envelope.as_object_mut().unwrap().remove("input");
+    let mut chat = super::providers::transform_codex_chat::responses_to_chat_completions(envelope)?;
+    let mut messages = chat["messages"].as_array().cloned().unwrap_or_default();
+    for input in inputs {
+        let original_role = input.get("role").cloned();
+        let single = super::providers::transform_codex_chat::responses_to_chat_completions(
+            json!({
+                "model":body["model"], "input": if input.is_string() { input.clone() } else { json!([input]) }
+            }),
+        )?;
+        let mut one = single["messages"]
+            .as_array()
+            .filter(|messages| messages.len() == 1)
+            .cloned()
+            .ok_or_else(unsupported)?;
+        if let Some(role) = original_role {
+            one[0]["role"] = role;
+        }
+        if !one[0]["content"].is_string() {
+            return Err(unsupported());
+        }
+        messages.extend(one);
+    }
+    if messages.last().and_then(|message| message["role"].as_str()) != Some("user") {
+        return Err(unsupported());
+    }
+    chat["messages"] = json!(messages);
+    Ok(chat)
+}
+
+/// The pool owns account selection, retry admission, health and its connection
+/// guard. Delay committing a streaming attempt until actual text or a verified
+/// clean success; progress/status events are not productive output.
+pub(crate) async fn forward(body: Value, dispatch: Dispatch) -> Result<ProxyResponse, ProxyError> {
+    use futures::StreamExt;
+    let streaming = body["stream"] == true;
+    let response = handle(body, dispatch, ()).await;
+    let (parts, body) = response.into_parts();
+    if !parts.status.is_success() {
+        // The worker has no authenticated HTTP status/error taxonomy. Never
+        // interpret a generic SDK failure as a retryable 401/429/5xx.
+        return Err(ProxyError::ForwardFailed(
+            "qoder_task_outcome_unverified".into(),
+        ));
+    }
+    if !streaming {
+        let bytes = axum::body::to_bytes(body, super::hyper_client::MAX_RESPONSE_BODY_BYTES)
+            .await
+            .map_err(|_| ProxyError::ForwardFailed("qoder_task_outcome_unverified".into()))?;
+        return Ok(ProxyResponse::buffered(parts.status, parts.headers, bytes));
+    }
+    let mut stream = body.into_data_stream();
+    let first = loop {
+        match stream.next().await {
+            Some(Ok(bytes)) if bytes.is_empty() => continue,
+            Some(Ok(bytes)) => break bytes,
+            _ => {
+                return Err(ProxyError::ForwardFailed(
+                    "qoder_task_outcome_unverified".into(),
+                ))
+            }
+        }
+    };
+    let value = std::str::from_utf8(&first)
+        .ok()
+        .and_then(|frame| frame.strip_prefix("data: "))
+        .and_then(|frame| serde_json::from_str::<Value>(frame.trim()).ok());
+    if !value.is_some_and(|value| value.get("error").is_none() && value["choices"].is_array()) {
+        return Err(ProxyError::ForwardFailed(
+            "qoder_task_outcome_unverified".into(),
+        ));
+    }
+    let output = async_stream::stream! {
+        yield Ok(first);
+        while let Some(item) = stream.next().await {
+            yield item.map_err(|_| std::io::Error::other("qoder_stream_failed"));
+        }
+    };
+    Ok(ProxyResponse::streamed(parts.status, parts.headers, output))
+}
 
 pub struct Dispatch {
     pub host: HostConfig,
@@ -32,10 +229,7 @@ fn prepare(body: &Value, dispatch: &Dispatch) -> Result<Value, (StatusCode, &'st
         .as_array()
         .filter(|v| !v.is_empty())
         .ok_or((StatusCode::BAD_REQUEST, "invalid_messages"))?;
-    if body.get("tools").is_some()
-        || body.get("tool_choice").is_some()
-        || body.get("previous_response_id").is_some()
-    {
+    if !no_tools(body) {
         return Err((StatusCode::BAD_REQUEST, "unsupported_qoder_input"));
     }
     for message in messages {
@@ -89,17 +283,17 @@ pub async fn handle(body: Value, dispatch: Dispatch, guard: impl Send + 'static)
     let events = async_stream::stream! {
         let _guard=guard;
         let mut texts:HashMap<String,String>=HashMap::new();let mut terminal=false;let mut first=true;
+        let first_deadline = (dispatch.first_byte_timeout > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(dispatch.first_byte_timeout));
         loop {
-            let seconds=if first{dispatch.first_byte_timeout}else{dispatch.idle_timeout};
-            let next=if seconds==0{host.next_event().await}else{match tokio::time::timeout(Duration::from_secs(seconds),host.next_event()).await{Ok(r)=>r,Err(_)=>{let _=host.cancel().await;yield sse(json!({"error":{"code":"qoder_timeout"}}));break;}}};
+            let deadline = if first { first_deadline } else { (dispatch.idle_timeout > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(dispatch.idle_timeout)) };
+            let next=if let Some(deadline)=deadline {match tokio::time::timeout_at(deadline,host.next_event()).await{Ok(r)=>r,Err(_)=>{let _=host.cancel().await;yield sse(json!({"error":{"code":"qoder_timeout"}}));break;}}} else {host.next_event().await};
             match next {
                 Ok(Some(event))=>{
-                    first=false;
                     match event["type"].as_str(){
                         Some("text_delta"|"text_snapshot")=>{
                             let key=event["messageId"].as_str().unwrap_or("").to_owned();let old=texts.entry(key).or_default();let text=event["text"].as_str().unwrap_or("");
                             let delta=if event["type"]=="text_snapshot" {match text.strip_prefix(old.as_str()){Some(t)=>t.to_owned(),None=>{yield sse(json!({"error":{"code":"qoder_text_conflict"}}));break;}}}else{text.to_owned()};
-                            old.push_str(&delta);if !delta.is_empty(){yield sse(chunk(&stream_id,&stream_model,Some(&delta),false));}
+                            old.push_str(&delta);if !delta.is_empty(){first=false;yield sse(chunk(&stream_id,&stream_model,Some(&delta),false));}
                         }
                         Some("terminal")=>{if event["status"]!="success"{yield sse(json!({"error":{"code":"qoder_task_failed"}}));break;}terminal=true;}
                         Some("tool_call"|"tool_result"|"permission_denied")=>{yield sse(json!({"error":{"code":"unsupported_qoder_tool_event"}}));break;}
@@ -295,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn http_unsupported_tools_fail_before_worker_spawn() {
         let mut b = body(false);
-        b["tools"] = json!([]);
+        b["tools"] = json!([{"type":"function","function":{"name":"unsupported"}}]);
         assert_eq!(
             request("does-not-exist", b).await.status(),
             StatusCode::BAD_REQUEST

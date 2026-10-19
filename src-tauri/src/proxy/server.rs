@@ -496,6 +496,281 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::Mutex;
 
+    // These are product-router regressions, not a substitute router. The SDK is
+    // synthetic; all candidates still pass the real DB/router/forwarder owner.
+    async fn qoder_pool_request(
+        candidates: &[(&str, bool)],
+        endpoint: &str,
+        body: Value,
+    ) -> (axum::response::Response, ProxyServer, tempfile::TempDir) {
+        use tower::ServiceExt;
+        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+        let directory = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        for (position, (id, has_auth)) in candidates.iter().enumerate() {
+            let mut provider = Provider::with_id(
+                (*id).into(),
+                (*id).into(),
+                json!({
+                    "auth": if *has_auth { json!({"OPENAI_API_KEY":format!("synthetic:{id}")}) } else { json!({}) },
+                    "config":"model_provider = \"qoder\"\n[model_providers.qoder]\nbase_url = \"http://127.0.0.1:9\"\nwire_api = \"responses\"\n"
+                }),
+                None,
+            );
+            provider.sort_index = Some(position);
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("qoder_sdk".into()),
+                local_proxy_request_overrides: (*id == "qoder-incompatible").then(|| {
+                    crate::provider::LocalProxyRequestOverrides {
+                        body: Some(json!({"tools":[{"type":"function","name":"unsupported"}]})),
+                        ..Default::default()
+                    }
+                }),
+                ..Default::default()
+            });
+            db.save_provider("codex", &provider).unwrap();
+            db.add_to_failover_queue("codex", id).unwrap();
+        }
+        db.set_current_provider("codex", candidates[0].0).unwrap();
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = true;
+        config.max_retries = 2;
+        config.streaming_first_byte_timeout = 3;
+        config.streaming_idle_timeout = 3;
+        config.non_streaming_timeout = 5;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        let proxy = ProxyServer::new(
+            ProxyConfig::default(),
+            db,
+            #[cfg(feature = "gui")]
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+        );
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        let runtime = super::super::qoder_host::HostConfig {
+            node: std::env::var_os("QODER_HOST_NODE")
+                .unwrap_or_else(|| "node".into())
+                .into(),
+            worker: root.join("tests/qoder-runtime/fixtures/account-pool.mjs"),
+            // A trusted test-only fixture writes an attempt marker here. HTTP
+            // fields cannot select this path or an executable.
+            sdk_root: Some(directory.path().to_owned()),
+        };
+        let response = proxy
+            .build_router()
+            .layer(axum::Extension(runtime))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer untrusted-client")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (response, proxy, directory)
+    }
+
+    async fn qoder_pool_assert_idle(proxy: &ProxyServer) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while proxy.state.status.read().await.active_connections != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("original connection guard must be released");
+    }
+
+    fn qoder_pool_attempts(directory: &tempfile::TempDir) -> Vec<String> {
+        std::fs::read_to_string(directory.path().join("attempts.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["account"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn qoder_responses_pool_uses_second_account_after_unsent_auth_failure() {
+        for streaming in [false, true] {
+            let (response, proxy, directory) = qoder_pool_request(
+                &[("qoder-missing", false), ("qoder-b", true)], "/v1/responses",
+                json!({"model":"fixture","stream":streaming,"tools":[],"instructions":"leading system","input":[
+                    {"role":"user","content":"first"},
+                    {"role":"developer","content":"middle developer"},
+                    {"role":"assistant","content":"prior"},
+                    {"role":"system","content":"middle system"},
+                    {"role":"user","content":"second"}
+                ]}),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(text.contains("ordered-history-and-auth-ok"), "{text}");
+            if streaming {
+                assert!(text.contains("response.completed"));
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&text).unwrap()["object"],
+                    "response"
+                );
+            }
+            assert_eq!(qoder_pool_attempts(&directory), vec!["qoder-b"]);
+            qoder_pool_assert_idle(&proxy).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_provider_override_exclusion_keeps_compatible_candidate() {
+        let (response, proxy, directory) = qoder_pool_request(
+            &[("qoder-incompatible", true), ("qoder-b", true)],
+            "/v1/responses",
+            json!({"model":"fixture","input":"hello"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(qoder_pool_attempts(&directory), vec!["qoder-b"]);
+        assert_eq!(proxy.state.status.read().await.failed_requests, 0);
+        qoder_pool_assert_idle(&proxy).await;
+    }
+
+    #[tokio::test]
+    async fn qoder_invalid_final_model_is_bad_request_without_runtime_or_account_attempt() {
+        for model in [Value::Null, json!(""), json!(42)] {
+            let (response, proxy, directory) = qoder_pool_request(
+                &[("qoder-a", false), ("qoder-b", false)],
+                "/v1/responses",
+                json!({"model":model,"input":"hello"}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("invalid_model"));
+            assert!(qoder_pool_attempts(&directory).is_empty());
+            assert!(proxy
+                .state
+                .status
+                .read()
+                .await
+                .current_provider_id
+                .is_none());
+            qoder_pool_assert_idle(&proxy).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_chat_route_uses_original_pool_too() {
+        let (response, _proxy, directory) = qoder_pool_request(
+            &[("qoder-missing", false), ("qoder-b", true)],
+            "/v1/chat/completions",
+            json!({"model":"fixture","messages":[{"role":"user","content":"hello"}]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(qoder_pool_attempts(&directory), vec!["qoder-b"]);
+    }
+
+    #[tokio::test]
+    async fn qoder_unknown_task_failure_never_replays_on_another_account() {
+        for streaming in [false, true] {
+            let (response, _proxy, directory) = qoder_pool_request(
+                &[("qoder-unknown", true), ("qoder-b", true)],
+                "/v1/responses",
+                json!({"model":"fixture","stream":streaming,"input":"hello"}),
+            )
+            .await;
+            assert!(!response.status().is_success());
+            let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(qoder_pool_attempts(&directory), vec!["qoder-unknown"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_output_then_failure_never_replays_or_emits_completed() {
+        let (response, proxy, directory) = qoder_pool_request(
+            &[("qoder-partial", true), ("qoder-b", true)],
+            "/v1/responses",
+            json!({"model":"fixture","stream":true,"input":"hello"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("partial-before-failure"));
+        assert!(!text.contains("response.completed"), "{text}");
+        assert_eq!(qoder_pool_attempts(&directory), vec!["qoder-partial"]);
+        qoder_pool_assert_idle(&proxy).await;
+    }
+
+    #[tokio::test]
+    async fn qoder_capability_exclusions_never_launch_or_mark_account_failure() {
+        for extra in [
+            json!({"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}),
+            json!({"previous_response_id":"old-response"}),
+            json!({"input":[{"type":"function_call_output","call_id":"c","output":"result"}]}),
+            json!({"input":[{"type":"unknown_future_item","text":"must not be discarded"}]}),
+            json!({"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.test/image"}]}]}),
+        ] {
+            let mut body = json!({"model":"fixture","input":"hello"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let (response, proxy, directory) = qoder_pool_request(
+                &[("qoder-a", true), ("qoder-b", true)],
+                "/v1/responses",
+                body,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(qoder_pool_attempts(&directory).is_empty());
+            qoder_pool_assert_idle(&proxy).await;
+            // No candidate became active: exclusions happen before attempts.
+            assert!(proxy
+                .state
+                .status
+                .read()
+                .await
+                .current_provider_id
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_responses_free_intent_rejects_before_any_worker() {
+        let (response, _proxy, directory) = qoder_pool_request(
+            &[("qoder-a", true), ("qoder-b", true)],
+            "/v1/responses",
+            json!({"model":"openrouter/free","input":"hello"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(qoder_pool_attempts(&directory).is_empty());
+    }
+
     /// Full product router/RequestContext/auth boundary. Run with an isolated
     /// CC_SWITCH_TEST_HOME; this test never needs an SDK or a real account.
     #[tokio::test]
@@ -681,9 +956,9 @@ mod tests {
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
-        // Admission loads the real fixed SDK/runtime; unsupported tools then
-        // reject the request before query(), so no account or model is used.
-        let body = json!({"model":"fixture","tools":[],"messages":[{"role":"user","content":"never sent"}],"nodePath":"/invalid-http-node","sdkRoot":"/invalid-http-sdk","options":{"sdkRoot":"/invalid-option-sdk","transport":"untrusted"}});
+        // Unsupported tool capability is rejected before runtime admission;
+        // untrusted HTTP hints cannot select a different executable or SDK.
+        let body = json!({"model":"fixture","tools":[{"type":"function","function":{"name":"unsupported"}}],"messages":[{"role":"user","content":"never sent"}],"nodePath":"/invalid-http-node","sdkRoot":"/invalid-http-sdk","options":{"sdkRoot":"/invalid-option-sdk","transport":"untrusted"}});
         let request = axum::http::Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
@@ -697,7 +972,12 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
-        assert_eq!(value["error"]["code"], "unsupported_qoder_input");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("unsupported_qoder_input")),
+            "{value}"
+        );
     }
 
     #[derive(Debug)]
@@ -1048,3 +1328,27 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "minimax_pool_tests.rs"]
+mod minimax_pool_tests;
+
+#[cfg(test)]
+#[path = "workbuddy_pool_tests.rs"]
+mod workbuddy_pool_tests;
+
+#[cfg(all(test, unix))]
+#[path = "zcode_pool_tests.rs"]
+mod zcode_pool_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "opencode_vendor_pool_tests.rs"]
+mod opencode_vendor_pool_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "openrouter_pool_tests.rs"]
+mod openrouter_pool_tests;
+
+#[cfg(test)]
+#[path = "trae_pool_tests.rs"]
+mod trae_pool_tests;

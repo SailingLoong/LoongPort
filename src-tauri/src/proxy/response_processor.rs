@@ -221,7 +221,7 @@ pub async fn handle_non_streaming(
     state: &ProxyState,
     parser_config: &UsageParserConfig,
     // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
-    _connection_guard: Option<ActiveConnectionGuard>,
+    connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<Response, ProxyError> {
     // 整包超时：仅在故障转移行为启用（显式开关或省心模式）且配置值非零时生效
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
@@ -327,7 +327,7 @@ pub async fn handle_non_streaming(
         builder = builder.header(key, value);
     }
 
-    let body = axum::body::Body::from(body_bytes);
+    let body = super::forwarder::final_buffered_body(connection_guard, body_bytes);
     builder.body(body).map_err(|e| {
         log::error!("[{}] 构建响应失败: {e}", ctx.tag);
         ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -848,6 +848,12 @@ pub fn create_logged_passthrough_stream(
                         }
                     }
 
+                    if let Some(guard) = &_conn_guard {
+                        if let Err(error) = guard.check_response_lease().await {
+                            yield Err(error);
+                            break;
+                        }
+                    }
                     yield Ok(bytes);
                 }
                 Some(Err(e)) => {

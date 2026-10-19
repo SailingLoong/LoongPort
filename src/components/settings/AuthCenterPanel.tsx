@@ -1,3 +1,4 @@
+import { TraeAccounts } from "@/components/trae/TraeAccounts";
 import { useEffect, useRef } from "react";
 import { ShieldCheck } from "lucide-react";
 
@@ -12,6 +13,8 @@ import type { ManagedAuthProvider } from "@/lib/api";
 import { XaiOAuthSection } from "@/components/providers/forms/XaiOAuthSection";
 import { MiniMaxCodeSection } from "@/components/providers/forms/MiniMaxCodeSection";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { ManagedAccountBootstrapSection } from "@/components/relay/ManagedAccountBootstrapSection";
+import { ManagedAccountProviderSection } from "@/components/settings/ManagedAccountProviderSection";
 
 interface AuthCenterPanelProps {
   authScrollTarget?: ManagedAuthProvider | null;
@@ -137,6 +140,10 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
         </div>
         <MiniMaxCodeSection />
       </section>
+
+      <TraeAccounts />
+      <ManagedAccountProviderSection />
+      <ManagedAccountBootstrapSection />
 
       <section
         ref={xaiOauthSectionRef}

@@ -13,6 +13,8 @@ pub(crate) mod rewrap;
 pub(crate) mod session;
 #[cfg(any(test, feature = "gui", feature = "test-hooks"))]
 pub(crate) mod startup;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod stream_guard;
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) mod testing;
 pub(crate) mod transition;

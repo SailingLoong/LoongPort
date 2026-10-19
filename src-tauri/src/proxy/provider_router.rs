@@ -58,6 +58,24 @@ impl ProviderRouter {
         }
     }
 
+    pub(crate) fn managed_secret_session(&self) -> Arc<crate::secrets::session::SecretSession> {
+        self.db.secrets.clone()
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks", test))]
+    pub(crate) fn vendor_response_fence(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<Option<crate::services::vendor_response_fence::Fence>, crate::proxy::ProxyError>
+    {
+        crate::services::vendor_response_fence::Fence::acquire(
+            self.db.clone(),
+            app.clone(),
+            provider,
+        )
+    }
+
     pub(crate) fn resolve_vendor_auth(
         &self,
         app: &AppType,

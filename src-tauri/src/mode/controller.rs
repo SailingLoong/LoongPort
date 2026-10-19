@@ -277,6 +277,9 @@ fn write_direct_with_catalog(
     target: PendingTarget,
     catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<bool, AppError> {
+    if let Some(provider) = direct {
+        crate::services::provider::managed_inference::reject_direct(provider)?;
+    }
     if *app == AppType::Codex {
         if catalog.is_none() {
             return codex_direct::apply_mode(
@@ -349,45 +352,264 @@ fn write_target_only(
         .map(|_| ())
 }
 
+/// Caller holds the existing switch lock. This reads original owners only; no recovery.
+pub(crate) fn routing_request_revision_for_service(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+    selected_provider: Option<&str>,
+) -> Result<String, AppError> {
+    // Original direct pointer owners can change while native bytes stay identical.
+    // Resolve before pinning the vault; the caller already owns the switch lock.
+    let direct_pointer = crate::mode::current::local_direct_pointer(app)?;
+    let current_pointer = service.database().get_current_provider(app.as_str())?;
+    let write = crate::mode::operation::AppWrite::begin_mode(service, app)?;
+    let live = crate::mode::state::load_app(&write.store, &write.vault, app.as_str())?;
+    let selected = selected_provider
+        .map(|id| {
+            let provider = service
+                .database()
+                .get_provider_by_id_with_vault(
+                    id,
+                    app.as_str(),
+                    service.database().secret_session(),
+                    &write.vault,
+                )?
+                .ok_or_else(|| AppError::Config("Provider does not exist".into()))?;
+            crate::database::Database::provider_update_digest(&provider)
+        })
+        .transpose()?;
+    let files = crate::mode::controller::files(app)?
+        .into_iter()
+        .map(|file| {
+            crate::live::engine::read_current(&file.path)
+                .map(|bytes| crate::live::engine::digest(bytes.as_deref()))
+                .map_err(AppError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bytes = crate::config::serialize_json_bytes(&serde_json::json!([
+        live.apps.get(app.as_str()),
+        direct_pointer,
+        current_pointer,
+        crate::database::order_profiles::snapshot(service.database(), app.as_str())?,
+        crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+        selected,
+        files,
+    ]))?;
+    Ok(crate::live::engine::sha256_hex(&bytes))
+}
+
+pub(crate) fn routing_request_status_for_db(
+    db: &crate::database::Database,
+    app: &AppType,
+    request: &crate::mode::state::SaveRequest,
+) -> Result<String, AppError> {
+    request.validate()?;
+    if request.scope != state::SaveScope::ApplicationRouting {
+        return Err(AppError::Config("mode.invalid_save_request".into()));
+    }
+    let vault = db.secret_session().read()?;
+    let live = crate::mode::state::load_app(
+        &crate::live::engine::DeviceStore::for_device(),
+        &vault,
+        app.as_str(),
+    )?;
+    let status = live
+        .apps
+        .get(app.as_str())
+        .map(|entry| crate::mode::operation::saved_request_status(app.as_str(), entry, request))
+        .transpose()?
+        .unwrap_or("notRecorded");
+    Ok(status.into())
+}
+
+/// One explicit empty-application ENTER, using the original app receipt.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InitialProxyRoute {
+    pub provider_id: String,
+    pub request: crate::mode::state::SaveRequest,
+}
+
+pub(crate) fn proxy_enter_digest(app: &str, provider_id: &str) -> Result<String, AppError> {
+    if !matches!(app, "claude" | "codex") || provider_id.trim().is_empty() {
+        return Err(AppError::Config("mode.invalid_save_request".into()));
+    }
+    let bytes = crate::config::serialize_json_bytes(&serde_json::json!([
+        "explicitProxyEnter-v1",
+        app,
+        provider_id
+    ]))?;
+    Ok(crate::live::engine::sha256_hex(&bytes))
+}
+
+/// The caller holds the original app lock. Preparation records no intent or receipt.
+pub(crate) fn prepare_proxy_enter_locked(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+    provider_id: &str,
+    id: &str,
+) -> Result<crate::mode::state::SaveRequest, AppError> {
+    admit_initial_route(service, app, provider_id)?;
+    let request = crate::mode::state::SaveRequest {
+        id: id.into(),
+        scope: crate::mode::state::SaveScope::ApplicationRouting,
+        provider_id: None,
+        draft_digest: proxy_enter_digest(app.as_str(), provider_id)?,
+        revision: routing_request_revision_for_service(service, app, Some(provider_id))?,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+/// Returns true only for this exact completed receipt. Unknown prior receipts
+/// can begin only with the current original owner revision; pending cannot replay.
+pub(crate) fn check_proxy_enter_locked(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+    initial: &InitialProxyRoute,
+) -> Result<bool, AppError> {
+    initial.request.validate()?;
+    if initial.request.scope != state::SaveScope::ApplicationRouting {
+        return Err(AppError::Config("mode.invalid_save_request".into()));
+    }
+    if initial.request.draft_digest != proxy_enter_digest(app.as_str(), &initial.provider_id)? {
+        return Err(AppError::Conflict("mode.invalid_save_request".into()));
+    }
+    let status = routing_request_status_for_db(service.database(), app, &initial.request)?;
+    match status.as_str() {
+        "completed" => return Ok(true),
+        "unknown" | "notRecorded" => {}
+        _ => return Err(AppError::Conflict("mode.verification_required".into())),
+    }
+    if initial.request.revision
+        != routing_request_revision_for_service(service, app, Some(&initial.provider_id))?
+    {
+        return Err(AppError::Conflict("mode.verification_required".into()));
+    }
+    Ok(false)
+}
+
+/// Explicit bootstrap is admitted only for a known empty Direct application.
+/// ATTACH and recovery retain their original recorded route and never call this.
+pub(crate) fn admit_initial_route(
+    service: &ProxyService,
+    app: &AppType,
+    provider_id: &str,
+) -> Result<Provider, AppError> {
+    if !matches!(app, AppType::Claude | AppType::Codex)
+        || !operation::uses_upstream4_schema(service.database())?
+    {
+        return Err(invalid());
+    }
+    let before = mode(service, app)?;
+    if before.mode != Some(Mode::Direct)
+        || before.attached
+        || before.proxy_route.is_some()
+        || current::direct_provider(service.database(), app)?.is_some()
+    {
+        return Err(invalid());
+    }
+    let route = provider(service, app, provider_id)?;
+    if !crate::services::provider::managed_inference::is_managed_inference(&route) {
+        return Err(invalid());
+    }
+    crate::services::provider::managed_inference::validate(app, &route)?;
+    admit(service, app, &route)?;
+    Ok(route)
+}
+
+pub(crate) async fn enter_initial_route_locked(
+    service: &ProxyService,
+    app: &AppType,
+    initial: InitialProxyRoute,
+) -> Result<(), String> {
+    if check_proxy_enter_locked(service, app, &initial).map_err(err)? {
+        return Ok(());
+    }
+    enter_with_initial_route_locked(service, app, op::ENTER, Some(initial)).await
+}
+
 /// Caller owns the existing service lifecycle and app switch locks.
 pub(crate) async fn enter_locked(
     service: &ProxyService,
     app: &AppType,
     operation: &'static str,
 ) -> Result<(), String> {
+    enter_with_initial_route_locked(service, app, operation, None).await
+}
+
+async fn enter_with_initial_route_locked(
+    service: &ProxyService,
+    app: &AppType,
+    operation: &'static str,
+    initial: Option<InitialProxyRoute>,
+) -> Result<(), String> {
     let before = mode(service, app).map_err(err)?;
-    let route = match before.proxy_route.as_deref() {
-        Some(id) => provider(service, app, id).map_err(err)?,
-        None if operation == op::ENTER && !before.is_proxy() => {
-            current::direct_provider(service.database(), app)
-                .map_err(err)?
-                .ok_or_else(|| err(invalid()))?
+    let route = if let Some(initial) = &initial {
+        admit_initial_route(service, app, &initial.provider_id).map_err(err)?
+    } else {
+        match before.proxy_route.as_deref() {
+            Some(id) => provider(service, app, id).map_err(err)?,
+            None if operation == op::ENTER && !before.is_proxy() => {
+                current::direct_provider(service.database(), app)
+                    .map_err(err)?
+                    .ok_or_else(|| err(invalid()))?
+            }
+            None => return Err(err(invalid())),
         }
-        None => return Err(err(invalid())),
     };
     admit(service, app, &route).map_err(err)?;
     let live = LiveNow::of(service, app, &before).map_err(err)?;
     service.invalidate_app_requests(app.as_str()).map_err(err)?;
-    service.start_for_mode().await?;
-    let (url, _) = service.build_proxy_urls().await?;
-    let target = PendingTarget::mode(ModeState {
-        mode: Some(Mode::Proxy),
-        attached: true,
-        proxy_route: Some(route.id.clone()),
-        ..Default::default()
-    });
-    let service = service.owner()?;
-    let app = app.clone();
-    let crash = operation::failpoint::current_crash();
-    tokio::task::spawn_blocking(move || {
-        operation::failpoint::in_worker(crash, || {
-            write_proxy(&service, &app, operation, &route, &live, target, &url)
+    let explicit_bootstrap = initial.is_some();
+    let created = if explicit_bootstrap {
+        service.start_for_mode_owned().await?
+    } else {
+        service.start_for_mode().await?;
+        false
+    };
+    let result = async {
+        let (url, _) = service.build_proxy_urls().await?;
+        let mut target = PendingTarget::mode(ModeState {
+            mode: Some(Mode::Proxy),
+            attached: true,
+            proxy_route: Some(route.id.clone()),
+            ..Default::default()
+        });
+        target.save_request = initial.as_ref().map(|initial| initial.request.clone());
+        let service = service.owner()?;
+        let app = app.clone();
+        let crash = operation::failpoint::current_crash();
+        tokio::task::spawn_blocking(move || {
+            operation::failpoint::in_worker(crash, || {
+                // Starting the listener yields. Recheck the same original row,
+                // mode, pointers, profile and native snapshots before publication.
+                if let Some(initial) = &initial {
+                    if check_proxy_enter_locked(&service, &app, initial)? {
+                        return Ok(false);
+                    }
+                    admit_initial_route(&service, &app, &initial.provider_id)?;
+                }
+                write_proxy(&service, &app, operation, &route, &live, target, &url)
+            })
         })
-    })
-    .await
-    .map_err(err)?
-    .map(|_| ())
-    .map_err(err)
+        .await
+        .map_err(err)?
+        .map(|_| ())
+        .map_err(err)
+    }
+    .await;
+    match result {
+        Err(error) if explicit_bootstrap && created => {
+            // Never stop a pre-existing standalone listener or a listener another
+            // start won. The original pending/attached owner retains dependencies.
+            if let Err(cleanup) = stop_if_unused(service).await {
+                return Err(format!("{error}; listener cleanup failed: {cleanup}"));
+            }
+            Err(error)
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn exit_locked(

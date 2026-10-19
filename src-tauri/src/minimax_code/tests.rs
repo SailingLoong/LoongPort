@@ -15,14 +15,7 @@ impl Fixture {
     async fn new() -> Self {
         // Tests that call process shutdown share its actual process-wide epoch.
         // Serialize synthetic sessions without changing production fencing.
-        static SERIAL: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
-            std::sync::OnceLock::new();
-        let serial = SERIAL
-            .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-            .lock_owned()
-            .await;
-        super::reset_for_isolated_fixture();
+        let serial = super::isolated_fixture_guard().await;
         let root = tempfile::tempdir().unwrap();
         let session =
             SecretSession::from_context(root.path().into(), VaultContext::generate().unwrap());
@@ -1564,3 +1557,6 @@ async fn lifecycle_partial_authorization_publication_remains_uncertain_without_r
         "must retain the published credentials without another generation increment"
     );
 }
+
+#[path = "inference_tests.rs"]
+mod inference_tests;

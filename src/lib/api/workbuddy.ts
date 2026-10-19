@@ -40,7 +40,37 @@ export interface WorkBuddyClaimResult {
   account: WorkBuddyAccount;
   error: WorkBuddyFailure | null;
 }
+export type WorkBuddyInferenceState =
+  "needsAuthorization" | "ready" | "refreshRequired" | "expired";
+export interface WorkBuddyInferenceAccount {
+  id: string;
+  state: WorkBuddyInferenceState;
+}
+export interface WorkBuddyInferenceLogin extends WorkBuddyLogin {
+  accountId: string;
+}
+export interface WorkBuddyInferenceModel {
+  id: string;
+  name: string;
+}
 export const workbuddyApi = {
+  listInferenceAccounts: () =>
+    invoke<WorkBuddyInferenceAccount[]>("list_workbuddy_inference_accounts"),
+  beginInferenceLogin: (id: string) =>
+    invoke<WorkBuddyInferenceLogin>("begin_workbuddy_inference_authorization", {
+      id,
+    }),
+  pollInferenceLogin: (flowId: string) =>
+    invoke<{ state: "saved" | "waiting" }>(
+      "poll_workbuddy_inference_authorization",
+      { flowId },
+    ),
+  cancelInferenceLogin: (flowId: string) =>
+    invoke<void>("cancel_workbuddy_inference_authorization", { flowId }),
+  discoverModels: (id: string) =>
+    invoke<WorkBuddyInferenceModel[]>("discover_workbuddy_inference_models", {
+      id,
+    }),
   list: () => invoke<WorkBuddyAccount[]>("list_workbuddy_accounts"),
   refresh: (id: string) =>
     invoke<WorkBuddyAccount>("refresh_workbuddy_account", { id }),

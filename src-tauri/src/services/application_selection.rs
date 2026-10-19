@@ -349,52 +349,19 @@ fn routing_request_digest(
     Ok(crate::live::engine::sha256_hex(&bytes))
 }
 
-/// Caller holds the existing switch lock. This reads original owners only; no recovery.
 fn routing_request_revision(
     state: &AppState,
     app: &AppType,
     change: &ApplicationRoutingChange,
 ) -> Result<String, AppError> {
-    // Original direct pointer owners can change while native bytes stay identical.
-    // Resolve before pinning the vault; the caller already owns the switch lock.
-    let direct_pointer = crate::mode::current::local_direct_pointer(app)?;
-    let current_pointer = state.db.get_current_provider(app.as_str())?;
-    let write = crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
-    let live = crate::mode::state::load_app(&write.store, &write.vault, app.as_str())?;
-    let selected = change
-        .selection
-        .as_ref()
-        .map(|selection| {
-            let provider = state
-                .db
-                .get_provider_by_id_with_vault(
-                    &selection.provider_id,
-                    app.as_str(),
-                    state.db.secret_session(),
-                    &write.vault,
-                )?
-                .ok_or_else(|| AppError::Config("Provider does not exist".into()))?;
-            crate::database::Database::provider_update_digest(&provider)
-        })
-        .transpose()?;
-    let files = crate::mode::controller::files(app)?
-        .into_iter()
-        .map(|file| {
-            crate::live::engine::read_current(&file.path)
-                .map(|bytes| crate::live::engine::digest(bytes.as_deref()))
-                .map_err(AppError::from)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let bytes = crate::config::serialize_json_bytes(&serde_json::json!([
-        live.apps.get(app.as_str()),
-        direct_pointer,
-        current_pointer,
-        crate::database::order_profiles::snapshot(&state.db, app.as_str())?,
-        crate::proxy::auto_strategy::get_model_pref_checked(&state.db, app.as_str())?,
-        selected,
-        files,
-    ]))?;
-    Ok(crate::live::engine::sha256_hex(&bytes))
+    crate::mode::controller::routing_request_revision_for_service(
+        &state.proxy_service,
+        app,
+        change
+            .selection
+            .as_ref()
+            .map(|selection| selection.provider_id.as_str()),
+    )
 }
 
 pub(crate) fn prepare_routing_request(
@@ -421,22 +388,9 @@ fn query_routing_request_locked(
     app: &AppType,
     request: &crate::mode::state::SaveRequest,
 ) -> Result<RoutingRequestResult, AppError> {
-    routing_request_scope(request)?;
-    let vault = state.db.secret_session().read()?;
-    let live = crate::mode::state::load_app(
-        &crate::live::engine::DeviceStore::for_device(),
-        &vault,
-        app.as_str(),
-    )?;
-    let status = live
-        .apps
-        .get(app.as_str())
-        .map(|entry| crate::mode::operation::saved_request_status(app.as_str(), entry, request))
-        .transpose()?
-        .unwrap_or("notRecorded");
     Ok(RoutingRequestResult {
         request: request.clone(),
-        status: status.into(),
+        status: crate::mode::controller::routing_request_status_for_db(&state.db, app, request)?,
     })
 }
 

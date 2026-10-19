@@ -39,6 +39,15 @@ use super::codex_oauth_auth::{CODEX_OAUTH_CLIENT_VERSION, CODEX_OAUTH_ORIGINATOR
 /// 供 handler/forwarder 外部使用的公开函数。
 /// 优先级：meta.apiFormat > settings_config.api_format > openrouter_compat_mode > 默认 "anthropic"
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
+    // A managed account's verified transport wins over editable preset metadata.
+    if super::super::managed_accounts::selected(provider).is_some() {
+        return if super::super::managed_accounts::is_chat(provider) {
+            "openai_chat"
+        } else {
+            "anthropic"
+        };
+    }
+
     // 0) Managed Responses OAuth providers force their wire protocol. This is
     // an invariant, not a preset default: editable metadata must not be able to
     // send an Anthropic Messages body to a Responses-only upstream.

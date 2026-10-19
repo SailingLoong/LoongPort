@@ -67,3 +67,18 @@ it("preserves each backend's nullable data and does not retry failed claims", as
   );
   expect(vi.mocked(invoke)).toHaveBeenCalledTimes(3);
 });
+
+it("inference commands use the selected original account and opaque flow identifiers", async () => {
+  await workbuddyApi.listInferenceAccounts();
+  await workbuddyApi.beginInferenceLogin("original-account");
+  await workbuddyApi.pollInferenceLogin("opaque-flow");
+  await workbuddyApi.cancelInferenceLogin("opaque-flow");
+  await workbuddyApi.discoverModels("original-account");
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["list_workbuddy_inference_accounts"],
+    ["begin_workbuddy_inference_authorization", { id: "original-account" }],
+    ["poll_workbuddy_inference_authorization", { flowId: "opaque-flow" }],
+    ["cancel_workbuddy_inference_authorization", { flowId: "opaque-flow" }],
+    ["discover_workbuddy_inference_models", { id: "original-account" }],
+  ]);
+});

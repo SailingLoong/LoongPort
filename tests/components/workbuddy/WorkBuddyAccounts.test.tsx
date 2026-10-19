@@ -12,6 +12,11 @@ const api = vi.hoisted(() => ({
   claimAll: vi.fn(),
   beginLogin: vi.fn(),
   finishLogin: vi.fn(),
+  listInferenceAccounts: vi.fn(),
+  beginInferenceLogin: vi.fn(),
+  pollInferenceLogin: vi.fn(),
+  cancelInferenceLogin: vi.fn(),
+  discoverModels: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/api/workbuddy", () => ({ workbuddyApi: api }));
@@ -40,6 +45,19 @@ const row: WorkBuddyAccount = {
 beforeEach(() => {
   vi.clearAllMocks();
   api.list.mockResolvedValue([row]);
+  api.listInferenceAccounts.mockResolvedValue([
+    { id: row.id, state: "needsAuthorization" },
+  ]);
+  api.beginInferenceLogin.mockResolvedValue({
+    flowId: "inference-a",
+    accountId: row.id,
+    verificationUri: "https://copilot.tencent.com/login?state=synthetic",
+  });
+  api.pollInferenceLogin.mockResolvedValue({ state: "waiting" });
+  api.cancelInferenceLogin.mockResolvedValue(undefined);
+  api.discoverModels.mockResolvedValue([
+    { id: "live-cli-model", name: "Live model" },
+  ]);
   api.refresh.mockResolvedValue(row);
   api.refreshAll.mockResolvedValue([row]);
   api.claim.mockResolvedValue({
@@ -442,3 +460,202 @@ it("batch transport failure preserves snapshots and redacts untrusted errors", a
   expect(api.claimAll).toHaveBeenCalledOnce();
   expect(api.claim).not.toHaveBeenCalled();
 });
+
+it("inference requires explicit same-row authorization; legacy check-in never makes it ready", async () => {
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.discoverModels).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "workbuddy.inference.models" }),
+  ).toBeDisabled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+  );
+  expect(api.beginInferenceLogin).toHaveBeenCalledWith(row.id);
+  const link = await screen.findByRole("link", {
+    name: "workbuddy.inference.open",
+  });
+  expect(api.openExternal).not.toHaveBeenCalled();
+  await userEvent.click(link);
+  expect(api.openExternal).toHaveBeenCalledWith(
+    "https://copilot.tencent.com/login?state=synthetic",
+  );
+  api.pollInferenceLogin.mockResolvedValueOnce({ state: "saved" });
+  api.listInferenceAccounts.mockResolvedValueOnce([
+    { id: row.id, state: "ready" },
+  ]);
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.finish" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "workbuddy.inference.models" }),
+    ).toBeEnabled(),
+  );
+  expect(api.discoverModels).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.models" }),
+  );
+  expect(api.discoverModels).toHaveBeenCalledWith(row.id);
+  expect(await screen.findByText("Live model · live-cli-model")).toBeVisible();
+  expect(api.claim).not.toHaveBeenCalled();
+});
+it.each(["close", "unmount"])(
+  "cancels late begin after %s without publishing a stale link",
+  async (action) => {
+    let complete!: (flow: unknown) => void;
+    api.beginInferenceLogin.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const view = render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+    );
+    if (action === "close")
+      await userEvent.click(
+        screen.getByRole("button", { name: "workbuddy.inference.cancel" }),
+      );
+    else view.unmount();
+    await act(async () =>
+      complete({
+        flowId: "late-flow",
+        accountId: row.id,
+        verificationUri: "https://copilot.tencent.com/login?state=late",
+      }),
+    );
+    await waitFor(() =>
+      expect(api.cancelInferenceLogin).toHaveBeenCalledWith("late-flow"),
+    );
+    expect(
+      screen.queryByRole("link", { name: "workbuddy.inference.open" }),
+    ).not.toBeInTheDocument();
+    expect(api.pollInferenceLogin).not.toHaveBeenCalled();
+  },
+);
+it("closing pending poll and opening another row rejects old completion without cancelling new flow", async () => {
+  api.list.mockResolvedValue([
+    row,
+    { ...row, id: "cn-account-b", label: "Synthetic B" },
+  ]);
+  let complete!: (value: unknown) => void;
+  api.pollInferenceLogin.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic B");
+  await userEvent.click(
+    screen.getAllByRole("button", { name: "workbuddy.inference.authorize" })[0],
+  );
+  await screen.findByRole("link", { name: "workbuddy.inference.open" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.finish" }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.cancel" }),
+  );
+  expect(api.cancelInferenceLogin).toHaveBeenCalledWith("inference-a");
+  api.beginInferenceLogin.mockResolvedValueOnce({
+    flowId: "inference-b",
+    accountId: "cn-account-b",
+    verificationUri: "https://copilot.tencent.com/login?state=b",
+  });
+  await userEvent.click(
+    screen.getAllByRole("button", { name: "workbuddy.inference.authorize" })[1],
+  );
+  await screen.findByRole("link", { name: "workbuddy.inference.open" });
+  await act(async () => complete({ state: "saved" }));
+  expect(
+    screen.getByRole("link", { name: "workbuddy.inference.open" }),
+  ).toHaveAttribute("href", "https://copilot.tencent.com/login?state=b");
+  expect(api.cancelInferenceLogin).not.toHaveBeenCalledWith("inference-b");
+  expect(api.listInferenceAccounts).toHaveBeenCalledTimes(1);
+});
+it("discovery late response after reauthorization does not repopulate stale models or raw errors", async () => {
+  api.listInferenceAccounts.mockResolvedValue([{ id: row.id, state: "ready" }]);
+  let complete!: (value: unknown) => void;
+  api.discoverModels.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.models" }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+  );
+  await screen.findByRole("link", { name: "workbuddy.inference.open" });
+  await act(async () => complete([{ id: "stale", name: "Stale model" }]));
+  expect(screen.queryByText(/Stale model/)).not.toBeInTheDocument();
+  api.pollInferenceLogin.mockRejectedValueOnce(
+    new Error("SYNTHETIC_SECRET_CANARY"),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.finish" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "workbuddy.inference.failed",
+  );
+  expect(screen.queryByText(/SYNTHETIC_SECRET_CANARY/)).not.toBeInTheDocument();
+});
+
+it.each(["cancel", "open"])(
+  "old %s rejection cannot mark the reopened flow as failed",
+  async (operation) => {
+    let reject!: (error: Error) => void;
+    if (operation === "cancel")
+      api.cancelInferenceLogin.mockImplementationOnce(
+        () =>
+          new Promise((_, fail) => {
+            reject = fail;
+          }),
+      );
+    else
+      api.openExternal.mockImplementationOnce(
+        () =>
+          new Promise((_, fail) => {
+            reject = fail;
+          }),
+      );
+    render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+    );
+    const link = await screen.findByRole("link", {
+      name: "workbuddy.inference.open",
+    });
+    if (operation === "open") await userEvent.click(link);
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.cancel" }),
+    );
+    api.beginInferenceLogin.mockResolvedValueOnce({
+      flowId: "reopened-flow",
+      accountId: row.id,
+      verificationUri: "https://copilot.tencent.com/login?state=reopened",
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+    );
+    await screen.findByRole("link", { name: "workbuddy.inference.open" });
+    await act(async () => reject(new Error("SYNTHETIC_SECRET_CANARY")));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "workbuddy.inference.open" }),
+    ).toHaveAttribute(
+      "href",
+      "https://copilot.tencent.com/login?state=reopened",
+    );
+  },
+);

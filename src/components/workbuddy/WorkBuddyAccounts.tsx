@@ -12,6 +12,9 @@ import {
   type WorkBuddyAccount,
   type WorkBuddyClaimResult,
   type WorkBuddyLogin,
+  type WorkBuddyInferenceLogin,
+  type WorkBuddyInferenceAccount,
+  type WorkBuddyInferenceModel,
 } from "@/lib/api/workbuddy";
 import { settingsApi } from "@/lib/api/settings";
 const amount = (value: number | null) =>
@@ -31,6 +34,152 @@ export function WorkBuddyAccounts() {
   const listGeneration = useRef(0);
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
+  const [inferenceAccounts, setInferenceAccounts] = useState<
+    WorkBuddyInferenceAccount[]
+  >([]);
+  const [inferenceLogin, setInferenceLogin] =
+    useState<WorkBuddyInferenceLogin | null>(null);
+  const [inferenceTarget, setInferenceTarget] = useState<string | null>(null);
+  const [inferenceBusy, setInferenceBusy] = useState<string | null>(null);
+  const [inferenceWaiting, setInferenceWaiting] = useState(false);
+  const [inferenceFailed, setInferenceFailed] = useState(false);
+  const [models, setModels] = useState<
+    Record<string, WorkBuddyInferenceModel[]>
+  >({});
+  const inferenceGeneration = useRef(0);
+  const inferenceFlow = useRef<WorkBuddyInferenceLogin | null>(null);
+  const inferenceOperation = useRef<string | null>(null);
+  const inferenceStatusGeneration = useRef(0);
+  const loadInferenceAccounts = useCallback(async () => {
+    const generation = ++inferenceStatusGeneration.current;
+    const operationGeneration = inferenceGeneration.current;
+    try {
+      const rows = await workbuddyApi.listInferenceAccounts();
+      if (alive.current && generation === inferenceStatusGeneration.current) {
+        setInferenceAccounts(rows);
+      }
+    } catch {
+      if (alive.current && generation === inferenceStatusGeneration.current) {
+        setInferenceAccounts([]);
+        if (operationGeneration === inferenceGeneration.current)
+          setInferenceFailed(true);
+      }
+    }
+  }, []);
+  const closeInference = () => {
+    const generation = ++inferenceGeneration.current;
+    const flow = inferenceFlow.current;
+    inferenceFlow.current = null;
+    inferenceOperation.current = null;
+    setInferenceLogin(null);
+    setInferenceTarget(null);
+    setInferenceBusy(null);
+    setInferenceWaiting(false);
+    if (flow)
+      void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {
+        if (alive.current && generation === inferenceGeneration.current)
+          setInferenceFailed(true);
+      });
+  };
+  const beginInference = async (accountId: string) => {
+    if (inferenceOperation.current === `begin:${accountId}`) return;
+    const generation = ++inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    const previous = inferenceFlow.current;
+    inferenceFlow.current = null;
+    inferenceOperation.current = `begin:${accountId}`;
+    setInferenceLogin(null);
+    setInferenceTarget(accountId);
+    setInferenceBusy("begin");
+    setInferenceWaiting(false);
+    setInferenceFailed(false);
+    setModels((old) => {
+      const next = { ...old };
+      delete next[accountId];
+      return next;
+    });
+    try {
+      if (previous) await workbuddyApi.cancelInferenceLogin(previous.flowId);
+      if (!current()) return;
+      const flow = await workbuddyApi.beginInferenceLogin(accountId);
+      if (!current() || flow.accountId !== accountId) {
+        await workbuddyApi.cancelInferenceLogin(flow.flowId);
+        if (current()) setInferenceFailed(true);
+        return;
+      }
+      inferenceFlow.current = flow;
+      setInferenceLogin(flow);
+    } catch {
+      if (current()) setInferenceFailed(true);
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+  const pollInference = async () => {
+    const flow = inferenceFlow.current;
+    if (!flow || inferenceOperation.current) return;
+    const generation = inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    inferenceOperation.current = "poll";
+    setInferenceBusy("poll");
+    setInferenceFailed(false);
+    try {
+      const result = await workbuddyApi.pollInferenceLogin(flow.flowId);
+      if (!current()) return;
+      if (result.state === "saved") {
+        inferenceFlow.current = null;
+        setInferenceLogin(null);
+        setInferenceTarget(null);
+        setInferenceWaiting(false);
+        await loadInferenceAccounts();
+      } else setInferenceWaiting(true);
+    } catch {
+      if (current()) {
+        inferenceFlow.current = null;
+        setInferenceLogin(null);
+        setInferenceFailed(true);
+        // Also releases a backend flow when the command failed before polling.
+        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
+      }
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+  const discoverModels = async (accountId: string) => {
+    if (inferenceOperation.current || inferenceFlow.current) return;
+    const generation = ++inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    inferenceOperation.current = "models";
+    setInferenceTarget(accountId);
+    setInferenceBusy("models");
+    setInferenceFailed(false);
+    setModels((old) => {
+      const next = { ...old };
+      delete next[accountId];
+      return next;
+    });
+    try {
+      const discovered = await workbuddyApi.discoverModels(accountId);
+      if (current()) setModels((old) => ({ ...old, [accountId]: discovered }));
+    } catch {
+      if (current()) setInferenceFailed(true);
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+
   const [claimResults, setClaimResults] = useState<
     { id: string; error: WorkBuddyClaimResult["error"] }[] | null
   >(null);
@@ -54,11 +203,18 @@ export function WorkBuddyAccounts() {
   useEffect(() => {
     alive.current = true;
     void loadAccounts();
+    void loadInferenceAccounts();
     return () => {
       alive.current = false;
       listGeneration.current += 1;
+      inferenceGeneration.current += 1;
+      inferenceStatusGeneration.current += 1;
+      const flow = inferenceFlow.current;
+      inferenceFlow.current = null;
+      if (flow)
+        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
     };
-  }, [loadAccounts]);
+  }, [loadAccounts, loadInferenceAccounts]);
   const run = async (key: string, operation: () => Promise<void>) => {
     if (active.current) return;
     active.current = true;
@@ -173,6 +329,76 @@ export function WorkBuddyAccounts() {
           {t("workbuddy.failed")}
         </p>
       )}
+      {inferenceFailed && (
+        <p role="alert" className="text-sm text-destructive">
+          {t("workbuddy.inference.failed", {
+            defaultValue:
+              "Inference authorization or model discovery failed. Select the matching account and try again.",
+          })}
+        </p>
+      )}
+      {inferenceTarget && (inferenceLogin || inferenceBusy === "begin") && (
+        <div
+          role="region"
+          aria-label={t("workbuddy.inference.authorization", {
+            defaultValue: "Inference authorization",
+          })}
+          className="space-y-2 rounded-xl border p-3 text-sm"
+        >
+          <p>{accounts.find((row) => row.id === inferenceTarget)?.label}</p>
+          <p>
+            {t("workbuddy.inference.identityNotice", {
+              defaultValue:
+                "Authorize this same WorkBuddy account in the same region. The existing check-in login is retained.",
+            })}
+          </p>
+          {inferenceLogin && (
+            <>
+              <a
+                href={inferenceLogin.verificationUri}
+                className="text-primary underline"
+                onClick={(event) => {
+                  event.preventDefault();
+                  const generation = inferenceGeneration.current;
+                  const flowId = inferenceLogin.flowId;
+                  void settingsApi
+                    .openExternal(inferenceLogin.verificationUri)
+                    .catch(() => {
+                      if (
+                        alive.current &&
+                        generation === inferenceGeneration.current &&
+                        inferenceFlow.current?.flowId === flowId
+                      )
+                        setInferenceFailed(true);
+                    });
+                }}
+              >
+                {t("workbuddy.inference.open", {
+                  defaultValue: "Open inference authorization",
+                })}
+              </a>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={inferenceBusy !== null}
+                onClick={() => void pollInference()}
+              >
+                {t("workbuddy.inference.finish", {
+                  defaultValue: "I have authorized this account",
+                })}
+              </Button>
+            </>
+          )}
+          <Button size="sm" variant="ghost" onClick={closeInference}>
+            {t("workbuddy.inference.cancel", {
+              defaultValue: "Cancel authorization",
+            })}
+          </Button>
+          {inferenceWaiting && (
+            <p role="status">{t("workbuddy.authorizationWaiting")}</p>
+          )}
+        </div>
+      )}
       {login && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border p-3 text-sm">
           <a
@@ -197,7 +423,9 @@ export function WorkBuddyAccounts() {
                 if (!alive.current) return;
                 if (result.state === "saved") {
                   setLogin(null);
+                  setModels({});
                   await loadAccounts();
+                  await loadInferenceAccounts();
                 } else setWaiting(true);
               })
             }
@@ -288,6 +516,77 @@ export function WorkBuddyAccounts() {
                   {t("workbuddy.claim")}
                 </Button>
               </div>
+            </div>
+            <div className="mt-3 space-y-2 border-t pt-3 text-xs">
+              <p role="status">
+                {t(
+                  `workbuddy.inference.state.${inferenceAccounts.find((row) => row.id === account.id)?.state ?? "needsAuthorization"}`,
+                  {
+                    defaultValue: (
+                      {
+                        needsAuthorization:
+                          "New inference authorization required",
+                        ready: "Inference authorization available",
+                        refreshRequired:
+                          "Inference authorization needs refresh",
+                        expired: "Inference authorization expired",
+                      } as const
+                    )[
+                      inferenceAccounts.find((row) => row.id === account.id)
+                        ?.state ?? "needsAuthorization"
+                    ],
+                  },
+                )}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    busy !== null ||
+                    (inferenceTarget === account.id &&
+                      inferenceBusy === "begin")
+                  }
+                  onClick={() => void beginInference(account.id)}
+                >
+                  {t("workbuddy.inference.authorize", {
+                    defaultValue: "Authorize inference",
+                  })}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    busy !== null ||
+                    inferenceBusy !== null ||
+                    inferenceLogin !== null ||
+                    !inferenceAccounts.some(
+                      (row) =>
+                        row.id === account.id &&
+                        (row.state === "ready" ||
+                          row.state === "refreshRequired"),
+                    )
+                  }
+                  onClick={() => void discoverModels(account.id)}
+                >
+                  {t("workbuddy.inference.models", {
+                    defaultValue: "Discover inference models",
+                  })}
+                </Button>
+              </div>
+              {models[account.id] && (
+                <ul
+                  aria-label={t("workbuddy.inference.availableModels", {
+                    defaultValue: "Available inference models",
+                  })}
+                >
+                  {models[account.id].map((model) => (
+                    <li key={model.id}>
+                      {model.name} · {model.id}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
               <div>
