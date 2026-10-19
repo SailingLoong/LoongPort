@@ -75,3 +75,11 @@ synthetic key in comparison text, Keep retaining the entered key, Use external
 clearing it, and explicit Save completing after resolution. JSON output records
 the actual focused control bounds; it does not report a screenshot as native
 acceptance.
+
+## Current unified-account pages
+
+The same Vite build also includes `unified-accounts.html`. After starting the existing server on port4314, run `UNIFIED_LAYOUT_SOURCE_SHA=$(git rev-parse HEAD) node tests/browser/run-unified-accounts.mjs` with the same `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE` as above. `UNIFIED_LAYOUT_OUTPUT` selects the screenshot/report directory. The source SHA is mandatory.
+
+Eight screenshots cover real ServicesPage/AddHubPage and the original MiniMax Code manager: empty/populated/add/two-account views at1440x800 English light and959x650 Chinese dark. Real components, CSS and translations are imported from this checkout. Only IPC/events are mocked with deterministic synthetic read results; unknown commands fail, no login/import/save is performed, and non-local browser traffic is blocked. Geometry, keyboard focus, relay-tab visibility and return navigation are asserted. The view adapter is isolated and does not replace real App-routing regression tests.
+
+The existing ZCode matrix job runs this check and uploads its PNGs, results.json and source-sha.txt alongside, but separately from, released guide images. Passing automated geometry checks does not constitute image review or native Tauri acceptance; inspect all eight current-source PNGs before reporting visual acceptance.
