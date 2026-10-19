@@ -11681,3 +11681,7 @@ experimental_bearer_token = "PROXY_MANAGED"
 #[cfg(all(test, any(feature = "gui", feature = "test-hooks")))]
 #[path = "proxy_bootstrap_tests.rs"]
 mod bootstrap_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "proxy_vendor_bootstrap_tests.rs"]
+mod vendor_bootstrap_tests;

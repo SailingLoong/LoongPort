@@ -510,10 +510,24 @@ pub(crate) fn admit_initial_route(
         return Err(invalid());
     }
     let route = provider(service, app, provider_id)?;
-    if !crate::services::provider::managed_inference::is_managed_inference(&route) {
+    if crate::services::provider::managed_inference::is_managed_inference(&route) {
+        crate::services::provider::managed_inference::validate(app, &route)?;
+    } else if crate::services::vendor_source_binding::is_reference(&route)
+        && route
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.auth_binding.as_ref())
+            .is_some_and(|binding| {
+                binding.auth_provider.as_deref()
+                    == Some(crate::vendor::Vendor::OpenCode.vendor_id())
+            })
+    {
+        // Validate the original account/plan/destination/key owner, but retain
+        // only the saved reference for the original native proxy projection.
+        drop(service.database().resolve_vendor_auth(app, &route)?);
+    } else {
         return Err(invalid());
     }
-    crate::services::provider::managed_inference::validate(app, &route)?;
     admit(service, app, &route)?;
     Ok(route)
 }

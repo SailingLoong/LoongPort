@@ -25,9 +25,11 @@ const emptyApplication = (routing: ApplicationRouting) => {
 };
 const accountChoice = (row: Provider): boolean => {
   const binding = row.meta?.authBinding;
+  if (!binding?.accountId?.trim()) return false;
+  if (binding.source === "vendor_api_key")
+    return binding.authProvider === "opencode";
   return (
-    binding?.source === "managed_account" &&
-    !!binding.accountId?.trim() &&
+    binding.source === "managed_account" &&
     ["minimax_code", "zcode_start_plan", "workbuddy", "trae"].includes(
       binding.authProvider ?? "",
     )
