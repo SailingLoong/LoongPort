@@ -1337,6 +1337,7 @@ mod tests {
     #[test]
     fn fresh_and_migrated_relay_tables_have_the_same_v9_shape() {
         let migrated = mem();
+        provider_owner_for_http_migration(&migrated);
         v8_relay_table(&migrated);
         ensure_version_table(&migrated).expect("建版本表");
         set_version(&migrated, 8).expect("设为 v8");

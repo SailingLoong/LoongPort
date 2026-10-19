@@ -496,8 +496,10 @@ async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
         input.push(json!({"type":"function_call_output","call_id":TOOL_ID,"output":output}));
         input.push(json!({"role":"user","content":"Summarize"}));
         let second=f.request("/v1/responses",json!({"model":MODEL,"stream":streaming,"tools":response_tools(),"instructions":"leading system","input":input})).await;
-        assert_eq!(second.status(), StatusCode::OK);
-        let value = final_response(&text(second).await, streaming);
+        let status = second.status();
+        let body = text(second).await;
+        assert_eq!(status, StatusCode::OK, "streaming={streaming}: {body}");
+        let value = final_response(&body, streaming);
         assert!(value.to_string().contains("tool-result-summary"));
         let sent = f.sent();
         assert_eq!(sent.len(), 2);
@@ -507,6 +509,12 @@ async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
             response_tools()[0]["parameters"]
         );
         let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("reasoning_content").is_none()),
+            "only the generated converter placeholder is removed before strict worker admission"
+        );
         assert!(messages.iter().any(|v| v["tool_calls"][0]["id"] == TOOL_ID));
         assert!(messages.iter().any(|v| v["role"] == "tool"
             && v["tool_call_id"] == TOOL_ID

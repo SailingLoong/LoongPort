@@ -34,6 +34,7 @@ import {
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
+import type { CatalogStatus } from "@/lib/api/zcodeAccounts";
 
 vi.mock("@/components/settings/ThemeSettings", () => ({
   ThemeSettings: () => null,
@@ -1482,6 +1483,34 @@ it("keeps an editor account roundtrip on its originating app", async () => {
 });
 
 it("keeps a managed-account model draft until the original leave confirmation is accepted", async () => {
+  // The real section waits for every account catalog before enabling its fields.
+  // Handle all native reads so this flow never depends on tauri.local failing.
+  server.use(
+    ...[
+      "list_minimax_code_accounts",
+      "list_workbuddy_accounts",
+      "list_workbuddy_inference_accounts",
+      "list_trae_accounts",
+    ].map((command) =>
+      http.post(`http://tauri.local/${command}`, () => HttpResponse.json([])),
+    ),
+    http.post("http://tauri.local/get_zcode_account_library", () =>
+      HttpResponse.json({
+        revision: "synthetic-empty-catalog",
+        profiles: [],
+        current: null,
+        pending: false,
+        nativeUnconfirmed: false,
+        actions: {
+          canAdd: true,
+          canImport: true,
+          canBackup: true,
+          canEditLabels: true,
+          blockedReason: null,
+        },
+      } satisfies CatalogStatus),
+    ),
+  );
   resetProviderState();
   workspaceHarness.real = false;
   localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
