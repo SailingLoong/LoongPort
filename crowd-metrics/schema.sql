@@ -94,3 +94,28 @@ CREATE TABLE IF NOT EXISTS feedback_ip_day (
     count   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ip_hash, day)
 ) WITHOUT ROWID;
+
+-- One manifest is authoritative for new and time-boxed legacy feedback alike.
+-- IDs are public labels, not credentials. Live upload leases/stored reports own capacity.
+-- Retired uncertain writes keep one bounded cleanup manifest until the original absolute expiry.
+-- Content belongs only in FEEDBACK KV; GitHub notifications contain no submitted content.
+CREATE TABLE IF NOT EXISTS feedback_reports (
+    report_id      TEXT NOT NULL PRIMARY KEY,
+    generation     TEXT NOT NULL, -- internal concurrency fence, never client authorization
+    identity_kind  TEXT NOT NULL CHECK (identity_kind IN ('install', 'legacy')),
+    identity_key   TEXT NOT NULL,
+    content_hash   TEXT NOT NULL,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    lease_until    INTEGER, -- upload deadline; NULL once all writes are confirmed stored
+    put_pending    INTEGER NOT NULL DEFAULT 0 CHECK (put_pending IN (0, 1)),
+    state          TEXT NOT NULL CHECK (state IN ('uploading', 'stored', 'cleanup', 'retired')),
+    asset_keys     TEXT NOT NULL,
+    issue_number   INTEGER,
+    issue_state    TEXT NOT NULL CHECK (issue_state IN ('pending', 'creating', 'unknown', 'created', 'cleaned')),
+    retry_after    INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS feedback_reports_identity ON feedback_reports(identity_key);
+CREATE INDEX IF NOT EXISTS feedback_reports_lifecycle ON feedback_reports(expires_at, state);
+CREATE INDEX IF NOT EXISTS feedback_reports_legacy ON feedback_reports(identity_kind);
+CREATE INDEX IF NOT EXISTS feedback_reports_upload_lease ON feedback_reports(lease_until, state);
