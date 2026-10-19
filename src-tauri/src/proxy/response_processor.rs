@@ -894,6 +894,7 @@ pub fn create_logged_passthrough_stream(
 
                     if let Some(guard) = &_conn_guard {
                         if let Err(error) = guard.check_response_lease().await {
+                            diagnostic_guard.finish("io_error");
                             yield Err(error);
                             break;
                         }

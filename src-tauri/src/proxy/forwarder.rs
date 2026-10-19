@@ -7034,10 +7034,84 @@ mod managed_response_lease_tests {
             Some(guard),
             None,
             ingress,
+            super::super::handler_context::ProxyDiagnosticId::new(),
         );
         tokio::pin!(stream);
         valid.store(false, Ordering::SeqCst);
         assert!(stream.next().await.unwrap().is_err());
         assert!(stream.next().await.is_none());
+    }
+
+    async fn assert_revoked_stream_diagnostic(poll_to_eof: bool) {
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let valid = Arc::new(AtomicBool::new(true));
+        let guard = guarded(valid.clone()).await;
+        let diagnostic_id = super::super::handler_context::ProxyDiagnosticId::new();
+        let before = captured_logs().len();
+        let input = futures::stream::iter([Ok(Bytes::from_static(b"DIAG_PRIVATE_REVOKED"))]);
+        let mut stream = Box::pin(
+            super::super::response_processor::create_logged_passthrough_stream(
+                input,
+                "LeaseTest",
+                None,
+                super::super::handler_context::StreamingTimeoutConfig {
+                    first_byte_timeout: 0,
+                    idle_timeout: 0,
+                },
+                Some(guard),
+                None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                diagnostic_id,
+            ),
+        );
+        valid.store(false, Ordering::SeqCst);
+        // The first downstream item must be the lease error, never the buffered bytes.
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        if poll_to_eof {
+            assert!(stream.next().await.is_none());
+        }
+        drop(stream);
+        let logs = captured_logs();
+        let events: Vec<serde_json::Value> = logs[before..]
+            .lines()
+            .filter_map(|line| {
+                line.find('{')
+                    .and_then(|at| serde_json::from_str::<serde_json::Value>(&line[at..]).ok())
+            })
+            .filter(|value| value["event"] == "proxy.stream.lifecycle")
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "lease rejection must not also emit dropped"
+        );
+        assert_eq!(events[0]["diagnostic_id"], diagnostic_id.to_string());
+        assert_eq!(events[0]["outcome"], "io_error");
+        assert_eq!(events[0]["received_chunk"], true);
+        assert!(!logs[before..].contains("DIAG_PRIVATE_REVOKED"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn revoked_stream_diagnostic_finishes_before_immediate_drop() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::managed_response_lease_tests::revoked_stream_diagnostic_finishes_before_immediate_drop",
+        ) {
+            return;
+        }
+        assert_revoked_stream_diagnostic(false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn revoked_stream_diagnostic_finishes_when_polled_to_eof() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::managed_response_lease_tests::revoked_stream_diagnostic_finishes_when_polled_to_eof",
+        ) {
+            return;
+        }
+        assert_revoked_stream_diagnostic(true).await;
     }
 }
