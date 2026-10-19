@@ -81,14 +81,21 @@ async function readAccounts(
 }
 
 /** Explicit, one-account entry into the existing application provider chain. */
-export function ManagedAccountProviderSection() {
+export function ManagedAccountProviderSection({
+  appId,
+  onInteractionChange,
+}: {
+  appId?: ManagedInferenceApp;
+  onInteractionChange?: (dirty: boolean, submitting: boolean) => void;
+} = {}) {
   const { t } = useTranslation();
   const copy = (name: string, defaultValue: string) =>
     t(`managedAccount.${name}`, { defaultValue });
   const queryClient = useQueryClient();
   const [accounts, setAccounts] = useState<ManagedInferenceAccount[]>([]);
   const [selected, setSelected] = useState("");
-  const [app, setApp] = useState<ManagedInferenceApp | "">("");
+  const [chosenApp, setApp] = useState<ManagedInferenceApp | "">("");
+  const app = appId ?? chosenApp;
   const [model, setModel] = useState("");
   const [models, setModels] = useState<WorkBuddyInferenceModel[]>([]);
   const [modelsOwner, setModelsOwner] = useState("");
@@ -103,6 +110,12 @@ export function ManagedAccountProviderSection() {
     chainOnly?: boolean;
     chainRequest?: ApplicationRoutingRequest;
   } | null>(null);
+  useEffect(() => {
+    onInteractionChange?.(
+      !!selected || !!model || !!pending,
+      busy || modelsBusy,
+    );
+  }, [selected, model, pending, busy, modelsBusy, onInteractionChange]);
   const alive = useRef(false);
   const inFlight = useRef(false);
   const generation = useRef(0);
@@ -514,7 +527,7 @@ export function ManagedAccountProviderSection() {
             aria-label={copy("app", "目标应用")}
             className={fieldClass}
             value={app}
-            disabled={locked}
+            disabled={locked || !!appId}
             onChange={(event) =>
               setApp(event.target.value as ManagedInferenceApp | "")
             }

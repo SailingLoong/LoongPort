@@ -12,7 +12,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { ManagedAccountProviderSection } from "@/components/settings/ManagedAccountProviderSection";
-import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
+import { ManagedAccountApplicationPanel } from "@/components/relay/accounts/ManagedAccountApplicationPanel";
 import { minimaxCodeApi } from "@/lib/api/minimaxCode";
 import { workbuddyApi } from "@/lib/api/workbuddy";
 import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
@@ -188,10 +188,10 @@ beforeEach(() => {
   vi.mocked(invoke).mockImplementation(originalCommand as never);
 });
 describe("explicit account to original provider entry", () => {
-  it("is mounted in the existing authentication center", async () => {
+  it("is mounted in the application account panel", async () => {
     render(
       <QueryClientProvider client={queryClient}>
-        <AuthCenterPanel />
+        <ManagedAccountApplicationPanel />
       </QueryClientProvider>,
     );
     await screen.findByRole("option", { name: /Synthetic MiniMax/ });

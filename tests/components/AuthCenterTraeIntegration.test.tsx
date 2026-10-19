@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ManagedAccountApplicationPanel } from "@/components/relay/accounts/ManagedAccountApplicationPanel";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import {
   TRAE_AUTH_HOST,
@@ -160,7 +161,10 @@ function mount() {
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <AuthCenterPanel />
+      <>
+        <AuthCenterPanel platform="trae" />
+        <ManagedAccountApplicationPanel />
+      </>
     </QueryClientProvider>,
   );
 }

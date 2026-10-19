@@ -50,7 +50,13 @@ async function routeSnapshot(row: Provider): Promise<string> {
 }
 
 /** Select a saved account route before the first original ENTER transaction. */
-export function ManagedAccountBootstrapSection() {
+export function ManagedAccountBootstrapSection({
+  appId,
+  onInteractionChange,
+}: {
+  appId?: App;
+  onInteractionChange?: (dirty: boolean, submitting: boolean) => void;
+} = {}) {
   const { t } = useTranslation();
   const copy = (key: string, defaultValue: string) =>
     t(`managedAccount.bootstrap.${key}`, { defaultValue });
@@ -64,6 +70,9 @@ export function ManagedAccountBootstrapSection() {
   const [pending, setPending] = useState<Attempt | null>(null);
   const [canRestart, setCanRestart] = useState(false);
   const [message, setMessage] = useState("");
+  useEffect(() => {
+    onInteractionChange?.(!!selected || !!pending, busy);
+  }, [selected, pending, busy, onInteractionChange]);
   const alive = useRef(false);
   const generation = useRef(0);
   const inFlight = useRef(false);
@@ -115,6 +124,13 @@ export function ManagedAccountBootstrapSection() {
       if (alive.current && epoch === generation.current) setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (appId) void load(appId);
+    // The containing view is keyed by app after its existing leave-draft guard.
+    // Loading is the original read-only owner path; this never enables a route.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appId]);
 
   const recheck = async (attempt: Attempt) => {
     const [result, routing] = await Promise.all([
@@ -245,7 +261,7 @@ export function ManagedAccountBootstrapSection() {
         <select
           aria-label={copy("app", "首次启用的应用")}
           value={app}
-          disabled={busy || !!pending}
+          disabled={busy || !!pending || !!appId}
           onChange={(event) => void load(event.target.value as App | "")}
         >
           <option value="">{copy("selectApp", "请选择应用")}</option>

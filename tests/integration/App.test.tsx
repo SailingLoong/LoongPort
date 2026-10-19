@@ -177,10 +177,12 @@ vi.mock("@/components/providers/EditProviderDialog", () => ({
     onSubmit,
     onOpenChange,
     mutationsDisabled,
+    appId,
   }: any) =>
     open ? (
       <div
         data-testid="edit-provider-dialog"
+        data-app-id={appId}
         data-mutations-disabled={String(!!mutationsDisabled)}
       >
         <button
@@ -902,7 +904,7 @@ describe("App integration with MSW", () => {
     );
     renderApp();
     expect(
-      await screen.findByRole("tab", { name: "Sign-in accounts" }),
+      await screen.findByRole("tab", { name: "API configuration" }),
     ).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
       key: "Enter",
@@ -1441,4 +1443,67 @@ describe("U02 App original result callback", () => {
       client.clear();
     }
   });
+});
+
+it("keeps an editor account roundtrip on its originating app", async () => {
+  resetProviderState();
+  workspaceHarness.real = false;
+  localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+  localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
+  renderApp();
+  await waitFor(() =>
+    expect(screen.getByTestId("current-provider")).toHaveTextContent("codex-1"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "edit" }));
+  expect(await screen.findByTestId("edit-provider-dialog")).toHaveAttribute(
+    "data-app-id",
+    "codex",
+  );
+  fireEvent(
+    window,
+    new CustomEvent("loongport:open-account-manager", {
+      detail: "codex_oauth",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "client.services" }),
+    ).toBeDisabled(),
+  );
+  expect(screen.getByTestId("edit-provider-dialog")).not.toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "common.back" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("edit-provider-dialog")).toBeVisible(),
+  );
+  expect(await screen.findByTestId("edit-provider-dialog")).toHaveAttribute(
+    "data-app-id",
+    "codex",
+  );
+});
+
+it("keeps a managed-account model draft until the original leave confirmation is accepted", async () => {
+  resetProviderState();
+  workspaceHarness.real = false;
+  localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+  localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  renderApp();
+  const model = await screen.findByLabelText("官方模型 ID");
+  await waitFor(() => expect(model).toBeEnabled());
+  fireEvent.change(model, { target: { value: "synthetic-unsaved-model" } });
+  await userEvent.click(
+    screen.getByRole("button", { name: "client.services" }),
+  );
+  expect(screen.getByTestId("confirm-dialog")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "cancel-delete" }));
+  expect(screen.getByLabelText("官方模型 ID")).toHaveValue(
+    "synthetic-unsaved-model",
+  );
+  expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+  await userEvent.click(
+    screen.getByRole("button", { name: "client.services" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "confirm-delete" }));
+  await waitFor(() =>
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("services"),
+  );
 });

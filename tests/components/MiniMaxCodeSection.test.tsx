@@ -105,10 +105,13 @@ const button = (name: string, id = "code-a") =>
 async function mount() {
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <AuthCenterPanel />
+      <section>
+        <h2>MiniMax Code</h2>
+        <AuthCenterPanel platform="minimax_code" />
+      </section>
     </QueryClientProvider>,
   );
-  // Keep assertions on the real MiniMax owner, alongside the other real panels.
+  // Keep assertions on the real MiniMax owner, in its single-platform services view.
   miniMax = within(
     page.getByRole("heading", { name: "MiniMax Code" }).closest("section")!,
   );
@@ -159,15 +162,7 @@ describe("MiniMax Code in the original authentication center", () => {
     ).toBeInTheDocument();
     expect(row()).toHaveTextContent("verified-code-a");
     expect(row()).toHaveTextContent("中国区");
-    expect(mocks.invoke.mock.calls).toEqual([
-      ["list_minimax_code_accounts"],
-      ["list_trae_accounts"],
-      ["list_minimax_code_accounts"],
-      ["get_zcode_account_library", {}],
-      ["list_workbuddy_accounts"],
-      ["list_workbuddy_inference_accounts"],
-      ["list_trae_accounts"],
-    ]);
+    expect(mocks.invoke.mock.calls).toEqual([["list_minimax_code_accounts"]]);
     expect(miniMax.queryByRole("textbox")).not.toBeInTheDocument();
     expect(miniMax.getByText(/Token Plan 和 API Key/)).toBeInTheDocument();
   });
@@ -472,7 +467,7 @@ describe("MiniMax Code in the original authentication center", () => {
     expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     expect(button("领取今日额度")).toBeDisabled();
     // The manager and provider consumer each read once on mount, then the manager rereads.
-    expect(calls("list_minimax_code_accounts")).toHaveLength(3);
+    expect(calls("list_minimax_code_accounts")).toHaveLength(2);
     await act(async () =>
       pending.resolve({ state: "saved", account: account("late-account") }),
     );
@@ -499,7 +494,7 @@ describe("MiniMax Code in the original authentication center", () => {
       expect(miniMax.getByRole("alert")).not.toHaveTextContent("授权已完成");
       expect(miniMax.getByRole("alert")).not.toHaveTextContent("已取消");
       // No reread beyond the manager and provider consumer mount reads.
-      expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+      expect(calls("list_minimax_code_accounts")).toHaveLength(1);
       expect(miniMax.queryByRole("article")).not.toBeInTheDocument();
       expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     },

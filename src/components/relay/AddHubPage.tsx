@@ -1,3 +1,7 @@
+import {
+  accountPlatforms,
+  type AccountPlatform,
+} from "./accounts/accountPlatforms";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Plus } from "lucide-react";
@@ -16,18 +20,22 @@ import {
 import { RelayDirectoryPage } from "./directory/RelayDirectoryPage";
 import { OfficialApiPage } from "./OfficialApiPage";
 
-export type AddHubTab = "directory" | "official" | "manual";
+export type AddHubTab = "accounts" | "directory" | "official" | "manual";
 
 export function AddHubPage({
   sourceAppId,
-  initialTab = "directory",
+  initialTab = "accounts",
+  onOpenPlatform,
+  onOpenConfiguration,
   onBack,
   onAddProvider,
   firstVisit = false,
   entryRequest,
 }: {
   sourceAppId: AppId;
-  /** 进来落在哪个标签；顶栏大「+」与首启引导不传（落默认「中转站」）。 */
+  onOpenPlatform?: (platform: AccountPlatform) => void;
+  onOpenConfiguration?: (app: AppId, tab: "manual" | "official") => void;
+  /** 统一添加默认先选平台；首启与旧直达入口显式指定原标签。 */
   initialTab?: AddHubTab;
   onBack: () => void;
   onAddProvider: AddProviderFormProps["onSubmit"];
@@ -92,6 +100,9 @@ export function AddHubPage({
               {t("common.back")}
             </Button>
             <TabsList>
+              <TabsTrigger value="accounts">
+                {t("zcode.accounts.login.account", { defaultValue: "账号" })}
+              </TabsTrigger>
               <TabsTrigger value="directory">
                 {t("loongport.sections.relay")}
               </TabsTrigger>
@@ -114,6 +125,37 @@ export function AddHubPage({
             )}
           </div>
 
+          <TabsContent value="accounts" className="mt-4">
+            <div className="grid gap-2 sm:grid-cols-2">
+              {accountPlatforms.map((platform) => (
+                <Button
+                  key={platform.id}
+                  variant="outline"
+                  onClick={() => onOpenPlatform?.(platform.id)}
+                >
+                  {platform.name}
+                </Button>
+              ))}
+              <Button
+                variant="outline"
+                onClick={() => onOpenConfiguration?.("codex", "manual")}
+              >
+                Qoder
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => onOpenConfiguration?.(sourceAppId, "manual")}
+              >
+                OpenRouter · API Key
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => onOpenConfiguration?.(sourceAppId, "official")}
+              >
+                OpenCode
+              </Button>
+            </div>
+          </TabsContent>
           <TabsContent
             value="directory"
             forceMount

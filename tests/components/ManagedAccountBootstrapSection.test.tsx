@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { proxyApi } from "@/lib/api/proxy";
 import { ManagedAccountBootstrapSection } from "@/components/relay/ManagedAccountBootstrapSection";
-import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
+import { ManagedAccountApplicationPanel } from "@/components/relay/accounts/ManagedAccountApplicationPanel";
 import type { Provider } from "@/types";
 import type {
   ApplicationRouting,
@@ -104,7 +104,11 @@ function mount(full = false) {
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      {full ? <AuthCenterPanel /> : <ManagedAccountBootstrapSection />}
+      {full ? (
+        <ManagedAccountApplicationPanel />
+      ) : (
+        <ManagedAccountBootstrapSection />
+      )}
     </QueryClientProvider>,
   );
 }
@@ -175,7 +179,7 @@ describe("original proxy takeover API", () => {
   });
 });
 describe("explicit empty-app bootstrap", () => {
-  it("is mounted in the original authentication center and selects nothing by default", () => {
+  it("is mounted in the application account panel and selects nothing by default", () => {
     mount(true);
     expect(
       screen.getByRole("region", { name: "首次启用账号路由" }),

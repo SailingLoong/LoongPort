@@ -300,3 +300,29 @@ describe("SettingsPage integration", () => {
     expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 });
+
+it("keeps the selected settings tab across parent callback changes", async () => {
+  const client = new QueryClient();
+  const view = (manage: () => void) => (
+    <QueryClientProvider client={client}>
+      <SettingsPage
+        open
+        onOpenChange={() => {}}
+        beforeLeave={(next) => next()}
+        onManageAccounts={manage}
+      />
+    </QueryClientProvider>
+  );
+  const mounted = render(view(vi.fn()));
+  await screen.findByText("language:zh");
+  fireEvent.click(screen.getByText("settings.tabAdvanced"));
+  expect(screen.getByTestId("tab-advanced")).toBeInTheDocument();
+  mounted.rerender(view(vi.fn()));
+  expect(screen.getByTestId("tab-advanced")).toBeInTheDocument();
+});
+it("redirects the legacy auth destination without mounting its old managers", async () => {
+  const manage = vi.fn();
+  renderDialog({ defaultTab: "auth", onManageAccounts: manage });
+  await waitFor(() => expect(manage).toHaveBeenCalledTimes(1));
+  expect(screen.queryByTestId("tab-auth")).not.toBeInTheDocument();
+});

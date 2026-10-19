@@ -138,11 +138,11 @@ describe("CodexOAuthSection", () => {
     );
     render(
       <QueryClientProvider client={queryClient}>
-        <AuthCenterPanel />
+        <AuthCenterPanel platform="codex_oauth" />
       </QueryClientProvider>,
     );
 
-    await waitFor(() => expect(readCatalog).toHaveBeenCalledTimes(7));
+    expect(readCatalog).not.toHaveBeenCalled();
     expect(mocks.renderAccountQuota).toHaveBeenCalledWith("account-1");
     expect(mocks.renderAccountQuota).toHaveBeenCalledWith("account-2");
     expect(

@@ -76,50 +76,23 @@ beforeEach(() => {
   });
 });
 describe("ZCode native provider panel", () => {
-  it("defaults to sign-in accounts and exposes API actions only after selecting that tab", async () => {
+  it("starts in API configuration and never mounts another account manager", async () => {
     mount(undefined, false);
-    expect(
-      screen.getByRole("tab", { name: "Sign-in accounts" }),
-    ).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("Account library fixture")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Add provider" }),
-    ).not.toBeInTheDocument();
-    expect(zcodeApi.read).not.toHaveBeenCalled();
-    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
-      key: "Enter",
-    });
     await screen.findByText("Managed example");
     expect(
-      screen.queryByText("Account library fixture"),
+      screen.queryByRole("tab", { name: "Sign-in accounts" }),
     ).not.toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Sign-in accounts" }), {
-      key: "Enter",
-    });
-    expect(screen.queryByText("Managed example")).not.toBeInTheDocument();
+    expect(accountPanel.render).not.toHaveBeenCalled();
     expect(
-      screen.queryByRole("button", { name: "Refresh" }),
-    ).not.toBeInTheDocument();
-    expect(zcodeApi.save).not.toHaveBeenCalled();
-  });
-  it("keeps tab navigation locked while an account operation owns the view", () => {
-    mount(undefined, false);
-    act(() => accountPanel.render.mock.lastCall![0].onBusyChange(true));
-    expect(
-      screen.getByRole("tab", { name: "API configuration" }),
-    ).toBeDisabled();
-    fireEvent.keyDown(screen.getByRole("tab", { name: "API configuration" }), {
-      key: "Enter",
-    });
-    expect(screen.getByText("Account library fixture")).toBeInTheDocument();
-    expect(zcodeApi.read).not.toHaveBeenCalled();
+      screen.getByRole("button", { name: "Services & accounts" }),
+    ).toBeInTheDocument();
   });
   it("keeps the API editor and removal confirmation attached to their original tab", async () => {
     mount();
     await screen.findByText("Managed example");
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(
-      screen.getByRole("tab", { name: "Sign-in accounts", hidden: true }),
+      screen.getByRole("button", { name: "Services & accounts", hidden: true }),
     ).toBeDisabled();
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
@@ -128,11 +101,11 @@ describe("ZCode native provider panel", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     expect(
-      screen.getByRole("tab", { name: "Sign-in accounts", hidden: true }),
+      screen.getByRole("button", { name: "Services & accounts", hidden: true }),
     ).toBeDisabled();
     expect(zcodeApi.remove).not.toHaveBeenCalled();
   });
-  it("keeps navigation blocked while either provider or account work is busy", async () => {
+  it("keeps provider navigation blocked until its save completes", async () => {
     let finish!: (value: ZCodeConfig) => void;
     vi.mocked(zcodeApi.save).mockImplementationOnce(
       () =>
@@ -146,14 +119,8 @@ describe("ZCode native provider panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onBlocked).toHaveBeenLastCalledWith(true));
-    const { onBusyChange } = accountPanel.render.mock.lastCall![0];
-    act(() => onBusyChange(true));
-    act(() => onBusyChange(false));
-    expect(onBlocked).toHaveBeenLastCalledWith(true);
-    act(() => onBusyChange(true));
+    expect(accountPanel.render).not.toHaveBeenCalled();
     await act(async () => finish(fixture));
-    expect(onBlocked).toHaveBeenLastCalledWith(true);
-    act(() => onBusyChange(false));
     await waitFor(() => expect(onBlocked).toHaveBeenLastCalledWith(false));
   });
   it("reloads a conflict in the editor, preserves input and requires explicit resolution and save", async () => {

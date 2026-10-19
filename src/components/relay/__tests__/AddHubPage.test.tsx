@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AddHubPage } from "../AddHubPage";
@@ -32,8 +32,43 @@ function renderHub() {
 }
 
 describe("AddHubPage 中转站 tab 常驻", () => {
-  it("默认落「中转站」广场页，tab 不随广场开关消失", () => {
+  it("默认展示账号平台，指定中转站仍能直达", () => {
     renderHub();
-    expect(screen.getByTestId("relay-directory")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "GitHub Copilot" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("relay-directory")).not.toBeInTheDocument();
   });
+});
+
+it("keeps existing API configuration owners and their actual application context", () => {
+  const open = vi.fn();
+  const platform = vi.fn();
+  render(
+    <AddHubPage
+      sourceAppId="claude"
+      onBack={() => {}}
+      onAddProvider={() => undefined as never}
+      onOpenConfiguration={open}
+      onOpenPlatform={platform}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Qoder" }));
+  expect(open).toHaveBeenLastCalledWith("codex", "manual");
+  fireEvent.click(screen.getByRole("button", { name: "OpenRouter · API Key" }));
+  expect(open).toHaveBeenLastCalledWith("claude", "manual");
+  fireEvent.click(screen.getByRole("button", { name: "OpenCode" }));
+  expect(open).toHaveBeenLastCalledWith("claude", "official");
+  expect(platform).not.toHaveBeenCalled();
+});
+it("preserves the original direct relay destination", () => {
+  render(
+    <AddHubPage
+      sourceAppId="codex"
+      initialTab="directory"
+      onBack={() => {}}
+      onAddProvider={() => undefined as never}
+    />,
+  );
+  expect(screen.getByTestId("relay-directory")).toBeInTheDocument();
 });
