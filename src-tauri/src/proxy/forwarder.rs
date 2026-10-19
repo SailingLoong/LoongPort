@@ -7034,6 +7034,7 @@ mod managed_response_lease_tests {
             Some(guard),
             None,
             ingress,
+            super::super::handler_context::ProxyDiagnosticId::new(),
         );
         tokio::pin!(stream);
         valid.store(false, Ordering::SeqCst);
