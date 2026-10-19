@@ -11,7 +11,7 @@ use tauri::State;
 pub(crate) async fn list_trae_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<AccountView>, Error> {
-    entry::list(&state.db.secret_session()).await
+    entry::list(state.db.secret_session()).await
 }
 #[tauri::command]
 pub(crate) async fn begin_trae_authorization(
@@ -20,13 +20,7 @@ pub(crate) async fn begin_trae_authorization(
     product_path: String,
     realm: Realm,
 ) -> Result<FlowView, Error> {
-    entry::begin(
-        &state.db.secret_session(),
-        storage_path,
-        product_path,
-        realm,
-    )
-    .await
+    entry::begin(state.db.secret_session(), storage_path, product_path, realm).await
 }
 #[tauri::command]
 pub(crate) async fn confirm_trae_authorization(
@@ -40,12 +34,12 @@ pub(crate) async fn cancel_trae_authorization(
     state: State<'_, AppState>,
     flow_id: String,
 ) -> Result<(), Error> {
-    entry::cancel(&state.db.secret_session(), &flow_id).await
+    entry::cancel(state.db.secret_session(), &flow_id).await
 }
 #[tauri::command]
 pub(crate) async fn retire_trae_account(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), Error> {
-    entry::retire(&state.db.secret_session(), &id).await
+    entry::retire(state.db.secret_session(), &id).await
 }

@@ -116,9 +116,13 @@ let chain: string[];
 let appendOnSave: boolean;
 let discoverySerial: number;
 let discoveredRequests: Map<string, string>;
-const traeModels = [{ id: "confirmed-global-model", name: "Discovered TRAE model" }];
-const nativeCalls = (name: string) => vi.mocked(invoke).mock.calls.filter(([command]) => command === name);
-const expectNoProviderWrite = () => expect(nativeCalls("add_provider")).toHaveLength(0);
+const traeModels = [
+  { id: "confirmed-global-model", name: "Discovered TRAE model" },
+];
+const nativeCalls = (name: string) =>
+  vi.mocked(invoke).mock.calls.filter(([command]) => command === name);
+const expectNoProviderWrite = () =>
+  expect(nativeCalls("add_provider")).toHaveLength(0);
 async function originalCommand(
   command: string,
   args?: Record<string, unknown>,
@@ -129,7 +133,8 @@ async function originalCommand(
     return { requestId };
   }
   if (command === "list_trae_discovered_models") {
-    if (!discoveredRequests.has(args!.requestId as string)) throw new Error("unknown synthetic request");
+    if (!discoveredRequests.has(args!.requestId as string))
+      throw new Error("unknown synthetic request");
     return traeModels;
   }
   if (command === "cancel_trae_model_discovery") return;
@@ -167,7 +172,8 @@ beforeEach(() => {
   rows = {};
   chain = [];
   appendOnSave = true;
-  discoverySerial = 0; discoveredRequests = new Map();
+  discoverySerial = 0;
+  discoveredRequests = new Map();
   vi.mocked(minimaxCodeApi.list).mockResolvedValue([mini] as never);
   vi.mocked(zcodeAccountsApi.library).mockResolvedValue(zcode as never);
   vi.mocked(traeAccountsApi.list).mockResolvedValue([]);
@@ -786,18 +792,29 @@ describe("WorkBuddy original account and live model consumer", () => {
   });
 });
 
-
-const trae: TraeAccountView = { id: "trae-sg-opaque", realm: "sg", status: "stored" };
-async function selectTrae(id = trae.id, app = "claude", model = "confirmed-global-model") {
+const trae: TraeAccountView = {
+  id: "trae-sg-opaque",
+  realm: "sg",
+  status: "stored",
+};
+async function selectTrae(
+  id = trae.id,
+  app = "claude",
+  model = "confirmed-global-model",
+) {
   const option = await screen.findByRole("option", { name: new RegExp(id) });
   fireEvent.change(screen.getByLabelText("账号"), {
     target: { value: (option as HTMLOptionElement).value },
   });
-  fireEvent.change(screen.getByLabelText("目标应用"), { target: { value: app } });
+  fireEvent.change(screen.getByLabelText("目标应用"), {
+    target: { value: app },
+  });
   if (model) {
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
     await screen.findByRole("option", { name: "Discovered TRAE model" });
-    fireEvent.change(screen.getByLabelText("官方模型 ID"), { target: { value: model } });
+    fireEvent.change(screen.getByLabelText("官方模型 ID"), {
+      target: { value: model },
+    });
   }
 }
 describe("TRAE Global explicit text-only account entry", () => {
@@ -805,164 +822,277 @@ describe("TRAE Global explicit text-only account entry", () => {
     vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
     mount();
     await selectTrae(trae.id, "claude", "");
-    expect(screen.getByRole("option", { name: /trae-sg-opaque/ })).toHaveTextContent("SG");
-    expect(screen.getByRole("option", { name: /trae-sg-opaque/ })).toHaveTextContent("已保存");
+    expect(
+      screen.getByRole("option", { name: /trae-sg-opaque/ }),
+    ).toHaveTextContent("SG");
+    expect(
+      screen.getByRole("option", { name: /trae-sg-opaque/ }),
+    ).toHaveTextContent("已保存");
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
-    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent("不支持工具调用、图片或附件");
-    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent("未验证模型可用");
-    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent("已发现模型");
-    expect(screen.getByRole("button", { name: "加入应用路由链" })).toBeDisabled();
+    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent(
+      "不支持工具调用、图片或附件",
+    );
+    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent(
+      "未验证模型可用",
+    );
+    expect(screen.getByText(/TRAE Global.*仅纯文本/)).toHaveTextContent(
+      "已发现模型",
+    );
+    expect(
+      screen.getByRole("button", { name: "加入应用路由链" }),
+    ).toBeDisabled();
     expect(workbuddyApi.discoverModels).not.toHaveBeenCalled();
     expectNoProviderWrite();
   });
   it.each([
-    ["sg", "claude"], ["sg", "codex"], ["us", "claude"], ["us", "codex"],
-  ] as const)("saves only the selected %s account/model for %s through original add(false)", async (realm, app) => {
-    const row = { ...trae, realm, id: `trae-${realm}-opaque` };
-    vi.mocked(traeAccountsApi.list).mockResolvedValue([row]);
-    mount();
-    await selectTrae(row.id, app);
-    fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
-    await screen.findByRole("status");
-    expect(traeAccountsApi.list).toHaveBeenCalledTimes(2);
-    expect(nativeCalls("begin_trae_model_discovery")).toEqual([
-      ["begin_trae_model_discovery", { accountId: row.id }],
-      ["begin_trae_model_discovery", { accountId: row.id }],
-    ]);
-    expect(nativeCalls("list_trae_discovered_models")).toEqual([
-      ["list_trae_discovered_models", { requestId: "synthetic-discovery-1" }],
-      ["list_trae_discovered_models", { requestId: "synthetic-discovery-2" }],
-    ]);
-    expect(invoke).toHaveBeenCalledWith("add_provider", expect.objectContaining({
-      app, addToLive: false, provider: expect.objectContaining({ meta: {
-        authBinding: { source: "managed_account", authProvider: "trae", accountId: row.id },
-        apiFormat: "openai_chat", commonConfigEnabled: false,
-      } }),
-    }));
-    const saved = Object.values(rows)[0];
-    expect(JSON.stringify(saved)).not.toMatch(/BASE_URL|base_url|accessToken|refreshToken|authHost|realm|stored|inference_verified|discovered/);
-    expect(chain).toEqual([saved.id]);
-    expect(screen.getByRole("status")).toHaveTextContent("未切换当前配置");
-  });
+    ["sg", "claude"],
+    ["sg", "codex"],
+    ["us", "claude"],
+    ["us", "codex"],
+  ] as const)(
+    "saves only the selected %s account/model for %s through original add(false)",
+    async (realm, app) => {
+      const row = { ...trae, realm, id: `trae-${realm}-opaque` };
+      vi.mocked(traeAccountsApi.list).mockResolvedValue([row]);
+      mount();
+      await selectTrae(row.id, app);
+      fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+      await screen.findByRole("status");
+      expect(traeAccountsApi.list).toHaveBeenCalledTimes(2);
+      expect(nativeCalls("begin_trae_model_discovery")).toEqual([
+        ["begin_trae_model_discovery", { accountId: row.id }],
+        ["begin_trae_model_discovery", { accountId: row.id }],
+      ]);
+      expect(nativeCalls("list_trae_discovered_models")).toEqual([
+        ["list_trae_discovered_models", { requestId: "synthetic-discovery-1" }],
+        ["list_trae_discovered_models", { requestId: "synthetic-discovery-2" }],
+      ]);
+      expect(invoke).toHaveBeenCalledWith(
+        "add_provider",
+        expect.objectContaining({
+          app,
+          addToLive: false,
+          provider: expect.objectContaining({
+            meta: {
+              authBinding: {
+                source: "managed_account",
+                authProvider: "trae",
+                accountId: row.id,
+              },
+              apiFormat: "openai_chat",
+              commonConfigEnabled: false,
+            },
+          }),
+        }),
+      );
+      const saved = Object.values(rows)[0];
+      expect(JSON.stringify(saved)).not.toMatch(
+        /BASE_URL|base_url|accessToken|refreshToken|authHost|realm|stored|inference_verified|discovered/,
+      );
+      expect(chain).toEqual([saved.id]);
+      expect(screen.getByRole("status")).toHaveTextContent("未切换当前配置");
+    },
+  );
   it.each([
-    { ...trae, realm: "cn" }, { ...trae, status: "retired" },
-    { ...trae, status: "refreshPending" }, { ...trae, realm: "unknown" },
+    { ...trae, realm: "cn" },
+    { ...trae, status: "retired" },
+    { ...trae, status: "refreshPending" },
+    { ...trae, realm: "unknown" },
     { ...trae, status: "ready" },
   ])("does not admit unsupported or uncertain local status %j", async (row) => {
-    vi.mocked(traeAccountsApi.list).mockResolvedValue([row] as TraeAccountView[]);
+    vi.mocked(traeAccountsApi.list).mockResolvedValue([
+      row,
+    ] as TraeAccountView[]);
     mount();
-    expect(await screen.findByRole("option", { name: /trae-sg-opaque/ })).toBeDisabled();
+    expect(
+      await screen.findByRole("option", { name: /trae-sg-opaque/ }),
+    ).toBeDisabled();
     expectNoProviderWrite();
   });
-  it.each(["retired", "refreshPending"] as const)("rechecks %s before writing a Provider", async (status) => {
-    vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
-    mount(); await selectTrae();
-    vi.mocked(traeAccountsApi.list).mockResolvedValue([{ ...trae, status }]);
-    fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
-    await screen.findByRole("alert");
-    expectNoProviderWrite();
-  });
+  it.each(["retired", "refreshPending"] as const)(
+    "rechecks %s before writing a Provider",
+    async (status) => {
+      vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
+      mount();
+      await selectTrae();
+      vi.mocked(traeAccountsApi.list).mockResolvedValue([{ ...trae, status }]);
+      fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+      await screen.findByRole("alert");
+      expectNoProviderWrite();
+    },
+  );
   it("keeps other catalogs available when the TRAE owner list fails", async () => {
-    vi.mocked(traeAccountsApi.list).mockRejectedValue(new Error("must-not-copy native details"));
+    vi.mocked(traeAccountsApi.list).mockRejectedValue(
+      new Error("must-not-copy native details"),
+    );
     mount();
     await screen.findByRole("option", { name: /Synthetic MiniMax/ });
-    expect(await screen.findByRole("alert")).toHaveTextContent("部分账号库不可用");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "部分账号库不可用",
+    );
     expect(screen.queryByText(/must-not-copy/)).toBeNull();
     await choose();
     fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
     await screen.findByRole("status");
   });
-  it.each([false, true])("ignores an old owner reread after unmount/reopen, late failure=%s", async (fail) => {
-    vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
-    const view = mount(); await selectTrae();
-    let resolve!: (value: TraeAccountView[]) => void;
-    let reject!: (reason: Error) => void;
-    vi.mocked(traeAccountsApi.list).mockImplementationOnce(() => new Promise((ok, no) => { resolve = ok; reject = no; }));
-    fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
-    await waitFor(() => expect(traeAccountsApi.list).toHaveBeenCalledTimes(2));
-    view.unmount(); mount(); await selectTrae();
-    if (fail) reject(new Error("must-not-copy late failure")); else resolve([trae]);
-    await new Promise((done) => setTimeout(done, 0));
-    expectNoProviderWrite();
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByLabelText("官方模型 ID")).toHaveValue("confirmed-global-model");
-  });
+  it.each([false, true])(
+    "ignores an old owner reread after unmount/reopen, late failure=%s",
+    async (fail) => {
+      vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
+      const view = mount();
+      await selectTrae();
+      let resolve!: (value: TraeAccountView[]) => void;
+      let reject!: (reason: Error) => void;
+      vi.mocked(traeAccountsApi.list).mockImplementationOnce(
+        () =>
+          new Promise((ok, no) => {
+            resolve = ok;
+            reject = no;
+          }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+      await waitFor(() =>
+        expect(traeAccountsApi.list).toHaveBeenCalledTimes(2),
+      );
+      view.unmount();
+      mount();
+      await selectTrae();
+      if (fail) reject(new Error("must-not-copy late failure"));
+      else resolve([trae]);
+      await new Promise((done) => setTimeout(done, 0));
+      expectNoProviderWrite();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByLabelText("官方模型 ID")).toHaveValue(
+        "confirmed-global-model",
+      );
+    },
+  );
   it("does not reuse a model after account ABA and repeated submission keeps one row", async () => {
     vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
-    mount(); await selectTrae();
+    mount();
+    await selectTrae();
     const other = screen.getByRole("option", { name: /Synthetic MiniMax/ });
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: (other as HTMLOptionElement).value } });
+    fireEvent.change(screen.getByLabelText("账号"), {
+      target: { value: (other as HTMLOptionElement).value },
+    });
     await selectTrae(trae.id, "claude", "");
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "加入应用路由链" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "加入应用路由链" }),
+    ).toBeDisabled();
     await selectTrae();
     const save = screen.getByRole("button", { name: "加入应用路由链" });
-    fireEvent.click(save); fireEvent.click(save);
+    fireEvent.click(save);
+    fireEvent.click(save);
     await screen.findByRole("status");
-    await selectTrae(); fireEvent.click(save); await screen.findByRole("status");
+    await selectTrae();
+    fireEvent.click(save);
+    await screen.findByRole("status");
     expect(Object.keys(rows)).toHaveLength(1);
-    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "add_provider")).toHaveLength(1);
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "add_provider"),
+    ).toHaveLength(1);
   });
   it("does not announce chain success until original CAS restores a saved TRAE row", async () => {
     vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
-    appendOnSave = false; chain = ["existing-route"];
-    mount(); await selectTrae();
+    appendOnSave = false;
+    chain = ["existing-route"];
+    mount();
+    await selectTrae();
     fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("已保存，加入路由待恢复");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "已保存，加入路由待恢复",
+    );
     expect(screen.queryByRole("status")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重试加入路由链" }));
     await screen.findByRole("status");
     expect(chain).toEqual(["existing-route", Object.keys(rows)[0]]);
-    expect(invoke).toHaveBeenCalledWith("apply_application_routing", expect.objectContaining({ request: expect.objectContaining({ revision: "synthetic-revision" }) }));
-    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "add_provider")).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledWith(
+      "apply_application_routing",
+      expect.objectContaining({
+        request: expect.objectContaining({ revision: "synthetic-revision" }),
+      }),
+    );
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "add_provider"),
+    ).toHaveLength(1);
   });
 });
 
 // These tests do not mock traeModels. The production thin API must reach the
 // native invoke mock with the exact opaque account/request contracts.
 describe("TRAE cancellable discovered-model entry", () => {
-  beforeEach(() => { vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]); });
+  beforeEach(() => {
+    vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
+  });
   it("does not discover on mount or account selection, and does not accept a hand-typed/default model", async () => {
-    mount(); await selectTrae(trae.id, "claude", "");
+    mount();
+    await selectTrae(trae.id, "claude", "");
     expect(invoke).not.toHaveBeenCalled();
     expect(screen.getByLabelText("官方模型 ID").tagName).toBe("SELECT");
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
     expect(screen.getByLabelText("官方模型 ID")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "获取 TRAE 模型" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "获取 TRAE 模型" }),
+    ).toBeEnabled();
   });
   it("performs one metadata begin then one list only on explicit discovery, suppressing repeated clicks", async () => {
     let resolve!: (value: { requestId: string }) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "begin_trae_model_discovery"
-      ? await new Promise((done) => { resolve = done; }) : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "claude", "");
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "begin_trae_model_discovery"
+        ? await new Promise((done) => {
+            resolve = done;
+          })
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    mount();
+    await selectTrae(trae.id, "claude", "");
     const button = screen.getByRole("button", { name: "获取 TRAE 模型" });
-    fireEvent.click(button); fireEvent.click(button);
-    expect(nativeCalls("begin_trae_model_discovery")).toEqual([["begin_trae_model_discovery", { accountId: trae.id }]]);
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(nativeCalls("begin_trae_model_discovery")).toEqual([
+      ["begin_trae_model_discovery", { accountId: trae.id }],
+    ]);
     expect(nativeCalls("list_trae_discovered_models")).toHaveLength(0);
     discoveredRequests.set("metadata-only", trae.id);
-    await act(async () => { resolve({ requestId: "metadata-only" }); });
+    await act(async () => {
+      resolve({ requestId: "metadata-only" });
+    });
     await screen.findByRole("option", { name: "Discovered TRAE model" });
-    expect(nativeCalls("list_trae_discovered_models")).toEqual([["list_trae_discovered_models", { requestId: "metadata-only" }]]);
+    expect(nativeCalls("list_trae_discovered_models")).toEqual([
+      ["list_trae_discovered_models", { requestId: "metadata-only" }],
+    ]);
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
     expectNoProviderWrite();
   });
-  it.each(["begin_trae_model_discovery", "list_trae_discovered_models"])("keeps %s errors safe and requires a new explicit request", async (failedCommand) => {
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-      if (cmd === failedCommand) throw new Error("must-not-copy native secret echo");
-      return originalCommand(cmd, args as Record<string, unknown>);
-    });
-    mount(); await selectTrae(trae.id, "claude", "");
-    fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("重新获取");
-    expect(screen.queryByText(/must-not-copy/)).toBeNull();
-    expect(nativeCalls(failedCommand)).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "加入应用路由链" })).toBeDisabled();
-    expectNoProviderWrite();
-  });
+  it.each(["begin_trae_model_discovery", "list_trae_discovered_models"])(
+    "keeps %s errors safe and requires a new explicit request",
+    async (failedCommand) => {
+      vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (cmd === failedCommand)
+          throw new Error("must-not-copy native secret echo");
+        return originalCommand(cmd, args as Record<string, unknown>);
+      });
+      mount();
+      await selectTrae(trae.id, "claude", "");
+      fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("重新获取");
+      expect(screen.queryByText(/must-not-copy/)).toBeNull();
+      expect(nativeCalls(failedCommand)).toHaveLength(1);
+      expect(
+        screen.getByRole("button", { name: "加入应用路由链" }),
+      ).toBeDisabled();
+      expectNoProviderWrite();
+    },
+  );
   it("rejects a model removed during the fresh pre-save discovery", async () => {
-    mount(); await selectTrae();
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models"
-      ? [{ id: "other", name: "Other" }] : originalCommand(cmd, args as Record<string, unknown>));
+    mount();
+    await selectTrae();
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "list_trae_discovered_models"
+        ? [{ id: "other", name: "Other" }]
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
     fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("重新获取");
     expect(nativeCalls("begin_trae_model_discovery")).toHaveLength(2);
@@ -970,7 +1100,8 @@ describe("TRAE cancellable discovered-model entry", () => {
     expectNoProviderWrite();
   });
   it("never falls back to the old discovered list when the save-time request fails", async () => {
-    mount(); await selectTrae();
+    mount();
+    await selectTrae();
     vi.mocked(invoke).mockImplementation(async (cmd, args) => {
       if (cmd === "list_trae_discovered_models") throw new Error("expired");
       return originalCommand(cmd, args as Record<string, unknown>);
@@ -980,119 +1111,234 @@ describe("TRAE cancellable discovered-model entry", () => {
     expectNoProviderWrite();
     expect(nativeCalls("get_providers")).toHaveLength(0);
   });
-  it.each([false, true])("cancels the exact old request and ignores an account ABA late failure=%s", async (fail) => {
-    let resolve!: (models: typeof traeModels) => void;
-    let reject!: (error: Error) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models" && (args as { requestId: string }).requestId === "synthetic-discovery-1"
-      ? await new Promise((ok, no) => { resolve = ok; reject = no; }) : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "claude", "");
-    fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
-    await waitFor(() => expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1));
-    const other = screen.getByRole("option", { name: /Synthetic MiniMax/ });
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: (other as HTMLOptionElement).value } });
-    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([["cancel_trae_model_discovery", { requestId: "synthetic-discovery-1" }]]);
-    await selectTrae();
-    await act(async () => { if (fail) reject(new Error("must-not-copy")); else resolve([{ id: "stale", name: "Stale TRAE model" }]); });
-    expect(screen.queryByRole("option", { name: "Stale TRAE model" })).toBeNull();
-    expect(screen.getByLabelText("官方模型 ID")).toHaveValue("confirmed-global-model");
-    expect(screen.queryByRole("alert")).toBeNull();
-    expectNoProviderWrite();
-  });
+  it.each([false, true])(
+    "cancels the exact old request and ignores an account ABA late failure=%s",
+    async (fail) => {
+      let resolve!: (models: typeof traeModels) => void;
+      let reject!: (error: Error) => void;
+      vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+        cmd === "list_trae_discovered_models" &&
+        (args as { requestId: string }).requestId === "synthetic-discovery-1"
+          ? await new Promise((ok, no) => {
+              resolve = ok;
+              reject = no;
+            })
+          : originalCommand(cmd, args as Record<string, unknown>),
+      );
+      mount();
+      await selectTrae(trae.id, "claude", "");
+      fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
+      await waitFor(() =>
+        expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1),
+      );
+      const other = screen.getByRole("option", { name: /Synthetic MiniMax/ });
+      fireEvent.change(screen.getByLabelText("账号"), {
+        target: { value: (other as HTMLOptionElement).value },
+      });
+      expect(nativeCalls("cancel_trae_model_discovery")).toEqual([
+        ["cancel_trae_model_discovery", { requestId: "synthetic-discovery-1" }],
+      ]);
+      await selectTrae();
+      await act(async () => {
+        if (fail) reject(new Error("must-not-copy"));
+        else resolve([{ id: "stale", name: "Stale TRAE model" }]);
+      });
+      expect(
+        screen.queryByRole("option", { name: "Stale TRAE model" }),
+      ).toBeNull();
+      expect(screen.getByLabelText("官方模型 ID")).toHaveValue(
+        "confirmed-global-model",
+      );
+      expect(screen.queryByRole("alert")).toBeNull();
+      expectNoProviderWrite();
+    },
+  );
   it("cancels a begin handle arriving after account change without listing it", async () => {
     let resolve!: (value: { requestId: string }) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "begin_trae_model_discovery"
-      ? await new Promise((done) => { resolve = done; }) : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "claude", "");
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "begin_trae_model_discovery"
+        ? await new Promise((done) => {
+            resolve = done;
+          })
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    mount();
+    await selectTrae(trae.id, "claude", "");
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
     const other = screen.getByRole("option", { name: /Synthetic MiniMax/ });
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: (other as HTMLOptionElement).value } });
-    await act(async () => { resolve({ requestId: "late-begin" }); });
-    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([["cancel_trae_model_discovery", { requestId: "late-begin" }]]);
+    fireEvent.change(screen.getByLabelText("账号"), {
+      target: { value: (other as HTMLOptionElement).value },
+    });
+    await act(async () => {
+      resolve({ requestId: "late-begin" });
+    });
+    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([
+      ["cancel_trae_model_discovery", { requestId: "late-begin" }],
+    ]);
     expect(nativeCalls("list_trae_discovered_models")).toHaveLength(0);
   });
-  it.each(["discovery", "save-time"])("unmount cancels %s and prevents a late Provider save", async (phase) => {
-    const view = mount();
-    await selectTrae(trae.id, "claude", phase === "save-time" ? "confirmed-global-model" : "");
-    let resolve!: (models: typeof traeModels) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models"
-      ? await new Promise((done) => { resolve = done; }) : originalCommand(cmd, args as Record<string, unknown>));
-    fireEvent.click(screen.getByRole("button", { name: phase === "save-time" ? "加入应用路由链" : "获取 TRAE 模型" }));
-    const number = phase === "save-time" ? 2 : 1;
-    await waitFor(() => expect(nativeCalls("list_trae_discovered_models")).toHaveLength(number));
-    view.unmount();
-    expect(nativeCalls("cancel_trae_model_discovery")).toContainEqual(["cancel_trae_model_discovery", { requestId: `synthetic-discovery-${number}` }]);
-    await act(async () => { resolve(traeModels); });
-    expectNoProviderWrite();
-    expect(nativeCalls("get_providers")).toHaveLength(0);
-  });
+  it.each(["discovery", "save-time"])(
+    "unmount cancels %s and prevents a late Provider save",
+    async (phase) => {
+      const view = mount();
+      await selectTrae(
+        trae.id,
+        "claude",
+        phase === "save-time" ? "confirmed-global-model" : "",
+      );
+      let resolve!: (models: typeof traeModels) => void;
+      vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+        cmd === "list_trae_discovered_models"
+          ? await new Promise((done) => {
+              resolve = done;
+            })
+          : originalCommand(cmd, args as Record<string, unknown>),
+      );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: phase === "save-time" ? "加入应用路由链" : "获取 TRAE 模型",
+        }),
+      );
+      const number = phase === "save-time" ? 2 : 1;
+      await waitFor(() =>
+        expect(nativeCalls("list_trae_discovered_models")).toHaveLength(number),
+      );
+      view.unmount();
+      expect(nativeCalls("cancel_trae_model_discovery")).toContainEqual([
+        "cancel_trae_model_discovery",
+        { requestId: `synthetic-discovery-${number}` },
+      ]);
+      await act(async () => {
+        resolve(traeModels);
+      });
+      expectNoProviderWrite();
+      expect(nativeCalls("get_providers")).toHaveLength(0);
+    },
+  );
   it("unmount while begin is pending cancels the late handle without calling list", async () => {
     let resolve!: (value: { requestId: string }) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "begin_trae_model_discovery"
-      ? await new Promise((done) => { resolve = done; }) : originalCommand(cmd, args as Record<string, unknown>));
-    const view = mount(); await selectTrae(trae.id, "claude", "");
-    fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" })); view.unmount();
-    await act(async () => { resolve({ requestId: "late-unmounted" }); });
-    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([["cancel_trae_model_discovery", { requestId: "late-unmounted" }]]);
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "begin_trae_model_discovery"
+        ? await new Promise((done) => {
+            resolve = done;
+          })
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    const view = mount();
+    await selectTrae(trae.id, "claude", "");
+    fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
+    view.unmount();
+    await act(async () => {
+      resolve({ requestId: "late-unmounted" });
+    });
+    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([
+      ["cancel_trae_model_discovery", { requestId: "late-unmounted" }],
+    ]);
     expect(nativeCalls("list_trae_discovered_models")).toHaveLength(0);
   });
   it("refresh cancels the active request and discards the model selection", async () => {
     let resolve!: (models: typeof traeModels) => void;
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models"
-      ? await new Promise((done) => { resolve = done; }) : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "claude", "");
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "list_trae_discovered_models"
+        ? await new Promise((done) => {
+            resolve = done;
+          })
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    mount();
+    await selectTrae(trae.id, "claude", "");
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
-    await waitFor(() => expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1));
+    await waitFor(() =>
+      expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1),
+    );
     fireEvent.click(screen.getByRole("button", { name: "刷新账号列表" }));
-    await act(async () => { resolve(traeModels); });
-    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([["cancel_trae_model_discovery", { requestId: "synthetic-discovery-1" }]]);
+    await act(async () => {
+      resolve(traeModels);
+    });
+    expect(nativeCalls("cancel_trae_model_discovery")).toEqual([
+      ["cancel_trae_model_discovery", { requestId: "synthetic-discovery-1" }],
+    ]);
     expect(screen.getByLabelText("账号")).toHaveValue("");
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
     expectNoProviderWrite();
   });
   it("an empty discovered catalog has no hand-entry fallback or implicit model", async () => {
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models"
-      ? [] : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "claude", "");
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "list_trae_discovered_models"
+        ? []
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    mount();
+    await selectTrae(trae.id, "claude", "");
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("未发现可选模型");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "未发现可选模型",
+    );
     expect(screen.getByLabelText("官方模型 ID").tagName).toBe("SELECT");
     expect(screen.getByLabelText("官方模型 ID")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "加入应用路由链" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "加入应用路由链" }),
+    ).toBeDisabled();
     expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1);
     expectNoProviderWrite();
   });
   it("a cancel failure and old result never replace a newer account's discovery", async () => {
     let resolve!: (models: typeof traeModels) => void;
     vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-      if (cmd === "cancel_trae_model_discovery") throw new Error("must-not-copy cancellation details");
-      if (cmd === "list_trae_discovered_models" && (args as { requestId: string }).requestId === "synthetic-discovery-1")
-        return await new Promise((done) => { resolve = done; });
+      if (cmd === "cancel_trae_model_discovery")
+        throw new Error("must-not-copy cancellation details");
+      if (
+        cmd === "list_trae_discovered_models" &&
+        (args as { requestId: string }).requestId === "synthetic-discovery-1"
+      )
+        return await new Promise((done) => {
+          resolve = done;
+        });
       return originalCommand(cmd, args as Record<string, unknown>);
     });
-    mount(); await selectTrae(trae.id, "claude", "");
+    mount();
+    await selectTrae(trae.id, "claude", "");
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
-    await waitFor(() => expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1));
+    await waitFor(() =>
+      expect(nativeCalls("list_trae_discovered_models")).toHaveLength(1),
+    );
     const other = screen.getByRole("option", { name: /Synthetic MiniMax/ });
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: (other as HTMLOptionElement).value } });
+    fireEvent.change(screen.getByLabelText("账号"), {
+      target: { value: (other as HTMLOptionElement).value },
+    });
     await selectTrae();
-    await act(async () => { resolve([{ id: "stale", name: "Stale TRAE model" }]); });
-    expect(screen.queryByRole("option", { name: "Stale TRAE model" })).toBeNull();
+    await act(async () => {
+      resolve([{ id: "stale", name: "Stale TRAE model" }]);
+    });
+    expect(
+      screen.queryByRole("option", { name: "Stale TRAE model" }),
+    ).toBeNull();
     expect(screen.queryByText(/must-not-copy/)).toBeNull();
-    expect(screen.getByLabelText("官方模型 ID")).toHaveValue("confirmed-global-model");
+    expect(screen.getByLabelText("官方模型 ID")).toHaveValue(
+      "confirmed-global-model",
+    );
     expectNoProviderWrite();
   });
   it("preserves an exact valid non-ASCII discovered ID in selection and save without inferring verification", async () => {
     const id = ' 模型 "Global" / v1 ';
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => cmd === "list_trae_discovered_models"
-      ? [{ id, name: "Exact original ID" }] : originalCommand(cmd, args as Record<string, unknown>));
-    mount(); await selectTrae(trae.id, "codex", "");
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "list_trae_discovered_models"
+        ? [{ id, name: "Exact original ID" }]
+        : originalCommand(cmd, args as Record<string, unknown>),
+    );
+    mount();
+    await selectTrae(trae.id, "codex", "");
     fireEvent.click(screen.getByRole("button", { name: "获取 TRAE 模型" }));
     await screen.findByRole("option", { name: "Exact original ID" });
-    fireEvent.change(screen.getByLabelText("官方模型 ID"), { target: { value: id } });
+    fireEvent.change(screen.getByLabelText("官方模型 ID"), {
+      target: { value: id },
+    });
     fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
     await screen.findByRole("status");
     const saved = Object.values(rows)[0];
     expect(saved.settingsConfig.config).toBe(`model = ${JSON.stringify(id)}\n`);
-    expect(JSON.stringify(saved.meta)).not.toMatch(/verified|discovered|requestId/);
+    expect(JSON.stringify(saved.meta)).not.toMatch(
+      /verified|discovered|requestId/,
+    );
   });
 });

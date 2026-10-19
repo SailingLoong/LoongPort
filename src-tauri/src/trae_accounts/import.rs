@@ -3,6 +3,7 @@
 use super::store::{Account, Failure};
 #[derive(Clone, Copy)]
 pub(crate) enum Edition {
+    #[cfg(test)]
     Cn,
     Global,
 }
@@ -23,6 +24,7 @@ pub(crate) fn read_selected(
     edition: Edition,
 ) -> Result<Material, Failure> {
     let expected = match edition {
+        #[cfg(test)]
         Edition::Cn => "Trae CN",
         Edition::Global => "Trae",
     };
@@ -219,6 +221,7 @@ pub(super) fn parse(
         .ok_or(Failure::Invalid)?
         .to_ascii_uppercase();
     let realm = match (edition, region.as_str(), host.as_str()) {
+        #[cfg(test)]
         (Edition::Cn, "CN", "https://api.trae.cn") => Realm::Cn,
         (Edition::Global, "SG", "https://growsg-normal.trae.ai") => Realm::Sg,
         (Edition::Global, "US", "https://growsg-normal.trae.ai") => Realm::Us,

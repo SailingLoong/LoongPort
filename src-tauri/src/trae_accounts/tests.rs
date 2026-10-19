@@ -495,6 +495,19 @@ fn checkin_reply(body: Value) -> ProxyResponse {
     )
 }
 #[tokio::test]
+async fn checkin_entry_rejects_cn_before_transport_or_claim_admission() {
+    let f = Fixture::new().await;
+    let id = f.seed(Realm::Cn).await;
+    assert!(matches!(
+        super::checkin::run(f.session.clone(), &id, Duration::from_secs(2)).await,
+        Err(ProxyError::AuthError(message)) if message == "trae.checkin_unavailable"
+    ));
+    assert_eq!(
+        snapshot(&f.session, &id).await.unwrap().account.checkin_day,
+        None
+    );
+}
+#[tokio::test]
 async fn cn_checkin_uses_original_device_and_persists_claim_admission() {
     let f = Fixture::new().await;
     let id = f.seed(Realm::Cn).await;

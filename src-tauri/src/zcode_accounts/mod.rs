@@ -23,7 +23,7 @@ pub(crate) mod discovery_paths;
 pub(crate) mod import_receipts;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod import_reviews;
-#[cfg(any(feature = "gui", test))]
+#[cfg(all(any(feature = "gui", test), any(not(test), unix)))]
 pub(crate) mod inference;
 pub(crate) mod key_intent;
 #[cfg(all(feature = "gui", target_os = "macos"))]

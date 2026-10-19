@@ -12,9 +12,12 @@ export interface ManagedInferenceAccount {
 
 /** Original TRAE catalog/protocol text contract, not an entitlement check. */
 export function isTraeModelText(value: string): boolean {
-  return typeof value === "string" && !!value.trim() &&
+  return (
+    typeof value === "string" &&
+    !!value.trim() &&
     new TextEncoder().encode(value).length <= 256 &&
-    !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+  );
 }
 
 /** Model-only application projection. Never accept a token or editable endpoint. */
@@ -24,7 +27,8 @@ export function buildManagedAccountProvider(
   requestedModel: string,
   id: string,
 ): Provider {
-  const model = account.authProvider === "trae" ? requestedModel : requestedModel.trim();
+  const model =
+    account.authProvider === "trae" ? requestedModel : requestedModel.trim();
   if (
     !account.available ||
     !account.id.trim() ||
@@ -33,7 +37,9 @@ export function buildManagedAccountProvider(
       account.authProvider,
     ) ||
     !["claude", "codex"].includes(app) ||
-    !(account.authProvider === "trae" ? isTraeModelText(model) : /^[A-Za-z0-9._:/@+-]{1,200}$/.test(model))
+    !(account.authProvider === "trae"
+      ? isTraeModelText(model)
+      : /^[A-Za-z0-9._:/@+-]{1,200}$/.test(model))
   ) {
     throw new Error("managedAccount.invalidSelection");
   }
@@ -58,10 +64,9 @@ export function buildManagedAccountProvider(
         authProvider: account.authProvider,
         accountId: account.id,
       },
-      apiFormat:
-        ["workbuddy", "trae"].includes(account.authProvider)
-          ? "openai_chat"
-          : "anthropic",
+      apiFormat: ["workbuddy", "trae"].includes(account.authProvider)
+        ? "openai_chat"
+        : "anthropic",
       commonConfigEnabled: false,
     },
   };

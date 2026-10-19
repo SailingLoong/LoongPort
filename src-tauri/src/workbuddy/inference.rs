@@ -1022,6 +1022,7 @@ impl Lease {
         }
         Ok(models)
     }
+    #[cfg(not(test))]
     pub(crate) async fn dispatch(
         self,
         body: Value,

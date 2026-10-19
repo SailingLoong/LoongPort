@@ -180,35 +180,71 @@ it.each(["claude", "codex"] as const)(
   },
 );
 
-
 describe("TRAE fixed text-only route projection", () => {
-  it.each(["claude", "codex"] as const)("uses opaque TRAE identity and fixed Chat for %s", async (app) => {
-    const trae = { ...account, authProvider: "trae" as const };
-    const id = await managedAccountProviderId(trae, app, "explicit-global-model");
-    const p = buildManagedAccountProvider(trae, app, "explicit-global-model", id);
-    expect(p.meta).toEqual({
-      authBinding: { source: "managed_account", authProvider: "trae", accountId: account.id },
-      apiFormat: "openai_chat", commonConfigEnabled: false,
-    });
-    expect(id).not.toBe(await managedAccountProviderId(account, app, "explicit-global-model"));
-    expect(JSON.stringify(p)).not.toMatch(/base_url|BASE_URL|accessToken|refreshToken|apiKey|authHost|realm|inference_verified|discovered/);
-    expect(() => buildManagedAccountProvider(trae, app, "", "id")).toThrow();
-  });
+  it.each(["claude", "codex"] as const)(
+    "uses opaque TRAE identity and fixed Chat for %s",
+    async (app) => {
+      const trae = { ...account, authProvider: "trae" as const };
+      const id = await managedAccountProviderId(
+        trae,
+        app,
+        "explicit-global-model",
+      );
+      const p = buildManagedAccountProvider(
+        trae,
+        app,
+        "explicit-global-model",
+        id,
+      );
+      expect(p.meta).toEqual({
+        authBinding: {
+          source: "managed_account",
+          authProvider: "trae",
+          accountId: account.id,
+        },
+        apiFormat: "openai_chat",
+        commonConfigEnabled: false,
+      });
+      expect(id).not.toBe(
+        await managedAccountProviderId(account, app, "explicit-global-model"),
+      );
+      expect(JSON.stringify(p)).not.toMatch(
+        /base_url|BASE_URL|accessToken|refreshToken|apiKey|authHost|realm|inference_verified|discovered/,
+      );
+      expect(() => buildManagedAccountProvider(trae, app, "", "id")).toThrow();
+    },
+  );
 });
 
-it.each(["claude", "codex"] as const)("preserves exact TRAE discovered text IDs for %s without changing other platform validation", async (app) => {
-  const a = { ...account, authProvider: "trae" as const };
-  const model = ' 模型 "Global" / v1 ';
-  const id = await managedAccountProviderId(a, app, model);
-  const p = buildManagedAccountProvider(a, app, model, id);
-  if (app === "codex") {
-    expect(p.settingsConfig.config).toBe(`model = ${JSON.stringify(model)}\n`);
-    expect(parseToml(p.settingsConfig.config as string).model).toBe(model);
-  }
-  else expect(p.settingsConfig.env.ANTHROPIC_MODEL).toBe(model);
-  expect(id).not.toBe(await managedAccountProviderId(a, app, model.trim()));
-  expect(() => buildManagedAccountProvider(account, app, model, "id")).toThrow();
-});
-it.each(["", "  ", "x\n", "x\u007f", "x\u0085", "界".repeat(86)])("rejects unsafe TRAE discovered model text %j", (model) => {
-  expect(() => buildManagedAccountProvider({ ...account, authProvider: "trae" }, "codex", model, "id")).toThrow();
-});
+it.each(["claude", "codex"] as const)(
+  "preserves exact TRAE discovered text IDs for %s without changing other platform validation",
+  async (app) => {
+    const a = { ...account, authProvider: "trae" as const };
+    const model = ' 模型 "Global" / v1 ';
+    const id = await managedAccountProviderId(a, app, model);
+    const p = buildManagedAccountProvider(a, app, model, id);
+    if (app === "codex") {
+      expect(p.settingsConfig.config).toBe(
+        `model = ${JSON.stringify(model)}\n`,
+      );
+      expect(parseToml(p.settingsConfig.config as string).model).toBe(model);
+    } else expect(p.settingsConfig.env.ANTHROPIC_MODEL).toBe(model);
+    expect(id).not.toBe(await managedAccountProviderId(a, app, model.trim()));
+    expect(() =>
+      buildManagedAccountProvider(account, app, model, "id"),
+    ).toThrow();
+  },
+);
+it.each(["", "  ", "x\n", "x\u007f", "x\u0085", "界".repeat(86)])(
+  "rejects unsafe TRAE discovered model text %j",
+  (model) => {
+    expect(() =>
+      buildManagedAccountProvider(
+        { ...account, authProvider: "trae" },
+        "codex",
+        model,
+        "id",
+      ),
+    ).toThrow();
+  },
+);

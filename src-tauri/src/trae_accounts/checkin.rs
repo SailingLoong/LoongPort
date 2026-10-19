@@ -1,4 +1,5 @@
-//! Explicit one-shot operation for the existing scheduler. No new job runner.
+//! Synthetic-only CN check-in protocol research; no production consumer is wired.
+//! CN authorization and check-in remain unimplemented product requirements.
 use super::{
     inference::{self, Lease, OfficialHttp, Transport},
     protocol,

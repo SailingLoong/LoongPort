@@ -4,10 +4,12 @@
 //! packages/config/src/config.ts and packages/local-runtime/src/runtime/
 //! model-resolver{,-helpers}.ts. MIT notice: licenses/minimax-code-MIT.txt.
 //! `sk-xxx` in that source is an SDK placeholder, never an account credential.
+#[cfg(not(test))]
+use super::http::OfficialHttp;
 use super::{
     auth,
     catalog::{self, Failure, Snapshot},
-    http::{OfficialHttp, Transport},
+    http::Transport,
 };
 use crate::{
     proxy::{hyper_client::ProxyResponse, ProxyError},
@@ -114,7 +116,9 @@ pub(super) trait StreamTransport: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ProxyResponse, ProxyError>> + Send + '_>>;
 }
 
+#[cfg(not(test))]
 struct OfficialStreamTransport;
+#[cfg(not(test))]
 impl StreamTransport for OfficialStreamTransport {
     fn request(
         &self,
@@ -221,6 +225,7 @@ impl Lease {
     /// Accept an already-converted Anthropic Messages body from the original
     /// forwarder. Preserve its complete messages/tools/thinking payload. This
     /// adapter performs no parallel protocol conversion and no pool selection.
+    #[cfg(not(test))]
     pub(crate) async fn dispatch(
         self,
         body: Value,

@@ -61,6 +61,7 @@ pub(crate) fn validate_capabilities(provider: &Provider, body: &Value) -> Result
 #[cfg(any(feature = "gui", test))]
 enum AccountLease {
     MiniMax(crate::minimax_code::inference::Lease),
+    #[cfg(any(not(test), unix))]
     ZCode(crate::zcode_accounts::inference::Lease),
     WorkBuddy(crate::workbuddy::inference::Lease),
     Trae(crate::trae_accounts::inference::Lease),
@@ -161,6 +162,7 @@ impl PreparedAccount {
     pub(crate) fn base_url(&self) -> &'static str {
         match &self.lease {
             AccountLease::MiniMax(lease) => lease.base_url(),
+            #[cfg(any(not(test), unix))]
             AccountLease::ZCode(_) => "https://zcode.z.ai/api/v1/zcode-plan/anthropic",
             AccountLease::WorkBuddy(lease) => lease.base_url(),
             AccountLease::Trae(lease) => lease.base_url(),
@@ -256,6 +258,7 @@ impl PreparedAccount {
                     }),
                 ))
             }
+            #[cfg(any(not(test), unix))]
             AccountLease::ZCode(lease) => {
                 let fence = lease.clone();
                 #[cfg(all(test, unix))]
@@ -269,13 +272,6 @@ impl PreparedAccount {
                         })?;
                     lease.dispatch_fixture(body, timeout, fixture).await?
                 };
-                #[cfg(all(test, not(unix)))]
-                {
-                    let _ = (lease, fence, body, timeout);
-                    return Err(ProxyError::ConfigError(
-                        "ZCode synthetic owner is unsupported on this test platform".into(),
-                    ));
-                }
                 #[cfg(not(test))]
                 let response = lease.dispatch(body, timeout).await?;
                 #[cfg(any(not(test), unix))]
@@ -366,5 +362,27 @@ impl PreparedAccount {
         Err(ProxyError::ConfigError(
             "Managed account owner is unavailable in this build".into(),
         ))
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn zcode_non_unix_fixture_acquisition_remains_closed() {
+        let result = PreparedAccount::acquire(
+            SecretSession::ephemeral().unwrap(),
+            AccountKind::ZCode,
+            "synthetic-account",
+            "synthetic-session",
+            &http::Extensions::new(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ProxyError::ConfigError(message))
+                if message == "ZCode synthetic owner is unsupported on this test platform"
+        ));
     }
 }

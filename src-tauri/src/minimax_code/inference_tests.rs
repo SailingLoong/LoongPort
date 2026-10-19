@@ -111,6 +111,8 @@ async fn inference_binds_two_accounts_and_preserves_anthropic_body() {
         .iter()
         .enumerate()
     {
+        assert!(calls[n].streaming);
+        assert_eq!(calls[n].timeout, Duration::from_secs(3));
         let h = &calls[n].headers;
         assert_eq!(h[http::header::AUTHORIZATION], *token);
         assert!(h[http::header::AUTHORIZATION].is_sensitive());

@@ -125,12 +125,17 @@ export function ManagedAccountProviderSection() {
     try {
       // Single-use request. No automatic retry or polling after any outcome.
       const found = await traeModelsApi.list(requestId);
-      if (found.length > 512 || found.some((row) =>
-        !isTraeModelText(row.id) || !isTraeModelText(row.name)))
+      if (
+        found.length > 512 ||
+        found.some(
+          (row) => !isTraeModelText(row.id) || !isTraeModelText(row.name),
+        )
+      )
         throw new Error("managedAccount.invalidModels");
       return found;
     } finally {
-      if (traeModelRequest.current === requestId) traeModelRequest.current = null;
+      if (traeModelRequest.current === requestId)
+        traeModelRequest.current = null;
     }
   };
   const clearModels = useCallback(() => {
@@ -210,7 +215,9 @@ export function ManagedAccountProviderSection() {
       const unique = [
         ...new Map(
           found
-            .filter((item) => trae || /^[A-Za-z0-9._:/@+-]{1,200}$/.test(item.id))
+            .filter(
+              (item) => trae || /^[A-Za-z0-9._:/@+-]{1,200}$/.test(item.id),
+            )
             .map((item) => [item.id, item]),
         ).values(),
       ];
@@ -557,7 +564,9 @@ export function ManagedAccountProviderSection() {
             disabled={locked || modelsBusy || !account?.available}
             onClick={() => void discover()}
           >
-            {trae ? copy("discoverTraeModels", "获取 TRAE 模型") : copy("discoverWorkbuddyModels", "获取 WorkBuddy 模型")}
+            {trae
+              ? copy("discoverTraeModels", "获取 TRAE 模型")
+              : copy("discoverWorkbuddyModels", "获取 WorkBuddy 模型")}
           </button>
         )}
         <button
@@ -611,36 +620,39 @@ export function ManagedAccountProviderSection() {
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error === "emptyModels"
-            ? copy("emptyModels", "未发现可选模型，请重新获取；不会回退到手动填写。")
-            : error === "models"
             ? copy(
-                "modelsError",
-                "未确认当前账号的实时模型，请重新获取并选择模型。",
+                "emptyModels",
+                "未发现可选模型，请重新获取；不会回退到手动填写。",
               )
-            : error === "chain"
+            : error === "models"
               ? copy(
-                  "chainPending",
-                  "已保存，加入路由待恢复。重试仅更新原路由链，不会重复创建档位。",
+                  "modelsError",
+                  "未确认当前账号的实时模型，请重新获取并选择模型。",
                 )
-              : error === "conflict"
+              : error === "chain"
                 ? copy(
-                    "identityConflict",
-                    "已有档位身份或模型与本次选择不同，未覆盖原记录。请到应用页核对。",
+                    "chainPending",
+                    "已保存，加入路由待恢复。重试仅更新原路由链，不会重复创建档位。",
                   )
-                : error === "unknown"
+                : error === "conflict"
                   ? copy(
-                      "unknown",
-                      "保存结果暂无法确认。请核对保存结果，不要重复提交。",
+                      "identityConflict",
+                      "已有档位身份或模型与本次选择不同，未覆盖原记录。请到应用页核对。",
                     )
-                  : error === "catalog"
+                  : error === "unknown"
                     ? copy(
-                        "catalogError",
-                        "部分账号库不可用；仅显示本次成功读取的账号。请确认原账号库已解锁。",
+                        "unknown",
+                        "保存结果暂无法确认。请核对保存结果，不要重复提交。",
                       )
-                    : copy(
-                        "saveError",
-                        "未确认保存成功。请检查账号状态和模型 ID 后重试。",
-                      )}
+                    : error === "catalog"
+                      ? copy(
+                          "catalogError",
+                          "部分账号库不可用；仅显示本次成功读取的账号。请确认原账号库已解锁。",
+                        )
+                      : copy(
+                          "saveError",
+                          "未确认保存成功。请检查账号状态和模型 ID 后重试。",
+                        )}
         </p>
       )}
       {notice && (

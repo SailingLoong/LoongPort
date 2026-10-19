@@ -1,8 +1,10 @@
 //! One encrypted document, using the original SecretSession/OwnedFile lifecycle.
 use crate::secrets::{session::SecretSession, VaultMetadata};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 use zeroize::Zeroize;
@@ -36,6 +38,7 @@ pub(crate) enum Failure {
     Retired,
     Unsupported,
     Invalid,
+    #[cfg(test)]
     Network,
     NeedsLogin,
 }
@@ -325,6 +328,7 @@ pub(crate) async fn list(session: &SecretSession) -> Result<Vec<AccountView>, Fa
     })
     .await
 }
+#[cfg(test)]
 pub(crate) async fn lookup(
     session: &SecretSession,
     id: &str,

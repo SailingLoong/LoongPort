@@ -136,8 +136,8 @@ fn body() -> Value {
 
 #[test]
 fn expiry_is_only_a_local_rejection_hint_never_an_authorization_proof() {
-    assert_eq!(jwt_is_expired(&jwt(100, "a"), 100), true);
-    assert_eq!(jwt_is_expired(&jwt(101, "a"), 100), false);
+    assert!(jwt_is_expired(&jwt(100, "a"), 100));
+    assert!(!jwt_is_expired(&jwt(101, "a"), 100));
     for token in [
         "opaque-token",
         "a.not-json.c",
@@ -219,6 +219,8 @@ async fn two_existing_accounts_supply_their_own_start_jwt_and_preserve_messages(
     assert_eq!(calls.len(), 2);
     for (index, call) in calls.iter().enumerate() {
         assert_eq!(call.url, START_MESSAGES_URL);
+        assert!(call.streaming);
+        assert_eq!(call.timeout, Duration::from_secs(3));
         assert_eq!(call.headers["x-api-key"], f.tokens[index]);
         assert_eq!(
             call.headers[http::header::AUTHORIZATION],

@@ -21,7 +21,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
-use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
+#[cfg(not(test))]
+use std::path::Path;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 const START_MESSAGES_URL: &str = "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages";
 
@@ -67,7 +69,9 @@ trait StreamTransport: Send + Sync {
         request: StreamRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ProxyResponse, ProxyError>> + Send + '_>>;
 }
+#[cfg(not(test))]
 struct OfficialTransport;
+#[cfg(not(test))]
 impl StreamTransport for OfficialTransport {
     fn request(
         &self,
@@ -139,6 +143,7 @@ impl Lease {
     /// Resolve the same default library scope used by the existing account UI.
     /// Non-macOS production remains unsupported by that owner; never fabricate
     /// OS identity or silently pick another catalog to make acquisition succeed.
+    #[cfg(not(test))]
     pub(crate) async fn acquire(
         session: Arc<SecretSession>,
         account_id: &str,
@@ -150,6 +155,7 @@ impl Lease {
     /// selected_data_root may come only from the trusted backend account/library
     /// selection. Never derive it from inference JSON or provider credential fields.
     /// It is a ZCode namespace, distinct from session.root() (LoongPort's vault).
+    #[cfg(not(test))]
     pub(crate) async fn acquire_selected(
         session: Arc<SecretSession>,
         account_id: &str,
@@ -283,6 +289,7 @@ impl Lease {
         self.with_current(|_, _, _| Ok(())).await
     }
 
+    #[cfg(not(test))]
     pub(crate) async fn dispatch(
         self,
         body: Value,
@@ -298,10 +305,10 @@ impl Lease {
     ) -> Result<ProxyResponse, ProxyError> {
         if !body.is_object()
             || !body.get("messages").is_some_and(Value::is_array)
-            || !body
+            || body
                 .get("model")
                 .and_then(Value::as_str)
-                .is_some_and(|v| !v.trim().is_empty())
+                .is_none_or(|v| v.trim().is_empty())
             || body.get("stream").is_some_and(|v| !v.is_boolean())
         {
             return Err(ProxyError::InvalidRequest(
