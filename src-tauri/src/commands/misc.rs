@@ -364,14 +364,16 @@ mod diagnostic_probe_tests {
         let side_effect = dir.path().join("must-not-exist");
         let calls = std::cell::Cell::new(0);
         let result = local_tool_diagnostics_with_probe(
-            std::time::Duration::from_millis(100),
+            // The child must reliably reach its pid write before the deadline:
+            // on a loaded CI runner exec alone can outpace a 100ms budget.
+            std::time::Duration::from_secs(2),
             |_, timeout| {
                 calls.set(calls.get() + 1);
                 crate::process::run_tool_at_path_with_timeout(
                     std::path::Path::new("/bin/sh"),
                     &[
                         "-c",
-                        "echo $$ > \"$1\"; (sleep 0.5; touch \"$2\") & wait",
+                        "echo $$ > \"$1\"; (sleep 5; touch \"$2\") & wait",
                         "diagnostic-fixture",
                         parent_pid.to_str().unwrap(),
                         side_effect.to_str().unwrap(),
@@ -401,7 +403,8 @@ mod diagnostic_probe_tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // A surviving descendant would touch at ~5s; check past that point.
+        std::thread::sleep(std::time::Duration::from_secs(4));
         assert!(
             !side_effect.exists(),
             "a surviving descendant must not continue after timeout"
