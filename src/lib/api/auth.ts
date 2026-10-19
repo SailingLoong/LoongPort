@@ -44,6 +44,19 @@ export async function authStartLogin(
   });
 }
 
+/** Cancels only a pending flow. False means it was no longer pending; refresh status. */
+export async function authCancelLogin(
+  authProvider: ManagedAuthProvider,
+  deviceCode: string,
+  githubDomain?: string,
+): Promise<boolean> {
+  return invoke<boolean>("auth_cancel_login", {
+    authProvider,
+    deviceCode,
+    githubDomain: githubDomain || null,
+  });
+}
+
 export async function authPollForAccount(
   authProvider: ManagedAuthProvider,
   deviceCode: string,
@@ -102,6 +115,7 @@ export async function authLogout(
 
 export const authApi = {
   authStartLogin,
+  authCancelLogin,
   authPollForAccount,
   authListAccounts,
   authGetStatus,

@@ -470,6 +470,16 @@ impl XaiOAuthManager {
             .await
     }
 
+    /// Serialize with the existing persisted-account commit boundary.
+    pub async fn cancel_device_flow(&self, device_code: &str) -> bool {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        self.pending_device_codes
+            .write()
+            .await
+            .remove(device_code)
+            .is_some()
+    }
+
     pub async fn clear_auth(&self) -> Result<(), XaiOAuthError> {
         let _mutation_guard = self.mutation_lock.lock().await;
         CredentialFile::Xai.remove(&self.secrets)?;
@@ -1334,5 +1344,105 @@ mod tests {
         assert!(manager.list_accounts().await.is_empty());
         assert!(manager.access_tokens.read().await.is_empty());
         assert!(!data_dir.path().join("xai_oauth_auth.json").exists());
+    }
+    #[tokio::test]
+    async fn cancel_one_device_flow_preserves_existing_account_and_other_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path().to_path_buf());
+        manager
+            .add_account_internal(
+                "existing".into(),
+                None,
+                "existing-refresh".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let before = CredentialFile::Xai.read(&manager.secrets).unwrap();
+        // Use the same pending representation as start_device_flow.
+        for id in ["A", "B"] {
+            manager.pending_device_codes.write().await.insert(
+                id.into(),
+                PendingDeviceCode {
+                    token_endpoint: "https://example.invalid/token".into(),
+                    expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+                    interval_secs: 5,
+                    next_poll_at_ms: 0,
+                },
+            );
+        }
+        assert!(manager.cancel_device_flow("A").await);
+        assert!(!manager.cancel_device_flow("A").await);
+        let late = manager
+            .add_account_internal(
+                "late-A".into(),
+                None,
+                "synthetic-refresh".into(),
+                Some("A"),
+                None,
+            )
+            .await;
+        assert!(late.is_err());
+        assert_eq!(CredentialFile::Xai.read(&manager.secrets).unwrap(), before);
+        assert!(manager.pending_device_codes.read().await.contains_key("B"));
+        manager
+            .add_account_internal(
+                "B-account".into(),
+                None,
+                "synthetic-refresh".into(),
+                Some("B"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!manager.cancel_device_flow("B").await);
+        assert!(manager.accounts.read().await.contains_key("existing"));
+        assert!(manager.accounts.read().await.contains_key("B-account"));
+    }
+    #[tokio::test]
+    async fn cancellation_uses_the_original_account_mutation_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(test_manager(dir.path().to_path_buf()));
+        manager.pending_device_codes.write().await.insert(
+            "race".into(),
+            PendingDeviceCode {
+                token_endpoint: "https://example.invalid/token".into(),
+                expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+                interval_secs: 5,
+                next_poll_at_ms: 0,
+            },
+        );
+        let mutation_guard = manager.mutation_lock.lock().await;
+        let cancel_manager = manager.clone();
+        let mut cancel =
+            tokio::spawn(async move { cancel_manager.cancel_device_flow("race").await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(manager
+            .pending_device_codes
+            .read()
+            .await
+            .contains_key("race"));
+        drop(mutation_guard);
+        assert!(cancel.await.unwrap());
+        assert!(manager
+            .add_account_internal(
+                "race-account".into(),
+                None,
+                "synthetic-refresh".into(),
+                Some("race"),
+                None
+            )
+            .await
+            .is_err());
+        assert!(manager.accounts.read().await.is_empty());
+        assert!(CredentialFile::Xai
+            .read(&manager.secrets)
+            .unwrap()
+            .is_none());
     }
 }
