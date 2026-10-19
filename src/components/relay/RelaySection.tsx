@@ -116,7 +116,7 @@ export interface RelaySectionProps {
     renderActions: (target: AccountActionTarget) => ReactNode,
     renderDelete: (target: AccountActionTarget) => ReactNode,
   ) => ReactNode;
-  onAccountChanged?: () => void;
+  onAccountChanged?: (requireFresh?: boolean) => void | Promise<void>;
   /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
    * 两个区块的空态占位也经它指名跳转（中转站→directory / 官方 API→official）。 */
   onOpenAddHub: (
@@ -263,27 +263,45 @@ export function RelaySection({
    * `appId` 传给后端用于计算当前平台的支持状态、配置状态与当前项；前端直接消费
    * `supported/accounts`，不复制厂商支持列表。
    */
-  const accountOwnerRef = useRef({ accountSnapshot, onAccountChanged });
-  accountOwnerRef.current = { accountSnapshot, onAccountChanged };
+  const accountOwnerRef = useRef({
+    accountSnapshot,
+    onAccountChanged,
+    translate: t,
+  });
+  accountOwnerRef.current = { accountSnapshot, onAccountChanged, translate: t };
 
-  const reloadVendors = useCallback(async () => {
-    if (accountOwnerRef.current.accountSnapshot !== undefined) {
-      accountOwnerRef.current.onAccountChanged?.();
-      return;
-    }
-    const seq = ++vendorReloadSeqRef.current;
-    const isStale = () => seq !== vendorReloadSeqRef.current;
+  const reloadVendors = useCallback(
+    async (requireFresh = false) => {
+      if (accountOwnerRef.current.accountSnapshot !== undefined) {
+        if (requireFresh)
+          await accountOwnerRef.current.onAccountChanged?.(true);
+        else accountOwnerRef.current.onAccountChanged?.();
+        return;
+      }
+      const seq = ++vendorReloadSeqRef.current;
+      const isStale = () => seq !== vendorReloadSeqRef.current;
 
-    try {
-      const result = await vendorApi.list(appId);
-      if (isStale()) return;
-      setVendorSupported(result.supported);
-      setVendors(result.accounts);
-    } catch (e) {
-      if (isStale()) return;
-      toast.error(String(e));
-    }
-  }, [appId]);
+      try {
+        const result = await vendorApi.list(appId);
+        if (isStale()) {
+          if (requireFresh)
+            throw new Error(
+              accountOwnerRef.current.translate(
+                "provider.preview.sourceChanged",
+              ),
+            );
+          return;
+        }
+        setVendorSupported(result.supported);
+        setVendors(result.accounts);
+      } catch (e) {
+        if (requireFresh) throw e;
+        if (isStale()) return;
+        toast.error(String(e));
+      }
+    },
+    [appId],
+  );
 
   const presentRefreshResult = useCallback(
     (result: RefreshResult) => {
@@ -365,31 +383,46 @@ export function RelaySection({
    * 现算（`tier.isCurrent` 与 vendor 的 `isCurrent` 同源），一次动作后必须把两类行
    * 一起刷齐，否则切档位后 DeepSeek 行会停在旧高亮上（2026-08-07 修的互斥 bug）。
    */
-  const reload = useCallback(async () => {
-    if (accountOwnerRef.current.accountSnapshot !== undefined) {
-      accountOwnerRef.current.onAccountChanged?.();
-      return;
-    }
-    // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
-    //
-    // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
-    // 「保存编辑 → reload B」撞上更早开始的「获取密钥 → reload A」。
-    // 没有守卫的话 A 后返回就用**旧行**覆盖 B 的新行 ⇒ 用户刚保存的编辑在界面上
-    // 「没生效」（`userEdited` 标记闪一下又消失），而库里其实是对的。（review 抓出）
-    const seq = ++reloadSeqRef.current;
-    const isStale = () => seq !== reloadSeqRef.current;
+  const reload = useCallback(
+    async (requireFresh = false) => {
+      if (accountOwnerRef.current.accountSnapshot !== undefined) {
+        if (requireFresh)
+          await accountOwnerRef.current.onAccountChanged?.(true);
+        else accountOwnerRef.current.onAccountChanged?.();
+        return;
+      }
+      // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
+      //
+      // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
+      // 「保存编辑 → reload B」撞上更早开始的「获取密钥 → reload A」。
+      // 没有守卫的话 A 后返回就用**旧行**覆盖 B 的新行 ⇒ 用户刚保存的编辑在界面上
+      // 「没生效」（`userEdited` 标记闪一下又消失），而库里其实是对的。（review 抓出）
+      const seq = ++reloadSeqRef.current;
+      const isStale = () => seq !== reloadSeqRef.current;
 
-    try {
-      const rows = await relayApi.listRelays(appId);
-      if (isStale()) return;
-      setRelays(rows);
-    } catch (e) {
-      toast.error(String(e));
-    }
-    // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
-    // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
-    void reloadVendors();
-  }, [appId, reloadVendors]);
+      try {
+        const rows = await relayApi.listRelays(appId);
+        if (isStale()) {
+          if (requireFresh)
+            throw new Error(
+              accountOwnerRef.current.translate(
+                "provider.preview.sourceChanged",
+              ),
+            );
+          return;
+        }
+        setRelays(rows);
+      } catch (e) {
+        if (requireFresh) throw e;
+        toast.error(String(e));
+      }
+      // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
+      // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
+      if (requireFresh) await reloadVendors(true);
+      else void reloadVendors();
+    },
+    [appId, reloadVendors],
+  );
 
   useEffect(() => {
     if (accountOwnerRef.current.accountSnapshot === undefined) void reload();
@@ -1137,7 +1170,7 @@ export function RelaySection({
               onAddSite={() => onOpenAddHub("directory")}
               onLogin={(relayId) => void handleLogin(relayId)}
               onProvision={handleProvision}
-              onSiteConfigApplied={() => void reload()}
+              onSiteConfigApplied={() => reload(true)}
               onReorder={(ids) => void handleReorder(ids)}
               onSwitchTier={(relayId, tier) =>
                 void handleSwitchTier(relayId, tier)
@@ -1232,7 +1265,7 @@ export function RelaySection({
           onOpenChange={(open) => {
             if (!open) setSiteConfigTarget(null);
           }}
-          onApplied={reload}
+          onApplied={() => reload(true)}
         />
       )}
 

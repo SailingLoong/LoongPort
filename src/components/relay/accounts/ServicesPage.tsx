@@ -82,11 +82,15 @@ export function ServicesPage({
   const { t } = useTranslation();
   const { accounts, isPending, error, reload } = useServiceAccounts();
   const queryClient = useQueryClient();
-  const reloadAccounts = () =>
-    Promise.all([
+  const reloadAccounts = async (requireFresh = false) => {
+    const [result] = await Promise.all([
       reload(),
       queryClient.invalidateQueries({ queryKey: serviceSourcesKey }),
     ]);
+    // React Query refetch resolves an error result by default. Only callers
+    // awaiting a just-saved configuration require a verified refresh result.
+    if (requireFresh && result.error) throw result.error;
+  };
   const activityOf = useAccountActivity();
   const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
@@ -209,7 +213,7 @@ export function ServicesPage({
               : null
           }
           onOpenAddHub={onOpenAddHub}
-          onAccountChanged={() => void reloadAccounts()}
+          onAccountChanged={reloadAccounts}
         />
       </section>
     );
@@ -220,7 +224,7 @@ export function ServicesPage({
       appId={appId}
       accountSnapshot={null}
       onOpenAddHub={onOpenAddHub}
-      onAccountChanged={() => void reloadAccounts()}
+      onAccountChanged={reloadAccounts}
       renderAccounts={(renderActions, renderDelete) => (
         <section className="page-content space-y-6">
           <header className="flex flex-wrap items-center justify-between gap-4">
