@@ -1309,6 +1309,8 @@ mod paperclip_admission_tests {
                 .proxy_service
                 .paperclip_install_original_test_server(mode != "logging_disabled"),
         );
+        let failover = rt.block_on(state.proxy_service.active_failover_manager_for_test());
+        let failover_gate = skip_unfunded.then(|| failover.pause_next_switch_for_test());
         let mut t = super::super::tests::task();
         t.timeout_ms = if timeout_case { 100 } else { 5000 };
         let b = owner
@@ -1493,6 +1495,32 @@ mod paperclip_admission_tests {
                 Decimal::ZERO
             );
         }
+        if let Some((entered, release)) = failover_gate {
+            rt.block_on(async {
+                use futures::FutureExt;
+                tokio::time::timeout(Duration::from_secs(8), entered)
+                    .await
+                    .expect("original failover did not acquire its app lock")
+                    .unwrap();
+                // Completion may precede the original asynchronous switch. Its
+                // held app lock must still reject start admission without replay.
+                assert!(matches!(
+                    owner.start_execution(json!({"binding":b,"task":t})),
+                    Err(AppError::Config(code)) if code == "paperclip.owner_unavailable"
+                ));
+                let joined = failover.join_spawned_for_test();
+                tokio::pin!(joined);
+                assert!(joined.as_mut().now_or_never().is_none());
+                assert_eq!(count.load(Ordering::SeqCst), 1);
+                release.send(()).unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(8), joined)
+                        .await
+                        .expect("original failover did not finish"),
+                    1
+                );
+            });
+        }
         assert_eq!(
             owner
                 .start_execution(json!({"binding":b,"task":t}))
@@ -1518,6 +1546,81 @@ mod paperclip_admission_tests {
         owner.control.executions.stop().unwrap();
         server.abort();
     }
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_failover_join_includes_original_switch_before_first_poll() {
+        let (_home, rt, state, _owner, _) = seeded();
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE proxy_config SET enabled=1,auto_failover_enabled=1 WHERE app_type='codex'",
+                [],
+            )
+            .unwrap();
+        rt.block_on(
+            state
+                .proxy_service
+                .paperclip_install_original_test_server(true),
+        );
+        let manager = rt.block_on(state.proxy_service.active_failover_manager_for_test());
+        let (entered, release) = manager.pause_next_switch_for_test();
+        let clock = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        clock.block_on(async {
+            use futures::FutureExt;
+            let worker = manager.clone();
+            let identity = state.proxy_service.request_identity("codex").unwrap();
+            let task = tokio::spawn(async move {
+                // This is the original manager and service, not a replacement
+                // router. Its terminal outcome is irrelevant to the join barrier.
+                let _ = worker
+                    .try_switch(
+                        #[cfg(feature = "gui")]
+                        None,
+                        "codex",
+                        "synthetic",
+                        "Synthetic",
+                        "synthetic",
+                        Some(&identity),
+                    )
+                    .await;
+            });
+            // A current-thread runtime cannot poll the spawned task before this
+            // runnable task yields. Empty pending_switches would be a false idle.
+            manager.record_spawned_for_test(task);
+            let joined = manager.join_spawned_for_test();
+            tokio::pin!(joined);
+            assert!(joined.as_mut().now_or_never().is_none());
+            tokio::time::timeout(Duration::from_secs(8), entered)
+                .await
+                .expect("original failover did not acquire its app lock")
+                .unwrap();
+            assert!(state
+                .proxy_service
+                .lock_switch_for_app("codex")
+                .now_or_never()
+                .is_none());
+            assert!(joined.as_mut().now_or_never().is_none());
+            release.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(8), joined)
+                    .await
+                    .expect("original failover did not finish"),
+                1
+            );
+            assert!(state
+                .proxy_service
+                .lock_switch_for_app("codex")
+                .now_or_never()
+                .is_some());
+        });
+    }
+
     #[test]
     #[serial_test::serial]
     fn paperclip_final_body_overrides_cannot_replace_input_or_add_tools() {

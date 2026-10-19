@@ -24,6 +24,17 @@ pub struct FailoverSwitchManager {
     pending_switches: Arc<RwLock<HashSet<String>>>,
     db: Arc<Database>,
     service_owner: std::sync::Weak<crate::services::ProxyService>,
+    #[cfg(test)]
+    spawned_for_test: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    #[cfg(test)]
+    switch_gate_for_test: Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            )>,
+        >,
+    >,
 }
 
 impl FailoverSwitchManager {
@@ -32,6 +43,10 @@ impl FailoverSwitchManager {
             pending_switches: Arc::new(RwLock::new(HashSet::new())),
             db,
             service_owner: std::sync::Weak::new(),
+            #[cfg(test)]
+            spawned_for_test: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(test)]
+            switch_gate_for_test: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -44,6 +59,41 @@ impl FailoverSwitchManager {
 
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.pending_switches, &other.pending_switches)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_spawned_for_test(&self, task: tokio::task::JoinHandle<()>) {
+        self.spawned_for_test.lock().unwrap().push(task);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn join_spawned_for_test(&self) -> usize {
+        // Registration happens before the forwarder returns its response, even
+        // if a spawned switch has not been polled yet. Never hold this lock over await.
+        let tasks = std::mem::take(&mut *self.spawned_for_test.lock().unwrap());
+        let count = tasks.len();
+        for task in tasks {
+            task.await.expect("original failover worker panicked");
+        }
+        count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_switch_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        assert!(self
+            .switch_gate_for_test
+            .lock()
+            .unwrap()
+            .replace((entered, wait))
+            .is_none());
+        (observe, release)
     }
 
     /// 尝试执行故障转移切换
@@ -129,6 +179,14 @@ impl FailoverSwitchManager {
         let Some(guard) = service.lock_active_failover(app_type, self).await else {
             return Ok(false);
         };
+        #[cfg(test)]
+        {
+            let gate = self.switch_gate_for_test.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                entered.send(()).expect("failover observation dropped");
+                release.await.expect("failover release dropped");
+            }
+        }
         if crate::mode::operation::uses_upstream4_schema(&self.db)? {
             if !service.request_identity_is_current(app_type, request_identity)? {
                 return Ok(false);

@@ -521,7 +521,7 @@ impl RequestForwarder {
         let expected_current = self.current_provider_id_at_start.clone();
         let request_identity = self.request_identity.clone();
 
-        tokio::spawn(async move {
+        let _task = tokio::spawn(async move {
             manager
                 .try_switch(
                     #[cfg(feature = "gui")]
@@ -539,6 +539,8 @@ impl RequestForwarder {
                         .field("provider_id", provider_id),
                 );
         });
+        #[cfg(test)]
+        self.failover_manager.record_spawned_for_test(_task);
     }
 
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
