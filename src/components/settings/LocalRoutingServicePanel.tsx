@@ -1,6 +1,5 @@
 /** Local proxy runtime controls shared by connection settings. */
 
-import { useState } from "react";
 import { Server, Activity } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -12,7 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ProxyPanel } from "@/components/proxy";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useLocalRoutingService } from "@/hooks/useLocalRoutingService";
 import type { SettingsFormState } from "@/hooks/useSettings";
 
 interface LocalRoutingServicePanelProps {
@@ -25,38 +24,14 @@ export function LocalRoutingServicePanel({
   onAutoSave,
 }: LocalRoutingServicePanelProps) {
   const { t } = useTranslation();
-  const [showProxyConfirm, setShowProxyConfirm] = useState(false);
-
   const {
     isRunning,
-    startProxyServer,
-    stopWithRestore,
-    isPending: isProxyPending,
-  } = useProxyStatus();
-
-  const handleToggleProxy = async (checked: boolean) => {
-    try {
-      if (!checked) {
-        await stopWithRestore();
-      } else if (!settings?.proxyConfirmed) {
-        setShowProxyConfirm(true);
-      } else {
-        await startProxyServer();
-      }
-    } catch (error) {
-      console.error("Toggle proxy failed:", error);
-    }
-  };
-
-  const handleProxyConfirm = async () => {
-    setShowProxyConfirm(false);
-    try {
-      await onAutoSave({ proxyConfirmed: true });
-      await startProxyServer();
-    } catch (error) {
-      console.error("Proxy confirm failed:", error);
-    }
-  };
+    isPending,
+    showProxyConfirm,
+    toggleProxy,
+    confirmProxy,
+    cancelConfirmation,
+  } = useLocalRoutingService(settings, onAutoSave);
 
   return (
     <AccordionItem
@@ -94,8 +69,8 @@ export function LocalRoutingServicePanel({
           onEnableLocalProxyChange={(checked) =>
             onAutoSave({ enableLocalProxy: checked })
           }
-          onToggleProxy={handleToggleProxy}
-          isProxyPending={isProxyPending}
+          onToggleProxy={toggleProxy}
+          isProxyPending={isPending}
         />
       </AccordionContent>
 
@@ -105,8 +80,9 @@ export function LocalRoutingServicePanel({
         title={t("confirm.proxy.title")}
         message={t("confirm.proxy.message")}
         confirmText={t("confirm.proxy.confirm")}
-        onConfirm={() => void handleProxyConfirm()}
-        onCancel={() => setShowProxyConfirm(false)}
+        pending={isPending}
+        onConfirm={() => void confirmProxy()}
+        onCancel={cancelConfirmation}
       />
     </AccordionItem>
   );
