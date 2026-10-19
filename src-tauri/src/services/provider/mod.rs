@@ -25,6 +25,8 @@ mod native;
 pub(crate) use native::service_configuration_revision;
 mod pi;
 pub(crate) mod qoder_daily;
+pub(crate) mod qoder_http_auth;
+pub(crate) mod qoder_auth_http;
 mod transaction;
 mod usage;
 pub(crate) use transaction::with_provider_config_transaction;

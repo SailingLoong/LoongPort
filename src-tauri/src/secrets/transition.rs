@@ -913,7 +913,7 @@ fn validate_database_version(
         return vault::preflight_connection(conn);
     };
     if binding.upstream != crate::database::UPSTREAM4_SCHEMA_VERSION
-        || ![24, 25, 26].contains(&binding.loongport)
+        || ![24, 25, 26, 27].contains(&binding.loongport)
     {
         return Err(invalid());
     }
@@ -1654,20 +1654,21 @@ mod tests {
     }
 
     // Explicit historical shapes: current fixture creation must not silently
-    // turn a fixed v24/v25 identity test into a v26 test.
+    // turn a fixed historical identity test into the latest schema.
     fn set_test_checkpoint_version(conn: &Connection, version: i32) {
-        assert!([24, 25, 26].contains(&version));
+        assert!([24, 25, 26, 27].contains(&version));
         if version < 26 {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
         } else {
-            // Use the existing schema owner instead of crossing its private DAO.
-            crate::database::loongport_schema::apply(conn).unwrap();
-            assert_eq!(
-                crate::database::loongport_schema::read_stored_version(conn).unwrap(),
-                version,
-                "the fixed v26 fixture must not follow a future schema target"
-            );
+            crate::database::dao::qoder_campaign_operations::create_schema(conn).unwrap();
+        }
+        if version < 27 {
+            if crate::database::dao::qoder_http_auth::has_column(conn).unwrap() {
+                conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret").unwrap();
+            }
+        } else {
+            crate::database::dao::qoder_http_auth::create_column(conn).unwrap();
         }
         if version < 25 {
             conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings")
@@ -1761,8 +1762,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn transition_publishes_exact_authenticated_v24_v25_v26_targets() {
-        for version in [24, 25, 26] {
+    fn transition_publishes_exact_authenticated_v24_v25_v26_v27_targets() {
+        for version in [24, 25, 26, 27] {
             publish_native_checkpoint(version, version, version);
         }
     }
@@ -1787,7 +1788,7 @@ mod tests {
     fn recorded_database_binding_versions_survive_native_schema_bumps() {
         // Version admission only. MAC, roots, inode and content digest remain
         // enforced by the existing original-journal replay owner and its tests.
-        for version in [24, 25, 26] {
+        for version in [24, 25, 26, 27] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
             conn.execute(
@@ -1810,7 +1811,7 @@ mod tests {
             conn.execute_batch("PRAGMA user_version=19").unwrap();
             assert!(validate_database_version(&conn, Some(&binding), true).is_err());
         }
-        for version in [23, 27] {
+        for version in [23, 28] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20").unwrap();
             let binding = DatabaseBinding {

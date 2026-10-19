@@ -41,7 +41,7 @@ pub(crate) const TABLES: &[ProtectedTable] = &[
         name: "providers",
         reset: ResetPolicy::EmptyObject,
         identity_columns: &["id", "app_type"],
-        columns: &["settings_config", "meta"],
+        columns: &["settings_config", "meta", "qoder_http_secret"],
     },
     ProtectedTable {
         name: "settings",
@@ -158,7 +158,16 @@ pub(crate) fn collect_plaintext_values(
     process_values(conn, |table, column, keys: &[&str], value| {
         let owned: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
         let plaintext = open_db(vault, table, column, keys, value)?;
-        collect(table, column, owned, plaintext);
+        // Derived credentials are deliberately excluded from plaintext export.
+        // Still authenticate them above; encrypted complete-image archives retain
+        // the column and all restore owners retire it before publication.
+        if table == "providers" && column == "qoder_http_secret" {
+            use zeroize::Zeroize;
+            let mut plaintext = plaintext;
+            plaintext.zeroize();
+        } else {
+            collect(table, column, owned, plaintext);
+        }
         Ok(None)
     })
 }
@@ -286,6 +295,20 @@ fn process_values(
             .collect::<Vec<_>>()
             .join(" AND ");
         for column in table.columns {
+            if table.name == "providers" && *column == "qoder_http_secret"
+                && !crate::database::dao::qoder_http_auth::has_column(conn)?
+            {
+                let version = crate::database::loongport_schema::read_stored_version(conn)?;
+                // Authenticated legacy archives must retain their exact historical
+                // schema/digest. Only this newly introduced column may be absent,
+                // and only for an explicitly older supported schema. The normal
+                // staging migration adds it before any owner can acquire a lease.
+                // If present even in a legacy image, it is always authenticated.
+                if (0..crate::database::dao::qoder_http_auth::INTRODUCED_VERSION).contains(&version) {
+                    continue;
+                }
+                return Err(AppError::Config("qoder.http_auth.schema_migration_required".into()));
+            }
             let mut fields = table.identity_columns.to_vec();
             fields.push(column);
             let select = fields

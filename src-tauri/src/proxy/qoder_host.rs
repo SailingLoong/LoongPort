@@ -1,17 +1,17 @@
 //! One task-owned Node worker, private JSONL pipes, no account discovery or SDK setup.
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{path::PathBuf, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
 };
+use zeroize::Zeroizing;
 const MAX_LINE: usize = 1024 * 1024;
 const STOP_GRACE: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct HostConfig {
     pub node: PathBuf,
     pub worker: PathBuf,
-    pub sdk_root: Option<PathBuf>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostError {
@@ -30,6 +30,7 @@ pub struct QoderHost {
     partial: Vec<u8>,
     ended: bool,
     cancel_sent: bool,
+    reaped_successfully: Option<bool>,
 }
 impl QoderHost {
     pub async fn start(config: &HostConfig, request: &Value) -> Result<Self, HostError> {
@@ -43,8 +44,18 @@ impl QoderHost {
                     .to_owned(),
             );
         }
-        let mut frame = serde_json::to_vec(&json!({"kind":"start","request":request}))
-            .map_err(|_| HostError::Protocol)?;
+        #[derive(serde::Serialize)]
+        struct Start<'a> {
+            kind: &'static str,
+            request: &'a Value,
+        }
+        let mut frame = Zeroizing::new(
+            serde_json::to_vec(&Start {
+                kind: "start",
+                request,
+            })
+            .map_err(|_| HostError::Protocol)?,
+        );
         frame.push(b'\n');
         if frame.len() > MAX_LINE {
             return Err(HostError::Protocol);
@@ -52,9 +63,6 @@ impl QoderHost {
         // Program and script are trusted backend configuration, never HTTP/IPC input.
         let mut command = Command::new(&config.node);
         command.arg(&config.worker);
-        if let Some(root) = &config.sdk_root {
-            command.arg("--sdk-root").arg(root);
-        }
         let mut child = command
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
@@ -64,8 +72,18 @@ impl QoderHost {
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| HostError::Start)?;
-        let input = child.stdin.take().ok_or(HostError::Start)?;
-        let output = BufReader::new(child.stdout.take().ok_or(HostError::Start)?);
+        let pipes = (child.stdin.take(), child.stdout.take());
+        let (input, output) = match pipes {
+            (Some(input), Some(output)) => (input, BufReader::new(output)),
+            (input, output) => {
+                drop(input);
+                drop(output);
+                return match tokio::time::timeout(STOP_GRACE, child.kill()).await {
+                    Ok(Ok(())) => Err(HostError::Start),
+                    _ => Err(HostError::Cleanup),
+                };
+            }
+        };
         let mut host = Self {
             child: Some(child),
             input: Some(input),
@@ -74,16 +92,12 @@ impl QoderHost {
             partial: Vec::new(),
             ended: false,
             cancel_sent: false,
+            reaped_successfully: None,
         };
-        if host
-            .input
-            .as_mut()
-            .unwrap()
-            .write_all(&frame)
-            .await
-            .is_err()
-        {
-            host.stop().await;
+        let written =
+            tokio::time::timeout(STOP_GRACE, host.input.as_mut().unwrap().write_all(&frame)).await;
+        if !matches!(written, Ok(Ok(()))) {
+            host.close_and_reap().await?;
             return Err(HostError::Start);
         }
         Ok(host)
@@ -91,15 +105,33 @@ impl QoderHost {
     async fn stop(&mut self) -> bool {
         self.ended = true;
         drop(self.input.take());
-        let Some(mut child) = self.child.take() else {
-            return true;
+        // Keep Child in Self across await: timeout/cancellation cannot discard
+        // the handle and make a later call report a process was reaped.
+        let Some(child) = self.child.as_mut() else {
+            return self.reaped_successfully.unwrap_or(false);
         };
-        match tokio::time::timeout(STOP_GRACE, child.wait()).await {
-            Ok(Ok(status)) => status.success(),
-            _ => {
-                let _ = child.kill().await;
-                false
-            }
+        if let Ok(Ok(status)) = tokio::time::timeout(STOP_GRACE, child.wait()).await {
+            let success = status.success();
+            self.reaped_successfully = Some(success);
+            self.child.take();
+            return success;
+        }
+        if matches!(
+            tokio::time::timeout(STOP_GRACE, child.kill()).await,
+            Ok(Ok(()))
+        ) {
+            self.reaped_successfully = Some(false);
+            self.child.take();
+        }
+        false
+    }
+    pub(crate) async fn close_and_reap(&mut self) -> Result<(), HostError> {
+        // Closing stdin is a cancellation signal in the per-request worker.
+        self.stop().await;
+        if self.child.is_none() && self.reaped_successfully.is_some() {
+            Ok(())
+        } else {
+            Err(HostError::Cleanup)
         }
     }
     pub async fn next_event(&mut self) -> Result<Option<Value>, HostError> {
@@ -195,7 +227,12 @@ impl Drop for QoderHost {
                     let _ = child.wait().await;
                 };
                 if tokio::time::timeout(STOP_GRACE, graceful).await.is_err() {
-                    let _ = child.kill().await;
+                    if !matches!(
+                        tokio::time::timeout(STOP_GRACE, child.kill()).await,
+                        Ok(Ok(()))
+                    ) {
+                        log::warn!("Qoder worker cleanup could not confirm child reaping");
+                    }
                 }
             });
         }
@@ -222,7 +259,6 @@ mod tests {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "node".into()),
             worker: root.join("tests/qoder-runtime/fixtures").join(name),
-            sdk_root: None,
         }
     }
     fn request() -> Value {

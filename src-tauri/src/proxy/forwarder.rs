@@ -1673,7 +1673,7 @@ impl RequestForwarder {
         endpoint: &str,
         body: &Value,
         extensions: &Extensions,
-        adapter: &dyn ProviderAdapter,
+        _adapter: &dyn ProviderAdapter,
         free_only: &mut bool,
     ) -> Result<
         (
@@ -1685,7 +1685,7 @@ impl RequestForwarder {
         ProxyError,
     > {
         // Recheck the resolved owner at the actual output boundary. An HTTP
-        // free origin cannot establish free pricing for a separate SDK task.
+        // free origin cannot establish free pricing for the fixed account HTTP transport.
         let chat = self.prepare_qoder_request(app_type, provider, endpoint, body)?;
         super::free_models::enforce(
             free_only,
@@ -1694,10 +1694,11 @@ impl RequestForwarder {
             "",
             super::free_models::configured(&provider.settings_config),
         )?;
-        let auth = adapter
-            .extract_auth(provider)
-            .filter(|auth| !auth.api_key.is_empty())
-            .ok_or_else(|| ProxyError::AuthError("qoder_auth_required".into()))?;
+        if app_type.as_str() != "codex" {
+            return Err(ProxyError::InvalidRequest(
+                "unsupported_qoder_application".into(),
+            ));
+        }
         #[cfg(test)]
         let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
         #[cfg(not(test))]
@@ -1735,25 +1736,32 @@ impl RequestForwarder {
                 .ok()
                 .and_then(Result::ok)
                 .ok_or_else(|| ProxyError::ConfigError("qoder_runtime_node_unavailable".into()))?;
-            let root = crate::config::get_app_config_dir().join("runtimes/qoder/1.0.53");
-            super::qoder_runtime::resolve_runtime(node, worker, root)
+            super::qoder_runtime::resolve_runtime(node, worker)
                 .await
                 .map_err(|_| ProxyError::ConfigError("qoder_runtime_admission_failed".into()))?
         };
         let outbound_model = chat["model"].as_str().map(str::to_owned);
-        let dispatch = super::qoder_http::Dispatch {
-            host,
-            account_id: provider.id.clone(),
-            access_token: auth.api_key,
-            first_byte_timeout: self.streaming_first_byte_timeout.as_secs(),
-            idle_timeout: self.streaming_idle_timeout.as_secs(),
-            non_streaming_timeout: self.non_streaming_timeout.as_secs(),
-        };
-        // No second guard, account selection, or retry loop. Once the SDK is
-        // started its unclassified errors are terminal for this client request.
-        super::qoder_http::forward(chat, dispatch)
-            .await
-            .map(|response| (response, None, outbound_model, None))
+        let transport = crate::services::provider::qoder_http_auth::transport::FixedInternationalTransport::new()
+            .map_err(|_| ProxyError::ConfigError("qoder_http_transport_unavailable".into()))?;
+        let (dispatch, response_lease) = self
+            .router
+            .prepare_qoder_http_dispatch(
+                app_type,
+                provider,
+                host,
+                [
+                    self.streaming_first_byte_timeout.as_secs(),
+                    self.streaming_idle_timeout.as_secs(),
+                    self.non_streaming_timeout.as_secs(),
+                ],
+                &transport,
+            )
+            .await?;
+        // One selected original owner and one request. A submitted result that
+        // becomes unknown is never replayed just because no head was received.
+        let response = super::qoder_http::forward(chat, dispatch).await?;
+        response_lease.check().await?;
+        Ok((response, None, outbound_model, Some(response_lease)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3633,9 +3641,9 @@ impl RequestForwarder {
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
         if super::qoder_http::enabled(provider) {
-            // These exact local failures occur before SDK task admission. The
-            // worker does not expose trustworthy 401/429/permission categories;
-            // generic errors, timeouts and partial output must never replay.
+            // Only these original local preflight exclusions may select the
+            // next provider. Submitted HTTP errors, unknown outcomes, timeouts
+            // and partial output never replay, regardless of upstream status.
             return match error {
                 ProxyError::AuthError(code) if code == "qoder_auth_required" => {
                     ErrorCategory::Retryable

@@ -76,6 +76,78 @@ impl ProviderRouter {
         )
     }
 
+    #[cfg(any(feature = "gui", feature = "test-hooks", test))]
+    pub(crate) async fn prepare_qoder_http_dispatch(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+        host: super::qoder_host::HostConfig,
+        timeouts: [u64; 3],
+        transport: &dyn crate::services::provider::qoder_http_auth::AuthTransport,
+    ) -> Result<
+        (
+            super::qoder_http::Dispatch,
+            super::response_lease::ResponseLease,
+        ),
+        super::ProxyError,
+    > {
+        use crate::services::provider::qoder_http_auth;
+        if app.as_str() != "codex" {
+            return Err(super::ProxyError::InvalidRequest(
+                "unsupported_qoder_application".into(),
+            ));
+        }
+        if !cfg!(test) && !qoder_http_auth::PRODUCTION_ADMISSION {
+            return Err(super::ProxyError::ConfigError(
+                "qoder_http_admission_pending".into(),
+            ));
+        }
+        let snapshot = Arc::new(
+            qoder_http_auth::acquire(&self.db, provider, transport, || {
+                chrono::Utc::now().timestamp_millis()
+            })
+            .await
+            .map_err(|error| match error {
+                qoder_http_auth::AcquireError::PreflightMissingSource => {
+                    super::ProxyError::AuthError("qoder_auth_required".into())
+                }
+                qoder_http_auth::AcquireError::NonRetryable(..) => {
+                    super::ProxyError::Internal("qoder.http_auth.unavailable".into())
+                }
+            })?,
+        );
+        qoder_http_auth::check_selected_provider(provider, &snapshot).map_err(|_| {
+            super::ProxyError::Internal("qoder.http_auth.selected_source_changed".into())
+        })?;
+        self.db
+            .check_qoder_http_snapshot(&snapshot, chrono::Utc::now().timestamp_millis())
+            .map_err(|_| {
+                super::ProxyError::Internal("qoder.http_auth.authorization_changed".into())
+            })?;
+        let fence_db = self.db.clone();
+        let fence_snapshot = snapshot.clone();
+        let lease = super::response_lease::ResponseLease::new(move || {
+            let db = fence_db.clone();
+            let snapshot = fence_snapshot.clone();
+            async move {
+                db.check_qoder_http_snapshot_fence(&snapshot).map_err(|_| {
+                    super::ProxyError::Internal("qoder.http_auth.authorization_changed".into())
+                })
+            }
+        });
+        Ok((
+            super::qoder_http::Dispatch {
+                host,
+                database: self.db.clone(),
+                snapshot,
+                first_byte_timeout: timeouts[0],
+                idle_timeout: timeouts[1],
+                non_streaming_timeout: timeouts[2],
+            },
+            lease,
+        ))
+    }
+
     pub(crate) fn resolve_vendor_auth(
         &self,
         app: &AppType,

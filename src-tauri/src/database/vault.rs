@@ -51,6 +51,9 @@ pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
         crate::paperclip::bindings::validate_schema(conn)?;
         crate::paperclip::bindings::read_rows(conn)?;
     }
+    if super::loongport_schema::read_stored_version(conn)? >= 27 {
+        super::dao::qoder_http_auth::validate_column(conn)?;
+    }
     if super::loongport_schema::read_stored_version(conn)? >= 26 {
         crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     }

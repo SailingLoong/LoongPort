@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 26;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 27;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -357,6 +357,24 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 }
                 conn.execute_batch("RELEASE qoder_operation_migration")?;
             }
+            26 => {
+                crate::paperclip::bindings::validate_schema(conn)?;
+                crate::paperclip::bindings::read_rows(conn)?;
+                crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
+                conn.execute_batch("SAVEPOINT qoder_http_auth_migration")?;
+                let result = (|| {
+                    crate::database::dao::qoder_http_auth::create_column(conn)?;
+                    // A preexisting experimental column has no trustworthy refresh
+                    // history. Only the original PAT survives schema admission.
+                    crate::database::dao::qoder_http_auth::retire_all_on(conn)?;
+                    set_version(conn, 27)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch("ROLLBACK TO qoder_http_auth_migration; RELEASE qoder_http_auth_migration")?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE qoder_http_auth_migration")?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -366,6 +384,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    crate::database::dao::qoder_http_auth::validate_column(conn)?;
     crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     // Installed v25 is evidence to validate, never permission to recreate a ledger.
     crate::paperclip::bindings::validate_schema(conn)?;
@@ -947,9 +966,24 @@ mod tests {
         Connection::open_in_memory().expect("内存库")
     }
 
+    // Partial historical migration fixtures still need the original Provider
+    // owner before the v27 subordinate column can be added. This is test-only;
+    // production never manufactures a missing installed Provider table.
+    fn provider_owner_for_http_migration(conn: &Connection) {
+        conn.execute_batch("CREATE TABLE providers (
+            id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+            settings_config TEXT NOT NULL DEFAULT '{}', available_models TEXT,
+            website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER,
+            notes TEXT, icon TEXT, icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}',
+            is_current BOOLEAN NOT NULL DEFAULT 0, in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+            user_edited INTEGER NOT NULL DEFAULT 0, tier_rate_multiplier REAL,
+            PRIMARY KEY(id,app_type))").unwrap();
+    }
+
     #[test]
     fn v22_adds_empty_attempt_history_without_rewriting_request_totals() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).unwrap();
         set_version(&conn, 22).unwrap();
         conn.execute_batch("CREATE TABLE proxy_request_logs (status_code INTEGER); INSERT INTO proxy_request_logs VALUES (200), (500);").unwrap();
@@ -974,6 +1008,7 @@ mod tests {
     fn migrated_database_at_version(version: i32) -> Connection {
         assert_eq!(version, 12, "这个夹具只描述 v12 的 relay 表形态");
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         conn.execute_batch(
             "CREATE TABLE loongport_relay (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1075,6 +1110,7 @@ mod tests {
     #[test]
     fn v18_to_v19_creates_the_site_balance_cache_table() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).expect("建版本表");
         set_version(&conn, 18).expect("设为 v18");
         assert!(
@@ -1103,6 +1139,7 @@ mod tests {
     #[test]
     fn v19_to_v20_rebuilds_balance_cache_with_composite_key() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).expect("建版本表");
         // 造一个停在 v19、持有**旧形态**表和数据的库
         conn.execute(
@@ -1147,6 +1184,7 @@ mod tests {
     #[test]
     fn v13_to_v14_creates_the_balance_snapshot_table() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).expect("建版本表");
         set_version(&conn, 13).expect("设为 v13");
         assert!(
@@ -1174,6 +1212,7 @@ mod tests {
     #[test]
     fn v14_to_v15_deletes_consecutive_duplicate_balance_snapshots() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         crate::relay::reconcile::create_table(&conn).expect("建快照表");
         // relay 7：10 → 10（删）→ 8 → 10；relay 8：5 → 5（删）。跨站互不影响。
         for (relay_id, created_at, balance) in [
@@ -1217,6 +1256,7 @@ mod tests {
     #[test]
     fn v8_to_v9_adds_backend_kind_and_defaults_existing_rows_to_sub2api() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         v8_relay_table(&conn);
         conn.execute(
             "INSERT INTO loongport_relay (
@@ -1258,6 +1298,7 @@ mod tests {
     #[test]
     fn v10_to_v11_adds_cf_clearance_column_idempotently() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         apply(&conn).expect("initial migrate");
         assert!(crate::Database::has_column(&conn, "loongport_relay", "cf_clearance").unwrap());
 
@@ -1382,6 +1423,7 @@ mod tests {
     #[test]
     fn v5_to_latest_is_idempotent_and_seeds_setting() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).expect("建版本表");
         set_version(&conn, 5).expect("设为 v5");
 
@@ -1937,6 +1979,7 @@ mod tests {
     #[test]
     fn apply_brings_a_fresh_database_to_the_latest_version() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         apply(&conn).expect("迁移");
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
         // 两张表都得建出来。
@@ -2153,6 +2196,7 @@ mod tests {
     #[test]
     fn apply_is_idempotent() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         apply(&conn).expect("第一次");
         apply(&conn).expect("第二次不该报错");
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
@@ -2167,6 +2211,7 @@ mod tests {
     #[test]
     fn loongport_migrations_never_touch_the_upstream_version_counter() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         // 先把上游那个计数器设成一个可辨认的值。
         conn.execute("PRAGMA user_version = 16;", []).unwrap();
 
@@ -2280,6 +2325,7 @@ mod tests {
     #[test]
     fn paperclip_native_v24_has_one_new_binding_migration() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).unwrap();
         set_version(&conn, 24).unwrap();
         let upstream_before: i32 = conn
@@ -2322,6 +2368,7 @@ mod tests {
     fn paperclip_native_fresh_and_migrated_tables_share_exact_ddl() {
         let fresh = crate::database::Database::memory().unwrap();
         let migrated = mem();
+        provider_owner_for_http_migration(&migrated);
         ensure_version_table(&migrated).unwrap();
         set_version(&migrated, 24).unwrap();
         apply(&migrated).unwrap();
@@ -2404,6 +2451,7 @@ mod tests {
     #[test]
     fn qoder_v25_migrates_once_without_changing_upstream_version() {
         let conn = mem();
+        provider_owner_for_http_migration(&conn);
         ensure_version_table(&conn).unwrap();
         // Build the historical table before claiming that v25 is installed:
         // the production owner must never repair a missing installed table.
@@ -2414,7 +2462,7 @@ mod tests {
             .unwrap();
         apply(&conn).unwrap();
         apply(&conn).unwrap();
-        assert_eq!(read_stored_version(&conn).unwrap(), 26);
+        assert_eq!(read_stored_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
                 .unwrap(),

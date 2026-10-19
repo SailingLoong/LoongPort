@@ -1886,6 +1886,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     include!("backup_qoder_tests.rs");
+    include!("backup_qoder_http_auth_tests.rs");
     use super::{lock_backup_file_operations, Database};
     use crate::error::AppError;
     use crate::secrets::VaultContext;

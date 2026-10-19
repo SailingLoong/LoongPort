@@ -49,11 +49,9 @@
     "resources": {
       "../scripts/qoder/package.json": "qoder/package.json",
       "../scripts/qoder/worker.mjs": "qoder/worker.mjs",
-      "../scripts/qoder/sdk-runtime.mjs": "qoder/sdk-runtime.mjs",
-      "../scripts/qoder/task-entry.mjs": "qoder/task-entry.mjs",
-      "../scripts/qoder/query-bridge.mjs": "qoder/query-bridge.mjs",
-      "../scripts/qoder/lib/transport.mjs": "qoder/lib/transport.mjs",
-      "../scripts/qoder/lib/converter.mjs": "qoder/lib/converter.mjs"
+      "../scripts/qoder/http-protocol.mjs": "qoder/http-protocol.mjs",
+      "../scripts/qoder/LICENSE": "qoder/LICENSE",
+      "../scripts/qoder/LICENSE-CLIProxyAPI": "qoder/LICENSE-CLIProxyAPI"
     },
     "icon": [
       "icons/32x32.png",
