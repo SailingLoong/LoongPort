@@ -39,6 +39,13 @@ use super::codex_oauth_auth::{CODEX_OAUTH_CLIENT_VERSION, CODEX_OAUTH_ORIGINATOR
 /// 供 handler/forwarder 外部使用的公开函数。
 /// 优先级：meta.apiFormat > settings_config.api_format > openrouter_compat_mode > 默认 "anthropic"
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
+    // The opted-in ACP transport already emits Anthropic Messages JSON/SSE.
+    // Match the forwarder's transport precedence (Qoder, then ACP) before
+    // account/preset metadata can cause a second response conversion.
+    if !super::super::qoder_http::enabled(provider) && super::workbuddy_acp::enabled(provider) {
+        return "anthropic";
+    }
+
     // A managed account's verified transport wins over editable preset metadata.
     if super::super::managed_accounts::selected(provider).is_some() {
         return if super::super::managed_accounts::is_chat(provider) {
@@ -978,6 +985,11 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn needs_transform(&self, provider: &Provider) -> bool {
+        // ACP owns its Anthropic response shape, including with stale metadata.
+        if !super::super::qoder_http::enabled(provider) && super::workbuddy_acp::enabled(provider) {
+            return false;
+        }
+
         // GitHub Copilot 总是需要格式转换 (Anthropic → OpenAI)
         if self.is_github_copilot(provider) {
             return true;
@@ -1542,6 +1554,158 @@ mod tests {
         let adapter = ClaudeAdapter::new();
         let url = adapter.build_url("https://integrate.api.nvidia.com", "/v1/chat/completions");
         assert_eq!(url, "https://integrate.api.nvidia.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn acp_transport_keeps_its_anthropic_output_over_managed_chat_and_metadata() {
+        let adapter = ClaudeAdapter::new();
+        for api_format in [
+            None,
+            Some("anthropic"),
+            Some("openai_chat"),
+            Some("openai_responses"),
+            Some("gemini_native"),
+        ] {
+            for provider_type in [
+                None,
+                Some("github_copilot"),
+                Some("codex_oauth"),
+                Some("xai_oauth"),
+            ] {
+                let mut provider = create_provider_with_meta(
+                    json!({
+                        "workbuddy_acp": {
+                            "account_id": "synthetic-account",
+                            "session_id": "synthetic-session",
+                            "link": "https://acp.example/session",
+                            "gateway_ticket": "SYNTHETIC_TICKET",
+                            "declared_model": "configured-label"
+                        },
+                        "api_format": "openai_responses",
+                        "openrouter_compat_mode": true
+                    }),
+                    ProviderMeta {
+                        api_format: api_format.map(str::to_owned),
+                        provider_type: provider_type.map(str::to_owned),
+                        auth_binding: Some(crate::provider::AuthBinding {
+                            source: crate::provider::AuthBindingSource::ManagedAccount,
+                            auth_provider: Some("workbuddy".into()),
+                            account_id: Some("synthetic-account".into()),
+                        }),
+                        ..Default::default()
+                    },
+                );
+                assert!(super::super::workbuddy_acp::enabled(&provider));
+                assert!(crate::proxy::managed_accounts::is_chat(&provider));
+                assert_eq!(get_claude_api_format(&provider), "anthropic");
+                assert!(
+                    !adapter.needs_transform(&provider),
+                    "metadata {api_format:?}/{provider_type:?} must not reconvert ACP output"
+                );
+
+                provider
+                    .settings_config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("workbuddy_acp");
+                assert!(!super::super::workbuddy_acp::enabled(&provider));
+                assert_eq!(get_claude_api_format(&provider), "openai_chat");
+                assert!(adapter.needs_transform(&provider));
+            }
+        }
+    }
+
+    #[test]
+    fn managed_account_protocols_stay_unchanged_without_acp_transport() {
+        let adapter = ClaudeAdapter::new();
+        for (auth_provider, expected) in [
+            ("workbuddy", "openai_chat"),
+            ("trae", "openai_chat"),
+            ("minimax_code", "anthropic"),
+            ("zcode_start_plan", "anthropic"),
+        ] {
+            let provider = create_provider_with_meta(
+                json!({"api_format": "gemini_native", "openrouter_compat_mode": true}),
+                ProviderMeta {
+                    api_format: Some("openai_responses".into()),
+                    auth_binding: Some(crate::provider::AuthBinding {
+                        source: crate::provider::AuthBindingSource::ManagedAccount,
+                        auth_provider: Some(auth_provider.into()),
+                        account_id: Some("synthetic-account".into()),
+                    }),
+                    ..Default::default()
+                },
+            );
+            assert!(!super::super::workbuddy_acp::enabled(&provider));
+            assert_eq!(
+                get_claude_api_format(&provider),
+                expected,
+                "{auth_provider}"
+            );
+            assert_eq!(
+                adapter.needs_transform(&provider),
+                expected == "openai_chat",
+                "{auth_provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn qoder_transport_keeps_precedence_over_a_stale_acp_setting() {
+        let provider = create_provider_with_meta(
+            json!({"workbuddy_acp": {}}),
+            ProviderMeta {
+                provider_type: Some("qoder_sdk".into()),
+                auth_binding: Some(crate::provider::AuthBinding {
+                    source: crate::provider::AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("workbuddy".into()),
+                    account_id: Some("synthetic-account".into()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(crate::proxy::qoder_http::enabled(&provider));
+        assert!(super::super::workbuddy_acp::enabled(&provider));
+        assert_eq!(get_claude_api_format(&provider), "openai_chat");
+        assert!(ClaudeAdapter::new().needs_transform(&provider));
+    }
+
+    #[tokio::test]
+    async fn acp_protocol_priority_does_not_bypass_transport_input_validation() {
+        for config in [
+            Value::Null,
+            json!({}),
+            json!({
+                "account_id": "different-account",
+                "session_id": "synthetic-session",
+                "link": "https://acp.example/session",
+                "gateway_ticket": "SYNTHETIC_TICKET",
+                "declared_model": "configured-label"
+            }),
+        ] {
+            let provider = create_provider_with_meta(
+                json!({"workbuddy_acp": config}),
+                ProviderMeta {
+                    auth_binding: Some(crate::provider::AuthBinding {
+                        source: crate::provider::AuthBindingSource::ManagedAccount,
+                        auth_provider: Some("workbuddy".into()),
+                        account_id: Some("synthetic-account".into()),
+                    }),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(get_claude_api_format(&provider), "anthropic");
+            assert!(!ClaudeAdapter::new().needs_transform(&provider));
+            let result = super::super::workbuddy_acp::forward(
+                &crate::app_config::AppType::Claude,
+                &http::Method::POST,
+                &provider,
+                "/v1/messages",
+                &super::super::workbuddy_acp::tests::request(true),
+            )
+            .await;
+            assert!(matches!(result, Err(ProxyError::InvalidRequest(_))));
+        }
     }
 
     #[test]
