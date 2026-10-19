@@ -673,6 +673,9 @@ export function CodexFormFields({
   // 默认模型下拉建议 = 模型映射的"实际请求模型"列 ∪ 拉取到的 /models 列表
   const defaultModelSuggestions = useMemo<FetchedModel[]>(() => {
     const seen = new Set<string>();
+    const fetchedById = new Map(
+      fetchedModels.map((model) => [model.id, model]),
+    );
     const suggestions: FetchedModel[] = [];
     for (const row of catalogRows) {
       const id = row.model.trim();
@@ -683,6 +686,7 @@ export function CodexFormFields({
         ownedBy: t("codexConfig.modelMappingTitle", {
           defaultValue: "模型映射",
         }),
+        ...fetchedById.get(id),
       });
     }
     for (const model of fetchedModels) {
