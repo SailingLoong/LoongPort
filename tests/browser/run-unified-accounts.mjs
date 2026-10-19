@@ -2,6 +2,56 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+// Kept here so local regression can exercise this exact browser evidence reader.
+function readFocusEvidence() {
+  const e = document.activeElement,
+    b = e.getBoundingClientRect();
+  const labelledBy = e.getAttribute("aria-labelledby");
+  const tab = labelledBy ? document.getElementById(labelledBy) : null;
+  const activeTabPanel =
+    e.matches('[role="tabpanel"][tabindex="0"][data-state="active"]') &&
+    !e.closest("[hidden],[inert]") &&
+    getComputedStyle(e).display !== "none" &&
+    getComputedStyle(e).visibility !== "hidden" &&
+    Boolean(
+      e.id &&
+      tab?.getAttribute("role") === "tab" &&
+      tab.getAttribute("aria-selected") === "true" &&
+      tab.getAttribute("aria-controls") === e.id,
+    );
+
+  return {
+    label: e.getAttribute("aria-label") || e.textContent.trim(),
+    role: e.getAttribute("role"),
+    id: e.id,
+    labelledBy,
+    activeTabPanel,
+    inMain: document.querySelector("main").contains(e),
+    interactive: e.matches(
+      "button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[role=tab],[role=combobox]",
+    ),
+    enabled:
+      !e.hasAttribute("disabled") && e.getAttribute("aria-disabled") !== "true",
+    tag: e.tagName,
+    top: b.top,
+    bottom: b.bottom,
+    hit: e.contains(
+      document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2),
+    ),
+  };
+}
+function isReachableFocus(evidence, height) {
+  return (
+    evidence.inMain &&
+    (evidence.interactive || evidence.activeTabPanel) &&
+    evidence.enabled &&
+    evidence.tag !== "BODY" &&
+    evidence.top >= 0 &&
+    evidence.bottom <= height &&
+    evidence.hit
+  );
+}
+
 const { chromium } = await import(
   process.env.PLAYWRIGHT_MODULE ?? "playwright"
 );
@@ -149,47 +199,37 @@ try {
         // Real Tab navigation must keep enabled controls hit-visible while scrolling.
         const first = main.getByRole("button").first();
         await first.focus();
-        for (let i = 0; i < 5; i++) {
-          const evidence = await page.evaluate(() => {
-            const e = document.activeElement,
-              b = e.getBoundingClientRect();
-            return {
-              label: e.getAttribute("aria-label") || e.textContent.trim(),
-              inMain: document.querySelector("main").contains(e),
-              interactive: e.matches(
-                "button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[role=tab],[role=combobox]",
-              ),
-              enabled:
-                !e.hasAttribute("disabled") &&
-                e.getAttribute("aria-disabled") !== "true",
-              tag: e.tagName,
-              top: b.top,
-              bottom: b.bottom,
-              hit: e.contains(
-                document.elementFromPoint(
-                  b.left + b.width / 2,
-                  b.top + b.height / 2,
-                ),
-              ),
-            };
-          });
+        for (
+          let i = 0;
+          i < 12 && focus.filter((item) => item.interactive).length < 5;
+          i++
+        ) {
+          const evidence = await page.evaluate(readFocusEvidence);
           assert.ok(
-            evidence.inMain &&
-              evidence.interactive &&
-              evidence.enabled &&
-              evidence.tag !== "BODY" &&
-              evidence.top >= 0 &&
-              evidence.bottom <= variant.height &&
-              evidence.hit,
+            isReachableFocus(evidence, variant.height),
             `Unreachable focus: ${JSON.stringify(evidence)}`,
           );
           focus.push(evidence);
           await page.keyboard.press("Tab");
         }
         assert.ok(
-          new Set(focus.map((item) => item.label)).size >= 3,
+          new Set(
+            focus.filter((item) => item.interactive).map((item) => item.label),
+          ).size >= 3,
           "Keyboard must visit distinct real controls",
         );
+        assert.equal(
+          focus.filter((item) => item.interactive).length,
+          5,
+          "Tab must reach five actual controls; panel stops do not count",
+        );
+        if (scenario === "add") {
+          for (const name of ["GitHub Copilot", "ChatGPT"])
+            assert.ok(
+              focus.some((item) => item.interactive && item.label === name),
+              `Tab must reach platform button ${name} after the panel`,
+            );
+        }
         const critical = main.locator("button, .page-content h2");
         for (const control of await critical.all()) {
           if (!(await control.isVisible())) continue;
