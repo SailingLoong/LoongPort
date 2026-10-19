@@ -35,12 +35,8 @@ export function WindowSettings({ settings, onChange }: WindowSettingsProps) {
           description={t("settings.anonymousStatsDescription")}
           checked={settings.enableAnonymousStats ?? false}
           onCheckedChange={(value) =>
-            // 关闭统计时清除专属随机标识，重新开启使用新的标识。
-            onChange(
-              value
-                ? { enableAnonymousStats: true }
-                : { enableAnonymousStats: false, statsInstallId: undefined },
-            )
+            // 安装标识由后端持有；这里仅改变统计分享偏好。
+            onChange({ enableAnonymousStats: value })
           }
         />
 

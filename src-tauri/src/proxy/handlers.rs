@@ -528,6 +528,7 @@ async fn handle_claude_transform(
             connection_guard,
             create_passive_tap(ctx),
             state.passive_ingress.clone(),
+            ctx.diagnostic_id,
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1224,6 +1225,7 @@ async fn handle_codex_responses_namespace_restore(
             connection_guard,
             create_passive_tap(ctx),
             state.passive_ingress.clone(),
+            ctx.diagnostic_id,
         );
 
         let body = axum::body::Body::from_stream(logged_stream);
@@ -1424,6 +1426,7 @@ async fn handle_codex_chat_to_responses_transform(
             connection_guard,
             create_passive_tap(ctx),
             state.passive_ingress.clone(),
+            ctx.diagnostic_id,
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1807,6 +1810,7 @@ fn build_codex_anthropic_sse_response(
         connection_guard,
         create_passive_tap(ctx),
         state.passive_ingress.clone(),
+        ctx.diagnostic_id,
     );
 
     let mut headers = axum::http::HeaderMap::new();

@@ -14,6 +14,23 @@ use crate::proxy::{
 use axum::http::HeaderMap;
 use std::time::Instant;
 
+/// Ephemeral, locally generated correlation for diagnostic logs only.
+/// Never derive it from client/session/auth identities or send it upstream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProxyDiagnosticId(uuid::Uuid);
+
+impl ProxyDiagnosticId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for ProxyDiagnosticId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// 流式超时配置
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingTimeoutConfig {
@@ -33,6 +50,8 @@ pub struct StreamingTimeoutConfig {
 /// - 日志标签
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
+    /// One request-local diagnostic identity, independent of authorization and sessions.
+    pub(crate) diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 请求开始时间（客户端请求进入代理的时刻）
     pub start_time: Instant,
@@ -200,6 +219,7 @@ impl RequestContext {
         );
 
         Ok(Self {
+            diagnostic_id: ProxyDiagnosticId::new(),
             request_identity,
             start_time,
             attempt_started_at: start_time,
@@ -269,6 +289,7 @@ impl RequestContext {
         };
 
         RequestForwarder::new(
+            self.diagnostic_id,
             state.provider_router.clone(),
             non_streaming_timeout,
             state.status.clone(),

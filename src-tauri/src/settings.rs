@@ -13,6 +13,10 @@ use crate::services::skill::{SkillStorageLocation, SyncMethod};
 #[path = "settings_vault_guard_tests.rs"]
 mod vault_guard_tests;
 
+#[cfg(test)]
+#[path = "settings_install_id_tests.rs"]
+mod install_id_tests;
+
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -471,7 +475,7 @@ pub struct AppSettings {
     /// Legacy acknowledgement, retained for existing settings compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats_notice_confirmed: Option<bool>,
-    /// 匿名统计**专属**的随机安装 id。
+    /// 匿名统计去重与主动反馈限额共用的随机安装 id（不是鉴权凭据）。
     ///
     /// ⚠️ **绝不复用 `creds` 的 `device_id`**，也别拿中转站账号 id 当它。
     ///
@@ -482,9 +486,8 @@ pub struct AppSettings {
     /// 统计 id 与任何「能对回某个人」的标识永不交叉，是这个字段存在的全部理由，
     /// 不该因为其中一条关联恰好消失就放松。
     ///
-    /// 这个 id 只用于统计去重。由**后端在首次上报时自生成**（只在开关开着时 ——
-    /// 从一开始就关的用户机器上不落地 id），跨启动复用：「关了再开」仍是同一个
-    /// 安装，不许被计成两个。
+    /// 由后端在首次获准的统计上报或用户主动反馈时生成，跨启动复用。关闭统计
+    /// 保留本机 id；主动反馈获取 id 不会开启统计，也不与账号或设备凭据关联。
     ///
     /// 随机 UUID、不含任何设备指纹（不取硬件序列号 / MAC / hostname）——
     /// 它回答「有多少个安装」，不是「这是谁」。
@@ -1701,10 +1704,30 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     let store = unlocked_settings_store()?;
     store.mutate(|settings| {
         new_settings.upgrade_completion = settings.upgrade_completion.clone();
+        // Installation identity belongs to the backend, even when a stale frontend
+        // snapshot predates its generation or an older client clears it on opt-out.
+        new_settings.stats_install_id = settings.stats_install_id.clone();
         *settings = new_settings;
     })?;
     refresh_bootstrap_from(&store)?;
     Ok(())
+}
+
+/// Reuse the original installation identity for an admitted statistics report or
+/// explicit feedback. Callers own consent; obtaining an ID never enables sharing.
+/// The existing settings mutation publishes a new ID only after its save succeeds.
+#[cfg(any(feature = "gui", test))]
+pub(crate) fn ensure_stats_install_id() -> Result<String, AppError> {
+    let store = unlocked_settings_store()?;
+    if let Some(id) = store.ready_snapshot()?.stats_install_id {
+        return Ok(id);
+    }
+    store.mutate(|settings| {
+        settings
+            .stats_install_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
+    })
 }
 
 fn decode_upgrade_completion(

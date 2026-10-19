@@ -47,6 +47,9 @@ vi.mock("@/lib/api", () => ({
   // 反馈入口按远端配置显隐；测试默认按「端点未下发」隐藏。
   feedbackApi: {
     isEndpointConfigured: vi.fn().mockResolvedValue(false),
+    getLastReport: vi.fn().mockResolvedValue(null),
+    deleteLocalReport: vi.fn(),
+    exportLastDiagnostics: vi.fn(),
     readClipboardImage: vi.fn(),
     submit: vi.fn(),
   },
@@ -295,5 +298,33 @@ describe("AboutSection manual update download progress", () => {
     });
     expect(cleanup).toHaveBeenCalledOnce();
     expect(settingsApi.installUpdateAndRestart).not.toHaveBeenCalled();
+  });
+});
+
+describe("AboutSection local feedback access", () => {
+  it("retains access to a local report when the remote upload endpoint is withdrawn", async () => {
+    const { feedbackApi } = await import("@/lib/api");
+    vi.mocked(feedbackApi.isEndpointConfigured).mockResolvedValue(false);
+    vi.mocked(feedbackApi.getLastReport).mockResolvedValue({
+      reportId: "synthetic-report",
+      identity: { kind: "report", id: "synthetic-report" },
+      uploadedAt: "2026-10-18T10:00:00Z",
+      summary: {
+        descriptionIncluded: true,
+        contactIncluded: false,
+        screenshotCount: 0,
+        screenshotBytes: 0,
+        diagnosticsIncluded: false,
+        diagnosticsBytes: 0,
+      },
+      localCopy: { status: "notAttached" },
+    });
+    render(<AboutSection isPortable={false} />);
+    expect(
+      (await screen.findAllByRole("button", { name: "settings.feedback" }))
+        .length,
+    ).toBeGreaterThan(0);
+    expect(feedbackApi.submit).not.toHaveBeenCalled();
+    vi.mocked(feedbackApi.getLastReport).mockResolvedValue(null);
   });
 });

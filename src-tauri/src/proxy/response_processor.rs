@@ -6,7 +6,7 @@ use super::{
     content_encoding::{decompress_body_with_limit, get_content_encoding, DecompressError},
     forwarder::ActiveConnectionGuard,
     handler_config::{StreamUsageEventFilter, UsageParserConfig},
-    handler_context::{RequestContext, StreamingTimeoutConfig},
+    handler_context::{ProxyDiagnosticId, RequestContext, StreamingTimeoutConfig},
     hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES},
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -14,6 +14,7 @@ use super::{
     ProxyError,
 };
 use crate::database::PRICING_SOURCE_REQUEST;
+use crate::diagnostics::DiagnosticEvent;
 use crate::relay::model_verification::{
     passive::PassiveIngress, protocols::VerificationTap, types::TargetKey,
 };
@@ -202,6 +203,7 @@ pub async fn handle_streaming(
         connection_guard,
         create_passive_tap(ctx),
         state.passive_ingress.clone(),
+        ctx.diagnostic_id,
     );
 
     let body = axum::body::Body::from_stream(logged_stream);
@@ -736,7 +738,42 @@ pub(crate) fn create_passive_tap(ctx: &RequestContext) -> Option<VerificationTap
     VerificationTap::new(create_passive_target(ctx)?)
 }
 
+// Request-local observation only; existing cleanup guards retain their ownership.
+struct StreamDiagnosticGuard {
+    diagnostic_id: ProxyDiagnosticId,
+    received_chunk: bool,
+    armed: bool,
+}
+
+impl StreamDiagnosticGuard {
+    fn event(&self, outcome: &'static str) -> DiagnosticEvent {
+        DiagnosticEvent::new("proxy.stream.lifecycle", outcome)
+            .field_display("diagnostic_id", self.diagnostic_id)
+            .field("received_chunk", self.received_chunk)
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        // Disarm before yielding errors: downstream may drop without polling again.
+        self.armed = false;
+        if outcome == "eof" {
+            log::debug!("{}", self.event(outcome));
+        } else {
+            log::error!("{}", self.event(outcome));
+        }
+    }
+}
+
+impl Drop for StreamDiagnosticGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Observation only: never spawn work or change usage/connection cleanup.
+            log::debug!("{}", self.event("dropped"));
+        }
+    }
+}
+
 /// 创建带日志记录和超时控制的透传流
+#[allow(clippy::too_many_arguments)]
 pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
     tag: &'static str,
@@ -745,8 +782,16 @@ pub fn create_logged_passthrough_stream(
     connection_guard: Option<ActiveConnectionGuard>,
     mut verification_tap: Option<VerificationTap>,
     passive_ingress: PassiveIngress,
+    diagnostic_id: ProxyDiagnosticId,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    // Construct outside the generator so dropping an unpolled body is observable.
+    let diagnostic_guard = StreamDiagnosticGuard {
+        diagnostic_id,
+        received_chunk: false,
+        armed: true,
+    };
     async_stream::stream! {
+        let mut diagnostic_guard = diagnostic_guard;
         let _conn_guard = connection_guard;
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
@@ -754,7 +799,6 @@ pub fn create_logged_passthrough_stream(
         let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
         let inspect_sse_events =
             collector.is_some() || log::log_enabled!(log::Level::Debug);
-        let mut is_first_chunk = true;
 
         // 超时配置
         let first_byte_timeout = if timeout_config.first_byte_timeout > 0 {
@@ -772,7 +816,7 @@ pub fn create_logged_passthrough_stream(
 
         loop {
             // 选择超时时间：首字节超时或静默期超时
-            let timeout_duration = if is_first_chunk {
+            let timeout_duration = if !diagnostic_guard.received_chunk {
                 first_byte_timeout
             } else {
                 idle_timeout
@@ -785,8 +829,8 @@ pub fn create_logged_passthrough_stream(
                         Ok(None) => None, // 流结束
                         Err(_) => {
                             // 超时
-                            let timeout_type = if is_first_chunk { "首字节" } else { "静默期" };
-                            log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
+                            let timeout_type = if !diagnostic_guard.received_chunk { "首字节" } else { "静默期" };
+                            diagnostic_guard.finish(if !diagnostic_guard.received_chunk { "first_byte_timeout" } else { "idle_timeout" });
                             yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
                             break;
                         }
@@ -797,13 +841,13 @@ pub fn create_logged_passthrough_stream(
 
             match chunk_result {
                 Some(Ok(bytes)) => {
-                    if is_first_chunk {
+                    if !diagnostic_guard.received_chunk {
                         log::debug!(
                             "[{tag}] 已接收上游流式首包: bytes={}",
                             bytes.len()
                         );
                     }
-                    is_first_chunk = false;
+                    diagnostic_guard.received_chunk = true;
                     if let Some(tap) = verification_tap.as_mut() {
                         tap.observe_chunk(&bytes);
                     }
@@ -857,12 +901,13 @@ pub fn create_logged_passthrough_stream(
                     yield Ok(bytes);
                 }
                 Some(Err(e)) => {
-                    log::error!("[{tag}] 流错误: {e}");
+                    diagnostic_guard.finish("io_error");
                     yield Err(std::io::Error::other(e.to_string()));
                     break;
                 }
                 None => {
-                    // 流正常结束
+                    // Byte EOF alone does not prove a protocol terminal event arrived.
+                    diagnostic_guard.finish("eof");
                     break;
                 }
             }
@@ -934,7 +979,252 @@ fn format_headers(headers: &HeaderMap) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial]
+    fn unpolled_stream_diagnostics_record_one_drop_without_a_runtime() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::response_processor::tests::unpolled_stream_diagnostics_record_one_drop_without_a_runtime",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let before = captured_logs().len();
+        let diagnostic_id = ProxyDiagnosticId::new();
+        let stream = create_logged_passthrough_stream(
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+            "test",
+            None,
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            diagnostic_id,
+        );
+        drop(stream);
+        let events = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["outcome"], "dropped");
+        assert_eq!(events[0]["received_chunk"], false);
+        assert_eq!(events[0]["diagnostic_id"], diagnostic_id.to_string());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn pending_stream_diagnostics_record_one_drop_before_and_after_a_chunk() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::response_processor::tests::pending_stream_diagnostics_record_one_drop_before_and_after_a_chunk",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        for (received, poll_pending) in [(false, true), (true, false), (true, true)] {
+            let diagnostic_id = ProxyDiagnosticId::new();
+            let before = captured_logs().len();
+            let prefix = if received {
+                vec![Ok(Bytes::from_static(b"DIAG_PRIVATE_CHUNK"))]
+            } else {
+                vec![]
+            };
+            let mut stream = Box::pin(create_logged_passthrough_stream(
+                futures::stream::iter(prefix)
+                    .chain(futures::stream::pending::<Result<Bytes, std::io::Error>>()),
+                "test",
+                None,
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 0,
+                    idle_timeout: 0,
+                },
+                None,
+                None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                diagnostic_id,
+            ));
+            if received {
+                assert_eq!(
+                    stream.next().await.unwrap().unwrap(),
+                    Bytes::from_static(b"DIAG_PRIVATE_CHUNK")
+                );
+            }
+            if poll_pending {
+                assert!(futures::poll!(stream.next()).is_pending());
+            }
+            drop(stream);
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["outcome"], "dropped");
+            assert_eq!(events[0]["received_chunk"], received);
+            assert_eq!(events[0]["diagnostic_id"], diagnostic_id.to_string());
+            assert!(!captured_logs()[before..].contains("DIAG_PRIVATE"));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn terminal_stream_diagnostics_disarm_before_error_is_yielded() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::response_processor::tests::terminal_stream_diagnostics_disarm_before_error_is_yielded",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        for received in [false, true] {
+            let diagnostic_id = ProxyDiagnosticId::new();
+            let before = captured_logs().len();
+            let prefix = if received {
+                vec![Ok(Bytes::from_static(b"first"))]
+            } else {
+                vec![]
+            };
+            let mut stream = Box::pin(create_logged_passthrough_stream(
+                futures::stream::iter(prefix)
+                    .chain(futures::stream::pending::<Result<Bytes, std::io::Error>>()),
+                "test",
+                None,
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 1,
+                    idle_timeout: 1,
+                },
+                None,
+                None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                diagnostic_id,
+            ));
+            if received {
+                assert!(stream.next().await.unwrap().is_ok());
+            }
+            assert!(stream.next().await.unwrap().is_err());
+            drop(stream); // Do not resume the generator's post-yield cleanup.
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+            assert_eq!(events.len(), 1, "timeout must not also emit dropped");
+            assert_eq!(
+                events[0]["outcome"],
+                if received {
+                    "idle_timeout"
+                } else {
+                    "first_byte_timeout"
+                }
+            );
+            assert_eq!(events[0]["diagnostic_id"], diagnostic_id.to_string());
+        }
+    }
     use super::*;
+
+    fn proxy_diagnostic_events_after(start: usize, event: &str) -> Vec<Value> {
+        crate::relay::model_verification::privacy_tests::captured_logs()[start..]
+            .lines()
+            .filter_map(|line| {
+                line.find('{')
+                    .and_then(|at| serde_json::from_str::<Value>(&line[at..]).ok())
+            })
+            .filter(|value| value.get("event").and_then(Value::as_str) == Some(event))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stream_lifecycle_diagnostics_follow_real_consumption() {
+        // Keep assertions isolated from concurrently running proxy log producers.
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::response_processor::tests::stream_lifecycle_diagnostics_follow_real_consumption",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        for (chunks, outcome, received) in [
+            (vec![Err(std::io::Error::other("DIAG_STREAM_PRIVATE_IO https://private.example?token=secret body=DIAG_STREAM_PRIVATE_BODY"))], "io_error", false),
+            (vec![], "eof", false),
+            (vec![Ok(Bytes::from_static(b"DIAG_STREAM_PRIVATE_CHUNK"))], "eof", true),
+            (vec![Ok(Bytes::from_static(b"DIAG_STREAM_PRIVATE_CHUNK")), Err(std::io::Error::other("DIAG_STREAM_PRIVATE_IO"))], "io_error", true),
+        ] {
+            let before = captured_logs().len();
+            let stream = create_logged_passthrough_stream(
+                futures::stream::iter(chunks), "test", None,
+                StreamingTimeoutConfig { first_byte_timeout: 0, idle_timeout: 0 }, None, None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                ProxyDiagnosticId::new(),
+            );
+            futures::pin_mut!(stream);
+            let mut output = Vec::new();
+            let mut error = None;
+            while let Some(chunk) = stream.next().await {
+                match chunk { Ok(bytes) => output.extend_from_slice(&bytes), Err(err) => error = Some(err.to_string()) }
+            }
+            assert_eq!(output.as_slice(), if received { b"DIAG_STREAM_PRIVATE_CHUNK".as_slice() } else { b"" });
+            assert_eq!(error.is_some(), outcome == "io_error");
+            if let Some(error) = error { assert!(error.contains("DIAG_STREAM_PRIVATE_IO"), "downstream error behavior must not change"); }
+            let logged = captured_logs();
+            assert!(!logged[before..].contains("PRIVATE"), "the logging call must not accept IO text or payloads");
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+            assert_eq!(events.len(), 1, "one terminal byte-stream event");
+            assert_eq!(events[0]["outcome"], outcome);
+            assert_eq!(events[0]["received_chunk"], received);
+            assert_eq!(events[0].as_object().unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stream_lifecycle_diagnostics_distinguish_first_byte_and_idle_timeouts() {
+        // Keep assertions isolated from concurrently running proxy log producers.
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::response_processor::tests::stream_lifecycle_diagnostics_distinguish_first_byte_and_idle_timeouts",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        for received in [false, true] {
+            let before = captured_logs().len();
+            let prefix = if received {
+                vec![Ok(Bytes::from_static(b"first"))]
+            } else {
+                vec![]
+            };
+            let upstream = futures::stream::iter(prefix)
+                .chain(futures::stream::pending::<Result<Bytes, std::io::Error>>());
+            let stream = create_logged_passthrough_stream(
+                upstream,
+                "test",
+                None,
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 1,
+                    idle_timeout: 1,
+                },
+                None,
+                None,
+                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+                ProxyDiagnosticId::new(),
+            );
+            futures::pin_mut!(stream);
+            if received {
+                assert_eq!(
+                    stream.next().await.unwrap().unwrap(),
+                    Bytes::from_static(b"first")
+                );
+            }
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.is_none());
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0]["outcome"],
+                if received {
+                    "idle_timeout"
+                } else {
+                    "first_byte_timeout"
+                }
+            );
+            assert_eq!(events[0]["received_chunk"], received);
+            assert_eq!(events[0].as_object().unwrap().len(), 4);
+        }
+    }
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::ProviderMeta;
@@ -1048,6 +1338,7 @@ mod tests {
             None,
             None,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            ProxyDiagnosticId::new(),
         );
         futures::pin_mut!(stream);
         while stream.next().await.is_some() {}

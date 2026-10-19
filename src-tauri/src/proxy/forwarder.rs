@@ -2,6 +2,7 @@
 //!
 //! 负责将请求转发到上游Provider，支持故障转移
 
+use super::handler_context::ProxyDiagnosticId;
 use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::{
     body_filter::filter_private_params_with_whitelist,
@@ -84,6 +85,54 @@ fn validate_codex_official_authorization(
 }
 
 use super::response_lease::ResponseLease;
+
+// Diagnostic labels are a closed set: never format an error's payload, provider
+// identity, request body or model alias into these lifecycle events.
+fn forward_error_kind(error: &ProxyError) -> &'static str {
+    match error {
+        ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "timeout",
+        ProxyError::ForwardFailed(_) => "forwarding",
+        ProxyError::UpstreamError { .. } => "upstream",
+        ProxyError::AuthError(_) => "authentication",
+        ProxyError::ConfigError(_) => "configuration",
+        ProxyError::TransformError(_) => "transform",
+        ProxyError::InvalidRequest(_) => "invalid_request",
+        ProxyError::ResponseBodyTooLarge(_) => "body_limit",
+        ProxyError::NoAvailableProvider
+        | ProxyError::AllProvidersCircuitOpen
+        | ProxyError::NoProvidersConfigured
+        | ProxyError::ProviderUnhealthy(_) => "unavailable",
+        ProxyError::MaxRetriesExceeded => "retry_limit",
+        ProxyError::DatabaseError(_) => "database",
+        ProxyError::AlreadyRunning
+        | ProxyError::NotRunning
+        | ProxyError::BindFailed(_)
+        | ProxyError::StopTimeout
+        | ProxyError::StopFailed(_)
+        | ProxyError::Internal(_) => "internal",
+    }
+}
+
+fn stream_prime_diagnostic(
+    diagnostic_id: ProxyDiagnosticId,
+    phase: &'static str,
+    result: &Result<ProxyResponse, ProxyError>,
+) -> DiagnosticEvent {
+    DiagnosticEvent::new(
+        "proxy.stream.prime",
+        if result.is_ok() { "ready" } else { "failed" },
+    )
+    .field_display("diagnostic_id", diagnostic_id)
+    .field("phase", phase)
+    .field(
+        "error_kind",
+        result
+            .as_ref()
+            .err()
+            .map(forward_error_kind)
+            .unwrap_or("none"),
+    )
+}
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -182,6 +231,7 @@ impl Drop for ActiveConnectionGuard {
 }
 
 pub struct RequestForwarder {
+    diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 共享的 ProviderRouter（持有熔断器状态）
     router: Arc<ProviderRouter>,
@@ -346,6 +396,7 @@ impl RequestForwarder {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        diagnostic_id: ProxyDiagnosticId,
         router: Arc<ProviderRouter>,
         non_streaming_timeout: u64,
         status: Arc<RwLock<ProxyStatus>>,
@@ -371,6 +422,7 @@ impl RequestForwarder {
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            diagnostic_id,
             request_identity: None,
             router,
             codex_tool_carriers,
@@ -766,6 +818,12 @@ impl RequestForwarder {
             }
 
             attempted_providers += 1;
+            log::debug!(
+                "{}",
+                DiagnosticEvent::new("proxy.forward.provider_attempt", "started")
+                    .field_display("diagnostic_id", self.diagnostic_id)
+                    .field("attempt", attempted_providers as u64)
+            );
 
             // 本次尝试的计时锚点：从「开始向这家发起请求」起算。同一家内部的
             // 整流器/媒体降级重试不重置它（重试也是这家消费掉的时间），
@@ -1534,6 +1592,11 @@ impl RequestForwarder {
         ),
         ProxyError,
     > {
+        log::debug!(
+            "{}",
+            DiagnosticEvent::new("proxy.forward.attempt", "started")
+                .field_display("diagnostic_id", self.diagnostic_id)
+        );
         let result = self
             .forward_attempt(
                 app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
@@ -1548,6 +1611,22 @@ impl RequestForwarder {
             self.router
                 .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
         }
+        log::debug!(
+            "{}",
+            DiagnosticEvent::new(
+                "proxy.forward.attempt",
+                if result.is_ok() { "ready" } else { "failed" }
+            )
+            .field_display("diagnostic_id", self.diagnostic_id)
+            .field(
+                "error_kind",
+                result
+                    .as_ref()
+                    .err()
+                    .map(forward_error_kind)
+                    .unwrap_or("none")
+            )
+        );
         result
     }
 
@@ -3225,7 +3304,14 @@ impl RequestForwarder {
         request_is_streaming: bool,
     ) -> Result<ProxyResponse, ProxyError> {
         if request_is_streaming {
-            return self.prime_streaming_response(response).await;
+            let result = self.prime_streaming_response(response).await;
+            if !self.streaming_first_byte_timeout.is_zero() {
+                log::debug!(
+                    "{}",
+                    stream_prime_diagnostic(self.diagnostic_id, "first_chunk", &result)
+                );
+            }
+            return result;
         }
 
         if self.non_streaming_timeout.is_zero() {
@@ -3308,6 +3394,18 @@ impl RequestForwarder {
     }
 
     async fn validate_responses_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        let result = self.validate_responses_stream_start_inner(response).await;
+        log::debug!(
+            "{}",
+            stream_prime_diagnostic(self.diagnostic_id, "responses_semantic", &result)
+        );
+        result
+    }
+
+    async fn validate_responses_stream_start_inner(
         &self,
         response: ProxyResponse,
     ) -> Result<ProxyResponse, ProxyError> {
@@ -4666,6 +4764,107 @@ fn value_for_log(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn interleaved_diagnostics_keep_each_request_correlated_across_stream_stages() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::interleaved_diagnostics_keep_each_request_correlated_across_stream_stages",
+        ) {
+            return;
+        }
+        use crate::proxy::handler_context::StreamingTimeoutConfig;
+        use crate::proxy::response_processor::create_logged_passthrough_stream;
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let first = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let second = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        assert_ne!(first.diagnostic_id, second.diagnostic_id);
+        let first_id = first.diagnostic_id.to_string();
+        let second_id = second.diagnostic_id.to_string();
+        let before = captured_logs().len();
+        let (first_tx, first_rx) = futures::channel::mpsc::unbounded();
+        let (second_tx, second_rx) = futures::channel::mpsc::unbounded();
+        let first_bytes = Bytes::from_static(b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"DIAG_PRIVATE_FIRST\"}\n\n");
+        let second_bytes = Bytes::from_static(b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"DIAG_PRIVATE_SECOND\"}\n\n");
+        first_tx.unbounded_send(Ok(first_bytes.clone())).unwrap();
+        second_tx.unbounded_send(Ok(second_bytes.clone())).unwrap();
+        let (first_response, second_response) = tokio::join!(
+            first.prepare_success_response_for_failover(
+                ProxyResponse::streamed(StatusCode::OK, HeaderMap::new(), first_rx),
+                true
+            ),
+            second.prepare_success_response_for_failover(
+                ProxyResponse::streamed(StatusCode::OK, HeaderMap::new(), second_rx),
+                true
+            ),
+        );
+        let (first_response, second_response) = tokio::join!(
+            first.validate_responses_stream_start(first_response.unwrap()),
+            second.validate_responses_stream_start(second_response.unwrap()),
+        );
+        let mut first_stream = Box::pin(create_logged_passthrough_stream(
+            first_response.unwrap().bytes_stream(),
+            "test",
+            None,
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            first.diagnostic_id,
+        ));
+        let mut second_stream = Box::pin(create_logged_passthrough_stream(
+            second_response.unwrap().bytes_stream(),
+            "test",
+            None,
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            second.diagnostic_id,
+        ));
+        assert_eq!(first_stream.next().await.unwrap().unwrap(), first_bytes);
+        assert_eq!(second_stream.next().await.unwrap().unwrap(), second_bytes);
+        assert!(futures::poll!(first_stream.next()).is_pending());
+        second_tx
+            .unbounded_send(Err(std::io::Error::other("DIAG_PRIVATE_SECOND_ERROR")))
+            .unwrap();
+        assert!(second_stream.next().await.unwrap().is_err());
+        drop(second_stream); // Drop immediately after error, without polling the final None.
+        drop(first_tx);
+        assert!(first_stream.next().await.is_none());
+        drop(first_stream);
+        drop(second_tx);
+        let primes = proxy_diagnostic_events_after(before, "proxy.stream.prime");
+        assert_eq!(primes.len(), 4);
+        for id in [&first_id, &second_id] {
+            let phases: Vec<_> = primes
+                .iter()
+                .filter(|event| event["diagnostic_id"] == *id)
+                .map(|event| event["phase"].as_str().unwrap())
+                .collect();
+            assert_eq!(phases, ["first_chunk", "responses_semantic"]);
+        }
+        let terminals = proxy_diagnostic_events_after(before, "proxy.stream.lifecycle");
+        assert_eq!(
+            terminals.len(),
+            2,
+            "an observed failure and EOF each finish only once"
+        );
+        assert_eq!(terminals[0]["diagnostic_id"], second_id);
+        assert_eq!(terminals[0]["outcome"], "io_error");
+        assert_eq!(terminals[1]["diagnostic_id"], first_id);
+        assert_eq!(terminals[1]["outcome"], "eof");
+        assert!(terminals
+            .iter()
+            .all(|event| event["received_chunk"] == true));
+        assert!(!captured_logs()[before..].contains("DIAG_PRIVATE"));
+    }
     use super::*;
     use crate::database::Database;
     use crate::provider::LocalProxyRequestOverrides;
@@ -4677,6 +4876,174 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
+    fn proxy_diagnostic_events_after(start: usize, event: &str) -> Vec<Value> {
+        crate::relay::model_verification::privacy_tests::captured_logs()[start..]
+            .lines()
+            .filter_map(|line| {
+                line.find('{')
+                    .and_then(|at| serde_json::from_str::<Value>(&line[at..]).ok())
+            })
+            .filter(|value| value.get("event").and_then(Value::as_str) == Some(event))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stream_priming_diagnostics_report_real_results_without_payloads() {
+        // Keep assertions isolated from concurrently running proxy log producers.
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::stream_priming_diagnostics_report_real_results_without_payloads",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        for (chunks, expected) in [
+            (vec![], "forwarding"),
+            (vec![Err(std::io::Error::other("DIAG_STREAM_PRIVATE_IO https://private.example?token=secret body=DIAG_STREAM_PRIVATE_BODY"))], "forwarding"),
+            (vec![Ok(Bytes::from_static(b"DIAG_STREAM_PRIVATE_CHUNK"))], "none"),
+        ] {
+            let before = captured_logs().len();
+            let response = ProxyResponse::streamed(StatusCode::OK, HeaderMap::new(), futures::stream::iter(chunks));
+            let result = forwarder.prepare_success_response_for_failover(response, true).await;
+            assert_eq!(result.is_ok(), expected == "none");
+            if let Ok(response) = result {
+                assert_eq!(response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await.unwrap(), Bytes::from_static(b"DIAG_STREAM_PRIVATE_CHUNK"));
+            }
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.prime");
+            assert_eq!(events.len(), 1, "one real first-chunk result event");
+            assert_eq!(events[0]["phase"], "first_chunk");
+            assert_eq!(events[0]["error_kind"], expected);
+            assert_eq!(events[0]["outcome"], if expected == "none" { "ready" } else { "failed" });
+            assert_eq!(events[0].as_object().unwrap().len(), 5);
+            assert_eq!(events[0]["diagnostic_id"], forwarder.diagnostic_id.to_string());
+            assert!(!events[0].to_string().contains("PRIVATE"));
+        }
+        let before = captured_logs().len();
+        let pending = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+        );
+        assert!(matches!(
+            forwarder
+                .prepare_success_response_for_failover(pending, true)
+                .await,
+            Err(ProxyError::Timeout(_))
+        ));
+        let events = proxy_diagnostic_events_after(before, "proxy.stream.prime");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["error_kind"], "timeout");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn disabled_priming_diagnostics_do_not_claim_first_chunk_arrival() {
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::disabled_priming_diagnostics_do_not_claim_first_chunk_arrival",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let before = captured_logs().len();
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::ZERO);
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+        );
+        assert!(forwarder
+            .prepare_success_response_for_failover(response, true)
+            .await
+            .is_ok());
+        assert!(proxy_diagnostic_events_after(before, "proxy.stream.prime").is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn semantic_priming_diagnostics_distinguish_failure_from_replay() {
+        // Keep assertions isolated from concurrently running proxy log producers.
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::semantic_priming_diagnostics_distinguish_failure_from_replay",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        for (bytes, expected) in [
+            (b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"PRIVATE_FAILURE https://private.example\"}}}\n\n".as_slice(), "transform"),
+            (b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"PRIVATE_CONTENT\"}\n\n".as_slice(), "none"),
+            (b"".as_slice(), "forwarding"),
+        ] {
+            let before = captured_logs().len();
+            let response = ProxyResponse::streamed(StatusCode::OK, HeaderMap::new(), futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]));
+            let result = forwarder.validate_responses_stream_start(response).await;
+            assert_eq!(result.is_ok(), expected == "none");
+            if let Ok(response) = result {
+                assert_eq!(response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await.unwrap().as_ref(), bytes);
+            }
+            let events = proxy_diagnostic_events_after(before, "proxy.stream.prime");
+            assert_eq!(events.len(), 1, "one real semantic priming result");
+            assert_eq!(events[0]["phase"], "responses_semantic");
+            assert_eq!(events[0]["error_kind"], expected);
+            assert_eq!(events[0].as_object().unwrap().len(), 5);
+            assert_eq!(events[0]["diagnostic_id"], forwarder.diagnostic_id.to_string());
+            assert!(!events[0].to_string().contains("PRIVATE"));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn forward_attempt_diagnostics_cover_pre_send_failure() {
+        // Keep assertions isolated from concurrently running proxy log producers.
+        if crate::proxy::redirect_test_support::run_in_isolated_process(
+            "proxy::forwarder::tests::forward_attempt_diagnostics_cover_pre_send_failure",
+        ) {
+            return;
+        }
+        use crate::relay::model_verification::privacy_tests::{captured_logs, init_logger};
+        init_logger();
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let provider = test_provider_with_type(None);
+        let adapter = super::super::providers::CodexAdapter::new();
+        let before = captured_logs().len();
+        let result = forwarder
+            .forward(
+                &AppType::Codex,
+                &http::Method::POST,
+                &provider,
+                "/PRIVATE_ENDPOINT",
+                &json!({"model":"PRIVATE_ALIAS","input":"DIAG_STREAM_PRIVATE_BODY"}),
+                &HeaderMap::new(),
+                &Extensions::new(),
+                &adapter,
+                &mut false,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "missing base URL must fail without contacting an upstream"
+        );
+        let events = proxy_diagnostic_events_after(before, "proxy.forward.attempt");
+        assert_eq!(events.len(), 2, "attempt start and real failure result");
+        assert_eq!(events[0]["outcome"], "started");
+        assert_eq!(events[1]["outcome"], "failed");
+        assert_eq!(events[1]["error_kind"], "configuration");
+        assert_eq!(events[0].as_object().unwrap().len(), 3);
+        assert_eq!(
+            events[0]["diagnostic_id"],
+            forwarder.diagnostic_id.to_string()
+        );
+        assert_eq!(events[1].as_object().unwrap().len(), 4);
+        assert_eq!(
+            events[1]["diagnostic_id"],
+            forwarder.diagnostic_id.to_string()
+        );
+        assert!(!serde_json::to_string(&events).unwrap().contains("PRIVATE"));
+    }
     fn test_provider_with_type(provider_type: Option<&str>) -> Provider {
         Provider {
             id: "provider-1".to_string(),
@@ -4705,6 +5072,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,
             router: Arc::new(ProviderRouter::new(db.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),

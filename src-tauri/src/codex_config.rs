@@ -3498,11 +3498,7 @@ pub(crate) fn cc_switch_catalog_reference_path(
     };
 
     if !path_is_within(base_dir, &resolved) {
-        log::warn!(
-            "Codex model_catalog_json 指向配置目录外: {}（允许目录: {}）",
-            resolved.display(),
-            base_dir.display()
-        );
+        log::warn!("Codex model_catalog_json rejected: outside configuration directory");
         return None;
     }
 
@@ -3517,11 +3513,8 @@ fn resolve_cc_switch_catalog_reference(resolved: &Path, base_dir: &Path) -> Opti
     if resolved.exists() {
         let canonical = match fs::canonicalize(resolved) {
             Ok(path) => path,
-            Err(error) => {
-                log::warn!(
-                    "Codex model_catalog_json canonicalize 失败: {}: {error}",
-                    resolved.display()
-                );
+            Err(_) => {
+                log::warn!("Codex model_catalog_json rejected: canonicalization failed");
                 return None;
             }
         };
@@ -3530,12 +3523,7 @@ fn resolve_cc_switch_catalog_reference(resolved: &Path, base_dir: &Path) -> Opti
         // 词法 base 与 canonical 路径比较只会误拒（退化为不读），不会误放。
         let canonical_base = fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
         if !path_is_within(&canonical_base, &canonical) {
-            log::warn!(
-                "Codex model_catalog_json 经符号链接解析到配置目录外: {} -> {}（允许目录: {}）",
-                resolved.display(),
-                canonical.display(),
-                canonical_base.display()
-            );
+            log::warn!("Codex model_catalog_json rejected: resolved target outside configuration directory");
             return None;
         }
         return Some(canonical);

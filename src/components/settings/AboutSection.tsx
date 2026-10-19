@@ -295,7 +295,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const [isDiagnosingAll, setIsDiagnosingAll] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
-  // 反馈入口只在远端配置下发了端点时出现（配置缺键 = 功能休眠）。
+  // Upload availability or an existing local report keeps feedback management accessible.
   const [feedbackConfigured, setFeedbackConfigured] = useState(false);
   // 升级前探测到「多处安装需确认」时暂存：toolNames=本次要升级的全部工具，
   // plans=其中需要确认的（≥2 处）那些。用户确认后对 toolNames 整体执行升级。
@@ -506,14 +506,16 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     };
   }, []);
 
-  // 反馈回传端点是否已随签名远端配置下发（缺键 = 休眠，按钮整个不渲染）。
-  // 拉不到远端配置时保守隐藏 —— 与后端 load_cached 的回落语义一致。
+  // A retained local report remains manageable even when the upload endpoint
+  // is withdrawn. Reading this receipt never uploads or contacts the server.
   useEffect(() => {
     let active = true;
-    void feedbackApi
-      .isEndpointConfigured()
-      .then((configured) => {
-        if (active) setFeedbackConfigured(configured);
+    void Promise.all([
+      feedbackApi.isEndpointConfigured().catch(() => false),
+      feedbackApi.getLastReport().catch(() => null),
+    ])
+      .then(([configured, receipt]) => {
+        if (active) setFeedbackConfigured(configured || receipt !== null);
       })
       .catch(() => {
         if (active) setFeedbackConfigured(false);
