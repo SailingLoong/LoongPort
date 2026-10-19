@@ -570,6 +570,17 @@ impl CodexOAuthManager {
         Ok(())
     }
 
+    /// Cancel only this pending login. False means no pending flow was removed;
+    /// an already committed account is deliberately never rolled back.
+    pub async fn cancel_device_flow(&self, device_code: &str) -> bool {
+        let _lifecycle = self.lifecycle_lock.write().await;
+        self.pending_device_codes
+            .write()
+            .await
+            .remove(device_code)
+            .is_some()
+    }
+
     /// 轮询 Device Code 状态
     ///
     /// 接收 device_code（即 device_auth_id），返回 Some(account) 表示授权成功
@@ -2562,5 +2573,121 @@ mod tests {
             Some("refresh_token_invalidated")
         );
         assert_eq!(extract_refresh_error_code("not json"), None);
+    }
+    #[tokio::test]
+    async fn cancel_one_device_flow_preserves_other_flow_and_saved_account() {
+        let temp = crate::secrets::testing::tempdir().unwrap();
+        let manager = test_manager(temp.path().to_path_buf());
+        manager
+            .add_test_account_with_access_token("existing", "existing-access", Some("existing-id"))
+            .await
+            .unwrap();
+        let before = CredentialFile::Codex.read(&manager.secrets).unwrap();
+        for id in ["A", "B"] {
+            manager
+                .register_pending_device_code(
+                    id.into(),
+                    "synthetic-code".into(),
+                    chrono::Utc::now().timestamp_millis() + 60_000,
+                    manager.login_epoch.load(Ordering::Acquire),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(manager.cancel_device_flow("A").await);
+        assert!(!manager.cancel_device_flow("A").await);
+        let late = manager
+            .add_account_internal(
+                "existing".into(),
+                "synthetic-refresh".into(),
+                None,
+                None,
+                None,
+                Some("A"),
+            )
+            .await;
+        assert!(matches!(late, Err(CodexOAuthError::ExpiredToken)));
+        assert!(manager.pending_device_codes.read().await.contains_key("B"));
+        assert!(manager.accounts.read().await.contains_key("existing"));
+        assert!(manager.access_tokens.read().await.contains_key("existing"));
+        assert_eq!(
+            CredentialFile::Codex.read(&manager.secrets).unwrap(),
+            before
+        );
+        manager
+            .add_account_internal(
+                "B-account".into(),
+                "synthetic-refresh".into(),
+                None,
+                None,
+                None,
+                Some("B"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !manager.cancel_device_flow("B").await,
+            "already committed is not reported cancelled"
+        );
+        assert!(manager.accounts.read().await.contains_key("B-account"));
+    }
+    #[tokio::test]
+    async fn cancellation_waits_for_owned_commit_and_never_rolls_it_back() {
+        let temp = crate::secrets::testing::tempdir().unwrap();
+        let manager = Arc::new(test_manager(temp.path().to_path_buf()));
+        manager
+            .register_pending_device_code(
+                "race".into(),
+                "synthetic".into(),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+                0,
+            )
+            .await
+            .unwrap();
+        let refresh_lock = manager.get_refresh_lock("race-account").await;
+        let refresh_guard = refresh_lock.lock().await;
+        let commit_manager = manager.clone();
+        let commit = tokio::spawn(async move {
+            commit_manager
+                .add_account_internal(
+                    "race-account".into(),
+                    "synthetic-refresh".into(),
+                    None,
+                    None,
+                    None,
+                    Some("race"),
+                )
+                .await
+        });
+        // Consumption is an observable barrier: commit now owns lifecycle(read)
+        // and is waiting at the held account refresh lock, before persistence.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager
+                .pending_device_codes
+                .read()
+                .await
+                .contains_key("race")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let cancel_manager = manager.clone();
+        let mut cancel =
+            tokio::spawn(async move { cancel_manager.cancel_device_flow("race").await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut cancel)
+                .await
+                .is_err()
+        );
+        drop(refresh_guard);
+        commit.await.unwrap().unwrap();
+        assert!(!cancel.await.unwrap());
+        assert!(manager.accounts.read().await.contains_key("race-account"));
+        assert!(CredentialFile::Codex
+            .read(&manager.secrets)
+            .unwrap()
+            .is_some());
     }
 }

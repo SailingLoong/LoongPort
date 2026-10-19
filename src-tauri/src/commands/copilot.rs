@@ -40,7 +40,7 @@ pub async fn copilot_poll_for_auth(
     github_domain: Option<String>,
     state: State<'_, CopilotAuthState>,
 ) -> Result<bool, String> {
-    let auth_manager = state.0.write().await;
+    let auth_manager = state.0.read().await;
     match auth_manager
         .poll_for_token(&device_code, github_domain.as_deref())
         .await
@@ -69,7 +69,7 @@ pub async fn copilot_poll_for_account(
     github_domain: Option<String>,
     state: State<'_, CopilotAuthState>,
 ) -> Result<Option<GitHubAccount>, String> {
-    let auth_manager = state.0.write().await;
+    let auth_manager = state.0.read().await;
     match auth_manager
         .poll_for_token(&device_code, github_domain.as_deref())
         .await

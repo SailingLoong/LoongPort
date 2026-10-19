@@ -431,6 +431,9 @@ pub struct CopilotAuthManager {
     api_endpoints: Arc<RwLock<HashMap<String, String>>>,
     /// 每个账号的端点拉取锁，避免并发拉取重复打 GitHub API
     endpoint_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Ephemeral device-flow ownership, keyed by normalized domain and device code.
+    /// Holding this lock through login commit linearizes commit versus cancellation.
+    pending_device_codes: Mutex<HashMap<(String, String), i64>>,
     /// 存储路径
     secrets: Arc<SecretSession>,
     /// 待迁移的旧格式 token
@@ -450,6 +453,7 @@ impl CopilotAuthManager {
             copilot_models: Arc::new(RwLock::new(HashMap::new())),
             api_endpoints: Arc::new(RwLock::new(HashMap::new())),
             endpoint_locks: Arc::new(RwLock::new(HashMap::new())),
+            pending_device_codes: Mutex::new(HashMap::new()),
             secrets,
             pending_migration: Arc::new(RwLock::new(None)),
             migration_error: Arc::new(RwLock::new(None)),
@@ -627,12 +631,67 @@ impl CopilotAuthManager {
             .await
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
+        let now = chrono::Utc::now().timestamp_millis();
+        let expires_ms = i64::try_from(device_code.expires_in)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000);
+        {
+            let mut pending = self.pending_device_codes.lock().await;
+            pending.retain(|_, expires_at| *expires_at > now);
+            pending.insert(
+                (domain, device_code.device_code.clone()),
+                now.saturating_add(expires_ms),
+            );
+        }
+
         log::info!(
             "[CopilotAuth] 获取设备码成功，user_code: {}",
             device_code.user_code
         );
 
         Ok(device_code)
+    }
+
+    pub async fn cancel_device_flow(
+        &self,
+        device_code: &str,
+        github_domain: Option<&str>,
+    ) -> Result<bool, CopilotAuthError> {
+        let domain = match github_domain {
+            Some(domain) => normalize_github_domain(domain)?,
+            None => DEFAULT_GITHUB_DOMAIN.to_string(),
+        };
+        Ok(self
+            .pending_device_codes
+            .lock()
+            .await
+            .remove(&(domain, device_code.to_string()))
+            .is_some())
+    }
+
+    async fn commit_device_flow(
+        &self,
+        device_code: &str,
+        github_token: String,
+        user: GitHubUser,
+        domain: String,
+        copilot_token: Option<CopilotToken>,
+    ) -> Result<GitHubAccount, CopilotAuthError> {
+        let account_id = composite_account_id(&domain, user.id);
+        let refresh_lock = self.get_refresh_lock(&account_id).await;
+        let _refresh_guard = refresh_lock.lock().await;
+        let mut pending = self.pending_device_codes.lock().await;
+        let expires_at = pending.remove(&(domain.clone(), device_code.to_string()));
+        if expires_at.is_none_or(|expires_at| expires_at <= chrono::Utc::now().timestamp_millis()) {
+            return Err(CopilotAuthError::ExpiredToken);
+        }
+        let account = self
+            .add_account_internal(github_token, user, domain)
+            .await?;
+        if let Some(token) = copilot_token {
+            self.copilot_tokens.write().await.insert(account_id, token);
+        }
+        Ok(account)
     }
 
     /// 轮询获取 OAuth Token（返回新添加的账号，如果成功）
@@ -645,6 +704,16 @@ impl CopilotAuthManager {
             Some(d) => normalize_github_domain(d)?,
             None => DEFAULT_GITHUB_DOMAIN.to_string(),
         };
+        let key = (domain.clone(), device_code.to_string());
+        if self
+            .pending_device_codes
+            .lock()
+            .await
+            .get(&key)
+            .is_none_or(|expires_at| *expires_at <= chrono::Utc::now().timestamp_millis())
+        {
+            return Err(CopilotAuthError::ExpiredToken);
+        }
         log::debug!("[CopilotAuth] 轮询 OAuth Token (domain: {domain})");
 
         let response = crate::proxy::http_client::get()
@@ -691,23 +760,22 @@ impl CopilotAuthManager {
             .fetch_user_info_with_token(&access_token, &domain)
             .await?;
 
-        // GHES 无需换取 Copilot Token，直接使用 OAuth token 作为 Bearer
-        // 参考 OpenCode 的实现：GHE Copilot 直接用 OAuth token 调用 copilot-api.{domain}
-        if !is_ghes(&domain) {
-            // github.com：验证 Copilot 订阅（获取 Copilot Token）
-            self.fetch_copilot_token_with_github_token(
-                &access_token,
-                &user.id.to_string(),
-                &domain,
+        // Validate without publishing cache state. Only the still-owned login
+        // commit may install the received credential bundle.
+        let copilot_token = if !is_ghes(&domain) {
+            Some(
+                self.request_copilot_token_with_github_token(
+                    &access_token,
+                    &user.id.to_string(),
+                    &domain,
+                )
+                .await?,
             )
-            .await?;
         } else {
-            log::info!("[CopilotAuth] GHES 账号，跳过 Copilot Token 兑换，直接使用 OAuth token");
-        }
-
-        // 添加账号
+            None
+        };
         let account = self
-            .add_account_internal(access_token, user, domain)
+            .commit_device_flow(device_code, access_token, user, domain, copilot_token)
             .await?;
 
         Ok(Some(account))
@@ -1136,6 +1204,8 @@ impl CopilotAuthManager {
     /// 清除所有认证（登出所有账号）
     pub async fn clear_auth(&self) -> Result<(), CopilotAuthError> {
         log::info!("[CopilotAuth] 清除所有认证");
+        let mut pending = self.pending_device_codes.lock().await;
+        pending.clear();
 
         // 先清理内存状态，确保即使文件删除失败用户也能看到已登出
         {
@@ -1292,6 +1362,22 @@ impl CopilotAuthManager {
         account_id: &str,
         domain: &str,
     ) -> Result<(), CopilotAuthError> {
+        let token = self
+            .request_copilot_token_with_github_token(github_token, account_id, domain)
+            .await?;
+        self.copilot_tokens
+            .write()
+            .await
+            .insert(account_id.to_string(), token);
+        Ok(())
+    }
+
+    async fn request_copilot_token_with_github_token(
+        &self,
+        github_token: &str,
+        account_id: &str,
+        domain: &str,
+    ) -> Result<CopilotToken, CopilotAuthError> {
         log::debug!("[CopilotAuth] 获取账号 {account_id} 的 Copilot Token (domain: {domain})");
 
         let response = crate::proxy::http_client::get()
@@ -1335,10 +1421,7 @@ impl CopilotAuthManager {
             expires_at: token_response.expires_at,
         };
 
-        let mut tokens = self.copilot_tokens.write().await;
-        tokens.insert(account_id.to_string(), copilot_token);
-
-        Ok(())
+        Ok(copilot_token)
     }
 
     // ==================== 存储和迁移 ====================
@@ -2106,5 +2189,151 @@ mod tests {
 
         let account = GitHubAccount::from(&data);
         assert_eq!(account.id, "company.ghe.com:99999");
+    }
+    #[tokio::test]
+    async fn cancelled_device_flow_cannot_write_account_or_cache_and_preserves_other_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path().to_path_buf());
+        manager
+            .add_account_internal(
+                "existing-token".into(),
+                GitHubUser {
+                    id: 1,
+                    login: "existing".into(),
+                    avatar_url: None,
+                },
+                DEFAULT_GITHUB_DOMAIN.into(),
+            )
+            .await
+            .unwrap();
+        let existing_id = composite_account_id(DEFAULT_GITHUB_DOMAIN, 1);
+        manager.copilot_tokens.write().await.insert(
+            existing_id.clone(),
+            CopilotToken {
+                token: "existing-cache".into(),
+                expires_at: i64::MAX,
+            },
+        );
+        let before = CredentialFile::Copilot.read(&manager.secrets).unwrap();
+        for id in ["A", "B"] {
+            manager.pending_device_codes.lock().await.insert(
+                (DEFAULT_GITHUB_DOMAIN.into(), id.into()),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+            );
+        }
+        assert!(manager.cancel_device_flow("A", None).await.unwrap());
+        assert!(!manager.cancel_device_flow("A", None).await.unwrap());
+        let late = manager
+            .commit_device_flow(
+                "A",
+                "synthetic-token".into(),
+                GitHubUser {
+                    id: 1,
+                    login: "late-A".into(),
+                    avatar_url: None,
+                },
+                DEFAULT_GITHUB_DOMAIN.into(),
+                Some(CopilotToken {
+                    token: "synthetic-cache".into(),
+                    expires_at: i64::MAX,
+                }),
+            )
+            .await;
+        assert!(matches!(late, Err(CopilotAuthError::ExpiredToken)));
+        assert_eq!(
+            CredentialFile::Copilot.read(&manager.secrets).unwrap(),
+            before
+        );
+        assert_eq!(
+            manager
+                .copilot_tokens
+                .read()
+                .await
+                .get(&existing_id)
+                .unwrap()
+                .token,
+            "existing-cache"
+        );
+        assert_eq!(
+            manager
+                .accounts
+                .read()
+                .await
+                .get(&existing_id)
+                .unwrap()
+                .github_token,
+            "existing-token"
+        );
+        assert!(manager
+            .pending_device_codes
+            .lock()
+            .await
+            .contains_key(&(DEFAULT_GITHUB_DOMAIN.into(), "B".into())));
+        manager
+            .commit_device_flow(
+                "B",
+                "synthetic-token".into(),
+                GitHubUser {
+                    id: 3,
+                    login: "B".into(),
+                    avatar_url: None,
+                },
+                DEFAULT_GITHUB_DOMAIN.into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!manager.cancel_device_flow("B", None).await.unwrap());
+        assert_eq!(manager.list_accounts().await.len(), 2);
+    }
+    #[tokio::test]
+    async fn cancel_can_win_while_device_commit_waits_for_same_account_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(test_manager(dir.path().to_path_buf()));
+        manager.pending_device_codes.lock().await.insert(
+            (DEFAULT_GITHUB_DOMAIN.into(), "race".into()),
+            chrono::Utc::now().timestamp_millis() + 60_000,
+        );
+        let account_id = composite_account_id(DEFAULT_GITHUB_DOMAIN, 7);
+        let refresh_lock = manager.get_refresh_lock(&account_id).await;
+        let refresh_guard = refresh_lock.lock().await;
+        let commit_manager = manager.clone();
+        let mut commit = tokio::spawn(async move {
+            commit_manager
+                .commit_device_flow(
+                    "race",
+                    "synthetic-token".into(),
+                    GitHubUser {
+                        id: 7,
+                        login: "race".into(),
+                        avatar_url: None,
+                    },
+                    DEFAULT_GITHUB_DOMAIN.into(),
+                    Some(CopilotToken {
+                        token: "synthetic-access".into(),
+                        expires_at: i64::MAX,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut commit)
+                .await
+                .is_err()
+        );
+        // Unlike the old outer command write lock, the held refresh lock does
+        // not prevent cancellation from invalidating this pending flow.
+        assert!(manager.cancel_device_flow("race", None).await.unwrap());
+        drop(refresh_guard);
+        assert!(matches!(
+            commit.await.unwrap(),
+            Err(CopilotAuthError::ExpiredToken)
+        ));
+        assert!(manager.accounts.read().await.is_empty());
+        assert!(manager.copilot_tokens.read().await.is_empty());
+        assert!(CredentialFile::Copilot
+            .read(&manager.secrets)
+            .unwrap()
+            .is_none());
     }
 }

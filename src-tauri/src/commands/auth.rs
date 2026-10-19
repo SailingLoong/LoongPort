@@ -145,6 +145,36 @@ pub async fn auth_start_login(
     }
 }
 
+/// True means this pending flow was cancelled. False does not undo or deny an
+/// account commit that won the race; callers must refresh the original status.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn auth_cancel_login(
+    auth_provider: String,
+    device_code: String,
+    github_domain: Option<String>,
+    copilot_state: State<'_, CopilotAuthState>,
+    codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
+) -> Result<bool, String> {
+    match ensure_auth_provider(&auth_provider)? {
+        AUTH_PROVIDER_GITHUB_COPILOT => copilot_state
+            .0
+            .read()
+            .await
+            .cancel_device_flow(&device_code, github_domain.as_deref())
+            .await
+            .map_err(|e| e.to_string()),
+        AUTH_PROVIDER_CODEX_OAUTH => Ok(codex_state.0.cancel_device_flow(&device_code).await),
+        AUTH_PROVIDER_XAI_OAUTH => Ok(xai_state
+            .0
+            .read()
+            .await
+            .cancel_device_flow(&device_code)
+            .await),
+        _ => unreachable!(),
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn auth_poll_for_account(
     auth_provider: String,
@@ -157,7 +187,7 @@ pub async fn auth_poll_for_account(
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
-            let auth_manager = copilot_state.0.write().await;
+            let auth_manager = copilot_state.0.read().await;
             match auth_manager
                 .poll_for_token(&device_code, github_domain.as_deref())
                 .await
@@ -186,7 +216,7 @@ pub async fn auth_poll_for_account(
             }
         }
         AUTH_PROVIDER_XAI_OAUTH => {
-            let auth_manager = xai_state.0.write().await;
+            let auth_manager = xai_state.0.read().await;
             match auth_manager.poll_for_token(&device_code).await {
                 Ok(account) => {
                     let default_account_id = auth_manager.get_status().await.default_account_id;
