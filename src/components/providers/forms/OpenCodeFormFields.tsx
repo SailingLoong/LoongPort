@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -203,6 +203,15 @@ export function OpenCodeFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const fetchGeneration = useRef(0);
+  useEffect(() => {
+    fetchGeneration.current += 1;
+    setFetchedModels([]);
+    setIsFetchingModels(false);
+    return () => {
+      fetchGeneration.current += 1;
+    };
+  }, [baseUrl, apiKey]);
 
   const handleFetchModels = useCallback(() => {
     if (!baseUrl || !apiKey) {
@@ -212,9 +221,11 @@ export function OpenCodeFormFields({
       });
       return;
     }
+    const generation = ++fetchGeneration.current;
     setIsFetchingModels(true);
     fetchModelsForConfig(baseUrl, apiKey)
       .then((models) => {
+        if (generation !== fetchGeneration.current) return;
         setFetchedModels(models);
         if (models.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));
@@ -225,10 +236,13 @@ export function OpenCodeFormFields({
         }
       })
       .catch((err) => {
+        if (generation !== fetchGeneration.current) return;
         console.warn("[ModelFetch] Failed:", err);
         showFetchModelsError(err, t);
       })
-      .finally(() => setIsFetchingModels(false));
+      .finally(() => {
+        if (generation === fetchGeneration.current) setIsFetchingModels(false);
+      });
   }, [baseUrl, apiKey, t]);
 
   // Track which models have expanded options panel

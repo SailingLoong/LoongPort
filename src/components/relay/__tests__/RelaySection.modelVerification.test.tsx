@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   openLogin: vi.fn(),
   vendorRefresh: vi.fn(),
   applySiteConfig: vi.fn(),
+  resetSiteConfig: vi.fn(),
   switchTier: vi.fn(),
   switchTierModel: vi.fn(),
   apply: vi.fn(),
@@ -1083,5 +1084,67 @@ describe("RelaySection model verification ownership", () => {
     expect(screen.getByTestId("vendor-labels")).toHaveTextContent(
       "new current",
     );
+  });
+
+  describe("site configuration refresh completion at real parent entry", () => {
+    for (const entry of ["legacy", "accounts"] as const) {
+      for (const operation of ["apply", "reset"] as const) {
+        it(`${entry}/${operation}: retains successful save and retries only failed list read`, async () => {
+          api.listRelays.mockResolvedValue([
+            { ...relay, canQueryBalance: false },
+          ]);
+          const mutate =
+            operation === "apply" ? api.applySiteConfig : api.resetSiteConfig;
+          mutate.mockResolvedValue({ applied: ["provider-a"] });
+          render(
+            <QueryClientProvider client={createTestQueryClient()}>
+              {entry === "accounts" ? (
+                <ServicesPage
+                  appId="codex"
+                  onOpenApp={vi.fn()}
+                  onOpenAddHub={vi.fn()}
+                />
+              ) : (
+                <RelaySection
+                  appId="codex"
+                  accountActionsOnly
+                  accountFilter={{ kind: "relay", id: 1 }}
+                  onOpenAddHub={vi.fn()}
+                />
+              )}
+            </QueryClientProvider>,
+          );
+          fireEvent.click(
+            await screen.findByRole("button", {
+              name: "loongport.siteConfig.entry",
+            }),
+          );
+          fireEvent.change(screen.getByRole("textbox"), {
+            target: { value: "synthetic configuration" },
+          });
+          api.listRelays.mockRejectedValue(
+            new Error("synthetic list refresh failure"),
+          );
+          fireEvent.click(
+            screen.getByRole("button", {
+              name: `loongport.siteConfig.${operation}`,
+            }),
+          );
+          await waitFor(() => expect(mutate).toHaveBeenCalledOnce());
+          const retry = await screen.findByRole("button", {
+            name: "common.retry",
+          });
+          expect(screen.getByRole("textbox")).toBeDisabled();
+          api.listRelays.mockResolvedValue([
+            { ...relay, canQueryBalance: false },
+          ]);
+          fireEvent.click(retry);
+          await waitFor(() =>
+            expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+          );
+          expect(mutate).toHaveBeenCalledOnce();
+        });
+      }
+    }
   });
 });
