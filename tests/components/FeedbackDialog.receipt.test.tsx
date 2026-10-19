@@ -2,6 +2,7 @@ import {
   act,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -29,6 +30,7 @@ vi.mock("@/lib/clipboard", () => ({ copyText: mocks.copyText }));
 vi.mock("@/lib/api/usage", () => ({ usageApi: mocks }));
 
 import { FeedbackDialog } from "@/components/settings/FeedbackDialog";
+import { useFeedbackForm } from "@/components/settings/useFeedbackForm";
 
 const receipt = {
   reportId: "report-synthetic-0001",
@@ -145,7 +147,7 @@ async function submitDescription(description = "Another synthetic feedback") {
   if (mocks.prepare.mock.calls.length === calls) return;
   await screen.findByRole("region", { name: "settings.feedbackPreviewTitle" });
   fireEvent.click(
-    screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+    screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
   );
 }
 
@@ -157,7 +159,7 @@ describe("FeedbackDialog receipt safety", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "settings.feedbackPrepare" }),
+        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
       ).toBeEnabled(),
     );
     expect(screen.getByText(receipt.reportId)).toBeVisible();
@@ -201,7 +203,7 @@ describe("FeedbackDialog receipt safety", () => {
       name: "settings.feedbackPreviewTitle",
     });
     const submit = screen.getByRole("button", {
-      name: "settings.feedbackSubmit",
+      name: "settings.feedbackConfirmSubmit",
     });
     fireEvent.click(submit);
     fireEvent.click(submit);
@@ -538,7 +540,7 @@ describe("FeedbackDialog pending attachment uploads", () => {
         },
       );
       const submit = screen.getByRole("button", {
-        name: "settings.feedbackPrepare",
+        name: "settings.feedbackSubmit",
       });
       expect(submit).toBeDisabled();
       fireEvent.click(submit);
@@ -586,6 +588,12 @@ describe("FeedbackDialog pending attachment uploads", () => {
             },
           },
         );
+      fireEvent.change(
+        screen.getByRole("textbox", {
+          name: "settings.feedbackDescriptionLabel",
+        }),
+        { target: { value: "Screenshot feedback" } },
+      );
       choose("old.png");
       rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
       rerender(<FeedbackDialog open onClose={vi.fn()} />);
@@ -604,7 +612,7 @@ describe("FeedbackDialog pending attachment uploads", () => {
         screen.queryByRole("img", { name: "old.png" }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "settings.feedbackPrepare" }),
+        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
       ).toBeDisabled();
       Object.defineProperty(readers[1], "result", {
         value: "data:image/png;base64,AAAA",
@@ -617,7 +625,7 @@ describe("FeedbackDialog pending attachment uploads", () => {
       );
       expect(screen.getByRole("img", { name: "new.png" })).toBeVisible();
       expect(
-        screen.getByRole("button", { name: "settings.feedbackPrepare" }),
+        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
       ).toBeEnabled();
     } finally {
       read.mockRestore();
@@ -902,7 +910,9 @@ describe("FeedbackDialog related apps and optional contact", () => {
       ),
     );
     expect(mocks.getUsageSummaryByApp).toHaveBeenCalledWith();
-    expect(screen.getByText("settings.feedbackAppOrderHint")).toBeVisible();
+    expect(
+      screen.queryByText("settings.feedbackAppOrderHint"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps registry order when request counts are unavailable or invalid", async () => {
@@ -1081,7 +1091,7 @@ describe("FeedbackDialog related apps and optional contact", () => {
       await submitDescription();
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "settings.feedbackPrepare" }),
+          screen.getByRole("button", { name: "settings.feedbackSubmit" }),
         ).toBeEnabled(),
       );
       expect(contactInput()).toHaveValue("followup@example.invalid");
@@ -1117,7 +1127,7 @@ describe("FeedbackDialog related apps and optional contact", () => {
 
 describe("FeedbackDialog extended field capability gate", () => {
   it.each(["pending", "unsupported", "failed"])(
-    "disables optional fields for %s capability while allowing basic feedback",
+    "hides optional fields for %s capability while allowing basic feedback",
     async (kind) => {
       const capability = deferred<unknown>();
       if (kind === "pending")
@@ -1130,9 +1140,14 @@ describe("FeedbackDialog extended field capability gate", () => {
         mocks.getFormCapabilities.mockResolvedValue({ extendedFields: false });
       render(<FeedbackDialog open onClose={vi.fn()} />);
       await act(async () => {});
-      expect(contactInput()).toBeDisabled();
-      for (const box of within(relatedAppGroup()).getAllByRole("checkbox"))
-        expect(box).toBeDisabled();
+      expect(
+        screen.queryByRole("group", { name: "settings.feedbackRelatedApps" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("textbox", {
+          name: "settings.feedbackContactLabel",
+        }),
+      ).not.toBeInTheDocument();
       expect(
         screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
       ).toBeVisible();
@@ -1160,7 +1175,9 @@ describe("FeedbackDialog extended field capability gate", () => {
       expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(2),
     );
     await act(async () => capability.resolve({ extendedFields: true }));
-    expect(contactInput()).toBeDisabled();
+    expect(
+      screen.queryByRole("textbox", { name: "settings.feedbackContactLabel" }),
+    ).not.toBeInTheDocument();
   });
 
   it("retains optional draft fields if capability disappears and requires explicit clearing before basic upload", async () => {
@@ -1177,7 +1194,11 @@ describe("FeedbackDialog extended field capability gate", () => {
     );
     rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
     rerender(<FeedbackDialog open onClose={vi.fn()} />);
-    await waitFor(() => expect(contactInput()).toBeDisabled());
+    await waitFor(() =>
+      expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(2),
+    );
+    await act(async () => {});
+    expect(contactInput()).toBeEnabled();
     expect(contactInput()).toHaveValue("followup@example.invalid");
     expect(
       within(relatedAppGroup()).getByRole("checkbox", { name: "Codex" }),
@@ -1192,10 +1213,12 @@ describe("FeedbackDialog extended field capability gate", () => {
         name: "settings.feedbackClearOptionalFields",
       }),
     );
-    expect(contactInput()).toHaveValue("");
     expect(
-      within(relatedAppGroup()).getByRole("checkbox", { name: "Codex" }),
-    ).not.toBeChecked();
+      screen.queryByRole("group", { name: "settings.feedbackRelatedApps" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "settings.feedbackContactLabel" }),
+    ).not.toBeInTheDocument();
     await submitDescription();
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
   });
@@ -1265,10 +1288,10 @@ describe("FeedbackDialog automatic app default", () => {
       { appType: "pi", summary: { totalRequests: 5 } },
     ]);
     render(<FeedbackDialog open onClose={vi.fn()} />);
-    await waitFor(() => expect(appNames()[0]).toBe("Pi"));
+    await act(async () => {});
     expect(
-      within(relatedAppGroup()).getByRole("checkbox", { name: "Pi" }),
-    ).not.toBeChecked();
+      screen.queryByRole("checkbox", { name: "Pi" }),
+    ).not.toBeInTheDocument();
     await act(async () => capability.resolve({ extendedFields: true }));
     expect(
       within(relatedAppGroup()).getByRole("checkbox", { name: "Pi" }),
@@ -1281,9 +1304,10 @@ describe("FeedbackDialog automatic app default", () => {
       { appType: "pi", summary: { totalRequests: 5 } },
     ]);
     render(<FeedbackDialog open onClose={vi.fn()} />);
-    await waitFor(() => expect(appNames()[0]).toBe("Pi"));
-    for (const box of within(relatedAppGroup()).getAllByRole("checkbox"))
-      expect(box).not.toBeChecked();
+    await act(async () => {});
+    expect(
+      screen.queryByRole("group", { name: "settings.feedbackRelatedApps" }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not restore a default after the user unchecks it, rerenders, or reopens the same draft", async () => {
@@ -1446,7 +1470,7 @@ describe("FeedbackDialog contact Unicode whitespace contract", () => {
 });
 
 function previewButton() {
-  return screen.getByRole("button", { name: "settings.feedbackPrepare" });
+  return screen.getByRole("button", { name: "settings.feedbackSubmit" });
 }
 
 async function prepareDraft() {
@@ -1464,8 +1488,8 @@ describe("FeedbackDialog frozen upload preview", () => {
   it("shows native file names, byte sizes, hashes and safe JSON before token-only submission", async () => {
     render(<FeedbackDialog open onClose={vi.fn()} />);
     expect(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "settings.feedbackConfirmSubmit" }),
+    ).not.toBeInTheDocument();
     const preview = await prepareDraft();
     expect(within(preview).getByText("synthetic.png")).toBeVisible();
     expect(within(preview).getByText("diagnostics.zip")).toBeVisible();
@@ -1477,7 +1501,7 @@ describe("FeedbackDialog frozen upload preview", () => {
     expect(within(preview).queryByRole("img")).not.toBeInTheDocument();
     expect(mocks.submit).not.toHaveBeenCalled();
     fireEvent.click(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+      screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
     );
     await waitFor(() =>
       expect(mocks.submit).toHaveBeenCalledWith({
@@ -1524,8 +1548,10 @@ describe("FeedbackDialog frozen upload preview", () => {
         screen.queryByRole("region", { name: "settings.feedbackPreviewTitle" }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-      ).toBeDisabled();
+        screen.queryByRole("button", {
+          name: "settings.feedbackConfirmSubmit",
+        }),
+      ).not.toBeInTheDocument();
       await waitFor(() =>
         expect(mocks.cancelPreview).toHaveBeenCalledWith(prepared.previewId),
       );
@@ -1592,6 +1618,11 @@ describe("FeedbackDialog frozen upload preview", () => {
     render(<FeedbackDialog open onClose={vi.fn()} />);
     await prepareDraft();
     mocks.prepare.mockRejectedValueOnce("synthetic-private-prepare-error");
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /settings.feedbackIncludeDiagnostics/,
+      }),
+    );
     fireEvent.click(previewButton());
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "settings.feedbackPrepareFailed",
@@ -1616,7 +1647,7 @@ describe("FeedbackDialog frozen upload preview", () => {
       render(<FeedbackDialog open onClose={vi.fn()} />);
       await prepareDraft();
       fireEvent.click(
-        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+        screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
       );
       expect(await screen.findByRole("alert")).toHaveTextContent(
         error === "feedback_preview_changed"
@@ -1627,8 +1658,10 @@ describe("FeedbackDialog frozen upload preview", () => {
         screen.queryByRole("region", { name: "settings.feedbackPreviewTitle" }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-      ).toBeDisabled();
+        screen.queryByRole("button", {
+          name: "settings.feedbackConfirmSubmit",
+        }),
+      ).not.toBeInTheDocument();
       expect(mocks.prepare).toHaveBeenCalledOnce();
       expect(mocks.submit).toHaveBeenCalledOnce();
     },
@@ -1725,8 +1758,8 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
     );
     expect(mocks.cancelPreview).toHaveBeenCalledWith("synthetic-preview-2");
     expect(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "settings.feedbackConfirmSubmit" }),
+    ).not.toBeInTheDocument();
   });
 
   it("prevents repeated prepare clicks from starting duplicate work", async () => {
@@ -1767,7 +1800,7 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
     });
     await act(async () => cancellation.resolve());
     fireEvent.click(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+      screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
     );
     expect(mocks.submit).toHaveBeenCalledWith({
       previewId: "synthetic-preview-2",
@@ -1789,8 +1822,8 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
     );
     await act(async () => {});
     expect(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "settings.feedbackConfirmSubmit" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("synthetic-private-cancel-error"),
     ).not.toBeInTheDocument();
@@ -1804,11 +1837,14 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "settings.feedbackUploadUnknown",
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
-    );
+    expect(
+      screen.queryByRole("button", { name: "settings.feedbackConfirmSubmit" }),
+    ).not.toBeInTheDocument();
     expect(mocks.submit).toHaveBeenCalledOnce();
     expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+    ).toBeEnabled();
     expect(screen.getByText(receipt.identity.id)).toBeVisible();
     expect(
       screen.queryByRole("region", { name: "settings.feedbackPreviewTitle" }),
@@ -1846,10 +1882,204 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
       name: "settings.feedbackPreviewTitle",
     });
     fireEvent.click(
-      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+      screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
     );
     expect(mocks.submit).toHaveBeenCalledWith({
       previewId: "reopened-preview",
     });
+  });
+});
+
+describe("FeedbackDialog direct submission interaction", () => {
+  it("prepares a two-character basic report from Submit without uploading until confirmation", async () => {
+    mocks.getFormCapabilities.mockResolvedValue({ extendedFields: false });
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    await act(async () => {});
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+      { target: { value: "测试" } },
+    );
+    const submit = screen.getByRole("button", {
+      name: "settings.feedbackSubmit",
+    });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    await screen.findByRole("region", {
+      name: "settings.feedbackPreviewTitle",
+    });
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "测试", relatedApps: [] }),
+    );
+    expect(mocks.submit).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.feedbackConfirmSubmit" }),
+    );
+    await waitFor(() =>
+      expect(mocks.submit).toHaveBeenCalledWith({
+        previewId: prepared.previewId,
+      }),
+    );
+  });
+
+  it.each(["pending", "unsupported", "failed"])(
+    "does not present dead optional controls when capability is %s",
+    async (kind) => {
+      if (kind === "pending")
+        mocks.getFormCapabilities.mockReturnValue(new Promise(() => {}));
+      else if (kind === "failed")
+        mocks.getFormCapabilities.mockRejectedValue(new Error("unavailable"));
+      else
+        mocks.getFormCapabilities.mockResolvedValue({ extendedFields: false });
+      render(<FeedbackDialog open onClose={vi.fn()} />);
+      await act(async () => {});
+      expect(
+        screen.queryByRole("checkbox", { name: "Codex" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("textbox", {
+          name: "settings.feedbackContactLabel",
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
+      ).toBeVisible();
+    },
+  );
+
+  it("toggles Codex on and off and submits with no applications", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    const codex = await screen.findByRole("checkbox", { name: "Codex" });
+    fireEvent.click(codex);
+    expect(codex).toBeChecked();
+    fireEvent.click(codex);
+    expect(codex).not.toBeChecked();
+    expect(
+      screen.queryByText("settings.feedbackAppOrderHint"),
+    ).not.toBeInTheDocument();
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+      { target: { value: "测试" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+    );
+    await screen.findByRole("button", {
+      name: "settings.feedbackConfirmSubmit",
+    });
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ relatedApps: [] }),
+    );
+  });
+
+  it("recovers after a failed preparation and admits only one repeated click per operation", async () => {
+    const preparation = deferred<typeof prepared>();
+    mocks.prepare
+      .mockReturnValueOnce(preparation.promise)
+      .mockResolvedValueOnce(prepared);
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+      { target: { value: "测试" } },
+    );
+    const submit = screen.getByRole("button", {
+      name: "settings.feedbackSubmit",
+    });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    await act(async () => preparation.reject(new Error("failed")));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "settings.feedbackPrepareFailed",
+    );
+    expect(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+    ).toHaveValue("测试");
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.feedbackSubmit" }),
+    );
+    const confirm = await screen.findByRole("button", {
+      name: "settings.feedbackConfirmSubmit",
+    });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
+  });
+});
+
+describe("FeedbackDialog rendered confirmation boundary", () => {
+  it("does not upgrade the old Submit action before confirmation renders", async () => {
+    const pending = deferred<typeof prepared>();
+    mocks.prepare.mockReturnValue(pending.promise);
+    const { result } = renderHook(() => useFeedbackForm(true, vi.fn()));
+    act(() => result.current.changeDescription("测试"));
+    const initialSubmit = result.current.handlePrimaryAction;
+    act(() => {
+      void initialSubmit();
+    });
+    await act(async () => {
+      pending.resolve(prepared);
+      await Promise.resolve();
+      void initialSubmit();
+    });
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(result.current.preview?.previewId).toBe(prepared.previewId);
+    await act(async () => {
+      await result.current.handlePrimaryAction();
+    });
+    expect(mocks.submit).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an older confirmation action submit a newer preview token", async () => {
+    const { result } = renderHook(() => useFeedbackForm(true, vi.fn()));
+    act(() => result.current.changeDescription("First draft"));
+    await act(async () => {
+      await result.current.handlePrimaryAction();
+    });
+    const oldConfirmation = result.current.handlePrimaryAction;
+    act(() => result.current.changeDescription("Second draft"));
+    mocks.prepare.mockResolvedValueOnce({
+      ...prepared,
+      previewId: "new-token",
+    });
+    await act(async () => {
+      await result.current.handlePrimaryAction();
+    });
+    await act(async () => {
+      await oldConfirmation();
+    });
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(result.current.preview?.previewId).toBe("new-token");
+    await act(async () => {
+      await result.current.handlePrimaryAction();
+    });
+    expect(mocks.submit).toHaveBeenCalledWith({ previewId: "new-token" });
+  });
+
+  it("shows contact transmission details only in the existing upload confirmation", async () => {
+    mocks.prepare.mockResolvedValue({
+      ...prepared,
+      summary: { ...prepared.summary, contactIncluded: true },
+    });
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(contactInput()).toBeEnabled());
+    expect(
+      screen.queryByText("settings.feedbackPreviewContactNotice"),
+    ).not.toBeInTheDocument();
+    fireEvent.change(contactInput(), {
+      target: { value: "reply@example.invalid" },
+    });
+    const preview = await prepareDraft();
+    expect(
+      within(preview).getByText("settings.feedbackPreviewContactNotice"),
+    ).toBeVisible();
   });
 });
