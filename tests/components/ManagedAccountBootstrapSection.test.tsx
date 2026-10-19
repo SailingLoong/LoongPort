@@ -72,6 +72,8 @@ const routing = (): ApplicationRouting => ({
     directProviderId: null,
     publicationStarted: null,
     canWrite: true,
+    writeProtocol: "native",
+    blockedReason: null,
     canRecheck: true,
   },
   autoFailoverEnabled: false,
@@ -386,52 +388,85 @@ describe("explicit empty-app bootstrap", () => {
       screen.queryByText(/Synthetic first · 已启用本地路由/),
     ).not.toBeInTheDocument();
   });
-  it("two UI windows submit their own identities and the losing CAS cannot report success", async () => {
-    let active: string | null = null;
-    apply = async (args) => {
-      if (active) throw new Error("synthetic revision conflict");
-      active = (args.initialRoute as { providerId: string }).providerId;
-      view = {
-        ...view,
-        routingActive: true,
-        modeState: {
-          ...view.modeState!,
-          mode: "proxy",
-          attached: true,
-          currentProviderId: active,
-        },
+  it.each(["first", "second"])(
+    "two UI windows preserve their identities when %s wins the competing CAS",
+    async (winner) => {
+      let active: string | null = null;
+      let arrivals = 0;
+      let releaseBoth!: () => void;
+      let releaseWinner!: () => void;
+      const both = new Promise<void>((resolve) => {
+        releaseBoth = resolve;
+      });
+      const winnerCommitted = new Promise<void>((resolve) => {
+        releaseWinner = resolve;
+      });
+      apply = async (args) => {
+        const providerId = (args.initialRoute as { providerId: string })
+          .providerId;
+        // Both windows reach the CAS with their own prepared identity. Choose
+        // either arrival order explicitly; crypto.subtle completion is unordered.
+        if (++arrivals === 2) releaseBoth();
+        await both;
+        if (providerId !== winner) await winnerCommitted;
+        if (active) throw new Error("synthetic revision conflict");
+        active = (args.initialRoute as { providerId: string }).providerId;
+        view = {
+          ...view,
+          routingActive: true,
+          modeState: {
+            ...view.modeState!,
+            mode: "proxy",
+            attached: true,
+            currentProviderId: active,
+          },
+        };
+        status = "completed";
+        releaseWinner();
       };
-      status = "completed";
-    };
-    const first = mount();
-    const second = mount();
-    for (const [mounted, id] of [
-      [first, "first"],
-      [second, "second"],
-    ] as const) {
-      const ui = within(mounted.container);
-      fireEvent.change(ui.getByLabelText("首次启用的应用"), {
-        target: { value: "claude" },
-      });
-      await ui.findByRole("option", { name: `Synthetic ${id}` });
-      fireEvent.change(ui.getByLabelText("已保存的账号档位"), {
-        target: { value: id },
-      });
-    }
-    fireEvent.click(
-      within(first.container).getByRole("button", {
-        name: "启用本地路由并使用此账号",
-      }),
-    );
-    fireEvent.click(
-      within(second.container).getByRole("button", {
-        name: "启用本地路由并使用此账号",
-      }),
-    );
-    await within(first.container).findByText(
-      /Synthetic first · 已启用本地路由/,
-    );
-    await within(second.container).findByText(/尚未确认启用/);
-    expect(calls("add_provider")).toHaveLength(0);
-  });
+      const first = mount();
+      const second = mount();
+      for (const [mounted, id] of [
+        [first, "first"],
+        [second, "second"],
+      ] as const) {
+        const ui = within(mounted.container);
+        fireEvent.change(ui.getByLabelText("首次启用的应用"), {
+          target: { value: "claude" },
+        });
+        await ui.findByRole("option", { name: `Synthetic ${id}` });
+        fireEvent.change(ui.getByLabelText("已保存的账号档位"), {
+          target: { value: id },
+        });
+      }
+      fireEvent.click(
+        within(first.container).getByRole("button", {
+          name: "启用本地路由并使用此账号",
+        }),
+      );
+      fireEvent.click(
+        within(second.container).getByRole("button", {
+          name: "启用本地路由并使用此账号",
+        }),
+      );
+      const winningWindow = winner === "first" ? first : second;
+      const losingWindow = winner === "first" ? second : first;
+      await within(winningWindow.container).findByText(
+        new RegExp(`Synthetic ${winner} · 已启用本地路由`),
+      );
+      await within(losingWindow.container).findByText(/尚未确认启用/);
+      expect(active).toBe(winner);
+      const attempts = calls("set_proxy_takeover_for_app");
+      expect(attempts).toHaveLength(2);
+      expect(
+        new Set(
+          attempts.map(([, args]) => (args as any).initialRoute.providerId),
+        ),
+      ).toEqual(new Set(["first", "second"]));
+      expect(
+        screen.getAllByText(/Synthetic (first|second) · 已启用本地路由/),
+      ).toHaveLength(1);
+      expect(calls("add_provider")).toHaveLength(0);
+    },
+  );
 });

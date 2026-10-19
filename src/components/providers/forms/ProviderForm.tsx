@@ -1,5 +1,6 @@
 import {
   applicationRoutingApi,
+  isApplicationCommonConfigWritable,
   type ApplicationRouting,
 } from "@/lib/api/applicationRouting";
 import {
@@ -322,8 +323,7 @@ function ProviderFormFull({
   const commonConfigReadOnly =
     !snippetAdmission.data ||
     Boolean(snippetAdmission.error) ||
-    (snippetAdmission.data.modeState != null &&
-      snippetAdmission.data.modeState.legacyCommonConfigWritable !== true);
+    !isApplicationCommonConfigWritable(appId, snippetAdmission.data.modeState);
   const isCommonConfigWriteAllowed = () => {
     const current = queryClient.getQueryState<ApplicationRouting>([
       "applicationRouting",
@@ -333,8 +333,7 @@ function ProviderFormFull({
       commonSnippetApp &&
       Boolean(current?.data) &&
       !current?.error &&
-      (current?.data?.modeState == null ||
-        current.data.modeState.legacyCommonConfigWritable === true)
+      isApplicationCommonConfigWritable(appId, current?.data?.modeState)
     );
   };
   const { data: settingsData } = useSettingsQuery();

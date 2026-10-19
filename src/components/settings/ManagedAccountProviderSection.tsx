@@ -344,7 +344,13 @@ export function ManagedAccountProviderSection({
           setError("chain");
           return;
         }
-        attempt = { ...attempt, chainRequest: request };
+        // Only native requests have an original-result journal. A legacy review
+        // is scoped to this attempt; a new user retry rereads before preparing.
+        attempt = {
+          ...attempt,
+          chainRequest:
+            request.protocol === "native" ? request.request : undefined,
+        };
         setPending(attempt);
         await applicationRoutingApi.apply(
           attempt.app,

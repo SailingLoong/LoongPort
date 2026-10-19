@@ -17,7 +17,8 @@ const mocks = vi.hoisted(() => ({
   error: vi.fn(),
   success: vi.fn(),
 }));
-vi.mock("@/lib/api/applicationRouting", () => ({
+vi.mock("@/lib/api/applicationRouting", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/applicationRouting")>()),
   applicationRoutingApi: {
     get: mocks.get,
     setOrder: mocks.order,
@@ -48,7 +49,16 @@ beforeEach(() => {
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  mocks.get.mockResolvedValue({ autoFailoverEnabled: false, tiers: [] });
+  mocks.get.mockResolvedValue({
+    autoFailoverEnabled: false,
+    tiers: [],
+    modeState: {
+      status: "ready",
+      canWrite: true,
+      writeProtocol: "native",
+      blockedReason: null,
+    },
+  });
   mocks.status.mockResolvedValue({ running: false });
   mocks.takeover.mockResolvedValue({ codex: false });
   mocks.start.mockResolvedValue({});
@@ -56,10 +66,13 @@ beforeEach(() => {
   mocks.failover.mockResolvedValue(undefined);
   mocks.order.mockResolvedValue(undefined);
   mocks.prepare.mockImplementation(async (_app, _change, id) => ({
-    id,
-    scope: "applicationRouting",
-    draftDigest: "a".repeat(64),
-    revision: "b".repeat(64),
+    protocol: "native",
+    request: {
+      id,
+      scope: "applicationRouting",
+      draftDigest: "a".repeat(64),
+      revision: "b".repeat(64),
+    },
   }));
   mocks.query.mockImplementation(async (_app, request) => ({
     request,

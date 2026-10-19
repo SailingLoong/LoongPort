@@ -1,5 +1,8 @@
 import type { ProviderUpdateInput } from "@/lib/api/providers";
-import { applicationRoutingApi } from "@/lib/api/applicationRouting";
+import {
+  applicationRoutingApi,
+  isApplicationRoutingWriteBlocked,
+} from "@/lib/api/applicationRouting";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -234,7 +237,10 @@ function App() {
     isProxyAppId(activeApp) &&
     (!routingAdmission.data ||
       Boolean(routingAdmission.error) ||
-      routingAdmission.data.modeState?.canWrite === false);
+      isApplicationRoutingWriteBlocked(
+        activeApp,
+        routingAdmission.data.modeState,
+      ));
   const setActiveApp = useCallback(
     (app: AppId) => {
       if (editingSessionApp.current && app !== editingSessionApp.current)

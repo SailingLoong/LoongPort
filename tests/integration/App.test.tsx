@@ -34,6 +34,7 @@ import {
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
+import type { CatalogStatus } from "@/lib/api/zcodeAccounts";
 
 vi.mock("@/components/settings/ThemeSettings", () => ({
   ThemeSettings: () => null,
@@ -306,6 +307,12 @@ const renderApp = (client = new QueryClient()) => {
     ? []
     : ["claude", "codex", "gemini", "grok"]) {
     client.setQueryData(["applicationRouting", app], {
+      modeState: {
+        status: "ready",
+        canWrite: true,
+        writeProtocol: "legacy",
+        blockedReason: null,
+      },
       autoFailoverEnabled: false,
       routingActive: false,
     });
@@ -349,7 +356,7 @@ async function renderRoutingDraft(client = new QueryClient()) {
           revision: "e".repeat(64),
         };
         requests.set(requestId, prepared);
-        return HttpResponse.json(prepared);
+        return HttpResponse.json({ protocol: "native", request: prepared });
       },
     ),
     http.post(
@@ -371,6 +378,12 @@ async function renderRoutingDraft(client = new QueryClient()) {
         };
         const ids = Object.keys(getProviders(appType));
         return HttpResponse.json({
+          modeState: {
+            status: "ready",
+            canWrite: true,
+            writeProtocol: "native",
+            blockedReason: null,
+          },
           autoFailoverEnabled: true,
           routingActive: true,
           chainIds: ids,
@@ -490,6 +503,8 @@ describe("App integration with MSW", () => {
             canWrite: true,
             canRecheck: true,
             legacyCommonConfigWritable: false,
+            writeProtocol: "native",
+            blockedReason: null,
           },
           autoFailoverEnabled: false,
           routingActive: false,
@@ -1352,97 +1367,104 @@ describe("App integration with MSW", () => {
 });
 
 describe("U02 App original result callback", () => {
-  it("returns the original outcome and permits a read-only query while application writes are blocked", async () => {
-    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
-    localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
-    const row = {
-      id: "u02-app-row",
-      name: "Synthetic App row",
-      settingsConfig: {},
-    };
-    setProviders("claude", { [row.id]: row });
-    setCurrentProviderId("claude", row.id);
-    const confirms = vi.fn();
-    const queries = vi.fn();
-    server.use(
-      http.post(
-        "http://tauri.local/confirm_provider_edit",
-        async ({ request }) => {
-          const input = (await request.json()) as any;
-          confirms();
-          return HttpResponse.json({
-            app: input.app,
-            request: input.request,
-            status: "unknown",
-          });
-        },
-      ),
-      http.post(
-        "http://tauri.local/query_provider_edit",
-        async ({ request }) => {
-          const input = (await request.json()) as any;
-          queries();
-          return HttpResponse.json({
-            app: input.app,
-            request: input.request,
-            status: "completed",
-          });
-        },
-      ),
-    );
-    editResultMock.mockReset();
-    const client = new QueryClient();
-    const view = renderApp(client);
-    try {
-      await waitFor(() =>
-        expect(screen.getByTestId("provider-list").textContent).toContain(
-          row.id,
+  it.each([
+    undefined,
+    { canWrite: true, status: "ready" },
+    { canWrite: false, status: "pending" },
+  ])(
+    "returns the original outcome and permits a read-only query while application writes are blocked: %j",
+    async (blockedMode) => {
+      localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+      localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+      const row = {
+        id: "u02-app-row",
+        name: "Synthetic App row",
+        settingsConfig: {},
+      };
+      setProviders("claude", { [row.id]: row });
+      setCurrentProviderId("claude", row.id);
+      const confirms = vi.fn();
+      const queries = vi.fn();
+      server.use(
+        http.post(
+          "http://tauri.local/confirm_provider_edit",
+          async ({ request }) => {
+            const input = (await request.json()) as any;
+            confirms();
+            return HttpResponse.json({
+              app: input.app,
+              request: input.request,
+              status: "unknown",
+            });
+          },
+        ),
+        http.post(
+          "http://tauri.local/query_provider_edit",
+          async ({ request }) => {
+            const input = (await request.json()) as any;
+            queries();
+            return HttpResponse.json({
+              app: input.app,
+              request: input.request,
+              status: "completed",
+            });
+          },
         ),
       );
-      fireEvent.click(screen.getByText("edit"));
-      await screen.findByTestId("edit-provider-dialog");
-      fireEvent.click(screen.getByText("confirm-bound-edit"));
-      await waitFor(() =>
-        expect(editResultMock).toHaveBeenCalledWith(
-          expect.objectContaining({ status: "unknown" }),
-        ),
-      );
-      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
-      act(() => {
-        client.setQueryData(["applicationRouting", "claude"], {
-          autoFailoverEnabled: false,
-          routingActive: false,
-          modeState: { canWrite: false, status: "pending" },
+      editResultMock.mockReset();
+      const client = new QueryClient();
+      const view = renderApp(client);
+      try {
+        await waitFor(() =>
+          expect(screen.getByTestId("provider-list").textContent).toContain(
+            row.id,
+          ),
+        );
+        fireEvent.click(screen.getByText("edit"));
+        await screen.findByTestId("edit-provider-dialog");
+        fireEvent.click(screen.getByText("confirm-bound-edit"));
+        await waitFor(() =>
+          expect(editResultMock).toHaveBeenCalledWith(
+            expect.objectContaining({ status: "unknown" }),
+          ),
+        );
+        expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+        act(() => {
+          client.setQueryData(["applicationRouting", "claude"], {
+            autoFailoverEnabled: false,
+            routingActive: false,
+            modeState: blockedMode,
+          });
         });
-      });
-      await waitFor(() =>
-        expect(screen.getByTestId("edit-provider-dialog")).toHaveAttribute(
-          "data-mutations-disabled",
-          "true",
-        ),
-      );
-      fireEvent.click(screen.getByText("confirm-bound-edit"));
-      await waitFor(() =>
-        expect(editResultMock).toHaveBeenCalledWith(
-          expect.objectContaining({ status: "blocked" }),
-        ),
-      );
-      fireEvent.click(screen.getByText("query-original-edit"));
-      await waitFor(() =>
-        expect(editResultMock).toHaveBeenCalledWith(
-          expect.objectContaining({ status: "completed" }),
-        ),
-      );
-      expect(confirms).toHaveBeenCalledTimes(1);
-      expect(queries).toHaveBeenCalledTimes(1);
-      // The actual dialog, not App's callback, decides whether its draft/session can close.
-      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
-    } finally {
-      view.unmount();
-      await client.cancelQueries();
-      client.clear();
-    }
-  });
+        await waitFor(() =>
+          expect(screen.getByTestId("edit-provider-dialog")).toHaveAttribute(
+            "data-mutations-disabled",
+            "true",
+          ),
+        );
+        fireEvent.click(screen.getByText("confirm-bound-edit"));
+        await waitFor(() =>
+          expect(editResultMock).toHaveBeenCalledWith(
+            expect.objectContaining({ status: "blocked" }),
+          ),
+        );
+        fireEvent.click(screen.getByText("query-original-edit"));
+        await waitFor(() =>
+          expect(editResultMock).toHaveBeenCalledWith(
+            expect.objectContaining({ status: "completed" }),
+          ),
+        );
+        expect(confirms).toHaveBeenCalledTimes(1);
+        expect(queries).toHaveBeenCalledTimes(1);
+        // The actual dialog, not App's callback, decides whether its draft/session can close.
+        expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+      } finally {
+        view.unmount();
+        await client.cancelQueries();
+        client.clear();
+      }
+    },
+  );
 });
 
 it("keeps an editor account roundtrip on its originating app", async () => {
@@ -1482,6 +1504,34 @@ it("keeps an editor account roundtrip on its originating app", async () => {
 });
 
 it("keeps a managed-account model draft until the original leave confirmation is accepted", async () => {
+  // The real section waits for every account catalog before enabling its fields.
+  // Handle all native reads so this flow never depends on tauri.local failing.
+  server.use(
+    ...[
+      "list_minimax_code_accounts",
+      "list_workbuddy_accounts",
+      "list_workbuddy_inference_accounts",
+      "list_trae_accounts",
+    ].map((command) =>
+      http.post(`http://tauri.local/${command}`, () => HttpResponse.json([])),
+    ),
+    http.post("http://tauri.local/get_zcode_account_library", () =>
+      HttpResponse.json({
+        revision: "synthetic-empty-catalog",
+        profiles: [],
+        current: null,
+        pending: false,
+        nativeUnconfirmed: false,
+        actions: {
+          canAdd: true,
+          canImport: true,
+          canBackup: true,
+          canEditLabels: true,
+          blockedReason: null,
+        },
+      } satisfies CatalogStatus),
+    ),
+  );
   resetProviderState();
   workspaceHarness.real = false;
   localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");

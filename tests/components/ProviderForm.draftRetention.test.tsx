@@ -13,8 +13,18 @@ import { describe, expect, it, vi } from "vitest";
 import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 import { PreservedView } from "@/components/ui/PreservedView";
 import { createTestQueryClient } from "../utils/testQueryClient";
-vi.mock("@/lib/api/applicationRouting", () => ({
-  applicationRoutingApi: { get: vi.fn().mockResolvedValue({}) },
+vi.mock("@/lib/api/applicationRouting", async (original) => ({
+  ...(await original<typeof import("@/lib/api/applicationRouting")>()),
+  applicationRoutingApi: {
+    get: vi.fn().mockResolvedValue({
+      modeState: {
+        status: "ready",
+        canWrite: true,
+        writeProtocol: "legacy",
+        blockedReason: null,
+      },
+    }),
+  },
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
@@ -89,7 +99,14 @@ describe("ProviderForm draft retention", () => {
 
 it("keeps an open Claude snippet readable when the backend cache freezes its write capability", async () => {
   const client = createTestQueryClient();
-  client.setQueryData(["applicationRouting", "claude"], {});
+  client.setQueryData(["applicationRouting", "claude"], {
+    modeState: {
+      status: "ready",
+      canWrite: true,
+      writeProtocol: "legacy",
+      blockedReason: null,
+    },
+  });
   const save = vi
     .spyOn(configApi, "setCommonConfigSnippet")
     .mockResolvedValue(undefined);
@@ -120,6 +137,8 @@ it("keeps an open Claude snippet readable when the backend cache freezes its wri
           status: "ready",
           canWrite: true,
           legacyCommonConfigWritable: false,
+          writeProtocol: "native",
+          blockedReason: null,
         },
       });
     });
@@ -159,6 +178,8 @@ it("preserves a frozen provider's existing common-config flag when saving ordina
       status: "ready",
       canWrite: true,
       legacyCommonConfigWritable: false,
+      writeProtocol: "native",
+      blockedReason: null,
     },
   };
   client.setQueryData(["applicationRouting", "claude"], admission);
@@ -200,5 +221,69 @@ it("preserves a frozen provider's existing common-config flag when saving ordina
     unmount();
     await client.cancelQueries();
     client.clear();
+  }
+});
+
+it("allows explicit legacy common snippet save and revokes an open editor when the same app loses its protocol", async () => {
+  const client = createTestQueryClient();
+  const legacy = {
+    modeState: {
+      status: "ready",
+      canWrite: true,
+      writeProtocol: "legacy",
+      blockedReason: null,
+      mode: null,
+      attached: null,
+    },
+  };
+  client.setQueryData(["applicationRouting", "claude"], legacy);
+  vi.mocked(applicationRoutingApi.get).mockResolvedValue(legacy as any);
+  const save = vi
+    .spyOn(configApi, "setCommonConfigSnippet")
+    .mockResolvedValue(undefined);
+  const { unmount } = render(
+    <QueryClientProvider client={client}>
+      <ProviderForm
+        appId="claude"
+        submitLabel="save"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  try {
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", {
+          name: "claudeConfig.writeCommonConfig",
+        }),
+      ).toBeEnabled(),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "claudeConfig.editCommonConfig" }),
+    );
+    fireEvent.change(
+      screen.getAllByRole("textbox", { name: "configuration JSON" }).at(-1)!,
+      { target: { value: '{"safe":"changed"}' } },
+    );
+    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await userEvent.click(
+      screen.getByRole("button", { name: "claudeConfig.editCommonConfig" }),
+    );
+    await act(async () => {
+      client.setQueryData(["applicationRouting", "claude"], {});
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "common.save" }),
+      ).toBeDisabled(),
+    );
+    expect(save).toHaveBeenCalledOnce();
+  } finally {
+    unmount();
+    await client.cancelQueries();
+    client.clear();
+    save.mockRestore();
   }
 });

@@ -1,7 +1,7 @@
 use base64::Engine as _;
 use minisign_verify::{PublicKey, Signature};
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::watch;
@@ -65,6 +65,80 @@ impl<F: Fn(&'static str) -> DiagnosticEvent> Drop for UpdateDiagnostic<F> {
     fn drop(&mut self) {
         self.finish("dropped", None, None);
     }
+}
+
+// Keep typed transport facts until after the race. Raw plugin messages can
+// contain URLs or proxy credentials and must not become UI text or log fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateCheckFailure {
+    Timeout,
+    Connect,
+    Http,
+    Manifest,
+    Platform,
+    Unknown,
+    Rejected(&'static str),
+}
+
+impl UpdateCheckFailure {
+    fn category(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connect => "connect",
+            Self::Http => "http",
+            Self::Manifest | Self::Rejected(_) => "manifest",
+            Self::Platform => "platform",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Timeout => "更新检查超时，请重试或从官网下载。",
+            Self::Connect => "无法连接更新服务，请检查网络后重试。",
+            Self::Http => "更新服务返回异常响应，请稍后重试。",
+            Self::Manifest => "更新清单无效，请稍后重试。",
+            Self::Platform => "更新清单不支持当前平台，请从官网下载。",
+            Self::Unknown => "更新检查未完成，请重试；如持续失败，请导出诊断日志。",
+            Self::Rejected(message) => message,
+        }
+    }
+}
+
+fn classify_check_error(error: &tauri_plugin_updater::Error) -> UpdateCheckFailure {
+    use tauri_plugin_updater::Error;
+    match error {
+        Error::Reqwest(error) if error.is_timeout() => UpdateCheckFailure::Timeout,
+        Error::Reqwest(error) if error.is_connect() => UpdateCheckFailure::Connect,
+        Error::Reqwest(error) if error.status().is_some() => UpdateCheckFailure::Http,
+        Error::Reqwest(error) if error.is_decode() => UpdateCheckFailure::Manifest,
+        Error::Serialization(_) | Error::Semver(_) => UpdateCheckFailure::Manifest,
+        Error::UnsupportedArch
+        | Error::UnsupportedOs
+        | Error::TargetNotFound(_)
+        | Error::TargetsNotFound(_) => UpdateCheckFailure::Platform,
+        // ReleaseNotFound does not retain the response status in the pinned
+        // updater. String variants do not prove HTTP, DNS or TLS failure either.
+        _ => UpdateCheckFailure::Unknown,
+    }
+}
+
+fn check_failure_summary(failure: &CheckFailure<UpdateCheckFailure>) -> &'static str {
+    match failure {
+        CheckFailure::TimedOut => "更新检查超时或结果不完整，请重试或从官网下载",
+        CheckFailure::NoCandidates => "没有可用的更新端点",
+        CheckFailure::Failed(errors) => match errors.first() {
+            Some(first) if errors.iter().all(|error| error == first) => first.summary(),
+            _ => UpdateCheckFailure::Unknown.summary(),
+        },
+    }
+}
+
+fn check_route_event(direct: bool, started: Instant, outcome: &'static str) -> DiagnosticEvent {
+    update_event("check_route", outcome)
+        .field("route", if direct { "direct" } else { "default" })
+        .field("elapsed_ms", started.elapsed().as_millis() as u64)
+        .field("cancelled", outcome == "dropped")
 }
 
 /// Keep channel selection pinned while the bounded race is in flight. Each
@@ -137,31 +211,50 @@ async fn check_update_with_proxy_fallback(
             let endpoint = endpoint.clone();
             let delay = policy::CHECK_HEDGE_DELAY * (index as u32 * 2 + u32::from(direct));
             checks.push((delay, async move {
-                let update = channel_updater(app, endpoint, budget, direct)
-                    .map_err(|e| e.to_string())?
-                    .check()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                match &update {
-                    Some(update) if policy::is_withdrawn_version(&update.version) => {
-                        return Err("该更新已撤回，请检查更新版本".to_string())
+                // Created after the existing hedge delay: an unstarted backup
+                // is not reported as a failed or cancelled network request.
+                let started = Instant::now();
+                let mut diagnostic =
+                    UpdateDiagnostic::new(|outcome| check_route_event(direct, started, outcome));
+                let result = async {
+                    let update = channel_updater(app, endpoint, budget, direct)
+                        .map_err(|error| classify_check_error(&error))?
+                        .check()
+                        .await
+                        .map_err(|error| classify_check_error(&error))?;
+                    match &update {
+                        Some(update) if policy::is_withdrawn_version(&update.version) => {
+                            return Err(UpdateCheckFailure::Rejected(
+                                "该更新已撤回，请检查更新版本",
+                            ))
+                        }
+                        Some(update) if !version_at_least(&update.version, minimum) => {
+                            return Err(UpdateCheckFailure::Rejected(
+                                "清单版本低于已发现的更新，保留已有更新并重试",
+                            ))
+                        }
+                        Some(update)
+                            if !beta
+                                && semver::Version::parse(&update.version)
+                                    .is_ok_and(|v| !v.pre.is_empty()) =>
+                        {
+                            return Err(UpdateCheckFailure::Rejected("稳定通道返回了测试版更新"))
+                        }
+                        None if minimum.is_some() => {
+                            return Err(UpdateCheckFailure::Rejected(
+                                "清单未确认已有更新，保留预下载产物并重试",
+                            ))
+                        }
+                        _ => {}
                     }
-                    Some(update) if !version_at_least(&update.version, minimum) => {
-                        return Err("清单版本低于已发现的更新，保留已有更新并重试".to_string())
-                    }
-                    Some(update)
-                        if !beta
-                            && semver::Version::parse(&update.version)
-                                .is_ok_and(|v| !v.pre.is_empty()) =>
-                    {
-                        return Err("稳定通道返回了测试版更新".to_string())
-                    }
-                    None if minimum.is_some() => {
-                        return Err("清单未确认已有更新，保留预下载产物并重试".to_string())
-                    }
-                    _ => {}
+                    Ok(update)
                 }
-                Ok(update)
+                .await;
+                match &result {
+                    Ok(_) => diagnostic.finish("completed", None, None),
+                    Err(error) => diagnostic.finish("failed", Some(error.category()), None),
+                }
+                result
             }));
         }
     }
@@ -179,11 +272,7 @@ async fn check_update_with_proxy_fallback(
             "{}",
             update_event("check", "failed").field("error_category", category)
         );
-        match error {
-            CheckFailure::TimedOut => "更新检查超时或结果不完整，请重试或从官网下载".to_string(),
-            CheckFailure::NoCandidates => "没有可用的更新端点".to_string(),
-            CheckFailure::Failed(errors) => format!("无法确认更新，请重试：{}", errors.join("；")),
-        }
+        check_failure_summary(&error).to_string()
     })?;
     if beta != crate::settings::get_settings().receive_beta_updates {
         log::warn!(
@@ -1233,5 +1322,243 @@ mod update_diagnostic_tests {
                 ["started", terminal.unwrap_or("dropped")]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod check_diagnostic_tests {
+    use super::{
+        check_failure_summary, check_route_event, classify_check_error, policy, CheckFailure,
+        UpdateCheckFailure, UpdateDiagnostic,
+    };
+    use futures::future::{pending, BoxFuture};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tauri_plugin_updater::Error;
+
+    #[test]
+    fn typed_check_errors_are_classified_without_reading_error_text() {
+        assert_eq!(
+            classify_check_error(&Error::Serialization(
+                serde_json::from_str::<serde_json::Value>("invalid").unwrap_err()
+            )),
+            UpdateCheckFailure::Manifest
+        );
+        assert_eq!(
+            classify_check_error(&Error::Semver(
+                semver::Version::parse("invalid").unwrap_err()
+            )),
+            UpdateCheckFailure::Manifest
+        );
+        for error in [
+            Error::UnsupportedArch,
+            Error::UnsupportedOs,
+            Error::TargetNotFound("PRIVATE_TARGET_CANARY".into()),
+            Error::TargetsNotFound(vec!["PRIVATE_TARGET_CANARY".into()]),
+        ] {
+            assert_eq!(classify_check_error(&error), UpdateCheckFailure::Platform);
+        }
+        // The plugin discards non-success HTTP statuses before this variant.
+        // Neither it nor a string containing DNS/TLS/HTTP terms proves a cause.
+        for error in [
+            Error::ReleaseNotFound,
+            Error::Network("DNS TLS HTTP 503 timeout https://user:password@example.invalid/?token=PRIVATE_TOKEN_CANARY Authorization: Bearer PRIVATE_HEADER_CANARY".into()),
+            Error::Io(std::io::Error::other("PRIVATE_PATH_CANARY")),
+        ] {
+            let classified = classify_check_error(&error);
+            assert_eq!(classified, UpdateCheckFailure::Unknown);
+            let summary = check_failure_summary(&CheckFailure::Failed(vec![classified, classified]));
+            assert_eq!(summary, "更新检查未完成，请重试；如持续失败，请导出诊断日志。");
+            assert!(!summary.contains("PRIVATE_"));
+            assert!(!summary.contains("https://"));
+        }
+    }
+
+    #[test]
+    fn duplicate_failures_have_one_fixed_summary_and_mixed_failures_stay_unspecified() {
+        use UpdateCheckFailure::*;
+        for (error, category, message) in [
+            (Timeout, "timeout", "更新检查超时，请重试或从官网下载。"),
+            (Connect, "connect", "无法连接更新服务，请检查网络后重试。"),
+            (Http, "http", "更新服务返回异常响应，请稍后重试。"),
+            (Manifest, "manifest", "更新清单无效，请稍后重试。"),
+            (
+                Platform,
+                "platform",
+                "更新清单不支持当前平台，请从官网下载。",
+            ),
+            (
+                Unknown,
+                "unknown",
+                "更新检查未完成，请重试；如持续失败，请导出诊断日志。",
+            ),
+        ] {
+            assert_eq!(error.category(), category);
+            assert_eq!(
+                check_failure_summary(&CheckFailure::Failed(vec![error, error])),
+                message
+            );
+        }
+        assert_eq!(
+            check_failure_summary(&CheckFailure::Failed(vec![Connect, Manifest])),
+            Unknown.summary()
+        );
+        assert_eq!(
+            check_failure_summary(&CheckFailure::Failed(vec![])),
+            Unknown.summary()
+        );
+        assert_eq!(
+            check_failure_summary(&CheckFailure::TimedOut),
+            "更新检查超时或结果不完整，请重试或从官网下载"
+        );
+        assert_eq!(
+            check_failure_summary(&CheckFailure::NoCandidates),
+            "没有可用的更新端点"
+        );
+        let rejection = Rejected("清单未确认已有更新，保留预下载产物并重试");
+        assert_eq!(
+            check_failure_summary(&CheckFailure::Failed(vec![rejection, rejection])),
+            "清单未确认已有更新，保留预下载产物并重试"
+        );
+    }
+
+    #[test]
+    fn route_event_has_only_fixed_labels_elapsed_time_and_cancellation() {
+        for direct in [false, true] {
+            let event = check_route_event(direct, Instant::now(), "dropped");
+            let value: serde_json::Value = serde_json::from_str(&event.to_string()).unwrap();
+            assert_eq!(value["event"], "app.update");
+            assert_eq!(value["stage"], "check_route");
+            assert_eq!(value["route"], if direct { "direct" } else { "default" });
+            assert_eq!(value["outcome"], "dropped");
+            assert_eq!(value["cancelled"], true);
+            assert!(value["elapsed_ms"].is_u64());
+            assert_eq!(value.as_object().unwrap().len(), 6);
+        }
+    }
+
+    type Events = Arc<Mutex<Vec<serde_json::Value>>>;
+    type Check = BoxFuture<'static, Result<Option<u8>, UpdateCheckFailure>>;
+
+    // Exercise the existing diagnostic guard and race together using the real
+    // route envelope. No HTTP requests, updater state or global logger replaced.
+    fn observed_check(direct: bool, events: Events, check: Check) -> Check {
+        Box::pin(async move {
+            let started = Instant::now();
+            let mut diagnostic = UpdateDiagnostic::new(|outcome| {
+                let event = check_route_event(direct, started, outcome);
+                // finish constructs its event even when logging is disabled.
+                // Ignore debug-only starts; never mutate the global log level.
+                if outcome != "started" {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_str(&event.to_string()).unwrap());
+                }
+                event
+            });
+            let result = check.await;
+            match &result {
+                Ok(_) => diagnostic.finish("completed", None, None),
+                Err(error) => diagnostic.finish("failed", Some(error.category()), None),
+            }
+            result
+        })
+    }
+
+    #[tokio::test]
+    async fn both_failed_routes_close_once_and_produce_one_summary() {
+        let events = Events::default();
+        let checks = [false, true]
+            .into_iter()
+            .map(|direct| {
+                (
+                    Duration::ZERO,
+                    observed_check(
+                        direct,
+                        events.clone(),
+                        Box::pin(async { Err(UpdateCheckFailure::Connect) }),
+                    ),
+                )
+            })
+            .collect();
+        let failure = policy::race_update_checks(checks, Duration::from_secs(1), |a, b| a > b)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            check_failure_summary(&failure),
+            UpdateCheckFailure::Connect.summary()
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["outcome"] == "failed")
+                .count(),
+            2
+        );
+        assert!(events.iter().all(|event| event["cancelled"] == false));
+    }
+
+    #[tokio::test]
+    async fn winning_backup_cancels_the_started_primary_without_a_false_failure() {
+        let events = Events::default();
+        let checks = vec![
+            (
+                Duration::ZERO,
+                observed_check(false, events.clone(), Box::pin(pending())),
+            ),
+            (
+                Duration::from_millis(1),
+                observed_check(true, events.clone(), Box::pin(async { Ok(Some(2)) })),
+            ),
+        ];
+        assert_eq!(
+            policy::race_update_checks(checks, Duration::from_secs(1), |a, b| a > b)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| event["route"] == "default"
+            && event["outcome"] == "dropped"
+            && event["cancelled"] == true));
+        assert!(events.iter().any(|event| event["route"] == "direct"
+            && event["outcome"] == "completed"
+            && event["cancelled"] == false));
+        assert!(!events.iter().any(|event| event["outcome"] == "failed"));
+    }
+
+    #[tokio::test]
+    async fn total_deadline_cancels_all_started_routes_and_remains_an_error() {
+        assert_eq!(policy::CHECK_BUDGET, Duration::from_secs(12));
+        assert_eq!(policy::STARTUP_CHECK_BUDGET, Duration::from_secs(5));
+        assert_eq!(policy::CHECK_HEDGE_DELAY, Duration::from_millis(750));
+        let events = Events::default();
+        let checks = [false, true]
+            .into_iter()
+            .map(|direct| {
+                (
+                    Duration::ZERO,
+                    observed_check(direct, events.clone(), Box::pin(pending())),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            policy::race_update_checks(checks, Duration::from_millis(5), |a, b| a > b).await,
+            Err(CheckFailure::TimedOut)
+        ));
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["outcome"] == "dropped" && event["cancelled"] == true)
+                .count(),
+            2
+        );
+        assert!(!events.iter().any(|event| event["outcome"] == "failed"));
     }
 }

@@ -72,6 +72,18 @@ pub(crate) fn select_legacy_with_commit(
         return Ok(result);
     }
     let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    select_legacy_locked_with_commit(state, app, selection, commit)
+}
+
+/// The existing legacy transaction, with its original switch lock held by the caller.
+/// This is not a native AppWrite and never creates or reports a native save receipt.
+fn select_legacy_locked_with_commit(
+    state: &AppState,
+    app: &AppType,
+    selection: &TierSelection,
+    commit: impl FnOnce() -> Result<(), AppError>,
+) -> Result<crate::services::SwitchResult, AppError> {
+    require_legacy_routing(state, app)?;
     let provider = state
         .db
         .get_provider_by_id(&selection.provider_id, app.as_str())?
@@ -323,6 +335,26 @@ pub struct ApplicationRoutingChange {
     pub catalog_preview_only: bool,
 }
 
+/// Short-lived compatibility review. Its revision is a CAS image, not a
+/// persistent completion receipt or permission to enter the native writer.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyRoutingReview {
+    pub draft_digest: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "protocol", rename_all = "camelCase")]
+pub enum PreparedRoutingRequest {
+    Native {
+        request: crate::mode::state::SaveRequest,
+    },
+    Legacy {
+        review: LegacyRoutingReview,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingRequestResult {
@@ -364,6 +396,125 @@ fn routing_request_revision(
     )
 }
 
+/// Caller holds the original switch lock. The classification and review image
+/// are captured together; a checkpoint never authorizes a legacy fallback.
+fn require_legacy_routing(state: &AppState, app: &AppType) -> Result<(), AppError> {
+    if !app.supports_local_proxy() || crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        return Err(AppError::Config("mode.verification_required".into()));
+    }
+    crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+        &crate::live::engine::DeviceStore::for_device(),
+    )
+}
+
+fn legacy_routing_revision(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+) -> Result<String, AppError> {
+    require_legacy_routing(state, app)?;
+    if change.catalog_decision.is_some() || change.catalog_preview_only {
+        return Err(AppError::Config(
+            "codex.catalog_takeover_unavailable".into(),
+        ));
+    }
+    let draft_digest = routing_request_digest(app, change)?;
+    // Bind only the original owners this draft reads or changes. An order-only
+    // review does not become stale merely because an unrelated credential rotates.
+    let selection = if let Some(selection) = &change.selection {
+        let local = crate::settings::get_current_provider_ready(app)?;
+        let current = state.db.get_current_provider(app.as_str())?;
+        let digest = |id: &str| -> Result<Option<String>, AppError> {
+            state
+                .db
+                .get_provider_by_id(id, app.as_str())?
+                .map(|provider| crate::Database::provider_update_digest(&provider))
+                .transpose()
+        };
+        let selected = digest(&selection.provider_id)?
+            .ok_or_else(|| AppError::Config("Provider does not exist".into()))?;
+        let outgoing = local
+            .as_ref()
+            .or(current.as_ref())
+            .map(|id| digest(id))
+            .transpose()?
+            .flatten();
+        let files = crate::mode::controller::files(app)?
+            .into_iter()
+            .map(|file| {
+                crate::live::engine::read_current(&file.path)
+                    .map(|bytes| (file.path, crate::live::engine::digest(bytes.as_deref())))
+                    .map_err(AppError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Some(serde_json::json!([
+            local,
+            current,
+            selected,
+            outgoing,
+            crate::proxy::auto_strategy::get_model_pref_checked(&state.db, app.as_str())?,
+            state.db.get_config_snippet(app.as_str())?,
+            futures::executor::block_on(state.db.get_live_backup(app.as_str()))?,
+            files,
+        ]))
+    } else {
+        None
+    };
+    let order = change
+        .order
+        .as_ref()
+        .map(|_| crate::database::order_profiles::snapshot(&state.db, app.as_str()))
+        .transpose()?;
+    // Reclassification stays within the same original app lock and precedes
+    // returning the review. Read paths never publish a checkpoint or mutate DB.
+    require_legacy_routing(state, app)?;
+    let bytes = crate::config::serialize_json_bytes(&serde_json::json!([
+        "legacyApplicationRouting",
+        app.as_str(),
+        draft_digest,
+        selection,
+        order,
+    ]))?;
+    Ok(crate::live::engine::sha256_hex(&bytes))
+}
+
+fn verify_legacy_routing_review(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    review: &LegacyRoutingReview,
+) -> Result<(), AppError> {
+    require_legacy_routing(state, app)?;
+    if review.draft_digest != routing_request_digest(app, change)?
+        || review.revision != legacy_routing_revision(state, app, change)?
+    {
+        return Err(AppError::Conflict("mode.verification_required".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_routing_strategy(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    id: &str,
+) -> Result<PreparedRoutingRequest, AppError> {
+    let _switch =
+        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    if app.supports_local_proxy() && !crate::mode::operation::uses_upstream4_schema(&state.db)? {
+        let review = LegacyRoutingReview {
+            draft_digest: routing_request_digest(app, change)?,
+            revision: legacy_routing_revision(state, app, change)?,
+        };
+        return Ok(PreparedRoutingRequest::Legacy { review });
+    }
+    prepare_native_routing_request_locked(state, app, change, id)
+        .map(|request| PreparedRoutingRequest::Native { request })
+}
+
+/// Existing native tests retain their exact persistent receipt API. Production
+/// preparation calls the same locked owner through prepare_routing_strategy.
+#[cfg(test)]
 pub(crate) fn prepare_routing_request(
     state: &AppState,
     app: &AppType,
@@ -372,6 +523,15 @@ pub(crate) fn prepare_routing_request(
 ) -> Result<crate::mode::state::SaveRequest, AppError> {
     let _switch =
         futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    prepare_native_routing_request_locked(state, app, change, id)
+}
+
+fn prepare_native_routing_request_locked(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    id: &str,
+) -> Result<crate::mode::state::SaveRequest, AppError> {
     let request = crate::mode::state::SaveRequest {
         id: id.into(),
         scope: crate::mode::state::SaveScope::ApplicationRouting,
@@ -381,6 +541,121 @@ pub(crate) fn prepare_routing_request(
     };
     routing_request_scope(&request)?;
     Ok(request)
+}
+
+/// Caller keeps the original app switch lock across the final CAS and original
+/// legacy transaction. Errors retain the original synchronous rollback contract.
+fn apply_legacy_routing_locked(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    review: &LegacyRoutingReview,
+) -> Result<crate::services::SwitchResult, AppError> {
+    verify_legacy_routing_review(state, app, change, review)?;
+    if let Some(selection) = &change.selection {
+        return select_legacy_locked_with_commit(state, app, selection, || {
+            if let Some(order) = &change.order {
+                crate::services::order_profiles::apply_order(
+                    &state.db,
+                    app.as_str(),
+                    &order.profile_name,
+                    &order.provider_ids,
+                )?;
+            }
+            Ok(())
+        });
+    }
+    let order = change
+        .order
+        .as_ref()
+        .ok_or_else(|| AppError::Config("No routing change was supplied".into()))?;
+    crate::services::order_profiles::apply_order(
+        &state.db,
+        app.as_str(),
+        &order.profile_name,
+        &order.provider_ids,
+    )?;
+    Ok(crate::services::SwitchResult::default())
+}
+
+#[cfg(feature = "gui")]
+pub async fn apply_reviewed_legacy_application_routing(
+    app_handle: &tauri::AppHandle,
+    app: AppType,
+    change: ApplicationRoutingChange,
+    user_choice: Option<bool>,
+    review: LegacyRoutingReview,
+) -> Result<SwitchTierCommandResult, AppError> {
+    let state = app_handle.state::<AppState>().inner().clone();
+    let event_app = app.clone();
+    let (response, selected) = tauri::async_runtime::spawn_blocking(move || {
+        let _switch =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+        verify_legacy_routing_review(&state, &app, &change, &review)?;
+        let taken_over = crate::services::provider::is_app_taken_over(&state, &app);
+        if let Some(confirmation) = application_routing_confirmation_locked(
+            &state,
+            &app,
+            &change,
+            user_choice,
+            chatgpt_app::needs_user_attention(),
+            taken_over,
+        )? {
+            return Ok::<_, AppError>((confirmation, None));
+        }
+        // Capture presentation before any effects. A label read failure must
+        // not turn an already-completed legacy write into an ambiguous error.
+        let selected = change
+            .selection
+            .as_ref()
+            .map(|selection| selection.provider_id.clone());
+        let provider_name = selected
+            .as_ref()
+            .map(|id| {
+                state
+                    .db
+                    .get_provider_by_id(id, app.as_str())
+                    .map(|provider| provider.map(|p| p.name).unwrap_or_default())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        // The lock remains held through around(). Quit may flush native bytes;
+        // apply_legacy_routing_locked rechecks them before any configuration write.
+        verify_legacy_routing_review(&state, &app, &change, &review)?;
+        let action = || apply_legacy_routing_locked(&state, &app, &change, &review);
+        let (switched, outcome) = if change.selection.is_some()
+            && wants_chatgpt_quit(user_choice.unwrap_or(false), &app, taken_over)
+        {
+            chatgpt_app::around(false, action)?
+        } else {
+            (action()?, chatgpt_app::AroundOutcome::default())
+        };
+        let mut warnings = outcome.warnings;
+        warnings.extend(switched.warnings);
+        Ok((
+            SwitchTierCommandResult::Switched {
+                result: SwitchTierResult {
+                    provider_name,
+                    chatgpt_was_running: outcome.was_running,
+                    chatgpt_relaunched: outcome.relaunched,
+                    warnings,
+                },
+            },
+            selected,
+        ))
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))??;
+    if let Some(id) = selected {
+        crate::services::application_overview::record_successful_selection(
+            &app_handle.state::<AppState>().db,
+            &event_app,
+            &id,
+        );
+        emit_provider_switched(app_handle, &event_app, &id);
+        crate::tray::refresh_tray_menu(app_handle);
+    }
+    Ok(response)
 }
 
 fn query_routing_request_locked(
@@ -1265,3 +1540,7 @@ pub(crate) async fn initialize_manual_routing(
     crate::mode::operation::admit_metadata_write(&state.proxy_service, app)?;
     crate::proxy::application_routing::migrate(&state.db, app.as_str())
 }
+
+#[cfg(test)]
+#[path = "application_selection_legacy_tests.rs"]
+mod legacy_routing_tests;

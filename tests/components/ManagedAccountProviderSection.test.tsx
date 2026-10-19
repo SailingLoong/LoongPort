@@ -155,10 +155,13 @@ async function originalCommand(
     return { current: "default", profiles: [] };
   if (command === "prepare_application_routing_request")
     return {
-      id: args!.requestId,
-      scope: "applicationRouting",
-      draftDigest: "synthetic",
-      revision: "synthetic-revision",
+      protocol: "native",
+      request: {
+        id: args!.requestId,
+        scope: "applicationRouting",
+        draftDigest: "synthetic",
+        revision: "synthetic-revision",
+      },
     };
   if (command === "apply_application_routing") {
     chain = [
@@ -1352,4 +1355,64 @@ describe("TRAE cancellable discovered-model entry", () => {
 afterEach(() => {
   cleanup();
   queryClient.clear();
+});
+
+it("retries a failed legacy chain append only after a fresh read and never queries a native receipt", async () => {
+  appendOnSave = false;
+  chain = ["existing-route"];
+  let calls = 0;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "prepare_application_routing_request")
+      return {
+        protocol: "legacy",
+        review: { draftDigest: "legacy-digest", revision: "legacy-revision" },
+      };
+    if (command === "apply_application_routing" && calls++ === 0)
+      throw new Error("legacy response lost");
+    return originalCommand(command, args as Record<string, unknown>);
+  });
+  mount();
+  await choose();
+  fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "重试加入路由链" }),
+  );
+  await waitFor(() => expect(calls).toBe(1));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "重试加入路由链" }),
+    ).toBeEnabled(),
+  );
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "get_application_routing_request_result",
+      ),
+  ).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "重试加入路由链" }));
+  await screen.findByRole("status");
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "get_application_routing_request_result",
+      ),
+  ).toHaveLength(0);
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "prepare_application_routing_request",
+      ),
+  ).toHaveLength(2);
+  expect(invoke).toHaveBeenCalledWith(
+    "apply_application_routing",
+    expect.objectContaining({
+      legacyReview: {
+        draftDigest: "legacy-digest",
+        revision: "legacy-revision",
+      },
+    }),
+  );
 });

@@ -152,6 +152,10 @@ pub(crate) fn verify_direct_pointer(
 #[serde(rename_all = "camelCase")]
 pub struct RoutingReadView {
     pub status: &'static str,
+    /// Original write owner, never inferred by the frontend from missing mode facts.
+    pub write_protocol: Option<&'static str>,
+    /// Allowlisted public reason only; never vault, provider or file details.
+    pub blocked_reason: Option<&'static str>,
     pub mode: Option<Mode>,
     pub attached: Option<bool>,
     pub current_provider_id: Option<String>,
@@ -166,6 +170,8 @@ impl RoutingReadView {
     fn blocked(status: &'static str, publication_started: Option<bool>) -> Self {
         Self {
             status,
+            write_protocol: None,
+            blocked_reason: Some("mode.verification_required"),
             mode: None,
             attached: None,
             current_provider_id: None,
@@ -175,6 +181,21 @@ impl RoutingReadView {
             can_recheck: true,
             legacy_common_config_writable: false,
         }
+    }
+
+    fn blocked_error(error: &AppError) -> Self {
+        let mut view = Self::blocked("unknown", None);
+        view.blocked_reason = Some(match error {
+            AppError::Config(code) => match code.as_str() {
+                "upgrade.migration_required" => "upgrade.migration_required",
+                "upgrade.checkpoint_pending" => "upgrade.checkpoint_pending",
+                "upgrade.future_version" => "upgrade.future_version",
+                "upgrade.source_changed" => "upgrade.source_changed",
+                _ => "mode.verification_required",
+            },
+            _ => "mode.verification_required",
+        });
+        view
     }
 }
 
@@ -191,7 +212,7 @@ pub(crate) fn read_view(
     let db = service.database();
     match super::operation::uses_upstream4_schema(db) {
         Ok(false) => return None,
-        Err(_) => return Some(RoutingReadView::blocked("unknown", None)),
+        Err(error) => return Some(RoutingReadView::blocked_error(&error)),
         Ok(true) => {}
     }
     let read = || -> Result<RoutingReadView, AppError> {
@@ -211,6 +232,8 @@ pub(crate) fn read_view(
         let current_provider_id = provider_for(db, app, Purpose::InUse)?;
         Ok(RoutingReadView {
             status: "ready",
+            write_protocol: Some("native"),
+            blocked_reason: None,
             mode: mode.mode,
             attached: Some(mode.attached),
             current_provider_id,
@@ -221,5 +244,44 @@ pub(crate) fn read_view(
             legacy_common_config_writable: false,
         })
     };
-    Some(read().unwrap_or_else(|_| RoutingReadView::blocked("unknown", None)))
+    Some(read().unwrap_or_else(|error| RoutingReadView::blocked_error(&error)))
+}
+
+/// Applications need an explicit write strategy; provider-edit readers retain
+/// their established `None` legacy contract through read_view above. The caller
+/// holds the same original app switch lock across classification and projection.
+pub(crate) fn read_application_view(
+    service: &crate::services::ProxyService,
+    app: &AppType,
+) -> Option<RoutingReadView> {
+    if !app.supports_local_proxy() {
+        return None;
+    }
+    match super::operation::uses_upstream4_schema(service.database()) {
+        Ok(false) => {
+            // Preserve the supported source17 owner without pretending that it
+            // has native mode state or a persistent native save receipt.
+            let view = match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
+                &DeviceStore::for_device(),
+            ) {
+                Ok(()) => RoutingReadView {
+                    status: "ready",
+                    write_protocol: Some("legacy"),
+                    blocked_reason: None,
+                    mode: None,
+                    attached: None,
+                    current_provider_id: None,
+                    direct_provider_id: None,
+                    publication_started: None,
+                    can_write: true,
+                    can_recheck: true,
+                    legacy_common_config_writable: true,
+                },
+                Err(error) => RoutingReadView::blocked_error(&error),
+            };
+            Some(view)
+        }
+        Ok(true) => read_view(service, app),
+        Err(error) => Some(RoutingReadView::blocked_error(&error)),
+    }
 }

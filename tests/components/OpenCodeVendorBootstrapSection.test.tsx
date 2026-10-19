@@ -45,6 +45,8 @@ const empty = (): ApplicationRouting => ({
     directProviderId: null,
     publicationStarted: null,
     canWrite: true,
+    writeProtocol: "native",
+    blockedReason: null,
     canRecheck: true,
   },
   autoFailoverEnabled: false,
