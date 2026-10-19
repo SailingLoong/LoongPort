@@ -1,5 +1,9 @@
+import { http, HttpResponse } from "msw";
+import { server } from "../msw/server";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createTestQueryClient } from "../utils/testQueryClient";
 import { useState } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
@@ -30,9 +34,11 @@ vi.mock("@/components/providers/forms/XaiOAuthSection", () => ({
 }));
 
 describe("CodexOAuthSection", () => {
+  let queryClient: ReturnType<typeof createTestQueryClient>;
   let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
+    queryClient = createTestQueryClient();
     scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
       HTMLElement.prototype,
       "scrollIntoView",
@@ -87,6 +93,8 @@ describe("CodexOAuthSection", () => {
   });
 
   afterEach(() => {
+    cleanup();
+    queryClient.clear();
     if (scrollIntoViewDescriptor) {
       Object.defineProperty(
         HTMLElement.prototype,
@@ -105,9 +113,36 @@ describe("CodexOAuthSection", () => {
     expect(screen.queryByTestId("account-quota")).not.toBeInTheDocument();
   });
 
-  it("renders account quota in Auth Center", () => {
-    render(<AuthCenterPanel />);
+  it("renders account quota in Auth Center", async () => {
+    const readCatalog = vi.fn();
+    server.use(
+      ...[
+        "list_minimax_code_accounts",
+        "list_trae_accounts",
+        "list_workbuddy_accounts",
+        "list_workbuddy_inference_accounts",
+      ].map((command) =>
+        http.post(`http://tauri.local/${command}`, () => {
+          readCatalog(command);
+          return HttpResponse.json([]);
+        }),
+      ),
+      http.post("http://tauri.local/get_zcode_account_library", () => {
+        readCatalog("get_zcode_account_library");
+        return HttpResponse.json({
+          revision: "test",
+          pending: false,
+          profiles: [],
+        });
+      }),
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AuthCenterPanel />
+      </QueryClientProvider>,
+    );
 
+    await waitFor(() => expect(readCatalog).toHaveBeenCalledTimes(7));
     expect(mocks.renderAccountQuota).toHaveBeenCalledWith("account-1");
     expect(mocks.renderAccountQuota).toHaveBeenCalledWith("account-2");
     expect(

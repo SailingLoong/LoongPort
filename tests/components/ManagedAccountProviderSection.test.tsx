@@ -1,13 +1,15 @@
+import { createTestQueryClient } from "../utils/testQueryClient";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { ManagedAccountProviderSection } from "@/components/settings/ManagedAccountProviderSection";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
@@ -33,9 +35,14 @@ vi.mock("@/lib/api/minimaxCode", () => ({ minimaxCodeApi: { list: vi.fn() } }));
 vi.mock("@/lib/api/zcodeAccounts", () => ({
   zcodeAccountsApi: { library: vi.fn() },
 }));
-vi.mock("@/lib/api/traeAccounts", () => ({
-  traeAccountsApi: { list: vi.fn() },
-}));
+vi.mock("@/lib/api/traeAccounts", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/api/traeAccounts")>();
+  return {
+    ...actual,
+    traeAccountsApi: { ...actual.traeAccountsApi, list: vi.fn() },
+  };
+});
 vi.mock("@/lib/api/workbuddy", () => ({
   workbuddyApi: {
     list: vi.fn(),
@@ -90,11 +97,7 @@ const zcode = {
 };
 function mount() {
   return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+    <QueryClientProvider client={queryClient}>
       <ManagedAccountProviderSection />
     </QueryClientProvider>,
   );
@@ -111,6 +114,7 @@ async function choose(name = "Synthetic MiniMax") {
     target: { value: "synthetic-model" },
   });
 }
+let queryClient: ReturnType<typeof createTestQueryClient>;
 let rows: Record<string, Provider>;
 let chain: string[];
 let appendOnSave: boolean;
@@ -168,6 +172,7 @@ async function originalCommand(
   throw new Error(`Unexpected command ${command}`);
 }
 beforeEach(() => {
+  queryClient = createTestQueryClient();
   vi.clearAllMocks();
   rows = {};
   chain = [];
@@ -185,7 +190,7 @@ beforeEach(() => {
 describe("explicit account to original provider entry", () => {
   it("is mounted in the existing authentication center", async () => {
     render(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={queryClient}>
         <AuthCenterPanel />
       </QueryClientProvider>,
     );
@@ -1023,6 +1028,7 @@ describe("TRAE Global explicit text-only account entry", () => {
 // native invoke mock with the exact opaque account/request contracts.
 describe("TRAE cancellable discovered-model entry", () => {
   beforeEach(() => {
+    queryClient = createTestQueryClient();
     vi.mocked(traeAccountsApi.list).mockResolvedValue([trae]);
   });
   it("does not discover on mount or account selection, and does not accept a hand-typed/default model", async () => {
@@ -1341,4 +1347,9 @@ describe("TRAE cancellable discovered-model entry", () => {
       /verified|discovered|requestId/,
     );
   });
+});
+
+afterEach(() => {
+  cleanup();
+  queryClient.clear();
 });

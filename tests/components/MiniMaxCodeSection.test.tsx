@@ -1,14 +1,17 @@
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createTestQueryClient } from "../utils/testQueryClient";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
-  screen,
+  screen as page,
   waitFor,
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import i18n from "i18next";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import type {
   MiniMaxCodeAccount,
@@ -89,23 +92,34 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+let queryClient: ReturnType<typeof createTestQueryClient>;
+let miniMax: ReturnType<typeof within>;
 let catalog: MiniMaxCodeAccount[];
 let handlers: Record<string, (payload: Record<string, string>) => unknown>;
 const calls = (command: string) =>
   mocks.invoke.mock.calls.filter(([name]) => name === command);
 const row = (id = "code-a") =>
-  screen.getByRole("article", { name: `Code ${id}` });
+  miniMax.getByRole("article", { name: `Code ${id}` });
 const button = (name: string, id = "code-a") =>
   within(row(id)).getByRole("button", { name });
 async function mount() {
-  const view = render(<AuthCenterPanel />);
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <AuthCenterPanel />
+    </QueryClientProvider>,
+  );
+  // Keep assertions on the real MiniMax owner, alongside the other real panels.
+  miniMax = within(
+    page.getByRole("heading", { name: "MiniMax Code" }).closest("section")!,
+  );
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "重新读取账号" })).toBeEnabled(),
+    expect(miniMax.getByRole("button", { name: "重新读取账号" })).toBeEnabled(),
   );
   return view;
 }
 
 beforeEach(async () => {
+  queryClient = createTestQueryClient();
   await i18n.changeLanguage("zh");
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   catalog = [account()];
@@ -114,6 +128,16 @@ beforeEach(async () => {
   mocks.openExternal.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockImplementation(
     async (command: string, payload: Record<string, string> = {}) => {
+      if (
+        [
+          "list_trae_accounts",
+          "list_workbuddy_accounts",
+          "list_workbuddy_inference_accounts",
+        ].includes(command)
+      )
+        return [];
+      if (command === "get_zcode_account_library")
+        return { revision: "test", pending: false, profiles: [] };
       if (handlers[command]) return handlers[command](payload);
       if (command === "list_minimax_code_accounts")
         return structuredClone(catalog);
@@ -128,16 +152,24 @@ beforeEach(async () => {
 });
 
 describe("MiniMax Code in the original authentication center", () => {
-  it("exposes the real entry and only reads its own catalog on mount", async () => {
+  it("exposes the real entry and only reads catalogs on mount", async () => {
     await mount();
     expect(
-      screen.getByRole("heading", { name: "MiniMax Code" }),
+      miniMax.getByRole("heading", { name: "MiniMax Code" }),
     ).toBeInTheDocument();
     expect(row()).toHaveTextContent("verified-code-a");
     expect(row()).toHaveTextContent("中国区");
-    expect(mocks.invoke.mock.calls).toEqual([["list_minimax_code_accounts"]]);
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByText(/Token Plan 和 API Key/)).toBeInTheDocument();
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["list_minimax_code_accounts"],
+      ["list_trae_accounts"],
+      ["list_minimax_code_accounts"],
+      ["get_zcode_account_library", {}],
+      ["list_workbuddy_accounts"],
+      ["list_workbuddy_inference_accounts"],
+      ["list_trae_accounts"],
+    ]);
+    expect(miniMax.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(miniMax.getByText(/Token Plan 和 API Key/)).toBeInTheDocument();
   });
 
   it("uses backend capabilities instead of inferring eligibility from a plan or status", async () => {
@@ -252,7 +284,7 @@ describe("MiniMax Code in the original authentication center", () => {
       unknown("code-a", { authGeneration: 2, credentialVersion: 2 }),
       account("code-b"),
     ];
-    fireEvent.click(screen.getByRole("button", { name: "重新读取账号" }));
+    fireEvent.click(miniMax.getByRole("button", { name: "重新读取账号" }));
     await waitFor(() => expect(row("code-b")).toBeInTheDocument());
     await act(async () =>
       pending.resolve(
@@ -291,13 +323,13 @@ describe("MiniMax Code in the original authentication center", () => {
     handlers.list_minimax_code_accounts = () => {
       throw "storageUnavailable";
     };
-    fireEvent.click(screen.getByRole("button", { name: "重新读取账号" }));
+    fireEvent.click(miniMax.getByRole("button", { name: "重新读取账号" }));
     await waitFor(() =>
-      expect(screen.queryByRole("article")).not.toBeInTheDocument(),
+      expect(miniMax.queryByRole("article")).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("解锁后重新读取");
+    expect(miniMax.getByRole("alert")).toHaveTextContent("解锁后重新读取");
     expect(
-      screen.getByRole("button", { name: "添加账号或重新登录" }),
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
     ).toBeDisabled();
     expect(calls("begin_minimax_code_authorization")).toHaveLength(0);
   });
@@ -307,13 +339,15 @@ describe("MiniMax Code in the original authentication center", () => {
       throw new Error("secret-token-in-error");
     };
     await mount();
-    expect(screen.getByRole("alert")).toHaveTextContent("未能确认操作结果");
-    expect(screen.queryByText(/secret-token-in-error/)).not.toBeInTheDocument();
+    expect(miniMax.getByRole("alert")).toHaveTextContent("未能确认操作结果");
     expect(
-      screen.queryByText("尚未添加 MiniMax Code 账号。"),
+      miniMax.queryByText(/secret-token-in-error/),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "添加账号或重新登录" }),
+      miniMax.queryByText("尚未添加 MiniMax Code 账号。"),
+    ).not.toBeInTheDocument();
+    expect(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
     ).toBeDisabled();
   });
 
@@ -321,22 +355,22 @@ describe("MiniMax Code in the original authentication center", () => {
     catalog = [];
     const user = userEvent.setup();
     await mount();
-    await user.click(screen.getByRole("combobox", { name: "账号地区" }));
-    await user.click(screen.getByRole("option", { name: "国际区" }));
+    await user.click(miniMax.getByRole("combobox", { name: "账号地区" }));
+    await user.click(page.getByRole("option", { name: "国际区" }));
     await user.click(
-      screen.getByRole("button", { name: "添加账号或重新登录" }),
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
     );
-    expect(await screen.findByText("TEST-CODE")).toBeInTheDocument();
+    expect(await miniMax.findByText("TEST-CODE")).toBeInTheDocument();
     expect(calls("begin_minimax_code_authorization")).toEqual([
       ["begin_minimax_code_authorization", { region: "global" }],
     ]);
-    await user.click(screen.getByRole("link", { name: "打开官方授权页" }));
+    await user.click(miniMax.getByRole("link", { name: "打开官方授权页" }));
     expect(mocks.openExternal).toHaveBeenCalledWith(flow.verificationUri);
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(miniMax.queryByRole("textbox")).not.toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "我已授权，检查登录" }),
+      miniMax.getByRole("button", { name: "我已授权，检查登录" }),
     );
-    expect(await screen.findByText(/尚未完成授权/)).toBeInTheDocument();
+    expect(await miniMax.findByText(/尚未完成授权/)).toBeInTheDocument();
     expect(calls("poll_minimax_code_authorization")).toEqual([
       ["poll_minimax_code_authorization", { flowId: "synthetic-flow" }],
     ]);
@@ -350,14 +384,18 @@ describe("MiniMax Code in the original authentication center", () => {
       return { state: "saved", account: account("wrong-id") };
     };
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "我已授权，检查登录" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "我已授权，检查登录" }),
+    );
     await waitFor(() => expect(row()).toBeInTheDocument());
     expect(
-      screen.queryByRole("article", { name: "Code wrong-id" }),
+      miniMax.queryByRole("article", { name: "Code wrong-id" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
+    expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     expect(calls("claim_minimax_code_today")).toHaveLength(0);
   });
 
@@ -365,10 +403,12 @@ describe("MiniMax Code in the original authentication center", () => {
     const pending = deferred<MiniMaxCodeLogin>();
     handlers.begin_minimax_code_authorization = () => pending.promise;
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
     await act(async () => pending.resolve(flow));
-    expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
+    expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     expect(calls("cancel_minimax_code_authorization")).toEqual([
       ["cancel_minimax_code_authorization", { flowId: "synthetic-flow" }],
     ]);
@@ -379,26 +419,32 @@ describe("MiniMax Code in the original authentication center", () => {
     const pending = deferred<{ state: "saved"; account: MiniMaxCodeAccount }>();
     handlers.poll_minimax_code_authorization = () => pending.promise;
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "我已授权，检查登录" }));
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "我已授权，检查登录" }),
+    );
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
     await act(async () =>
       pending.resolve({ state: "saved", account: account("late-account") }),
     );
     expect(
-      screen.queryByRole("article", { name: "Code late-account" }),
+      miniMax.queryByRole("article", { name: "Code late-account" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
     handlers.list_minimax_code_accounts = () => {
       throw "storageUnavailable";
     };
-    fireEvent.click(screen.getByRole("button", { name: "重新读取账号" }));
+    fireEvent.click(miniMax.getByRole("button", { name: "重新读取账号" }));
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("解锁后重新读取"),
+      expect(miniMax.getByRole("alert")).toHaveTextContent("解锁后重新读取"),
     );
-    expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
+    expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
   });
 
   it("reports a completed authorization when durable save wins cancellation and re-reads the catalog", async () => {
@@ -410,23 +456,28 @@ describe("MiniMax Code in the original authentication center", () => {
       throw "authorizationCompleted";
     };
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "我已授权，检查登录" }));
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "我已授权，检查登录" }),
+    );
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("授权已完成"),
+      expect(miniMax.getByRole("alert")).toHaveTextContent("授权已完成"),
     );
     await waitFor(() => expect(row()).toHaveTextContent("领取结果未确认"));
-    expect(screen.getByRole("alert")).toHaveTextContent("本次取消未生效");
-    expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
+    expect(miniMax.getByRole("alert")).toHaveTextContent("本次取消未生效");
+    expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     expect(button("领取今日额度")).toBeDisabled();
-    expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+    // The manager and provider consumer each read once on mount, then the manager rereads.
+    expect(calls("list_minimax_code_accounts")).toHaveLength(3);
     await act(async () =>
       pending.resolve({ state: "saved", account: account("late-account") }),
     );
     expect(
-      screen.queryByRole("article", { name: "Code late-account" }),
+      miniMax.queryByRole("article", { name: "Code late-account" }),
     ).not.toBeInTheDocument();
     expect(calls("claim_minimax_code_today")).toHaveLength(0);
   });
@@ -440,16 +491,17 @@ describe("MiniMax Code in the original authentication center", () => {
       };
       await mount();
       fireEvent.click(
-        screen.getByRole("button", { name: "添加账号或重新登录" }),
+        miniMax.getByRole("button", { name: "添加账号或重新登录" }),
       );
-      await screen.findByText("TEST-CODE");
-      fireEvent.click(screen.getByRole("button", { name: "取消" }));
-      await screen.findByRole("alert");
-      expect(screen.getByRole("alert")).not.toHaveTextContent("授权已完成");
-      expect(screen.getByRole("alert")).not.toHaveTextContent("已取消");
-      expect(calls("list_minimax_code_accounts")).toHaveLength(1);
-      expect(screen.queryByRole("article")).not.toBeInTheDocument();
-      expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
+      await miniMax.findByText("TEST-CODE");
+      fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
+      await miniMax.findByRole("alert");
+      expect(miniMax.getByRole("alert")).not.toHaveTextContent("授权已完成");
+      expect(miniMax.getByRole("alert")).not.toHaveTextContent("已取消");
+      // No reread beyond the manager and provider consumer mount reads.
+      expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+      expect(miniMax.queryByRole("article")).not.toBeInTheDocument();
+      expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     },
   );
 
@@ -462,16 +514,18 @@ describe("MiniMax Code in the original authentication center", () => {
       throw { code: "authorizationCompleted" };
     };
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("解锁后重新读取"),
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
     );
-    expect(screen.queryByText("TEST-CODE")).not.toBeInTheDocument();
-    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(miniMax.getByRole("alert")).toHaveTextContent("解锁后重新读取"),
+    );
+    expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
+    expect(miniMax.queryByRole("article")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "添加账号或重新登录" }),
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
     ).toBeDisabled();
   });
 
@@ -480,28 +534,34 @@ describe("MiniMax Code in the original authentication center", () => {
     catalog = [];
     handlers.cancel_minimax_code_authorization = () => cancellation.promise;
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
     const user = userEvent.setup();
-    await user.click(screen.getByRole("combobox", { name: "账号地区" }));
-    await user.click(screen.getByRole("option", { name: "国际区" }));
+    await user.click(miniMax.getByRole("combobox", { name: "账号地区" }));
+    await user.click(page.getByRole("option", { name: "国际区" }));
     handlers.begin_minimax_code_authorization = () => ({
       ...flow,
       flowId: "new-global-flow",
       userCode: "NEW-CODE",
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("NEW-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("NEW-CODE");
     catalog = [unknown()];
     await act(async () => cancellation.reject("authorizationCompleted"));
     await waitFor(() => expect(row()).toHaveTextContent("领取结果未确认"));
-    expect(screen.getByText("NEW-CODE")).toBeInTheDocument();
+    expect(miniMax.getByText("NEW-CODE")).toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "账号地区" }),
+      miniMax.getByRole("combobox", { name: "账号地区" }),
     ).toHaveTextContent("国际区");
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "我已授权，检查登录" }));
+    expect(miniMax.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "我已授权，检查登录" }),
+    );
     await waitFor(() =>
       expect(calls("poll_minimax_code_authorization")).toEqual([
         ["poll_minimax_code_authorization", { flowId: "new-global-flow" }],
@@ -515,29 +575,38 @@ describe("MiniMax Code in the original authentication center", () => {
     catalog = [];
     handlers.cancel_minimax_code_authorization = () => cancellation.promise;
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
+    fireEvent.click(miniMax.getByRole("button", { name: "取消" }));
     const user = userEvent.setup();
-    await user.click(screen.getByRole("combobox", { name: "账号地区" }));
-    await user.click(screen.getByRole("option", { name: "国际区" }));
+    await user.click(miniMax.getByRole("combobox", { name: "账号地区" }));
+    await user.click(page.getByRole("option", { name: "国际区" }));
     catalog = [account()];
     await act(async () => cancellation.reject("authorizationCompleted"));
     await waitFor(() => expect(row()).toBeInTheDocument());
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(miniMax.queryByRole("alert")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "账号地区" }),
+      miniMax.getByRole("combobox", { name: "账号地区" }),
     ).toHaveTextContent("国际区");
     expect(calls("begin_minimax_code_authorization")).toHaveLength(1);
   });
 
   it("cancels an active device flow on unmount", async () => {
     const view = await mount();
-    fireEvent.click(screen.getByRole("button", { name: "添加账号或重新登录" }));
-    await screen.findByText("TEST-CODE");
+    fireEvent.click(
+      miniMax.getByRole("button", { name: "添加账号或重新登录" }),
+    );
+    await miniMax.findByText("TEST-CODE");
     view.unmount();
     expect(calls("cancel_minimax_code_authorization")).toEqual([
       ["cancel_minimax_code_authorization", { flowId: "synthetic-flow" }],
     ]);
   });
+});
+
+afterEach(() => {
+  cleanup();
+  queryClient.clear();
 });
