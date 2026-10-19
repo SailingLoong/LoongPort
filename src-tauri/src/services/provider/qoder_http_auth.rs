@@ -72,7 +72,7 @@ impl SourceBinding {
                 source: SourceKind::InternationalQoderPat,
                 origin: ORIGIN.into(),
                 credential_generation: generation,
-                credential_digest: format!("{:x}", digest.finalize()),
+                credential_digest: hex::encode(digest.finalize()),
             },
             pat,
         ))

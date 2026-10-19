@@ -1078,13 +1078,18 @@ mod paperclip_schema_lifecycle_tests {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         crate::paperclip::bindings::ensure_schema(&source).unwrap();
-        crate::database::dao::qoder_campaign_operations::create_schema(&source).unwrap();
-        source.execute_batch("UPDATE loongport_schema_version SET version=26 WHERE id=1").unwrap();
+        crate::database::create_qoder_campaign_operations_schema(&source).unwrap();
+        source
+            .execute_batch("UPDATE loongport_schema_version SET version=26 WHERE id=1")
+            .unwrap();
         let before = Database::content_digest(&source).unwrap();
         let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
-        assert_eq!(database::loongport_schema::read_stored_version(&staged).unwrap(), 26);
-        assert!(!crate::database::dao::qoder_http_auth::has_column(&staged).unwrap());
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            26
+        );
+        assert!(!crate::database::has_qoder_http_auth_column(&staged).unwrap());
         assert_eq!(Database::content_digest(&source).unwrap(), before);
     }
 

@@ -1661,14 +1661,15 @@ mod tests {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
         } else {
-            crate::database::dao::qoder_campaign_operations::create_schema(conn).unwrap();
+            crate::database::create_qoder_campaign_operations_schema(conn).unwrap();
         }
         if version < 27 {
-            if crate::database::dao::qoder_http_auth::has_column(conn).unwrap() {
-                conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret").unwrap();
+            if crate::database::has_qoder_http_auth_column(conn).unwrap() {
+                conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret")
+                    .unwrap();
             }
         } else {
-            crate::database::dao::qoder_http_auth::create_column(conn).unwrap();
+            crate::database::create_qoder_http_auth_column(conn).unwrap();
         }
         if version < 25 {
             conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings")

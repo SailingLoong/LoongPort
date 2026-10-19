@@ -172,7 +172,11 @@ impl CampaignAdapter for HttpAdapter {
                 crate::services::provider::qoder_auth_http::PAT_EXCHANGE_PATH,
                 None,
                 None,
-                Some(crate::services::provider::qoder_auth_http::pat_exchange_body(candidate.as_str())),
+                Some(
+                    crate::services::provider::qoder_auth_http::pat_exchange_body(
+                        candidate.as_str(),
+                    ),
+                ),
             )
             .map_err(|_| Dependency::AuthenticationFailed)?;
         if exchange.response.status() != reqwest::StatusCode::OK {

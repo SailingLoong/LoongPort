@@ -1,6 +1,6 @@
 //! Synthetic-only tests. No account request, credential fixture, or live transport.
 use super::*;
-use crate::database::dao::qoder_http_auth as store;
+use crate::database::{validate_qoder_http_auth_column, QODER_HTTP_AUTH_COLUMN};
 use crate::secrets::inventory;
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,7 +80,14 @@ fn plaintext(db: &Database) -> String {
             |r| r.get(0),
         )
         .unwrap();
-    inventory::open_db(&vault, "providers", store::COLUMN, &[ID, "codex"], &raw).unwrap()
+    inventory::open_db(
+        &vault,
+        "providers",
+        QODER_HTTP_AUTH_COLUMN,
+        &[ID, "codex"],
+        &raw,
+    )
+    .unwrap()
 }
 fn has_code<T>(result: Result<T, AppError>, expected: &str) {
     let Err(error) = result else {
@@ -370,7 +377,7 @@ fn inventory_rewrap_reset_export_and_wrong_row_authentication_cover_private_colu
     assert!(inventory::open_db(
         &current,
         "providers",
-        store::COLUMN,
+        QODER_HTTP_AUTH_COLUMN,
         &["wrong-id", "codex"],
         &raw
     )
@@ -382,7 +389,7 @@ fn inventory_rewrap_reset_export_and_wrong_row_authentication_cover_private_colu
     .unwrap();
     assert!(!columns
         .iter()
-        .any(|(t, c)| t == "providers" && c == store::COLUMN));
+        .any(|(t, c)| t == "providers" && c == QODER_HTTP_AUTH_COLUMN));
     let target = crate::secrets::VaultContext::generate().unwrap();
     inventory::transform_database(&conn, Some(&current), &target).unwrap();
     inventory::validate_database(&conn, &target).unwrap();
@@ -391,8 +398,14 @@ fn inventory_rewrap_reset_export_and_wrong_row_authentication_cover_private_colu
     let raw: String = conn
         .query_row("SELECT qoder_http_secret FROM providers", [], |r| r.get(0))
         .unwrap();
-    let reset =
-        inventory::open_db(&target, "providers", store::COLUMN, &[ID, "codex"], &raw).unwrap();
+    let reset = inventory::open_db(
+        &target,
+        "providers",
+        QODER_HTTP_AUTH_COLUMN,
+        &[ID, "codex"],
+        &raw,
+    )
+    .unwrap();
     assert!(Record::decode(&reset).unwrap().is_none());
 }
 #[test]
@@ -410,7 +423,7 @@ fn legacy_inventory_keeps_archive_digest_and_v27_missing_column_is_rejected() {
     conn.execute_batch("UPDATE loongport_schema_version SET version=26;")
         .unwrap();
     crate::database::loongport_schema::apply(&conn).unwrap();
-    store::validate_column(&conn).unwrap();
+    validate_qoder_http_auth_column(&conn).unwrap();
     inventory::validate_database(&conn, &vault).unwrap();
 }
 #[test]
@@ -631,7 +644,7 @@ fn original_provider_save_initializes_source_revision_without_any_campaign_or_de
     assert_eq!(state.generation, declaration.credential_generation);
     assert!(state.pending.is_none());
     assert!(
-        crate::database::dao::qoder_campaign_operations::read_rows(&db.conn.lock().unwrap())
+        crate::database::read_qoder_campaign_operation_rows(&db.conn.lock().unwrap())
             .unwrap()
             .is_empty()
     );
@@ -784,4 +797,15 @@ async fn stale_selected_provider_cannot_spend_the_new_sources_near_expiry_refres
         Record::decode(&before).unwrap().unwrap().phase,
         Phase::Ready { .. }
     ));
+}
+
+#[test]
+fn source_digest_remains_stable_lowercase_hex_with_sha2_011() {
+    let (db, _) = fixture();
+    let provider = db.get_provider_by_id(ID, "codex").unwrap().unwrap();
+    let (source, _) = SourceBinding::from_provider(&provider).unwrap();
+    assert_eq!(
+        source.credential_digest,
+        "0ae30de816667fc04ebbe678b2420287e177cb80d8f119ca5a51eb81d758eb8d"
+    );
 }

@@ -46,6 +46,22 @@ pub(crate) use dao::proxy::{
     validate_cost_multiplier, validate_pricing_source, PRICING_SOURCE_REQUEST,
     PRICING_SOURCE_RESPONSE,
 };
+#[cfg(test)]
+pub(crate) use dao::qoder_campaign_operations::{
+    create_schema as create_qoder_campaign_operations_schema,
+    read_rows as read_qoder_campaign_operation_rows,
+};
+#[cfg(test)]
+pub(crate) use dao::qoder_http_auth::{
+    create_column as create_qoder_http_auth_column,
+    validate_column as validate_qoder_http_auth_column, COLUMN as QODER_HTTP_AUTH_COLUMN,
+};
+
+// Narrow schema hooks used by the existing credential inventory. Keep DAO private.
+pub(crate) use dao::qoder_http_auth::{
+    has_column as has_qoder_http_auth_column,
+    INTRODUCED_VERSION as QODER_HTTP_AUTH_INTRODUCED_VERSION,
+};
 pub use dao::FailoverQueueItem;
 pub use dao::Profile;
 

@@ -295,8 +295,9 @@ fn process_values(
             .collect::<Vec<_>>()
             .join(" AND ");
         for column in table.columns {
-            if table.name == "providers" && *column == "qoder_http_secret"
-                && !crate::database::dao::qoder_http_auth::has_column(conn)?
+            if table.name == "providers"
+                && *column == "qoder_http_secret"
+                && !crate::database::has_qoder_http_auth_column(conn)?
             {
                 let version = crate::database::loongport_schema::read_stored_version(conn)?;
                 // Authenticated legacy archives must retain their exact historical
@@ -304,10 +305,12 @@ fn process_values(
                 // and only for an explicitly older supported schema. The normal
                 // staging migration adds it before any owner can acquire a lease.
                 // If present even in a legacy image, it is always authenticated.
-                if (0..crate::database::dao::qoder_http_auth::INTRODUCED_VERSION).contains(&version) {
+                if (0..crate::database::QODER_HTTP_AUTH_INTRODUCED_VERSION).contains(&version) {
                     continue;
                 }
-                return Err(AppError::Config("qoder.http_auth.schema_migration_required".into()));
+                return Err(AppError::Config(
+                    "qoder.http_auth.schema_migration_required".into(),
+                ));
             }
             let mut fields = table.identity_columns.to_vec();
             fields.push(column);

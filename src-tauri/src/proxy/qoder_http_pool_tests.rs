@@ -240,11 +240,11 @@ impl HttpFixture {
         let worker = root.join("scripts/qoder/worker.mjs");
         let protocol = root.join("scripts/qoder/http-protocol.mjs");
         assert_eq!(
-            format!("{:x}", Sha256::digest(std::fs::read(&worker).unwrap())),
+            hex::encode(Sha256::digest(std::fs::read(&worker).unwrap())),
             WORKER_SHA256
         );
         assert_eq!(
-            format!("{:x}", Sha256::digest(std::fs::read(&protocol).unwrap())),
+            hex::encode(Sha256::digest(std::fs::read(&protocol).unwrap())),
             PROTOCOL_SHA256
         );
         let wrapper = root.join("tests/qoder-runtime/fixtures/http-proxy-wrapper.mjs");

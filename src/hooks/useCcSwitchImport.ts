@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ccSwitchImportApi } from "@/lib/api";
@@ -28,6 +28,14 @@ export interface UseCcSwitchImportResult {
 
 export function useCcSwitchImport(): UseCcSwitchImportResult {
   const { t } = useTranslation();
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const [preview, setPreview] = useState<CcSwitchImportPreview | null>(null);
   const [status, setStatus] = useState<CcSwitchImportStatus>("idle");
@@ -40,9 +48,11 @@ export function useCcSwitchImport(): UseCcSwitchImportResult {
     setErrorMessage(null);
     try {
       const p = await ccSwitchImportApi.getPreview();
+      if (!mounted.current) return;
       setPreview(p);
       setStatus("idle");
     } catch (error) {
+      if (!mounted.current) return;
       console.error("[useCcSwitchImport] preview failed", error);
       setStatus("error");
       setErrorMessage(
@@ -58,14 +68,17 @@ export function useCcSwitchImport(): UseCcSwitchImportResult {
     setErrorMessage(null);
     try {
       const r = await ccSwitchImportApi.import();
-      setReport(r);
-      setStatus("success");
+      if (mounted.current) {
+        setReport(r);
+        setStatus("success");
+      }
       if (r.warnings && r.warnings.length > 0) {
         // 非致命问题（回填失败/后置同步失败），导入仍成功但用户该知道。
         console.warn("[useCcSwitchImport] import warnings", r.warnings);
       }
       return r;
     } catch (error) {
+      if (!mounted.current) return null;
       console.error("[useCcSwitchImport] import failed", error);
       setStatus("error");
       const message =
@@ -79,7 +92,7 @@ export function useCcSwitchImport(): UseCcSwitchImportResult {
       );
       return null;
     } finally {
-      setIsImporting(false);
+      if (mounted.current) setIsImporting(false);
     }
   }, [isImporting, t]);
 

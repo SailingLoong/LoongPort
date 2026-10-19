@@ -132,6 +132,22 @@ function duplicateProvider(app: AppId, id: string): boolean {
 }
 
 export const handlers = [
+  http.post(`${TAURI_ENDPOINT}/get_cc_switch_import_preview`, () =>
+    success({
+      sourceExists: false,
+      canImport: false,
+      providers: {
+        willImport: 0,
+        skipped: [],
+        mergedToRelay: [],
+        cannotFingerprint: 0,
+      },
+      mcpServers: 0,
+      prompts: 0,
+      skills: 0,
+      notes: [],
+    }),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_common_config_snippet`, () => success(null)),
   http.post(`${TAURI_ENDPOINT}/preset_referral_urls`, () => success({})),
   http.post(`${TAURI_ENDPOINT}/get_claude_desktop_default_routes`, () =>

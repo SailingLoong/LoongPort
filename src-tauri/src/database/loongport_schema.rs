@@ -370,7 +370,9 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                     set_version(conn, 27)
                 })();
                 if let Err(error) = result {
-                    conn.execute_batch("ROLLBACK TO qoder_http_auth_migration; RELEASE qoder_http_auth_migration")?;
+                    conn.execute_batch(
+                        "ROLLBACK TO qoder_http_auth_migration; RELEASE qoder_http_auth_migration",
+                    )?;
                     return Err(error);
                 }
                 conn.execute_batch("RELEASE qoder_http_auth_migration")?;
@@ -970,14 +972,17 @@ mod tests {
     // owner before the v27 subordinate column can be added. This is test-only;
     // production never manufactures a missing installed Provider table.
     fn provider_owner_for_http_migration(conn: &Connection) {
-        conn.execute_batch("CREATE TABLE providers (
+        conn.execute_batch(
+            "CREATE TABLE providers (
             id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
             settings_config TEXT NOT NULL DEFAULT '{}', available_models TEXT,
             website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER,
             notes TEXT, icon TEXT, icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}',
             is_current BOOLEAN NOT NULL DEFAULT 0, in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
             user_edited INTEGER NOT NULL DEFAULT 0, tier_rate_multiplier REAL,
-            PRIMARY KEY(id,app_type))").unwrap();
+            PRIMARY KEY(id,app_type))",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2462,7 +2467,10 @@ mod tests {
             .unwrap();
         apply(&conn).unwrap();
         apply(&conn).unwrap();
-        assert_eq!(read_stored_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+        assert_eq!(
+            read_stored_version(&conn).unwrap(),
+            LOONGPORT_SCHEMA_VERSION
+        );
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
                 .unwrap(),
