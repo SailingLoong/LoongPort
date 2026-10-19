@@ -239,7 +239,7 @@ struct TempHome {
 
 impl TempHome {
     fn new() -> Self {
-        let dir = TempDir::new().expect("failed to create temp home");
+        let dir = crate::secrets::testing::tempdir().expect("failed to create temp home");
         let original_home = std::env::var("HOME").ok();
         let original_userprofile = std::env::var("USERPROFILE").ok();
         let original_test_home = std::env::var("CC_SWITCH_TEST_HOME").ok();

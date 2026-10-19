@@ -1546,8 +1546,10 @@ mod check_diagnostic_tests {
                 )
             })
             .collect();
+        // A 5ms total deadline can expire before the runtime polls both hedge
+        // tasks on a loaded CI runner; 250ms keeps the cancel semantics intact.
         assert!(matches!(
-            policy::race_update_checks(checks, Duration::from_millis(5), |a, b| a > b).await,
+            policy::race_update_checks(checks, Duration::from_millis(250), |a, b| a > b).await,
             Err(CheckFailure::TimedOut)
         ));
         let events = events.lock().unwrap();
