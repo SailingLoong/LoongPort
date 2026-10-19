@@ -23,11 +23,18 @@ impl Fixture {
             session,
         }
     }
+    fn selected_path(&self, relative: &str) -> String {
+        // The temporary fixture root supplies the platform's absolute prefix.
+        // Begin records these synthetic paths only; it must not read them.
+        let path = self._root.path().join(relative);
+        assert!(path.is_absolute());
+        path.to_str().unwrap().to_owned()
+    }
     async fn begin(&self) -> FlowView {
         begin(
             &self.session,
-            "/synthetic/Trae/User/globalStorage/storage.json".into(),
-            "/synthetic/Trae/resources/app/product.json".into(),
+            self.selected_path("Trae/User/globalStorage/storage.json"),
+            self.selected_path("Trae/resources/app/product.json"),
             Realm::Sg,
         )
         .await
@@ -411,8 +418,8 @@ async fn foreign_vault_or_unsupported_selection_has_no_read_entry() {
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     assert!(begin(
         &f.session,
-        "/synthetic/storage.json".into(),
-        "/synthetic/product.json".into(),
+        f.selected_path("storage.json"),
+        f.selected_path("product.json"),
         Realm::Cn
     )
     .await
@@ -420,7 +427,7 @@ async fn foreign_vault_or_unsupported_selection_has_no_read_entry() {
     assert!(begin(
         &f.session,
         "relative/storage.json".into(),
-        "/synthetic/product.json".into(),
+        f.selected_path("product.json"),
         Realm::Sg
     )
     .await

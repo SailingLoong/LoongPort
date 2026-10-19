@@ -52,6 +52,9 @@ fn server(status: &str, headers: &str, body: &str) -> (String, std::thread::Join
             );
             std::thread::sleep(Duration::from_millis(5));
         };
+        // Windows accept inherits the listener's nonblocking mode. Restore
+        // blocking reads on the connected socket, still bounded by the timeout.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
