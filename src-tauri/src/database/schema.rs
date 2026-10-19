@@ -39,6 +39,12 @@ impl Database {
             crate::paperclip::bindings::validate_schema(conn)?;
             crate::paperclip::bindings::read_rows(conn)?;
         }
+        if loongport_version >= 26 {
+            crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
+        }
+        if loongport_version == 0 {
+            crate::database::dao::qoder_campaign_operations::create_schema(conn)?;
+        }
         // 1. Providers 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS providers (

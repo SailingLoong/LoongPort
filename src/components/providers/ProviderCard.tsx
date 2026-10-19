@@ -15,6 +15,7 @@ import type { OpenClawProviderConfig, Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import { authApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import { ProviderActions } from "@/components/providers/ProviderActions";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -630,6 +631,13 @@ export function ProviderCard({
           {/* 主按钮常驻、次要图标 hover 才显形 —— 那条分界线在 `ProviderActions`
               内部（主按钮在上、图标组自带 hover 组），这里不再整组包一层。 */}
           <div className="flex-shrink-0">
+            {appId === "codex" &&
+              provider.meta?.providerType === "qoder_sdk" && (
+                <QoderDailyClaim
+                  providerId={provider.id}
+                  disabled={mutationsDisabled}
+                />
+              )}
             <ProviderActions
               mutationsDisabled={mutationsDisabled}
               appId={appId}

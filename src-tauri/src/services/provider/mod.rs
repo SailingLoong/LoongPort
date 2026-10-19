@@ -21,6 +21,7 @@ pub(crate) mod model_settings;
 mod native;
 pub(crate) use native::service_configuration_revision;
 mod pi;
+pub(crate) mod qoder_daily;
 mod transaction;
 mod usage;
 pub(crate) use transaction::with_provider_config_transaction;

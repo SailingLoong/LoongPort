@@ -148,11 +148,12 @@ type PresetEntry = {
 
 function getPresetProviderType(
   preset: PresetEntry["preset"] | null | undefined,
-): "github_copilot" | "codex_oauth" | "xai_oauth" | undefined {
+): "github_copilot" | "codex_oauth" | "xai_oauth" | "qoder_sdk" | undefined {
   if (!preset || !("providerType" in preset)) return undefined;
   return preset.providerType === "github_copilot" ||
     preset.providerType === "codex_oauth" ||
-    preset.providerType === "xai_oauth"
+    preset.providerType === "xai_oauth" ||
+    preset.providerType === "qoder_sdk"
     ? preset.providerType
     : undefined;
 }
@@ -843,6 +844,10 @@ function ProviderFormFull({
   );
   const presetProviderType = getPresetProviderType(selectedPresetEntry?.preset);
   const initialProviderType = initialData?.meta?.providerType;
+  const isQoderProvider =
+    appId === "codex" &&
+    (presetProviderType === "qoder_sdk" ||
+      (!selectedPresetEntry && initialProviderType === "qoder_sdk"));
   const isCopilotProvider =
     appId === "claude" &&
     (presetProviderType === "github_copilot" ||
@@ -1729,7 +1734,9 @@ function ProviderFormFull({
         ? "codex_oauth"
         : isXaiOauthProvider
           ? "xai_oauth"
-          : undefined;
+          : isQoderProvider
+            ? "qoder_sdk"
+            : undefined;
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -2365,6 +2372,14 @@ function ProviderFormFull({
             />
           )}
 
+          {isQoderProvider && (
+            <p className="text-sm text-muted-foreground">
+              {t("qoderDaily.configNotice", {
+                defaultValue:
+                  "Qoder 国际版类型用于保留原生路由与独立积分入口。积分操作需另行声明国际 PAT 来源；这不代表 PAT 已验证可用于 SDK 推理。模型请按实际可用配置填写。设备组件来源未验证时不能领取。",
+              })}
+            </p>
+          )}
           {appId === "codex" && (
             <CodexFormFields
               providerId={providerId}

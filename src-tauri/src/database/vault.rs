@@ -47,9 +47,12 @@ pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
     {
         return Err(AppError::Config("secret.database_version_too_new".into()));
     }
-    if super::loongport_schema::read_stored_version(conn)? == 25 {
+    if super::loongport_schema::read_stored_version(conn)? >= 25 {
         crate::paperclip::bindings::validate_schema(conn)?;
         crate::paperclip::bindings::read_rows(conn)?;
+    }
+    if super::loongport_schema::read_stored_version(conn)? >= 26 {
+        crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     }
     if super::loongport_schema::read_stored_version(conn)? >= 24 && stored_metadata(conn)?.is_none()
     {
@@ -413,7 +416,7 @@ mod tests {
         let reopened = prepare(&path, &vault).unwrap();
         assert_eq!(
             super::super::loongport_schema::read_stored_version(&reopened).unwrap(),
-            25
+            super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         assert_eq!(
             Database::get_user_version(&reopened).unwrap(),

@@ -1901,6 +1901,8 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_provider_edit_settings,
+            commands::qoder_daily_claim_context,
+            commands::claim_qoder_daily_credits,
             commands::get_application_model_settings,
             commands::preview_application_model_settings,
             commands::confirm_application_model_settings,

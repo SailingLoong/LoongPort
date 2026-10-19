@@ -2483,3 +2483,37 @@ mod switch_command_result_wire_tests {
         );
     }
 }
+
+/// Read only non-secret generation/selection context; no credential is returned.
+#[tauri::command]
+pub async fn qoder_daily_claim_context(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+) -> Result<crate::services::provider::qoder_daily::ClaimContext, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        ProviderService::qoder_daily_claim_context(&state.db, &provider_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 状态任务失败".to_owned())?
+}
+/// Explicit foreground action only. Never used by chat, polling or usage refresh.
+#[tauri::command]
+pub async fn claim_qoder_daily_credits(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+    declaration: crate::services::provider::qoder_daily::http::PatDeclaration,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        ProviderService::prepare_qoder_daily_claim(&state.db, &provider_id, declaration)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 领取任务失败，请重新打开后仅查询结果".to_owned())?
+}

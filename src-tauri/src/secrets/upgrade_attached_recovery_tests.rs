@@ -604,7 +604,7 @@ fn original_attached_journal(
         database::loongport_schema::apply(&conn).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&conn).unwrap(),
-            25
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
     }
     // Release the connection mutex before entering the unchanged native owner.

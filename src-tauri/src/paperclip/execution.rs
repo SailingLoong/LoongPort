@@ -1137,6 +1137,11 @@ mod paperclip_admission_tests {
     }
     #[test]
     #[serial_test::serial]
+    fn paperclip_claimed_send_without_packet_timeout_never_replays() {
+        original_router_case(false, "claimed_without_packet");
+    }
+    #[test]
+    #[serial_test::serial]
     fn paperclip_original_router_failed_delivery_preserves_original_usage() {
         for mode in [
             "incomplete",
@@ -1194,8 +1199,46 @@ mod paperclip_admission_tests {
         finished.store(true, Ordering::Release);
         assert_eq!(owner.execution_result(b).unwrap()["status"], "unknown");
     }
+    fn drive_paused_until<T>(
+        clock: &tokio::runtime::Runtime,
+        mut observe: impl FnMut() -> Option<T>,
+    ) -> T {
+        let until = Instant::now() + Duration::from_secs(8);
+        clock.block_on(async {
+            let frozen = tokio::time::Instant::now();
+            loop {
+                assert_eq!(
+                    tokio::time::Instant::now(),
+                    frozen,
+                    "test clock advanced early"
+                );
+                if let Some(value) = observe() {
+                    return value;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "timed out waiting for test observation"
+                );
+                // Stay runnable while driving I/O: an idle paused runtime would
+                // auto-advance to the deadline before the real request arrives.
+                tokio::task::yield_now().await;
+            }
+        })
+    }
     fn original_router_case(skip_unfunded: bool, mode: &'static str) {
-        let (_home, rt, state, owner, mut p) = seeded();
+        let (_home, rt, state, mut owner, mut p) = seeded();
+        let timeout_case = matches!(mode, "timeout" | "claimed_without_packet");
+        let clock = timeout_case.then(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap()
+        });
+        if let Some(clock) = &clock {
+            owner.runtime = Some(clock.handle().clone());
+        }
+        let claimed_route = Arc::new(Mutex::new(None::<RouteBinding>));
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let received = count.clone();
         let (address,server)=rt.block_on(async move {
@@ -1210,7 +1253,7 @@ mod paperclip_admission_tests {
                 if mode == "zero_usage" { response["usage"]=json!({"input_tokens":0,"output_tokens":0,"total_tokens":0}); }
                 if mode == "missing_usage" { response.as_object_mut().unwrap().remove("usage"); }
                 if mode == "overrun" { response["usage"]["output_tokens"]=json!(1_000_000); response["usage"]["total_tokens"]=json!(1_000_010); }
-                if mode == "timeout" { tokio::time::sleep(Duration::from_millis(500)).await; }
+                if mode == "timeout" { std::future::pending::<()>().await; }
                 axum::Json(response)
             }});
             let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
@@ -1267,7 +1310,7 @@ mod paperclip_admission_tests {
                 .paperclip_install_original_test_server(mode != "logging_disabled"),
         );
         let mut t = super::super::tests::task();
-        t.timeout_ms = if mode == "timeout" { 100 } else { 5000 };
+        t.timeout_ms = if timeout_case { 100 } else { 5000 };
         let b = owner
             .bind_execution(json!({"scope":super::super::tests::scope(&owner),"task":t}))
             .unwrap();
@@ -1299,17 +1342,61 @@ mod paperclip_admission_tests {
             server.abort();
             return;
         }
-        owner
-            .start_execution(json!({"binding":b,"task":t}))
-            .unwrap();
-        let until = Instant::now() + Duration::from_secs(8);
-        let result = loop {
-            let r = owner.execution_result(b.clone()).unwrap();
-            if r["status"] != "accepted" {
-                break r;
+        if mode == "claimed_without_packet" {
+            let service = state.proxy_service.clone();
+            let provider = p.clone();
+            let observed = claimed_route.clone();
+            owner
+                .start_execution_with_until(
+                    json!({"binding":b,"task":t}),
+                    move |_, route| async move {
+                        route
+                            .before_send(&service, "codex", &provider, &body())
+                            .unwrap();
+                        *observed.lock().unwrap() = Some(route);
+                        // Admission is irreversible even if no packet is sent.
+                        std::future::pending::<Result<Value, AppError>>().await
+                    },
+                    Instant::now() + REQUEST_BUDGET,
+                )
+                .unwrap();
+        } else {
+            owner
+                .start_execution(json!({"binding":b,"task":t}))
+                .unwrap();
+        }
+        let result = if let Some(clock) = &clock {
+            drive_paused_until(clock, || {
+                if mode == "timeout" {
+                    (count.load(Ordering::SeqCst) > 0).then_some(())
+                } else {
+                    claimed_route.lock().unwrap().is_some().then_some(())
+                }
+            });
+            assert_eq!(
+                owner.execution_result(b.clone()).unwrap()["status"],
+                "accepted"
+            );
+            assert_eq!(count.load(Ordering::SeqCst), usize::from(mode == "timeout"));
+            // Only the observation above permits the original worker's actual
+            // timeout to expire; wall-clock scheduling cannot decide this case.
+            clock.block_on(tokio::time::advance(Duration::from_millis(
+                t.timeout_ms + 1,
+            )));
+            drive_paused_until(clock, || {
+                let result = owner.execution_result(b.clone()).unwrap();
+                (result["status"] != "accepted").then_some(result)
+            })
+        } else {
+            let until = Instant::now() + Duration::from_secs(8);
+            loop {
+                let r = owner.execution_result(b.clone()).unwrap();
+                if r["status"] != "accepted" {
+                    break r;
+                }
+                assert!(Instant::now() < until, "{r}");
+                thread::sleep(Duration::from_millis(10));
             }
-            assert!(Instant::now() < until, "{r}");
-            thread::sleep(Duration::from_millis(10));
         };
         if !matches!(mode, "success" | "zero_usage") {
             assert_eq!(
@@ -1358,8 +1445,34 @@ mod paperclip_admission_tests {
                     .unwrap(),
                 result
             );
-            thread::sleep(Duration::from_millis(600));
-            assert_eq!(count.load(Ordering::SeqCst), 1);
+            if timeout_case {
+                assert_eq!(result["reason"], "usage_or_outcome_unresolved");
+                assert!(result["output"].is_null(), "{result}");
+                assert!(result["outputDigest"].is_null(), "{result}");
+            }
+            if let Some(route) = claimed_route.lock().unwrap().as_ref() {
+                assert!(route.has_sent());
+                let error = route
+                    .before_send(&state.proxy_service, "codex", &p, &body())
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("outcome_unresolved_no_replay"),
+                    "{error}"
+                );
+            }
+            if let Some(clock) = &clock {
+                let until = Instant::now() + Duration::from_millis(600);
+                drive_paused_until(clock, || {
+                    assert_eq!(count.load(Ordering::SeqCst), usize::from(mode == "timeout"));
+                    (Instant::now() >= until).then_some(())
+                });
+            } else {
+                thread::sleep(Duration::from_millis(600));
+            }
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                usize::from(mode != "claimed_without_packet")
+            );
             owner.control.executions.stop().unwrap();
             server.abort();
             return;

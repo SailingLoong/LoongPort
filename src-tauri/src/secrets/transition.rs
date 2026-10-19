@@ -900,7 +900,9 @@ fn database_image(
     inventory::validate_database(&memory, next)?;
     Ok(memory)
 }
-// Only the original authenticated journal can carry the exact current tuple.
+// Only the original authenticated journal can carry its exact recorded tuple.
+// Keep the explicitly supported historical binding; a schema bump must not
+// reinterpret an already authenticated journal as a new-version operation.
 // A missing binding retains the legacy ceiling, including old recovery records.
 fn validate_database_version(
     conn: &Connection,
@@ -911,7 +913,7 @@ fn validate_database_version(
         return vault::preflight_connection(conn);
     };
     if binding.upstream != crate::database::UPSTREAM4_SCHEMA_VERSION
-        || binding.loongport != crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        || ![24, 25, 26].contains(&binding.loongport)
     {
         return Err(invalid());
     }
@@ -1651,14 +1653,39 @@ mod tests {
         }
     }
 
+    // Explicit historical shapes: current fixture creation must not silently
+    // turn a fixed v24/v25 identity test into a v26 test.
+    fn set_test_checkpoint_version(conn: &Connection, version: i32) {
+        assert!([24, 25, 26].contains(&version));
+        if version < 26 {
+            conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
+                .unwrap();
+        } else {
+            // Use the existing schema owner instead of crossing its private DAO.
+            crate::database::loongport_schema::apply(conn).unwrap();
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(conn).unwrap(),
+                version,
+                "the fixed v26 fixture must not follow a future schema target"
+            );
+        }
+        if version < 25 {
+            conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings")
+                .unwrap();
+        } else {
+            crate::paperclip::bindings::ensure_schema(conn).unwrap();
+        }
+        conn.execute(
+            "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+            [version],
+        )
+        .unwrap();
+    }
+
     fn publish_native_checkpoint(source_version: i32, image_version: i32, recorded_version: i32) {
         let fixture = Fixture::new();
         let device = crate::live::engine::DeviceStore::for_device();
-        if source_version == 24 {
-            fixture.db.conn.lock().unwrap().execute_batch(
-                "DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;",
-            ).unwrap();
-        }
+        set_test_checkpoint_version(&fixture.db.conn.lock().unwrap(), source_version);
         let vault = fixture.db.secrets.read().unwrap().clone();
         let source_digest = Database::content_digest(&fixture.db.conn.lock().unwrap()).unwrap();
         let id = crate::secrets::upgrade::checkpoint::create(&fixture.root, &device, &vault, &[])
@@ -1680,11 +1707,7 @@ mod tests {
                     &id,
                 )?;
                 if image_version != source_version {
-                    if image_version == 25 {
-                        crate::database::loongport_schema::apply(&image)?;
-                    } else {
-                        image.execute_batch("DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;")?;
-                    }
+                    set_test_checkpoint_version(&image, image_version);
                 }
                 Ok(image)
             },
@@ -1738,8 +1761,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn paperclip_transition_publishes_exact_authenticated_v24_and_v25_targets() {
-        for version in [24, 25] {
+    fn transition_publishes_exact_authenticated_v24_v25_v26_targets() {
+        for version in [24, 25, 26] {
             publish_native_checkpoint(version, version, version);
         }
     }
@@ -1747,8 +1770,55 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn paperclip_transition_rejects_changed_image_and_forged_checkpoint_versions() {
-        for (source, image, recorded) in [(24, 25, 24), (25, 24, 25), (24, 24, 25), (25, 25, 24)] {
+        for (source, image, recorded) in [
+            (24, 25, 24),
+            (25, 24, 25),
+            (24, 24, 25),
+            (25, 25, 24),
+            (25, 26, 25),
+            (26, 25, 26),
+            (26, 26, 27),
+        ] {
             publish_native_checkpoint(source, image, recorded);
+        }
+    }
+
+    #[test]
+    fn recorded_database_binding_versions_survive_native_schema_bumps() {
+        // Version admission only. MAC, roots, inode and content digest remain
+        // enforced by the existing original-journal replay owner and its tests.
+        for version in [24, 25, 26] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
+            conn.execute(
+                "INSERT INTO loongport_schema_version VALUES(1,?1)",
+                [version],
+            )
+            .unwrap();
+            let mut binding = DatabaseBinding {
+                upstream: 20,
+                loongport: version,
+                source_database: "synthetic-version-gate".into(),
+            };
+            validate_database_version(&conn, Some(&binding), true).unwrap();
+            binding.loongport = if version == 24 { 25 } else { 24 };
+            assert!(validate_database_version(&conn, Some(&binding), true).is_err());
+            binding.loongport = version;
+            binding.upstream = 17;
+            assert!(validate_database_version(&conn, Some(&binding), true).is_err());
+            binding.upstream = 20;
+            conn.execute_batch("PRAGMA user_version=19").unwrap();
+            assert!(validate_database_version(&conn, Some(&binding), true).is_err());
+        }
+        for version in [23, 27] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA user_version=20").unwrap();
+            let binding = DatabaseBinding {
+                upstream: 20,
+                loongport: version,
+                source_database: "synthetic-version-gate".into(),
+            };
+            assert!(validate_database_version(&conn, Some(&binding), true).is_err());
         }
     }
 
