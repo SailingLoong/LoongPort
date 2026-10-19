@@ -48,13 +48,29 @@ fn http_owner_pair(tag: &str) -> http_auth::TokenPair {
         expires_at_ms: HTTP_OWNER_NOW + 1,
     }
 }
+fn http_owner_reserve(
+    db: &Database,
+    declaration: &crate::services::provider::qoder_daily::http::PatDeclaration,
+) -> Result<http_auth::EstablishLease, AppError> {
+    let request = http_auth::IdentityActionRequest {
+        declaration: declaration.clone(),
+        action: http_auth::IdentityAction::Establish,
+    };
+    let http_auth::PreparedIdentityAction::Establish {
+        receipt,
+        confirmation,
+    } = db.qoder_http_prepare_identity_action(&request, HTTP_OWNER_NOW)?
+    else {
+        panic!("synthetic initial setup must reserve")
+    };
+    assert!(confirmation.is_none());
+    db.qoder_http_reserve_identity_action(receipt)
+}
 fn http_owner_ready(
     db: &Database,
     declaration: &crate::services::provider::qoder_daily::http::PatDeclaration,
 ) {
-    let lease = db
-        .qoder_http_begin_establish(declaration, http_auth::EstablishIntent::SameIdentity)
-        .unwrap();
+    let lease = http_owner_reserve(db, declaration).unwrap();
     db.qoder_http_publish_establish(
         &lease,
         http_auth::Established {
@@ -84,7 +100,7 @@ fn http_owner_real_file_restore_retires_every_state_even_ready_spent_after_backu
         let _settings = SettingsGuard::with_backup_retain_count(3);
         let declaration = http_owner_fixture(&db);
         if state == "establishing" {
-            db.qoder_http_begin_establish(&declaration, http_auth::EstablishIntent::SameIdentity)?;
+            http_owner_reserve(&db, &declaration)?;
         } else {
             http_owner_ready(&db, &declaration);
             if state != "ready" {

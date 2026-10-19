@@ -2521,7 +2521,7 @@ pub async fn claim_qoder_daily_credits(
 /// Safe original-Provider status only. Closed admission is enforced before even
 /// obtaining application state, including a direct IPC invocation.
 #[tauri::command]
-pub async fn qoder_http_identity_context<R: tauri::Runtime>(
+pub(crate) async fn qoder_http_identity_context<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     provider_id: String,
 ) -> crate::services::provider::qoder_http_auth::IdentityContext {
@@ -2544,7 +2544,7 @@ pub async fn qoder_http_identity_context<R: tauri::Runtime>(
 /// One explicit foreground action. Only exceptional recovery/rebind uses a
 /// native confirmation, and the original owner retains its private receipt.
 #[tauri::command]
-pub async fn qoder_http_identity_action<R: tauri::Runtime>(
+pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     request: crate::services::provider::qoder_http_auth::IdentityActionRequest,
 ) -> crate::services::provider::qoder_http_auth::IdentityActionResult {

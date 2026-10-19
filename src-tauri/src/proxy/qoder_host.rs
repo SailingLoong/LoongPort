@@ -126,7 +126,9 @@ impl QoderHost {
         false
     }
     pub(crate) async fn close_and_reap(&mut self) -> Result<(), HostError> {
-        // Closing stdin is a cancellation signal in the per-request worker.
+        // Ask the same per-request worker to abort before closing its input.
+        // A blocked pipe cannot hold cleanup indefinitely; EOF remains the fallback.
+        let _ = tokio::time::timeout(STOP_GRACE, self.cancel()).await;
         self.stop().await;
         if self.child.is_none() && self.reaped_successfully.is_some() {
             Ok(())
@@ -303,6 +305,22 @@ mod tests {
             cancelled |= e["status"] == "cancelled";
         }
         assert!(cancelled);
+    }
+    #[tokio::test]
+    async fn explicit_close_sends_cancel_and_confirms_child_reaping() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("explicit-close");
+        let mut r = request();
+        r["options"]["syntheticMarker"] = json!(marker);
+        let mut h = QoderHost::start(&config("cancel.mjs"), &r).await.unwrap();
+        assert!(next(&mut h).await.unwrap().is_some());
+        h.close_and_reap().await.unwrap();
+        assert!(h.cancel_sent);
+        assert!(h.child.is_none());
+        assert!(h.reaped_successfully.is_some());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "closed");
+        h.close_and_reap().await.unwrap();
+        assert!(!h.cancel().await.unwrap());
     }
     #[tokio::test]
     async fn source_failure_reaches_host_without_private_error() {
