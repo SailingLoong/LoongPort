@@ -1,0 +1,8 @@
+# cargo-nextest 的仓级配置（nextest 会从 workspace 根的 .config/nextest.toml 读）。
+#
+# CI 档重试只兜「时序型偶发」——本仓实测过的场景：满载 runner 上进程启动
+# 慢过测试预算（诊断探针、更新检查竞速类）。一致性失败连挂三次仍然会红，
+# 重试不是修根的替代品：真 flake 按惯例还是要修（见 misc.rs / app_update.rs
+# 的先例）。本地默认跑（无 --profile ci）不重试，坏就是坏。
+[profile.ci]
+retries = 2
