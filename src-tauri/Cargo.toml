@@ -214,7 +214,6 @@ debug = false
 
 # Optimize release binary size to help reduce AppImage footprint
 [profile.release]
-codegen-units = 1
 lto = "thin"
 opt-level = "s"
 # 使用 unwind 以便 panic hook 能捕获 backtrace（abort 会直接终止无法捕获）
