@@ -52,6 +52,9 @@ impl LocalServer {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
                 let request = read_request(&mut stream);
                 captured.lock().unwrap().push(request);
                 let Some(reply) = replies.next() else {
@@ -86,8 +89,12 @@ impl LocalServer {
     fn transport(&self) -> FixedInternationalTransport {
         FixedInternationalTransport::synthetic_server(self.url.clone()).unwrap()
     }
-    fn finish(mut self) -> Vec<Seen> {
-        self.thread.take().unwrap().join().unwrap();
+    async fn finish(mut self) -> Vec<Seen> {
+        // Let the current-thread runtime finish dropping rejected HTTP responses.
+        let thread = self.thread.take().unwrap();
+        tokio::task::spawn_blocking(move || thread.join().unwrap())
+            .await
+            .unwrap();
         Arc::try_unwrap(self.seen)
             .ok()
             .unwrap()
@@ -200,7 +207,7 @@ async fn fixed_exchange_and_userinfo_match_proven_paths_methods_bodies_and_heade
         .unwrap();
     assert_eq!(result.uid, "1234");
     assert_eq!(result.tokens.access_token, "synthetic-access");
-    let requests = server.finish();
+    let requests = server.finish().await;
     assert_eq!(requests.len(), 2);
     assert!(requests[0]
         .head
@@ -236,7 +243,7 @@ async fn fixed_refresh_spends_exactly_one_body_without_pat_bearer_or_userinfo() 
         .await
         .unwrap();
     assert_eq!(result.access_token, "synthetic-new-access");
-    let requests = server.finish();
+    let requests = server.finish().await;
     assert_eq!(requests.len(), 1);
     assert!(requests[0]
         .head
@@ -286,7 +293,7 @@ async fn refused_refresh_remains_unknown_and_never_falls_back_to_pat_exchange() 
     assert!(acquire(&db, &selected_provider(&db), &transport, || now)
         .await
         .is_err());
-    let requests = server.finish();
+    let requests = server.finish().await;
     assert_eq!(requests.len(), 1);
     assert!(requests[0].head.contains("/jobtoken/refresh"));
 }
@@ -302,7 +309,7 @@ async fn redirect_is_not_followed_or_retried() {
         .exchange_and_identify("synthetic-pat", &machine())
         .await
         .is_err());
-    assert_eq!(server.finish().len(), 1);
+    assert_eq!(server.finish().await.len(), 1);
 }
 #[tokio::test]
 async fn partial_refresh_body_stays_unknown_without_replay() {
@@ -315,7 +322,7 @@ async fn partial_refresh_body_stays_unknown_without_replay() {
         .refresh("synthetic-refresh", &identity())
         .await
         .is_err());
-    assert_eq!(server.finish().len(), 1);
+    assert_eq!(server.finish().await.len(), 1);
 }
 #[tokio::test]
 async fn missing_uid_does_not_publish_an_unbound_token() {
@@ -346,7 +353,7 @@ async fn missing_uid_does_not_publish_an_unbound_token() {
     assert!(db
         .qoder_http_acquire(&source(&db), chrono::Utc::now().timestamp_millis())
         .is_err());
-    assert_eq!(server.finish().len(), 2);
+    assert_eq!(server.finish().await.len(), 2);
 }
 #[tokio::test]
 async fn oversized_response_is_rejected_without_identity_request() {
@@ -360,7 +367,24 @@ async fn oversized_response_is_rejected_without_identity_request() {
         .exchange_and_identify("synthetic-pat", &machine())
         .await
         .is_err());
-    assert_eq!(server.finish().len(), 1);
+    assert_eq!(server.finish().await.len(), 1);
+}
+#[tokio::test]
+async fn unread_response_server_has_bounded_write_and_is_joined() {
+    let server = LocalServer::start(vec![Reply {
+        status: 200,
+        headers: String::new(),
+        body: "x".repeat(16 * MAX_BYTES),
+    }]);
+    // Keep the peer alive without reading, exercising server-side backpressure.
+    let mut peer = TcpStream::connect(server.url.socket_addrs(|| None).unwrap()[0]).unwrap();
+    peer.write_all(b"POST /synthetic HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
+    let requests = tokio::time::timeout(Duration::from_secs(5), server.finish())
+        .await
+        .expect("the write deadline must let the actual server thread join");
+    assert_eq!(requests.len(), 1);
+    drop(peer);
 }
 #[test]
 fn source_expiry_units_aliases_and_optional_refresh_are_explicit() {
