@@ -294,6 +294,57 @@ fn available_version(result: crate::services::app_update::AppUpdateCheckResult) 
     }
 }
 
+/// 生成不与现存目录冲突的备份兄弟路径：`<原名>.backup-<本地时间戳>[-N]`。
+fn backup_dir_sibling(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let name = dir
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("app data directory has no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let parent = dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other("app data directory has no parent"))?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut candidate = parent.join(format!("{name}.backup-{stamp}"));
+    let mut suffix = 1u32;
+    while candidate.exists() {
+        candidate = parent.join(format!("{name}.backup-{stamp}-{suffix}"));
+        suffix += 1;
+    }
+    Ok(candidate)
+}
+
+/// 把整个应用数据目录一次性改名到备份路径。不删除任何内容；调用前提是
+/// 目录内没有打开的句柄（见 [`quarantine_app_data_and_restart`] 的守卫）。
+fn quarantine_dir_once(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let backup = backup_dir_sibling(dir)?;
+    std::fs::rename(dir, &backup)?;
+    Ok(backup)
+}
+
+/// 「数据库版本过新」恢复界面的逃生门：把应用数据目录整体改名隔离为带
+/// 时间戳的备份，然后重启应用（等价于全新首启）。适合确认要留在当前旧版本
+/// 的用户；升级到新版后仍可从备份目录手动找回数据（自动恢复另案，不在本命令）。
+#[tauri::command]
+pub async fn quarantine_app_data_and_restart(app: AppHandle) -> Result<(), String> {
+    // 仅允许在「数据库过新」恢复态调用：这条路径上应用从未打开数据库/日志，
+    // 配置目录内没有打开的句柄，改名是原子的；正常运行态半数文件被占用
+    // （Windows 尤其必然失败），直接拒绝而不是留下半个搬走的状态。
+    let in_recovery = crate::init_status::get_init_error()
+        .and_then(|payload| payload.kind)
+        .is_some_and(|kind| kind == "db_version_too_new");
+    if !in_recovery {
+        return Err("recovery_only".into());
+    }
+    let dir = crate::config::get_app_config_dir();
+    let backup = tauri::async_runtime::spawn_blocking(move || quarantine_dir_once(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("quarantine failed: {e}"))?;
+    log::info!("✓ App data quarantined to {}", backup.display());
+    crate::restart_process(&app)
+}
+
 /// Check for an application update and return the backend-owned update facts.
 #[tauri::command]
 pub async fn check_app_update(
@@ -334,7 +385,46 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{available_version, merge_settings_for_save};
+    use super::{
+        available_version, backup_dir_sibling, merge_settings_for_save, quarantine_dir_once,
+    };
+
+    #[test]
+    fn quarantine_moves_the_whole_directory_and_never_deletes_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("loongport-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "site data").unwrap();
+        let backup = quarantine_dir_once(&dir).unwrap();
+        assert!(!dir.exists(), "original directory must be moved away");
+        assert!(backup.starts_with(parent.path()));
+        assert_eq!(
+            std::fs::read_to_string(backup.join("marker.txt")).unwrap(),
+            "site data"
+        );
+    }
+
+    #[test]
+    fn quarantine_refuses_a_missing_directory_instead_of_inventing_a_backup() {
+        let parent = tempfile::tempdir().unwrap();
+        let err = quarantine_dir_once(&parent.path().join("no-such-dir")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(parent.path().read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn backup_sibling_never_returns_an_existing_path() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("loongport-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = backup_dir_sibling(&dir).unwrap();
+        // 占住第一次给出的名字，再要一个：必须避开现存路径（同一秒靠 -N，
+        // 跨秒靠新时间戳，两者都满足「不返回已存在路径」这一不变式）。
+        std::fs::create_dir_all(&first).unwrap();
+        let second = backup_dir_sibling(&dir).unwrap();
+        assert_ne!(first, second);
+        assert!(!second.exists());
+    }
 
     #[test]
     fn explicit_sharing_choice_completes_pending_decision_without_changing_other_preference() {

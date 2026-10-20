@@ -1977,7 +1977,11 @@
     "retry": "重试升级",
     "openReleases": "打开发布页",
     "openConfigDir": "打开配置目录",
-    "quit": "退出"
+    "quit": "退出",
+    "startFresh": "保留备份，重新开始",
+    "startFreshTitle": "留在此版本，重新开始？",
+    "startFreshBody": "全部数据（站点、密钥、设置）会保留为带时间戳的备份目录，应用随后以全新状态启动。仅建议在确认要继续使用当前版本时选择。",
+    "startFreshConfirm": "保留备份并重启"
   },
   "errors": {
     "usage_query_failed": "用量查询失败",
