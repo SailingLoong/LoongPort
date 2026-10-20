@@ -496,6 +496,35 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::Mutex;
 
+    #[derive(Debug)]
+    struct CapturedRequest {
+        path_and_query: String,
+        authorization: Option<String>,
+        body: Value,
+    }
+
+    /// Windows 上监听 socket 不能被子进程继承：从 CC Switch 拉起的终端、CLI 一旦继承它，
+    /// 退出后端口仍被占着，下次启动报 os error 10048（#8552）。mio 1.2.1 起才带
+    /// WSA_FLAG_NO_HANDLE_INHERIT，这里防止 Cargo.lock 退回旧版本。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listener_socket_is_not_inheritable_on_windows() {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let mut flags = 0u32;
+        let ok = unsafe { GetHandleInformation(listener.as_raw_socket() as HANDLE, &mut flags) };
+        assert_ne!(ok, 0, "GetHandleInformation failed");
+        assert_eq!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "listener socket is inheritable"
+        );
+    }
+
     /// Full product router/RequestContext/auth boundary. Run with an isolated
     /// CC_SWITCH_TEST_HOME; this test never needs an SDK or a real account.
     #[tokio::test]
@@ -698,13 +727,6 @@ mod tests {
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
         assert_eq!(value["error"]["code"], "unsupported_qoder_input");
-    }
-
-    #[derive(Debug)]
-    struct CapturedRequest {
-        path_and_query: String,
-        authorization: Option<String>,
-        body: Value,
     }
 
     /// 端到端自愈：严格三方 Responses 网关对 codex 私有工具载体回 400 整单
