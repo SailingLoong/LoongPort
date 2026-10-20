@@ -1977,7 +1977,11 @@
     "retry": "Retry upgrade",
     "openReleases": "Open releases page",
     "openConfigDir": "Open config folder",
-    "quit": "Quit"
+    "quit": "Quit",
+    "startFresh": "Restart with a backup",
+    "startFreshTitle": "Stay on this version and start fresh?",
+    "startFreshBody": "All data — sites, keys and settings — is kept as a timestamped backup folder, and the app restarts as new. Only choose this if you intend to keep using the current version.",
+    "startFreshConfirm": "Keep backup and restart"
   },
   "errors": {
     "usage_query_failed": "Usage query failed",

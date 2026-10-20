@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Loader2,
   AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { OFFICIAL_WEBSITE } from "@/config/constants";
@@ -58,6 +59,9 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   const [availableVersion, setAvailableVersion] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // 「保留备份，重新开始」的两步确认与执行中状态
+  const [freshConfirm, setFreshConfirm] = useState(false);
+  const [freshBusy, setFreshBusy] = useState(false);
   const unlistenRef = useRef<(() => void) | null>(null);
   const requestRef = useRef<string | null>(null);
 
@@ -138,6 +142,21 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
       requestRef.current = null;
       unlistenRef.current?.();
       unlistenRef.current = null;
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setPhase("error");
+    }
+  }, []);
+
+  // 逃生门：数据目录整体隔离为备份后重启（等价全新首启）。
+  // 成功时后端直接重启进程、本 await 不会返回；只有失败会走 catch。
+  const startFresh = useCallback(async () => {
+    setFreshBusy(true);
+    try {
+      await invoke("quarantine_app_data_and_restart");
+      setFreshBusy(false);
+    } catch (e) {
+      setFreshBusy(false);
+      setFreshConfirm(false);
       setErrorMsg(e instanceof Error ? e.message : String(e));
       setPhase("error");
     }
@@ -276,10 +295,43 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
           </p>
         )}
 
+        {freshConfirm && (
+          <div className="space-y-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-sm dark:border-amber-500/40 dark:bg-amber-950/40">
+            <p className="font-medium text-amber-800 dark:text-amber-300">
+              {t("dbUpgrade.startFreshTitle", "留在此版本，重新开始？")}
+            </p>
+            <p className="leading-relaxed text-muted-foreground">
+              {t(
+                "dbUpgrade.startFreshBody",
+                "全部数据（站点、密钥、设置）会保留为带时间戳的备份目录，应用随后以全新状态启动。仅建议在确认要继续使用当前版本时选择。",
+              )}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => setFreshConfirm(false)}
+                disabled={freshBusy}
+              >
+                {t("common.cancel", "取消")}
+              </Button>
+              <Button
+                variant="destructive"
+                className="gap-2"
+                onClick={() => void startFresh()}
+                disabled={freshBusy}
+              >
+                {freshBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                {t("dbUpgrade.startFreshConfirm", "保留备份并重启")}
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-2">
           {(phase === "upgradable" || phase === "error") && (
             <Button
               onClick={startUpgrade}
+              disabled={freshBusy}
               className="gap-2 bg-amber-500 text-white hover:bg-amber-600"
             >
               {phase === "error" ? (
@@ -310,17 +362,27 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
             variant="outline"
             className="gap-2"
             onClick={() => void invoke("open_app_config_folder")}
-            disabled={phase === "updating"}
+            disabled={phase === "updating" || freshBusy}
           >
             <FolderOpen className="h-4 w-4" />
             {t("dbUpgrade.openConfigDir", "打开配置目录")}
           </Button>
 
           <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => setFreshConfirm(true)}
+            disabled={phase === "updating" || phase === "checking" || freshBusy}
+          >
+            <RotateCcw className="h-4 w-4" />
+            {t("dbUpgrade.startFresh", "保留备份，重新开始")}
+          </Button>
+
+          <Button
             variant="ghost"
             className="ml-auto text-muted-foreground"
             onClick={() => void exit(0)}
-            disabled={phase === "updating"}
+            disabled={phase === "updating" || freshBusy}
           >
             {t("dbUpgrade.quit", "退出")}
           </Button>
