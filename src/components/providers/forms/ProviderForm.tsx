@@ -250,6 +250,7 @@ export interface ProviderFormProps {
   /** Observes the original draft; never owns another editable copy. */
   onDraftRevisionChange?: (revision: number) => void;
   preserveBlankCredential?: boolean;
+  initialPresetName?: string;
   initialData?: {
     name?: string;
     websiteUrl?: string;
@@ -290,6 +291,7 @@ function ProviderFormFull({
   onSubmittingChange,
   onDraftRevisionChange,
   preserveBlankCredential = false,
+  initialPresetName,
   initialData,
   showButtons = true,
   isProxyTakeover = false,
@@ -2133,6 +2135,17 @@ function ProviderFormFull({
       iconColor: preset.iconColor ?? "",
     });
   };
+
+  const initialPresetApplied = useRef(false);
+  useEffect(() => {
+    if (!initialPresetName || initialData || initialPresetApplied.current)
+      return;
+    initialPresetApplied.current = true;
+    const entry = presetEntries.find(
+      (item) => item.preset.name === initialPresetName,
+    );
+    if (entry) handlePresetChange(entry.id);
+  }, [initialPresetName, initialData, presetEntries]);
 
   const settingsConfigErrorField = (
     <FormField

@@ -9,6 +9,7 @@ import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AddProviderForm } from "@/components/providers/AddProviderForm";
 import type { ProviderFormValues } from "@/components/providers/forms/ProviderForm";
+import { universalProvidersApi } from "@/lib/api";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 
 vi.mock("@/components/ui/dialog", () => ({
@@ -74,6 +75,22 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
 vi.mock("@/components/providers/AuthSettingsPanel", () => ({
   AuthSettingsPanel: ({ target }: { target: string | null }) =>
     target ? <div data-testid="auth-settings-panel">{target}</div> : null,
+}));
+
+vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
+  UniversalProviderFormModal: ({ onSave, isOpen, onClose }: any) => (
+    <>
+      {isOpen && <input aria-label="New universal draft" />}
+      <button
+        onClick={() => {
+          onSave({ id: "synthetic-universal" });
+          onClose();
+        }}
+      >
+        Save universal test
+      </button>
+    </>
+  ),
 }));
 
 describe("AddProviderForm", () => {
@@ -337,4 +354,161 @@ context_window = 500000
     act(() => staleCallback?.(true));
     expect(reopenedButton).toBeDisabled();
   });
+});
+
+it("announces universal save start before API work, including its independent save path", async () => {
+  const order: string[] = [];
+  const upsert = vi
+    .spyOn(universalProvidersApi, "upsert")
+    .mockImplementation(async () => {
+      order.push("upsert");
+      return true;
+    });
+  const sync = vi
+    .spyOn(universalProvidersApi, "sync")
+    .mockResolvedValue(undefined as never);
+  const done = vi.fn();
+  render(
+    <AddProviderForm
+      appId="codex"
+      onSubmit={vi.fn()}
+      onSaveStart={() => order.push("start")}
+      onDone={done}
+    />,
+  );
+  fireEvent.click(screen.getByText("Save universal test"));
+  await waitFor(() => expect(done).toHaveBeenCalledWith("saved", 1));
+  expect(order).toEqual(["start", "upsert"]);
+  upsert.mockRestore();
+  sync.mockRestore();
+});
+
+it("retains each universal save's own navigation epoch across overlapping requests", async () => {
+  const resolves: Array<() => void> = [];
+  const upsert = vi
+    .spyOn(universalProvidersApi, "upsert")
+    .mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => resolves.push(() => resolve(true))),
+    );
+  const sync = vi
+    .spyOn(universalProvidersApi, "sync")
+    .mockResolvedValue(undefined as never);
+  let epoch = 10;
+  const done = vi.fn();
+  render(
+    <AddProviderForm
+      appId="codex"
+      onSubmit={vi.fn()}
+      onSaveStart={() => epoch++}
+      onDone={done}
+    />,
+  );
+  fireEvent.click(screen.getByText("Save universal test"));
+  fireEvent.click(screen.getByText("Save universal test"));
+  await act(async () => resolves[0]());
+  expect(done).toHaveBeenLastCalledWith("saved", 10);
+  await act(async () => resolves[1]());
+  expect(done).toHaveBeenLastCalledWith("saved", 11);
+  upsert.mockRestore();
+  sync.mockRestore();
+});
+
+it("does not close or navigate away from a newer universal draft when an old save completes", async () => {
+  let resolveSave!: () => void;
+  const upsert = vi.spyOn(universalProvidersApi, "upsert").mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        resolveSave = () => resolve(true);
+      }),
+  );
+  const sync = vi
+    .spyOn(universalProvidersApi, "sync")
+    .mockResolvedValue(undefined as never);
+  const done = vi.fn();
+  render(<AddProviderForm appId="codex" onSubmit={vi.fn()} onDone={done} />);
+  fireEvent.mouseDown(
+    screen.getByRole("tab", { name: "provider.tabUniversal" }),
+    { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
+  );
+  fireEvent.click(screen.getAllByText("Save universal test").at(-1)!);
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
+  );
+  fireEvent.change(screen.getByLabelText("New universal draft"), {
+    target: { value: "keep my newer draft" },
+  });
+  await act(async () => resolveSave());
+  expect(screen.getByLabelText("New universal draft")).toHaveValue(
+    "keep my newer draft",
+  );
+  expect(done).not.toHaveBeenCalled();
+  upsert.mockRestore();
+  sync.mockRestore();
+});
+
+it("ignores an old universal save after switching to the app-specific draft", async () => {
+  let resolveSave!: () => void;
+  const upsert = vi.spyOn(universalProvidersApi, "upsert").mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        resolveSave = () => resolve(true);
+      }),
+  );
+  const sync = vi
+    .spyOn(universalProvidersApi, "sync")
+    .mockResolvedValue(undefined as never);
+  const done = vi.fn();
+  render(<AddProviderForm appId="codex" onSubmit={vi.fn()} onDone={done} />);
+  fireEvent.mouseDown(
+    screen.getByRole("tab", { name: "provider.tabUniversal" }),
+    { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(screen.getAllByText("Save universal test").at(-1)!);
+  fireEvent.mouseDown(screen.getByRole("tab", { name: /apps.codex/ }), {
+    button: 0,
+    ctrlKey: false,
+  });
+  await act(async () => resolveSave());
+  expect(done).not.toHaveBeenCalled();
+  upsert.mockRestore();
+  sync.mockRestore();
+});
+
+it("ignores an old app-specific save after opening a universal draft", async () => {
+  mockFormReady = true;
+  mockFormValues = {
+    name: "Old draft",
+    websiteUrl: "",
+    settingsConfig: JSON.stringify({ auth: {}, config: "" }),
+  };
+  let resolveSave!: () => void;
+  const submit = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        resolveSave = resolve;
+      }),
+  );
+  const done = vi.fn();
+  render(<AddProviderForm appId="codex" onSubmit={submit} onDone={done} />);
+  fireEvent.click(screen.getByRole("button", { name: "common.add" }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+  fireEvent.mouseDown(
+    screen.getByRole("tab", { name: "provider.tabUniversal" }),
+    { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
+  );
+  fireEvent.change(screen.getByLabelText("New universal draft"), {
+    target: { value: "keep universal draft" },
+  });
+  await act(async () => resolveSave());
+  expect(done).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("New universal draft")).toHaveValue(
+    "keep universal draft",
+  );
 });

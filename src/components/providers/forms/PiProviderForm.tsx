@@ -392,6 +392,7 @@ export function PiProviderForm({
   onSubmittingChange,
   onSubmitReadyChange,
   initialData,
+  initialPresetName,
   showButtons = true,
 }: ProviderFormProps) {
   const { t } = useTranslation();
@@ -839,6 +840,17 @@ export function PiProviderForm({
     setExpandedModelKeys(new Set());
     setExpandedThinkingMapKeys(new Set());
   };
+
+  const initialPresetApplied = useRef(false);
+  useEffect(() => {
+    if (!initialPresetName || initialData || initialPresetApplied.current)
+      return;
+    initialPresetApplied.current = true;
+    const entry = presetEntries.find(
+      (item) => item.preset.name === initialPresetName,
+    );
+    if (entry) selectPreset(entry.id);
+  }, [initialPresetName, initialData, presetEntries]);
 
   const updateModelOverride = (
     key: string,

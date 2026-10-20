@@ -1,3 +1,7 @@
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
 import React from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -27,12 +31,14 @@ import { useXaiOauth } from "./hooks/useXaiOauth";
 
 interface XaiOAuthSectionProps {
   className?: string;
+  unified?: boolean;
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
 }
 
 export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
   className,
+  unified = false,
   selectedAccountId,
   onAccountSelect,
 }) => {
@@ -153,62 +159,95 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
             {t("xaiOauth.accounts", "xAI 账号")}
           </Label>
           <div className="space-y-1">
-            {accounts.map((account) => (
-              <div
-                key={account.id}
-                className="flex items-center justify-between rounded-md border bg-muted/30 p-2"
+            {
+              <AccountWorkspace
+                accounts={accounts}
+                label={(account) => account.login}
+                enabled={unified}
               >
-                <div className="flex min-w-0 items-center gap-2">
-                  {account.requires_reauth ? (
-                    <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
-                  ) : (
-                    <User className="h-5 w-5 shrink-0 text-muted-foreground" />
-                  )}
-                  <span className="truncate text-sm font-medium">
-                    {account.login}
-                  </span>
-                  {defaultAccountId === account.id && (
-                    <Badge variant="secondary" className="text-xs">
-                      {t("xaiOauth.defaultAccount", "默认")}
-                    </Badge>
-                  )}
-                  {account.requires_reauth && (
-                    <Badge
-                      variant="outline"
-                      className="border-amber-500 text-xs text-amber-600"
+                {(account) => {
+                  const nativeAuthorization = (
+                    <div
+                      key={account.id}
+                      className="flex items-center justify-between rounded-md border bg-muted/30 p-2"
                     >
-                      {t("xaiOauth.expired", "凭据已失效")}
-                    </Badge>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
-                  {!account.requires_reauth &&
-                    defaultAccountId !== account.id && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        disabled={isSettingDefaultAccount}
-                        onClick={() => setDefaultAccount(account.id)}
-                      >
-                        {t("xaiOauth.setAsDefault", "设为默认")}
-                      </Button>
-                    )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-red-500"
-                    disabled={isRemovingAccount}
-                    onClick={(event) => remove(account.id, event)}
-                    title={t("xaiOauth.removeAccount", "移除账号")}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            ))}
+                      <div className="flex min-w-0 items-center gap-2">
+                        {account.requires_reauth ? (
+                          <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+                        ) : (
+                          <User className="h-5 w-5 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="truncate text-sm font-medium">
+                          {account.login}
+                        </span>
+                        {defaultAccountId === account.id && (
+                          <Badge variant="secondary" className="text-xs">
+                            {t("xaiOauth.defaultAccount", "默认")}
+                          </Badge>
+                        )}
+                        {account.requires_reauth && (
+                          <Badge
+                            variant="outline"
+                            className="border-amber-500 text-xs text-amber-600"
+                          >
+                            {t("xaiOauth.expired", "凭据已失效")}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {!account.requires_reauth &&
+                          defaultAccountId !== account.id && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              disabled={isSettingDefaultAccount}
+                              onClick={() => setDefaultAccount(account.id)}
+                            >
+                              {t("xaiOauth.setAsDefault", "设为默认")}
+                            </Button>
+                          )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-red-500"
+                          disabled={isRemovingAccount}
+                          onClick={(event) => remove(account.id, event)}
+                          title={t("xaiOauth.removeAccount", "移除账号")}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                  if (!unified) return nativeAuthorization;
+                  return (
+                    <AccountDetailSections
+                      authorization={
+                        <>
+                          {nativeAuthorization}
+                          <p className="text-xs text-muted-foreground">
+                            账号记录与默认选择不等于实际请求已通过。
+                          </p>
+                        </>
+                      }
+                      entitlements={
+                        <p className="text-xs text-muted-foreground">
+                          此账号页未提供xAI的签到领取或完整权益查询能力。未知不会显示为零，也不会套用其他平台的奖励。
+                        </p>
+                      }
+                      inference={
+                        <p className="text-xs text-muted-foreground">
+                          真实推理消费尚未验收。模型与流式请求需通过原应用入口独立验证。
+                        </p>
+                      }
+                    />
+                  );
+                }}
+              </AccountWorkspace>
+            }
           </div>
         </div>
       )}

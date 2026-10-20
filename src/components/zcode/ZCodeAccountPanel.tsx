@@ -1,4 +1,8 @@
 import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -78,9 +82,11 @@ async function passive<T>(operation: () => Promise<T>): Promise<T> {
 /** Selection is ephemeral; native admission and account identity stay in Rust. */
 export function ZCodeAccountPanel({
   disabled = false,
+  unified = false,
   onBusyChange,
 }: {
   disabled?: boolean;
+  unified?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const { t } = useTranslation();
@@ -1361,180 +1367,226 @@ export function ZCodeAccountPanel({
             <h4 className="text-sm font-medium">
               {family === "zai" ? "Z.ai" : "BigModel"}
             </h4>
-            {shownCatalog.profiles
-              .filter((profile) => profile.family === family)
-              .map((profile) => (
-                <Card key={profile.id}>
-                  <CardContent className="flex flex-wrap items-center justify-between gap-3 p-3">
-                    <div className="min-w-0">
-                      <p className="break-all text-sm">
-                        {profile.label ?? profile.id}
-                      </p>
-                      <p className="break-all text-xs text-muted-foreground">
-                        {profile.id}
-                      </p>
-                      {profile.officialLabel &&
-                        profile.officialLabel !== profile.label && (
-                          <p className="text-xs text-muted-foreground">
-                            {profile.officialLabel}
+            {
+              <AccountWorkspace
+                accounts={shownCatalog.profiles.filter(
+                  (profile) => profile.family === family,
+                )}
+                label={(profile) => profile.label ?? profile.id}
+                enabled={unified}
+              >
+                {(profile) => {
+                  const nativeAuthorization = (
+                    <Card key={profile.id}>
+                      <CardContent className="flex flex-wrap items-center justify-between gap-3 p-3">
+                        <div className="min-w-0">
+                          <p className="break-all text-sm">
+                            {profile.label ?? profile.id}
                           </p>
-                        )}
-                      {profile.identitySource && (
-                        <p className="text-xs text-muted-foreground">
-                          {profile.identitySource === "officialLogin"
-                            ? copy("identityOfficialLogin", "Official sign-in")
-                            : profile.identitySource === "nativeCapture"
+                          <p className="break-all text-xs text-muted-foreground">
+                            {profile.id}
+                          </p>
+                          {profile.officialLabel &&
+                            profile.officialLabel !== profile.label && (
+                              <p className="text-xs text-muted-foreground">
+                                {profile.officialLabel}
+                              </p>
+                            )}
+                          {profile.identitySource && (
+                            <p className="text-xs text-muted-foreground">
+                              {profile.identitySource === "officialLogin"
+                                ? copy(
+                                    "identityOfficialLogin",
+                                    "Official sign-in",
+                                  )
+                                : profile.identitySource === "nativeCapture"
+                                  ? copy(
+                                      "identityNativeCapture",
+                                      "Captured native session",
+                                    )
+                                  : copy(
+                                      "identityPackageDeclared",
+                                      "Declared by account bundle",
+                                    )}
+                            </p>
+                          )}
+                          {currentIdentity?.id === profile.id && (
+                            <p className="text-xs text-blue-600">
+                              {copy(
+                                "currentNativeMarker",
+                                "Current native identity at last explicit read",
+                              )}
+                            </p>
+                          )}
+                          {profile.capabilities ? (
+                            <ZCodeAccountEvidence
+                              section={unified ? "authorization" : "all"}
+                              value={profile.capabilities}
+                              quotaPresentation={
+                                connectionViews[profile.id] ?? "previous"
+                              }
+                            />
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              {copy(
+                                "capabilitiesNotQueried",
+                                "Connection and quota checks have not been queried.",
+                              )}
+                            </p>
+                          )}
+                          {profile.activationBlockedReason && (
+                            <p className="text-xs text-muted-foreground">
+                              {errorText(profile.activationBlockedReason)}
+                            </p>
+                          )}
+                          {profile.needsKey && (
+                            <p className="text-xs text-muted-foreground">
+                              {copy(
+                                "savedCodingPending",
+                                "Coding connection needs a Key; other capabilities are shown independently.",
+                              )}
+                            </p>
+                          )}
+                          {profile.completeCodingBlockedReason && (
+                            <p className="text-xs text-muted-foreground">
+                              {errorText(profile.completeCodingBlockedReason)}
+                            </p>
+                          )}
+                          {profile.checkConnectionsBlockedReason && (
+                            <p className="text-xs text-muted-foreground">
+                              {errorText(profile.checkConnectionsBlockedReason)}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !libraryReady ||
+                              loading ||
+                              profile.canCheckConnections !== true ||
+                              !!action
+                            }
+                            onClick={() => void checkConnections(profile.id)}
+                          >
+                            {checkingId === profile.id
                               ? copy(
-                                  "identityNativeCapture",
-                                  "Captured native session",
+                                  "checkingConnections",
+                                  "Checking connections…",
                                 )
                               : copy(
-                                  "identityPackageDeclared",
-                                  "Declared by account bundle",
+                                  "checkConnections",
+                                  "Check connections and quota",
                                 )}
-                        </p>
-                      )}
-                      {currentIdentity?.id === profile.id && (
-                        <p className="text-xs text-blue-600">
+                          </Button>
+                          {checkingId === profile.id && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => retireConnectionCheck(true, true)}
+                            >
+                              {copy("cancelConnectionCheck", "Cancel check")}
+                            </Button>
+                          )}
+                          {profile.needsKey && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={
+                                !libraryReady ||
+                                profile.canCompleteCoding !== true ||
+                                !!action
+                              }
+                              onClick={() => {
+                                setCodingAccount({
+                                  id: profile.id,
+                                  catalogRevision: shownCatalog.revision,
+                                });
+                                setLoginOpen(true);
+                              }}
+                            >
+                              {copy(
+                                "completeSavedCoding",
+                                "Complete Coding connection",
+                              )}
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !libraryReady ||
+                              library.data?.actions.canEditLabels !== true ||
+                              !!action
+                            }
+                            onClick={() =>
+                              setLabelEditor({
+                                id: profile.id,
+                                value: profile.label ?? "",
+                                revision: shownCatalog.revision,
+                                root: libraryRoot,
+                              })
+                            }
+                          >
+                            {copy("editDisplayName", "Edit display name")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !ordinaryReady ||
+                              profile.canActivate !== true ||
+                              full ||
+                              !!action
+                            }
+                            onClick={() => review("switch", profile.id)}
+                          >
+                            {copy("switch", "Switch saved account")}
+                          </Button>
+                        </div>
+                        <p className="w-full text-xs text-muted-foreground">
                           {copy(
-                            "currentNativeMarker",
-                            "Current native identity at last explicit read",
+                            "connectionCheckDisclosure",
+                            "Only this account's related session credentials are sent to its official platform to read connections, plans and quota. No model calls, Key creation, account switching or automatic sign-in.",
                           )}
                         </p>
-                      )}
-                      {profile.capabilities ? (
-                        <ZCodeAccountEvidence
-                          value={profile.capabilities}
-                          quotaPresentation={
-                            connectionViews[profile.id] ?? "previous"
-                          }
-                        />
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          {copy(
-                            "capabilitiesNotQueried",
-                            "Connection and quota checks have not been queried.",
-                          )}
-                        </p>
-                      )}
-                      {profile.activationBlockedReason && (
-                        <p className="text-xs text-muted-foreground">
-                          {errorText(profile.activationBlockedReason)}
-                        </p>
-                      )}
-                      {profile.needsKey && (
-                        <p className="text-xs text-muted-foreground">
-                          {copy(
-                            "savedCodingPending",
-                            "Coding connection needs a Key; other capabilities are shown independently.",
-                          )}
-                        </p>
-                      )}
-                      {profile.completeCodingBlockedReason && (
-                        <p className="text-xs text-muted-foreground">
-                          {errorText(profile.completeCodingBlockedReason)}
-                        </p>
-                      )}
-                      {profile.checkConnectionsBlockedReason && (
-                        <p className="text-xs text-muted-foreground">
-                          {errorText(profile.checkConnectionsBlockedReason)}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !libraryReady ||
-                          loading ||
-                          profile.canCheckConnections !== true ||
-                          !!action
-                        }
-                        onClick={() => void checkConnections(profile.id)}
-                      >
-                        {checkingId === profile.id
-                          ? copy("checkingConnections", "Checking connections…")
-                          : copy(
-                              "checkConnections",
-                              "Check connections and quota",
+                      </CardContent>
+                    </Card>
+                  );
+                  if (!unified) return nativeAuthorization;
+                  return (
+                    <AccountDetailSections
+                      authorization={nativeAuthorization}
+                      entitlements={
+                        profile.capabilities ? (
+                          <ZCodeAccountEvidence
+                            value={profile.capabilities}
+                            section="entitlements"
+                            quotaPresentation={
+                              connectionViews[profile.id] ?? "previous"
+                            }
+                          />
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            {copy(
+                              "capabilitiesNotQueried",
+                              "Connection and quota checks have not been queried.",
                             )}
-                      </Button>
-                      {checkingId === profile.id && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => retireConnectionCheck(true, true)}
-                        >
-                          {copy("cancelConnectionCheck", "Cancel check")}
-                        </Button>
-                      )}
-                      {profile.needsKey && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={
-                            !libraryReady ||
-                            profile.canCompleteCoding !== true ||
-                            !!action
-                          }
-                          onClick={() => {
-                            setCodingAccount({
-                              id: profile.id,
-                              catalogRevision: shownCatalog.revision,
-                            });
-                            setLoginOpen(true);
-                          }}
-                        >
-                          {copy(
-                            "completeSavedCoding",
-                            "Complete Coding connection",
-                          )}
-                        </Button>
-                      )}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !libraryReady ||
-                          library.data?.actions.canEditLabels !== true ||
-                          !!action
-                        }
-                        onClick={() =>
-                          setLabelEditor({
-                            id: profile.id,
-                            value: profile.label ?? "",
-                            revision: shownCatalog.revision,
-                            root: libraryRoot,
-                          })
-                        }
-                      >
-                        {copy("editDisplayName", "Edit display name")}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !ordinaryReady ||
-                          profile.canActivate !== true ||
-                          full ||
-                          !!action
-                        }
-                        onClick={() => review("switch", profile.id)}
-                      >
-                        {copy("switch", "Switch saved account")}
-                      </Button>
-                    </div>
-                    <p className="w-full text-xs text-muted-foreground">
-                      {copy(
-                        "connectionCheckDisclosure",
-                        "Only this account's related session credentials are sent to its official platform to read connections, plans and quota. No model calls, Key creation, account switching or automatic sign-in.",
-                      )}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
+                          </p>
+                        )
+                      }
+                      inference={
+                        <p className="text-xs text-muted-foreground">
+                          真实推理消费尚未验收。会话检查、套餐额度和本机切号均不等于实际应用调用通过；保留原本机切号、备份与恢复操作。
+                        </p>
+                      }
+                    />
+                  );
+                }}
+              </AccountWorkspace>
+            }
             {shownCatalog.profiles.every(
               (profile) => profile.family !== family,
             ) && (

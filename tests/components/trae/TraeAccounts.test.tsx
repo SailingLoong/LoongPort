@@ -565,3 +565,19 @@ it("retires only the requested local account, once, and displays backend readbac
   expect(mocks.begin).not.toHaveBeenCalled();
   expect(mocks.confirm).not.toHaveBeenCalled();
 });
+
+it("keeps international realm and local auth status without inventing check-in capability", async () => {
+  mocks.list.mockResolvedValue([account]);
+  render(<TraeAccounts unified />);
+  const auth = await screen.findByRole("region", { name: "授权状态" });
+  expect(auth).toHaveTextContent("SG");
+  expect(
+    within(auth).getByRole("button", { name: "trae.retire" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "权益与签到" })).toHaveTextContent(
+    "未提供",
+  );
+  expect(screen.getByRole("region", { name: "模型与推理" })).toHaveTextContent(
+    "尚未验收",
+  );
+});

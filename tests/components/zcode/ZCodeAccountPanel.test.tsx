@@ -176,13 +176,13 @@ function priorEvidence(): SessionCheckDisplay {
     },
   };
 }
-function mount(onBusyChange = vi.fn()) {
+function mount(onBusyChange = vi.fn(), unified = false) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   render(
     <QueryClientProvider client={client}>
-      <ZCodeAccountPanel onBusyChange={onBusyChange} />
+      <ZCodeAccountPanel onBusyChange={onBusyChange} unified={unified} />
     </QueryClientProvider>,
   );
   return client;
@@ -2154,5 +2154,24 @@ describe("ZCode account command bindings", () => {
       remedy: "refreshContext",
       committed: false,
     });
+  });
+  it("separates native session evidence, entitlements and unverified inference without losing native switching", async () => {
+    vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+      ...catalog,
+      profiles: [{ ...catalog.profiles[0], capabilities: priorEvidence() }],
+    });
+    mount(vi.fn(), true);
+    const auth = await screen.findByRole("region", { name: "授权状态" });
+    expect(auth).toHaveTextContent("Business session");
+    expect(
+      within(auth).getByRole("button", { name: "Switch saved account" }),
+    ).toBeInTheDocument();
+    expect(auth).not.toHaveTextContent("Start quota");
+    expect(
+      screen.getByRole("region", { name: "权益与签到" }),
+    ).toHaveTextContent("Start quota");
+    expect(
+      screen.getByRole("region", { name: "模型与推理" }),
+    ).toHaveTextContent("尚未验收");
   });
 });

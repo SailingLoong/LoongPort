@@ -105,6 +105,7 @@ import {
 import { UsagePage } from "@/components/usage/UsagePage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
+import type { ServiceEntryIntent } from "@/components/relay/accounts/serviceEntryIntent";
 import { AddHubPage, type AddHubTab } from "@/components/relay/AddHubPage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
@@ -278,7 +279,17 @@ function App() {
   const isApplicationView =
     currentView === "providers" || currentView === "image";
   const [addHubEntries, setAddHubEntries] = useState<
-    Partial<Record<AppId, { id: number; tab: AddHubTab; firstVisit: boolean }>>
+    Partial<
+      Record<
+        AppId,
+        {
+          id: number;
+          tab: AddHubTab;
+          firstVisit: boolean;
+          intent?: ServiceEntryIntent;
+        }
+      >
+    >
   >({});
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
@@ -1003,7 +1014,11 @@ function App() {
   const handleOpenAddHub = useCallback(
     (
       tab: AddHubTab = "accounts",
-      opts?: { firstVisit?: boolean; appId?: AppId },
+      opts?: {
+        firstVisit?: boolean;
+        appId?: AppId;
+        intent?: ServiceEntryIntent;
+      },
     ) => {
       const app =
         opts?.appId ?? (usesProviderStore(activeApp) ? activeApp : "codex");
@@ -1015,6 +1030,7 @@ function App() {
           id: (entries[app]?.id ?? 0) + 1,
           tab,
           firstVisit: opts?.firstVisit === true,
+          intent: opts?.intent,
         },
       }));
       setCurrentView("addHub", app);
@@ -1750,9 +1766,6 @@ function App() {
               entryRequest={addHubEntries[app]}
               onOpenPlatform={(platform) =>
                 setCurrentView("services", app, undefined, platform)
-              }
-              onOpenConfiguration={(appId, tab) =>
-                handleOpenAddHub(tab, { appId })
               }
               firstVisit={addHubEntries[app]?.firstVisit}
               onBack={goBack}

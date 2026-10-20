@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -15,12 +16,34 @@ vi.mock("../directory/RelayDirectoryPage", () => ({
   RelayDirectoryPage: () => <div data-testid="relay-directory" />,
 }));
 vi.mock("../OfficialApiPage", () => ({
-  OfficialApiPage: () => <div data-testid="official-api" />,
+  OfficialApiPage: ({ onConnected }: any) => (
+    <button
+      data-testid="official-api"
+      onClick={() => onConnected({ kind: "vendor", rowId: 1 })}
+    >
+      Connect test
+    </button>
+  ),
 }));
 vi.mock("@/components/providers/AddProviderForm", () => ({
   AddProviderForm: () => <div data-testid="add-provider-form" />,
 }));
 
+vi.mock("../onboarding/ServiceConfiguration", () => ({
+  ServiceConfiguration: ({ onBack }: any) => {
+    const [draft, setDraft] = useState("");
+    return (
+      <div>
+        <input
+          aria-label="Configuration draft"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <button onClick={onBack}>Back to hub</button>
+      </div>
+    );
+  },
+}));
 function renderHub() {
   return render(
     <AddHubPage
@@ -41,25 +64,20 @@ describe("AddHubPage 中转站 tab 常驻", () => {
   });
 });
 
-it("keeps existing API configuration owners and their actual application context", () => {
-  const open = vi.fn();
+it("distinguishes native platform editions rather than routing to API configuration", () => {
   const platform = vi.fn();
   render(
     <AddHubPage
       sourceAppId="claude"
       onBack={() => {}}
-      onAddProvider={() => undefined as never}
-      onOpenConfiguration={open}
+      onAddProvider={() => {}}
       onOpenPlatform={platform}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Qoder" }));
-  expect(open).toHaveBeenLastCalledWith("codex", "manual");
-  fireEvent.click(screen.getByRole("button", { name: "OpenRouter · API Key" }));
-  expect(open).toHaveBeenLastCalledWith("claude", "manual");
-  fireEvent.click(screen.getByRole("button", { name: "OpenCode" }));
-  expect(open).toHaveBeenLastCalledWith("claude", "official");
-  expect(platform).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "MiniMax Code 国际版" }));
+  expect(platform).toHaveBeenLastCalledWith("minimax_code_global");
+  fireEvent.click(screen.getByRole("button", { name: "TRAE 中国版" }));
+  expect(platform).toHaveBeenLastCalledWith("trae_cn");
 });
 it("preserves the original direct relay destination", () => {
   render(
@@ -71,4 +89,28 @@ it("preserves the original direct relay destination", () => {
     />,
   );
   expect(screen.getByTestId("relay-directory")).toBeInTheDocument();
+});
+
+it("preserves a connected service draft while visiting another source", () => {
+  render(
+    <AddHubPage
+      sourceAppId="codex"
+      initialTab="official"
+      onBack={() => {}}
+      onAddProvider={() => {}}
+    />,
+  );
+  fireEvent.click(screen.getByText("Connect test"));
+  fireEvent.change(screen.getByLabelText("Configuration draft"), {
+    target: { value: "keep me" },
+  });
+  fireEvent.click(screen.getByText("Back to hub"));
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "账号" }), {
+    button: 0,
+    ctrlKey: false,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Qoder" }));
+  fireEvent.click(screen.getByText("返回平台列表"));
+  fireEvent.click(screen.getByText("loongport.onboarding.resume"));
+  expect(screen.getByLabelText("Configuration draft")).toHaveValue("keep me");
 });

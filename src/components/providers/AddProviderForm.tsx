@@ -35,6 +35,8 @@ import type { ManagedAuthProvider } from "@/lib/api";
  * 「这一轮添加结束」（提交成功 / 用户取消），由宿主决定回哪去。
  */
 export interface AddProviderFormProps {
+  initialPresetName?: string;
+  onSaveStart?: () => number;
   appId: AppId;
   onSubmit: (
     provider: Omit<Provider, "id"> & {
@@ -45,10 +47,12 @@ export interface AddProviderFormProps {
     },
   ) => Promise<void> | void;
   /** 提交成功或用户取消 —— 宿主收尾（聚合页回供应商列表）。 */
-  onDone: () => void;
+  onDone: (reason?: "saved" | "cancel", saveEpoch?: number) => void;
 }
 
 export function AddProviderForm({
+  initialPresetName,
+  onSaveStart,
   appId,
   onSubmit,
   onDone,
@@ -66,6 +70,7 @@ export function AddProviderForm({
     "app-specific",
   );
   const [universalFormOpen, setUniversalFormOpen] = useState(false);
+  const draftGeneration = useRef(0);
   const [selectedUniversalPreset, setSelectedUniversalPreset] =
     useState<UniversalProviderPreset | null>(null);
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
@@ -99,6 +104,8 @@ export function AddProviderForm({
 
   const handleUniversalProviderSave = useCallback(
     async (provider: UniversalProvider) => {
+      const saveEpoch = onSaveStart?.();
+      const savedDraftGeneration = draftGeneration.current;
       try {
         await universalProvidersApi.upsert(provider);
       } catch (error) {
@@ -133,11 +140,13 @@ export function AddProviderForm({
         );
       }
 
-      setUniversalFormOpen(false);
-      setSelectedUniversalPreset(null);
-      onDone();
+      // The modal closes synchronously on submit. A late save must not
+      // close a subsequently opened draft or navigate away from it.
+      if (savedDraftGeneration === draftGeneration.current) {
+        onDone("saved", saveEpoch);
+      }
     },
-    [t, onDone],
+    [t, onDone, onSaveStart],
   );
 
   const handleUniversalFormClose = useCallback(() => {
@@ -341,10 +350,14 @@ export function AddProviderForm({
         providerData.suggestedDefaults = values.suggestedDefaults;
       }
 
+      const saveEpoch = onSaveStart?.();
+      const savedDraftGeneration = draftGeneration.current;
       await onSubmit(providerData);
-      onDone();
+      if (savedDraftGeneration === draftGeneration.current) {
+        onDone("saved", saveEpoch);
+      }
     },
-    [appId, onSubmit, onDone],
+    [appId, onSubmit, onDone, onSaveStart],
   );
 
   const footer =
@@ -355,7 +368,7 @@ export function AddProviderForm({
         </span>
         <Button
           variant="outline"
-          onClick={() => onDone()}
+          onClick={() => onDone("cancel")}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
@@ -378,13 +391,16 @@ export function AddProviderForm({
       <>
         <Button
           variant="outline"
-          onClick={() => onDone()}
+          onClick={() => onDone("cancel")}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
         </Button>
         <Button
-          onClick={() => setUniversalFormOpen(true)}
+          onClick={() => {
+            ++draftGeneration.current;
+            setUniversalFormOpen(true);
+          }}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >
           <Plus className="h-4 w-4 mr-2" />
@@ -401,9 +417,10 @@ export function AddProviderForm({
         {showUniversalTab ? (
           <Tabs
             value={activeTab}
-            onValueChange={(v) =>
-              setActiveTab(v as "app-specific" | "universal")
-            }
+            onValueChange={(v) => {
+              ++draftGeneration.current;
+              setActiveTab(v as "app-specific" | "universal");
+            }}
           >
             <TabsList className="grid w-full grid-cols-2 mb-6">
               <TabsTrigger value="app-specific">
@@ -421,10 +438,11 @@ export function AddProviderForm({
             >
               <PreservedView active={activeTab === "app-specific"}>
                 <ProviderForm
+                  initialPresetName={initialPresetName}
                   appId={appId}
                   submitLabel={t("common.add")}
                   onSubmit={handleSubmit}
-                  onCancel={() => onDone()}
+                  onCancel={() => onDone("cancel")}
                   onManageAuthAccounts={setAuthSettingsTarget}
                   onSubmittingChange={setIsFormSubmitting}
                   onSubmitReadyChange={handleSubmitReadyChange}
@@ -446,10 +464,11 @@ export function AddProviderForm({
         ) : (
           // OpenCode/OpenClaw: directly show form without tabs
           <ProviderForm
+            initialPresetName={initialPresetName}
             appId={appId}
             submitLabel={t("common.add")}
             onSubmit={handleSubmit}
-            onCancel={() => onDone()}
+            onCancel={() => onDone("cancel")}
             onManageAuthAccounts={setAuthSettingsTarget}
             onSubmittingChange={setIsFormSubmitting}
             onSubmitReadyChange={handleSubmitReadyChange}

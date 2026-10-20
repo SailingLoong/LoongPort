@@ -211,9 +211,6 @@ function Fixture() {
               setPlatform(next);
               setView("services");
             }}
-            onOpenConfiguration={(_app, next) => {
-              setEntryRequest((entry) => ({ id: entry.id + 1, tab: next }));
-            }}
           />
         ) : (
           <ServicesPage

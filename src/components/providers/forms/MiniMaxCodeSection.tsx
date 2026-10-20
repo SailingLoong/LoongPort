@@ -1,3 +1,7 @@
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ExternalLink, Loader2, Plus, RefreshCw } from "lucide-react";
@@ -49,14 +53,17 @@ const date = (value: number) => new Date(value).toLocaleString();
 type AccountAction = "refresh" | "claim" | "recheck" | "retire";
 
 /** UI state only. Identities, capabilities and uncertain operations belong to Rust. */
-export function MiniMaxCodeSection() {
+export function MiniMaxCodeSection({
+  edition,
+  unified = false,
+}: { edition?: MiniMaxCodeRegion; unified?: boolean } = {}) {
   const { t } = useTranslation();
   const [accounts, setAccounts] = useState<MiniMaxCodeAccount[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<MiniMaxCodeFailure | null>(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());
-  const [region, setRegion] = useState<MiniMaxCodeRegion>("cn");
+  const [region, setRegion] = useState<MiniMaxCodeRegion>(edition ?? "cn");
   const [login, setLogin] = useState<MiniMaxCodeLogin | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
@@ -236,33 +243,42 @@ export function MiniMaxCodeSection() {
     }
   };
 
+  const visibleAccounts = edition
+    ? accounts.filter((account) => account.region === edition)
+    : accounts;
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         {t("minimaxCode.description")}
       </p>
       <div className="flex flex-wrap items-end gap-2">
-        <div className="min-w-40 space-y-2">
-          <Label htmlFor="minimax-code-region">{t("minimaxCode.region")}</Label>
-          <Select
-            value={region}
-            onValueChange={(value) => {
-              loginGeneration.current += 1;
-              setRegion(value as MiniMaxCodeRegion);
-            }}
-            disabled={loginBusy || login !== null}
-          >
-            <SelectTrigger id="minimax-code-region">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="cn">{t("minimaxCode.regions.cn")}</SelectItem>
-              <SelectItem value="global">
-                {t("minimaxCode.regions.global")}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        {!edition && (
+          <div className="min-w-40 space-y-2">
+            <Label htmlFor="minimax-code-region">
+              {t("minimaxCode.region")}
+            </Label>
+            <Select
+              value={region}
+              onValueChange={(value) => {
+                loginGeneration.current += 1;
+                setRegion(value as MiniMaxCodeRegion);
+              }}
+              disabled={loginBusy || login !== null}
+            >
+              <SelectTrigger id="minimax-code-region">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cn">
+                  {t("minimaxCode.regions.cn")}
+                </SelectItem>
+                <SelectItem value="global">
+                  {t("minimaxCode.regions.global")}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <Button
           type="button"
           variant="outline"
@@ -351,174 +367,240 @@ export function MiniMaxCodeSection() {
           )}
         </div>
       )}
-      {loaded && !loading && accounts.length === 0 && (
+      {loaded && !loading && visibleAccounts.length === 0 && (
         <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
           {t("minimaxCode.empty")}
         </p>
       )}
       <div className="space-y-2">
-        {accounts.map((account) => (
-          <article
-            key={account.id}
-            aria-label={account.label}
-            className="space-y-3 rounded-md border bg-muted/30 p-3"
+        {
+          <AccountWorkspace
+            accounts={visibleAccounts}
+            label={(account) => account.label}
+            identityDetails={(account) => (
+              <p className="mt-1 break-all text-xs text-muted-foreground">
+                {t(`minimaxCode.regions.${account.region}`)} ·{" "}
+                {account.realUserId}
+              </p>
+            )}
+            enabled={unified}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h5 className="text-sm font-medium">{account.label}</h5>
-              <Badge variant="secondary">
-                {t(`minimaxCode.status.${account.status}`)}
-              </Badge>
-            </div>
-            <p className="break-all text-xs text-muted-foreground">
-              {t(`minimaxCode.regions.${account.region}`)} ·{" "}
-              {account.realUserId}
-            </p>
-            <div className="text-xs text-muted-foreground">
-              <p>
-                {t("minimaxCode.entitlement.remaining", {
-                  amount:
-                    account.entitlement?.remainingCredits ??
-                    t("minimaxCode.entitlement.unknown"),
-                })}
-              </p>
-              <p>
-                {t("minimaxCode.entitlement.plan", {
-                  status: t(
-                    account.entitlement?.hasTokenPlan === true
-                      ? "minimaxCode.entitlement.active"
-                      : account.entitlement?.hasTokenPlan === false
-                        ? "minimaxCode.entitlement.inactive"
-                        : "minimaxCode.entitlement.unknown",
-                  ),
-                })}
-              </p>
-              {account.entitlement?.quotaState === "not-subscribed" ? (
-                <p>{t("minimaxCode.entitlement.quotaNotSubscribed")}</p>
-              ) : (
-                (["fiveHour", "weekly"] as const).map((kind) => {
-                  const window =
-                    account.entitlement?.quotaState === "available"
-                      ? account.entitlement.quota?.[kind]
-                      : undefined;
-                  const remaining = window?.unlimited
-                    ? t("minimaxCode.entitlement.quotaUnlimited")
-                    : window?.remainingPercent != null
-                      ? t("minimaxCode.entitlement.quotaPercent", {
-                          percent: window.remainingPercent,
-                        })
-                      : t("minimaxCode.entitlement.unknown");
-                  return (
-                    <div key={kind}>
+            {(account) => {
+              const identity = (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h5 className="text-sm font-medium">{account.label}</h5>
+                    <Badge variant="secondary">
+                      {t(`minimaxCode.status.${account.status}`)}
+                    </Badge>
+                  </div>
+                  <p className="break-all text-xs text-muted-foreground">
+                    {t(`minimaxCode.regions.${account.region}`)} ·{" "}
+                    {account.realUserId}
+                  </p>
+                </>
+              );
+              const credits = (
+                <>
+                  <div className="text-xs text-muted-foreground">
+                    <p>
+                      {t("minimaxCode.entitlement.remaining", {
+                        amount:
+                          account.entitlement?.remainingCredits ??
+                          t("minimaxCode.entitlement.unknown"),
+                      })}
+                    </p>
+                    <p>
+                      {t("minimaxCode.entitlement.plan", {
+                        status: t(
+                          account.entitlement?.hasTokenPlan === true
+                            ? "minimaxCode.entitlement.active"
+                            : account.entitlement?.hasTokenPlan === false
+                              ? "minimaxCode.entitlement.inactive"
+                              : "minimaxCode.entitlement.unknown",
+                        ),
+                      })}
+                    </p>
+                    {account.entitlement?.quotaState === "not-subscribed" ? (
+                      <p>{t("minimaxCode.entitlement.quotaNotSubscribed")}</p>
+                    ) : (
+                      (["fiveHour", "weekly"] as const).map((kind) => {
+                        const window =
+                          account.entitlement?.quotaState === "available"
+                            ? account.entitlement.quota?.[kind]
+                            : undefined;
+                        const remaining = window?.unlimited
+                          ? t("minimaxCode.entitlement.quotaUnlimited")
+                          : window?.remainingPercent != null
+                            ? t("minimaxCode.entitlement.quotaPercent", {
+                                percent: window.remainingPercent,
+                              })
+                            : t("minimaxCode.entitlement.unknown");
+                        return (
+                          <div key={kind}>
+                            <p>
+                              {t(
+                                kind === "fiveHour"
+                                  ? "minimaxCode.entitlement.quotaFiveHour"
+                                  : "minimaxCode.entitlement.quotaWeekly",
+                                { remaining },
+                              )}
+                            </p>
+                            {window?.resetAtMs != null && (
+                              <p>
+                                {t("minimaxCode.entitlement.quotaReset", {
+                                  time: date(window.resetAtMs),
+                                })}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                    {account.entitlement?.tokenPlanExpiresAt != null && (
                       <p>
-                        {t(
-                          kind === "fiveHour"
-                            ? "minimaxCode.entitlement.quotaFiveHour"
-                            : "minimaxCode.entitlement.quotaWeekly",
-                          { remaining },
-                        )}
+                        {t("minimaxCode.entitlement.expires", {
+                          time: date(account.entitlement.tokenPlanExpiresAt),
+                        })}
                       </p>
-                      {window?.resetAtMs != null && (
-                        <p>
-                          {t("minimaxCode.entitlement.quotaReset", {
-                            time: date(window.resetAtMs),
-                          })}
-                        </p>
-                      )}
+                    )}
+                  </div>
+                  {account.creditAmount !== null && (
+                    <p className="text-sm">
+                      {t("minimaxCode.creditAmount", {
+                        amount: account.creditAmount,
+                      })}
+                    </p>
+                  )}
+                  {account.operation && (
+                    <div className="space-y-1 rounded-md border p-2 text-sm">
+                      <p>
+                        {t(`minimaxCode.operation.${account.operation.status}`)}
+                      </p>
+                      <p>
+                        {t("minimaxCode.startedAt", {
+                          time: date(account.operation.startedAt),
+                        })}
+                      </p>
+                      <p className="break-all text-xs text-muted-foreground">
+                        {t("minimaxCode.attempt", {
+                          id: account.operation.attemptId,
+                        })}
+                      </p>
                     </div>
-                  );
-                })
-              )}
-              {account.entitlement?.tokenPlanExpiresAt != null && (
-                <p>
-                  {t("minimaxCode.entitlement.expires", {
-                    time: date(account.entitlement.tokenPlanExpiresAt),
-                  })}
-                </p>
-              )}
-            </div>
-            {account.creditAmount !== null && (
-              <p className="text-sm">
-                {t("minimaxCode.creditAmount", {
-                  amount: account.creditAmount,
-                })}
-              </p>
-            )}
-            {account.operation && (
-              <div className="space-y-1 rounded-md border p-2 text-sm">
-                <p>{t(`minimaxCode.operation.${account.operation.status}`)}</p>
-                <p>
-                  {t("minimaxCode.startedAt", {
-                    time: date(account.operation.startedAt),
-                  })}
-                </p>
-                <p className="break-all text-xs text-muted-foreground">
-                  {t("minimaxCode.attempt", {
-                    id: account.operation.attemptId,
-                  })}
-                </p>
-              </div>
-            )}
-            {account.status === "unknown" && (
-              <p className="text-sm text-amber-600">
-                {t("minimaxCode.unknownHint")}
-              </p>
-            )}
-            {account.lastCheckedAt !== null && (
-              <p className="text-xs text-muted-foreground">
-                {t("minimaxCode.lastCheckedAt", {
-                  time: date(account.lastCheckedAt),
-                })}
-              </p>
-            )}
-            {account.lastObservedStatus !== null && (
-              <p className="text-xs text-muted-foreground">
-                {t(`minimaxCode.observed.${account.lastObservedStatus}`)}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={
-                  loading || busy.has(account.id) || !account.canRefresh
-                }
-                onClick={() => void runAccount(account, "refresh")}
-              >
-                {t("minimaxCode.refresh")}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={loading || busy.has(account.id) || !account.canClaim}
-                onClick={() => void runAccount(account, "claim")}
-              >
-                {t("minimaxCode.claim")}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={
-                  loading || busy.has(account.id) || !account.canRecheck
-                }
-                onClick={() => void runAccount(account, "recheck")}
-              >
-                {t("minimaxCode.recheck")}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={loading || busy.has(account.id) || !account.canRetire}
-                onClick={() => void runAccount(account, "retire")}
-              >
-                {t("minimaxCode.retire")}
-              </Button>
-            </div>
-          </article>
-        ))}
+                  )}
+                  {account.status === "unknown" && (
+                    <p className="text-sm text-amber-600">
+                      {t("minimaxCode.unknownHint")}
+                    </p>
+                  )}
+                  {account.lastCheckedAt !== null && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("minimaxCode.lastCheckedAt", {
+                        time: date(account.lastCheckedAt),
+                      })}
+                    </p>
+                  )}
+                  {account.lastObservedStatus !== null && (
+                    <p className="text-xs text-muted-foreground">
+                      {t(`minimaxCode.observed.${account.lastObservedStatus}`)}
+                    </p>
+                  )}
+                </>
+              );
+              const creditActions = (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      loading || busy.has(account.id) || !account.canRefresh
+                    }
+                    onClick={() => void runAccount(account, "refresh")}
+                  >
+                    {t("minimaxCode.refresh")}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      loading || busy.has(account.id) || !account.canClaim
+                    }
+                    onClick={() => void runAccount(account, "claim")}
+                  >
+                    {t("minimaxCode.claim")}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      loading || busy.has(account.id) || !account.canRecheck
+                    }
+                    onClick={() => void runAccount(account, "recheck")}
+                  >
+                    {t("minimaxCode.recheck")}
+                  </Button>
+                </div>
+              );
+              const retireAction = (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={
+                    loading || busy.has(account.id) || !account.canRetire
+                  }
+                  onClick={() => void runAccount(account, "retire")}
+                >
+                  {t("minimaxCode.retire")}
+                </Button>
+              );
+              if (unified)
+                return (
+                  <AccountDetailSections
+                    authorization={
+                      <>
+                        <p role="status" className="text-sm">
+                          {account.authorized
+                            ? "账号授权已保存；不代表推理消费已验收"
+                            : "需要重新授权"}
+                        </p>
+                        {retireAction}
+                      </>
+                    }
+                    entitlements={
+                      <>
+                        <Badge variant="secondary">
+                          {t(`minimaxCode.status.${account.status}`)}
+                        </Badge>
+                        {credits}
+                        {creditActions}
+                      </>
+                    }
+                    inference={
+                      <p className="text-xs text-muted-foreground">
+                        真实推理消费尚未验收。此账号的权益与签到记录不代表模型调用已接通；模型列表与实际消费需要独立验证。
+                      </p>
+                    }
+                  />
+                );
+              return (
+                <article
+                  aria-label={account.label}
+                  className="space-y-3 rounded-md border bg-muted/30 p-3"
+                >
+                  {identity}
+                  {credits}
+                  {creditActions}
+                  {retireAction}
+                </article>
+              );
+            }}
+          </AccountWorkspace>
+        }
       </div>
     </div>
   );

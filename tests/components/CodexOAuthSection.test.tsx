@@ -486,4 +486,16 @@ describe("CodexOAuthSection", () => {
     expect(onAccountSelect).toHaveBeenCalledWith(null);
     expect(onSelectionConfirmed).not.toHaveBeenCalled();
   });
+  it("keeps unified authorization and quota separate from inference acceptance", () => {
+    render(<CodexOAuthSection unified showAccountQuota />);
+    expect(
+      screen.getByRole("region", { name: "授权状态" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "权益与签到" })).toContainElement(
+      screen.getByTestId("account-quota"),
+    );
+    expect(
+      screen.getByRole("region", { name: "模型与推理" }),
+    ).toHaveTextContent("尚未验收");
+  });
 });

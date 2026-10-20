@@ -60,4 +60,16 @@ describe("XaiOAuthSection", () => {
     );
     expect(screen.getByRole("combobox")).toHaveTextContent("凭据已失效");
   });
+  it("separates expired authorization from unsupported entitlements and unverified inference", () => {
+    render(<XaiOAuthSection unified />);
+    expect(screen.getByRole("region", { name: "授权状态" })).toHaveTextContent(
+      "凭据已失效",
+    );
+    expect(
+      screen.getByRole("region", { name: "权益与签到" }),
+    ).toHaveTextContent("未提供");
+    expect(
+      screen.getByRole("region", { name: "模型与推理" }),
+    ).toHaveTextContent("尚未验收");
+  });
 });

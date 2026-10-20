@@ -1,3 +1,7 @@
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -23,7 +27,9 @@ function isSelectedFile(path: unknown, filename: string): path is string {
   return typeof path === "string" && path.split(/[\\/]/).pop() === filename;
 }
 
-export function TraeAccounts() {
+export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
+  const AccountsContainer = unified ? "div" : "ul";
+  const AccountRow = unified ? "article" : "li";
   const { t } = useTranslation();
   const [accounts, setAccounts] = useState<TraeAccountView[]>([]);
   const [loading, setLoading] = useState(true);
@@ -359,36 +365,70 @@ export function TraeAccounts() {
           {t("trae.empty", { defaultValue: "尚无 TRAE 本地账号。" })}
         </p>
       )}
-      <ul className="space-y-2">
-        {accounts.map((account) => (
-          <li
-            key={account.id}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-3 text-sm"
+      <AccountsContainer className="space-y-2">
+        {
+          <AccountWorkspace
+            accounts={accounts}
+            label={(account) => account.id}
+            enabled={unified}
           >
-            <div className="min-w-0 space-y-1">
-              <p className="break-all">{account.id}</p>
-              <p>{account.realm.toUpperCase()}</p>
-              <p>
-                {t(`trae.status.${account.status}`, {
-                  defaultValue: {
-                    stored: "已保存（本地）",
-                    refreshPending: "授权待核对（不会自动重试）",
-                    retired: "已停用",
-                  }[account.status],
-                })}
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={retiring !== null || account.status === "retired"}
-              onClick={() => void retire(account.id)}
-            >
-              {t("trae.retire", { defaultValue: "停用本地账号" })}
-            </Button>
-          </li>
-        ))}
-      </ul>
+            {(account) => {
+              const nativeAuthorization = (
+                <AccountRow
+                  key={account.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-3 text-sm"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <p className="break-all">{account.id}</p>
+                    <p>{account.realm.toUpperCase()}</p>
+                    <p>
+                      {t(`trae.status.${account.status}`, {
+                        defaultValue: {
+                          stored: "已保存（本地）",
+                          refreshPending: "授权待核对（不会自动重试）",
+                          retired: "已停用",
+                        }[account.status],
+                      })}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={retiring !== null || account.status === "retired"}
+                    onClick={() => void retire(account.id)}
+                  >
+                    {t("trae.retire", { defaultValue: "停用本地账号" })}
+                  </Button>
+                </AccountRow>
+              );
+              if (!unified) return nativeAuthorization;
+              return (
+                <AccountDetailSections
+                  authorization={
+                    <>
+                      {nativeAuthorization}
+                      <p className="text-xs text-muted-foreground">
+                        此状态仅反映本地账号记录，不等于官方会话或推理已可用。
+                      </p>
+                    </>
+                  }
+                  entitlements={
+                    <p className="text-xs text-muted-foreground">
+                      此账号页未提供TRAE
+                      国际版的签到领取或完整权益查询能力。未知不会显示为零，也不会套用其他平台的奖励。
+                    </p>
+                  }
+                  inference={
+                    <p className="text-xs text-muted-foreground">
+                      真实推理消费尚未验收。模型与流式请求需通过原应用入口独立验证。
+                    </p>
+                  }
+                />
+              );
+            }}
+          </AccountWorkspace>
+        }
+      </AccountsContainer>
       <Dialog
         open={dialogOpen}
         onOpenChange={(value) => {

@@ -890,3 +890,26 @@ it("legacy save fences an older inference status read while its account reload i
     screen.getByText("workbuddy.inference.state.needsAuthorization"),
   ).toBeVisible();
 });
+it("places native authorization, claim and model actions in separate unified detail sections", async () => {
+  render(<WorkBuddyAccounts unified />);
+  const auth = await screen.findByRole("region", { name: "授权状态" });
+  const rights = screen.getByRole("region", { name: "权益与签到" });
+  const inference = screen.getByRole("region", { name: "模型与推理" });
+  expect(
+    within(auth).getByRole("button", { name: "workbuddy.inference.authorize" }),
+  ).toBeInTheDocument();
+  expect(
+    within(rights).getByRole("button", { name: "workbuddy.claim" }),
+  ).toBeEnabled();
+  expect(
+    within(inference).getByRole("button", {
+      name: "workbuddy.inference.models",
+    }),
+  ).toBeDisabled();
+  expect(within(inference).getByText(/尚未验收/)).toBeInTheDocument();
+  await userEvent.click(
+    within(rights).getByRole("button", { name: "workbuddy.claim" }),
+  );
+  await waitFor(() => expect(api.claim).toHaveBeenCalledWith(row.id));
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+});
