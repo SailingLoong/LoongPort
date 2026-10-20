@@ -822,3 +822,69 @@ async fn inference_rejects_compressed_success_before_body_output() {
         assert_eq!(calls[0].headers[http::header::ACCEPT_ENCODING], "identity");
     }
 }
+
+#[tokio::test]
+async fn explicit_denial_401_does_not_refresh_or_change_credentials() {
+    let f = Fixture::new().await;
+    two_accounts(&f);
+    let transport = StreamFixture::default();
+    transport
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(stream_response(
+            401,
+            vec![Ok(Bytes::from_static(
+                br#"{"error":{"code":"permission_denied","message":"synthetic-access"}}"#,
+            ))],
+        ));
+    let auth = RefreshFixture::default();
+    let out = Lease::acquire(f.session.clone(), "synthetic-account", "denied-request")
+        .await
+        .unwrap()
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &transport)
+        .await
+        .unwrap();
+    assert_eq!(out.response.status().as_u16(), 401);
+    let bytes = out.response.bytes_with_limit(4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["type"], "access_denied");
+    assert!(!String::from_utf8_lossy(&bytes).contains("synthetic-access"));
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    assert!(auth.calls.lock().unwrap().is_empty());
+    let primary = super::super::catalog::snapshot(&f.session, "synthetic-account")
+        .await
+        .unwrap();
+    assert_eq!(primary.account.credential_version, 1);
+}
+
+#[tokio::test]
+async fn error_body_epoch_change_cannot_refresh_original_account() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "error-read")
+        .await
+        .unwrap();
+    let session = f.session.clone();
+    let transport = StreamFixture::default();
+    transport
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(ProxyResponse::streamed(
+            http::StatusCode::UNAUTHORIZED,
+            http::HeaderMap::new(),
+            futures::stream::once(async move {
+                session.set_blocked(true);
+                session.set_blocked(false);
+                Ok(Bytes::from_static(b"{}"))
+            }),
+        ));
+    let auth = RefreshFixture::default();
+    assert!(lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &transport)
+        .await
+        .is_err());
+    assert!(auth.calls.lock().unwrap().is_empty());
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}

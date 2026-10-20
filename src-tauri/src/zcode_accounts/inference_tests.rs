@@ -835,3 +835,61 @@ async fn late_unauthorized_after_lock_unlock_does_not_publish_rejection() {
     assert!(f.lease(0).await.is_ok());
     assert!(f.lease(1).await.is_ok());
 }
+
+#[tokio::test]
+async fn explicit_denial_401_does_not_mark_original_account_needs_login() {
+    let f = Fixture::new(u64::MAX);
+    let net = TransportFixture::default();
+    net.responses
+        .lock()
+        .unwrap()
+        .push_back(ProxyResponse::buffered(
+            http::StatusCode::UNAUTHORIZED,
+            http::HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"error":{"type":"permission_error","message":"fixture-secret"}}"#,
+            ),
+        ));
+    let out = f
+        .lease(0)
+        .await
+        .unwrap()
+        .dispatch_with(body(), Duration::from_secs(3), &net)
+        .await
+        .unwrap();
+    assert_eq!(out.response.status().as_u16(), 401);
+    let bytes = out.response.bytes_with_limit(4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["type"], "access_denied");
+    assert!(!String::from_utf8_lossy(&bytes).contains("fixture-secret"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("needs_login"));
+    assert_eq!(net.calls.lock().unwrap().len(), 1);
+    assert!(f.lease(0).await.is_ok());
+    assert!(f.lease(1).await.is_ok());
+}
+
+#[tokio::test]
+async fn error_body_epoch_change_cannot_reject_original_account() {
+    let f = Fixture::new(u64::MAX);
+    let lease = f.lease(0).await.unwrap();
+    let session = f.session.clone();
+    let net = TransportFixture::default();
+    net.responses
+        .lock()
+        .unwrap()
+        .push_back(ProxyResponse::streamed(
+            http::StatusCode::UNAUTHORIZED,
+            http::HeaderMap::new(),
+            futures::stream::once(async move {
+                session.set_blocked(true);
+                session.set_blocked(false);
+                Ok(Bytes::from_static(b"{}"))
+            }),
+        ));
+    assert!(lease
+        .dispatch_with(body(), Duration::from_secs(3), &net)
+        .await
+        .is_err());
+    assert_eq!(net.calls.lock().unwrap().len(), 1);
+    assert!(f.lease(0).await.is_ok());
+}

@@ -402,7 +402,13 @@ impl Lease {
                     .await?
             }
         };
-        if response.status() == http::StatusCode::UNAUTHORIZED {
+        let (response, denied) = if response.status().is_success() {
+            (response, false)
+        } else {
+            safe_error_response(response, timeout).await?
+        };
+        self.check().await.map_err(owner_error)?;
+        if response.status() == http::StatusCode::UNAUTHORIZED && !denied {
             // Never refresh, replay, create a key, or silently select an account.
             // Late 401 after replacement may not contaminate a newer session.
             let committed_revision = self
@@ -416,14 +422,14 @@ impl Lease {
             // facts stay unchanged, and only the response fence receives it.
             self.binding.catalog_revision = committed_revision;
             return Ok(DispatchResponse {
-                response: safe_error_response(response),
+                response,
                 fence: ResponseFence { lease: self },
             });
         }
         self.check().await.map_err(owner_error)?;
         if !response.status().is_success() {
             return Ok(DispatchResponse {
-                response: safe_error_response(response),
+                response,
                 fence: ResponseFence { lease: self },
             });
         }
@@ -553,7 +559,10 @@ fn safe_success_headers(original: &http::HeaderMap) -> http::HeaderMap {
     }
     headers
 }
-fn safe_error_response(response: ProxyResponse) -> ProxyResponse {
+async fn safe_error_response(
+    response: ProxyResponse,
+    timeout: Duration,
+) -> Result<(ProxyResponse, bool), ProxyError> {
     let status = response.status();
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -572,25 +581,93 @@ fn safe_error_response(response: ProxyResponse) -> ProxyResponse {
     {
         headers.insert(http::header::RETRY_AFTER, value.clone());
     }
-    let kind = if status == http::StatusCode::UNAUTHORIZED {
+    // Inspect only a bounded error envelope, never return its raw text. This
+    // runs before refresh/rejection so an explicit denial cannot mutate auth
+    // state or be replayed under another account by the existing router.
+    if !response
+        .headers()
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .all(|v| {
+            v.to_str()
+                .is_ok_and(|s| s.trim().eq_ignore_ascii_case("identity"))
+        })
+    {
+        return Err(ProxyError::Internal(
+            "zcode.inference.error_encoding_unsupported".into(),
+        ));
+    }
+    let declared_json = response.is_json();
+    let deadline = if timeout.is_zero() {
+        Duration::from_secs(30)
+    } else {
+        timeout.min(Duration::from_secs(30))
+    };
+    let bytes = tokio::time::timeout(deadline, response.bytes_with_limit(64 * 1024))
+        .await
+        .map_err(|_| ProxyError::Internal("zcode.inference.error_body_timeout".into()))?
+        .map_err(|_| ProxyError::Internal("zcode.inference.error_body_unreadable".into()))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| ProxyError::Internal("zcode.inference.error_body_undecodable".into()))?;
+    let envelope: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_)
+            if !text.trim().is_empty()
+                && (declared_json || text.trim_start().starts_with(['{', '['])) =>
+        {
+            return Err(ProxyError::Internal(
+                "zcode.inference.error_json_invalid".into(),
+            ));
+        }
+        // Legacy empty or plain-text/HTML gateway errors retain status semantics.
+        // Their prose is never interpreted as permission or safety evidence.
+        Err(_) => serde_json::Value::Null,
+    };
+    // Same exact structured categories recognized by the original forwarder.
+    // Arbitrary message text, status alone and quota/rate codes are not denials.
+    let denied = envelope
+        .get("error")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|error| {
+            ["type", "code"].into_iter().any(|field| {
+                matches!(
+                    error.get(field).and_then(serde_json::Value::as_str),
+                    Some(
+                        "permission_error"
+                            | "permission_denied"
+                            | "access_denied"
+                            | "safety_error"
+                            | "content_policy_violation"
+                            | "content_filter"
+                    )
+                )
+            })
+        });
+    let kind = if denied {
+        "access_denied"
+    } else if status == http::StatusCode::UNAUTHORIZED {
         "authentication_error"
     } else if status == http::StatusCode::TOO_MANY_REQUESTS {
         "rate_limit_error"
     } else {
         "api_error"
     };
-    let message = if status == http::StatusCode::UNAUTHORIZED {
+    let message = if status == http::StatusCode::UNAUTHORIZED && !denied {
         "zcode.inference.needs_login"
     } else {
         "ZCode Start Plan request was not accepted"
     };
-    ProxyResponse::buffered(
-        status,
-        headers,
-        Bytes::from(
-            serde_json::json!({"type":"error","error":{"type":kind,"message":message}}).to_string(),
+    Ok((
+        ProxyResponse::buffered(
+            status,
+            headers,
+            Bytes::from(
+                serde_json::json!({"type":"error","error":{"type":kind,"message":message}})
+                    .to_string(),
+            ),
         ),
-    )
+        denied,
+    ))
 }
 
 #[cfg(all(test, unix))]

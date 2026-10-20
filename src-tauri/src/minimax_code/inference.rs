@@ -270,10 +270,17 @@ impl Lease {
         loop {
             let request = self.build_request(&body, timeout).map_err(owner_error)?;
             let response = self.send_once(stream_transport, request).await?;
+            let (response, denied) = if response.status().is_success() {
+                (response, false)
+            } else {
+                safe_error_response(response, timeout).await?
+            };
+            self.check().await.map_err(owner_error)?;
             // Only an explicit HTTP 401 before any downstream output allows one
-            // same-account refresh/replay. No body bytes have been consumed or
-            // emitted here. Expiry refresh consumes the same one-refresh budget.
-            if response.status() == http::StatusCode::UNAUTHORIZED && !refreshed {
+            // same-account refresh/replay, after inspecting its bounded error
+            // envelope. No downstream output has been emitted. Expiry refresh
+            // consumes the same one-refresh budget.
+            if response.status() == http::StatusCode::UNAUTHORIZED && !refreshed && !denied {
                 drop(response);
                 self.snapshot =
                     auth::refresh_snapshot(&self.session, auth_transport, &self.snapshot)
@@ -286,15 +293,12 @@ impl Lease {
             if !response.status().is_success() {
                 // Preserve the status for the ORIGINAL retry owner. 429 and a
                 // second 401 must never be treated as successful completions.
-                // Do not collect or return a provider error body: it may echo
-                // bearer credentials, request content or internal account IDs.
+                // The bounded classification above discarded raw upstream text;
+                // only its safe status and allowlisted denial category remain.
                 let fence = ResponseFence {
                     lease: Arc::new(self),
                 };
-                return Ok(DispatchResponse {
-                    response: safe_error_response(response),
-                    fence,
-                });
+                return Ok(DispatchResponse { response, fence });
             }
             let fence = ResponseFence {
                 lease: Arc::new(self),
@@ -488,7 +492,10 @@ fn safe_success_headers(original: &http::HeaderMap) -> http::HeaderMap {
     headers
 }
 
-fn safe_error_response(response: ProxyResponse) -> ProxyResponse {
+async fn safe_error_response(
+    response: ProxyResponse,
+    timeout: Duration,
+) -> Result<(ProxyResponse, bool), ProxyError> {
     let status = response.status();
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -507,7 +514,71 @@ fn safe_error_response(response: ProxyResponse) -> ProxyResponse {
     {
         headers.insert(http::header::RETRY_AFTER, value.clone());
     }
-    let error_type = if status == http::StatusCode::TOO_MANY_REQUESTS {
+    // Inspect only a bounded error envelope, never return its raw text. This
+    // runs before refresh/rejection so an explicit denial cannot mutate auth
+    // state or be replayed under another account by the existing router.
+    if !response
+        .headers()
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .all(|v| {
+            v.to_str()
+                .is_ok_and(|s| s.trim().eq_ignore_ascii_case("identity"))
+        })
+    {
+        return Err(ProxyError::Internal(
+            "minimax_code.error_encoding_unsupported".into(),
+        ));
+    }
+    let declared_json = response.is_json();
+    let deadline = if timeout.is_zero() {
+        Duration::from_secs(30)
+    } else {
+        timeout.min(Duration::from_secs(30))
+    };
+    let bytes = tokio::time::timeout(deadline, response.bytes_with_limit(64 * 1024))
+        .await
+        .map_err(|_| ProxyError::Internal("minimax_code.error_body_timeout".into()))?
+        .map_err(|_| ProxyError::Internal("minimax_code.error_body_unreadable".into()))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| ProxyError::Internal("minimax_code.error_body_undecodable".into()))?;
+    let envelope: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_)
+            if !text.trim().is_empty()
+                && (declared_json || text.trim_start().starts_with(['{', '['])) =>
+        {
+            return Err(ProxyError::Internal(
+                "minimax_code.error_json_invalid".into(),
+            ));
+        }
+        // Legacy empty or plain-text/HTML gateway errors retain status semantics.
+        // Their prose is never interpreted as permission or safety evidence.
+        Err(_) => serde_json::Value::Null,
+    };
+    // Same exact structured categories recognized by the original forwarder.
+    // Arbitrary message text, status alone and quota/rate codes are not denials.
+    let denied = envelope
+        .get("error")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|error| {
+            ["type", "code"].into_iter().any(|field| {
+                matches!(
+                    error.get(field).and_then(serde_json::Value::as_str),
+                    Some(
+                        "permission_error"
+                            | "permission_denied"
+                            | "access_denied"
+                            | "safety_error"
+                            | "content_policy_violation"
+                            | "content_filter"
+                    )
+                )
+            })
+        });
+    let error_type = if denied {
+        "access_denied"
+    } else if status == http::StatusCode::TOO_MANY_REQUESTS {
         "rate_limit_error"
     } else if status == http::StatusCode::UNAUTHORIZED {
         "authentication_error"
@@ -515,7 +586,10 @@ fn safe_error_response(response: ProxyResponse) -> ProxyResponse {
         "api_error"
     };
     let body = serde_json::json!({"type":"error","error":{"type":error_type,"message":"MiniMax Code upstream returned an error"}});
-    ProxyResponse::buffered(status, headers, Bytes::from(body.to_string()))
+    Ok((
+        ProxyResponse::buffered(status, headers, Bytes::from(body.to_string())),
+        denied,
+    ))
 }
 
 /// A test-only capability issued after synthetic seeding. Neither a real vault
