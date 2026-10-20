@@ -392,6 +392,42 @@ export function MiniMaxCodeSection() {
                   ),
                 })}
               </p>
+              {account.entitlement?.quotaState === "not-subscribed" ? (
+                <p>{t("minimaxCode.entitlement.quotaNotSubscribed")}</p>
+              ) : (
+                (["fiveHour", "weekly"] as const).map((kind) => {
+                  const window =
+                    account.entitlement?.quotaState === "available"
+                      ? account.entitlement.quota?.[kind]
+                      : undefined;
+                  const remaining = window?.unlimited
+                    ? t("minimaxCode.entitlement.quotaUnlimited")
+                    : window?.remainingPercent != null
+                      ? t("minimaxCode.entitlement.quotaPercent", {
+                          percent: window.remainingPercent,
+                        })
+                      : t("minimaxCode.entitlement.unknown");
+                  return (
+                    <div key={kind}>
+                      <p>
+                        {t(
+                          kind === "fiveHour"
+                            ? "minimaxCode.entitlement.quotaFiveHour"
+                            : "minimaxCode.entitlement.quotaWeekly",
+                          { remaining },
+                        )}
+                      </p>
+                      {window?.resetAtMs != null && (
+                        <p>
+                          {t("minimaxCode.entitlement.quotaReset", {
+                            time: date(window.resetAtMs),
+                          })}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
+              )}
               {account.entitlement?.tokenPlanExpiresAt != null && (
                 <p>
                   {t("minimaxCode.entitlement.expires", {

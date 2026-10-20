@@ -4998,6 +4998,12 @@
   },
   "minimaxCode": {
     "entitlement": {
+      "quotaNotSubscribed": "Token Plan 用量：未订阅",
+      "quotaUnlimited": "不限量",
+      "quotaPercent": "剩余 {{percent}}%",
+      "quotaFiveHour": "5 小时额度：{{remaining}}",
+      "quotaWeekly": "每周额度：{{remaining}}",
+      "quotaReset": "重置时间：{{time}}",
       "remaining": "剩余积分：{{amount}}",
       "plan": "Token Plan：{{status}}",
       "unknown": "未知（刷新查询）",

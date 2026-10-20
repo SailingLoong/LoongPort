@@ -220,3 +220,141 @@ describe("MiniMax entitlement freshness", () => {
     expect(within(row()).queryByText("剩余积分：0")).not.toBeInTheDocument();
   });
 });
+
+describe("MiniMax Code OAuth plan quota", () => {
+  it("shows independent five-hour and weekly windows, zero and reset time", async () => {
+    const reset = 1790000000000;
+    handlers.refresh_minimax_code_account = () =>
+      account("code-a", {
+        entitlement: {
+          remainingCredits: "23.50",
+          hasTokenPlan: true,
+          tokenPlanExpiresAt: null,
+          quotaState: "available",
+          quota: {
+            fiveHour: {
+              remainingPercent: 30,
+              resetAtMs: reset,
+              unlimited: false,
+            },
+            weekly: { remainingPercent: 0, resetAtMs: null, unlimited: false },
+          },
+        },
+      });
+    await mount();
+    await userEvent.click(button("刷新状态"));
+    await waitFor(() =>
+      expect(
+        within(row()).getByText("5 小时额度：剩余 30%"),
+      ).toBeInTheDocument(),
+    );
+    expect(within(row()).getByText("每周额度：剩余 0%")).toBeInTheDocument();
+    expect(
+      within(row()).getByText(`重置时间：${new Date(reset).toLocaleString()}`),
+    ).toBeInTheDocument();
+    expect(within(row()).getByText("剩余积分：23.50")).toBeInTheDocument();
+  });
+  it("shows unavailable as unknown rather than zero and keeps claims enabled", async () => {
+    handlers.refresh_minimax_code_account = () =>
+      account("code-a", {
+        entitlement: {
+          remainingCredits: "17",
+          hasTokenPlan: true,
+          tokenPlanExpiresAt: null,
+          quotaState: "unavailable",
+          quota: null,
+        },
+      });
+    await mount();
+    await userEvent.click(button("刷新状态"));
+    await waitFor(() =>
+      expect(within(row()).getByText("剩余积分：17")).toBeInTheDocument(),
+    );
+    expect(
+      within(row()).getByText("5 小时额度：未知（刷新查询）"),
+    ).toBeInTheDocument();
+    expect(
+      within(row()).queryByText("5 小时额度：剩余 0%"),
+    ).not.toBeInTheDocument();
+    expect(button("领取今日额度")).toBeEnabled();
+  });
+  it("distinguishes unlimited, missing weekly value and not subscribed", async () => {
+    handlers.refresh_minimax_code_account = () =>
+      account("code-a", {
+        entitlement: {
+          remainingCredits: null,
+          hasTokenPlan: true,
+          tokenPlanExpiresAt: null,
+          quotaState: "available",
+          quota: {
+            fiveHour: {
+              remainingPercent: null,
+              resetAtMs: null,
+              unlimited: true,
+            },
+            weekly: {
+              remainingPercent: null,
+              resetAtMs: null,
+              unlimited: false,
+            },
+          },
+        },
+      });
+    await mount();
+    await userEvent.click(button("刷新状态"));
+    await waitFor(() =>
+      expect(within(row()).getByText("5 小时额度：不限量")).toBeInTheDocument(),
+    );
+    expect(
+      within(row()).getByText("每周额度：未知（刷新查询）"),
+    ).toBeInTheDocument();
+    handlers.refresh_minimax_code_account = () =>
+      account("code-a", {
+        entitlement: {
+          remainingCredits: null,
+          hasTokenPlan: false,
+          tokenPlanExpiresAt: null,
+          quotaState: "not-subscribed",
+          quota: null,
+        },
+      });
+    await userEvent.click(button("刷新状态"));
+    await waitFor(() =>
+      expect(
+        within(row()).getByText("Token Plan 用量：未订阅"),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      within(row()).queryByText("5 小时额度：不限量"),
+    ).not.toBeInTheDocument();
+  });
+  it("does not display quota from an old credential generation", async () => {
+    handlers.refresh_minimax_code_account = () => {
+      catalog = [account("code-a", { credentialVersion: 2 })];
+      return account("code-a", {
+        entitlement: {
+          remainingCredits: null,
+          hasTokenPlan: true,
+          tokenPlanExpiresAt: null,
+          quotaState: "available",
+          quota: {
+            fiveHour: {
+              remainingPercent: 99,
+              resetAtMs: null,
+              unlimited: false,
+            },
+            weekly: { remainingPercent: 99, resetAtMs: null, unlimited: false },
+          },
+        },
+      });
+    };
+    await mount();
+    await userEvent.click(button("刷新状态"));
+    await waitFor(() =>
+      expect(calls("list_minimax_code_accounts").length).toBeGreaterThan(1),
+    );
+    expect(
+      within(row()).queryByText("5 小时额度：剩余 99%"),
+    ).not.toBeInTheDocument();
+  });
+});

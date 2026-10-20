@@ -4998,6 +4998,12 @@
   },
   "minimaxCode": {
     "entitlement": {
+      "quotaNotSubscribed": "Token Plan usage: Not subscribed",
+      "quotaUnlimited": "Unlimited",
+      "quotaPercent": "{{percent}}% remaining",
+      "quotaFiveHour": "5-hour quota: {{remaining}}",
+      "quotaWeekly": "Weekly quota: {{remaining}}",
+      "quotaReset": "Resets: {{time}}",
       "remaining": "Remaining credits: {{amount}}",
       "plan": "Token Plan: {{status}}",
       "unknown": "Unknown (refresh to check)",

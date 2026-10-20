@@ -13,6 +13,7 @@ pub(crate) enum Endpoint {
     Claim,
     UserExtra,
     Membership,
+    PlanQuota,
 }
 pub(crate) struct Request {
     pub endpoint: Endpoint,
@@ -70,6 +71,36 @@ pub(super) fn build_request(
     os: &str,
     version: &str,
 ) -> Result<reqwest::Request, Failure> {
+    if r.endpoint == Endpoint::PlanQuota {
+        // Code OAuth is not the API-key adapter: use its verified official
+        // open-platform origins and personal group, without Matrix signing.
+        let origin = match r.region {
+            Region::Cn => "https://www.minimaxi.com",
+            Region::Global => "https://platform.minimax.io",
+        };
+        let token = r
+            .access_token
+            .as_deref()
+            .filter(|v| !v.trim().is_empty() && v.len() <= 16384)
+            .ok_or(Failure::NeedsLogin)?;
+        let group = r
+            .body
+            .as_ref()
+            .and_then(|v| v.get("op_group_id"))
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
+            .ok_or(Failure::UnsupportedContext)?;
+        let mut group = reqwest::header::HeaderValue::from_str(group)
+            .map_err(|_| Failure::UnsupportedContext)?;
+        group.set_sensitive(true);
+        return client
+            .get(format!("{origin}/v1/api/openplatform/coding_plan/remains"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(token)
+            .header("X-Group-Id", group)
+            .build()
+            .map_err(|_| Failure::InvalidResponse);
+    }
     let account_origin = match r.region {
         Region::Cn => "https://account.minimax.cn",
         Region::Global => "https://account.minimax.io",
@@ -79,6 +110,7 @@ pub(super) fn build_request(
         Region::Global => "https://agent.minimax.io",
     };
     let path = match r.endpoint {
+        Endpoint::PlanQuota => return Err(Failure::UnsupportedContext),
         Endpoint::DeviceCode => "/oauth2/device/code",
         Endpoint::Token | Endpoint::Refresh => "/oauth2/token",
         Endpoint::Profile => "/v1/api/user/info",
@@ -258,7 +290,10 @@ impl Transport for OfficialHttp {
     ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
         Box::pin(async move {
             let client = new_client(Duration::from_secs(
-                if matches!(request.endpoint, Endpoint::UserExtra | Endpoint::Membership) {
+                if matches!(
+                    request.endpoint,
+                    Endpoint::UserExtra | Endpoint::Membership | Endpoint::PlanQuota
+                ) {
                     3
                 } else {
                     30
@@ -375,6 +410,71 @@ mod entitlement_wire_tests {
                     .any(|(k, v)| k == "device_platform" && v == "web"),
                 endpoint != Endpoint::Profile
             );
+        }
+    }
+    #[test]
+    fn plan_quota_uses_official_oauth_origins_group_and_get_without_matrix_signature() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for (region, host) in [
+            (Region::Cn, "www.minimaxi.com"),
+            (Region::Global, "platform.minimax.io"),
+        ] {
+            let request = build_request(
+                &client,
+                Request {
+                    endpoint: Endpoint::PlanQuota,
+                    region,
+                    access_token: Some("synthetic-oauth".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: Some(serde_json::json!({"op_group_id":"personal-group"})),
+                },
+                1790000000000,
+                0,
+                "linux",
+                "test",
+            )
+            .unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().host_str(), Some(host));
+            assert_eq!(
+                request.url().path(),
+                "/v1/api/openplatform/coding_plan/remains"
+            );
+            assert!(request.url().query().is_none());
+            assert!(request.body().is_none());
+            assert_eq!(request.headers()["authorization"], "Bearer synthetic-oauth");
+            assert!(request.headers()["authorization"].is_sensitive());
+            assert_eq!(request.headers()["x-group-id"], "personal-group");
+            assert!(request.headers()["x-group-id"].is_sensitive());
+            for header in ["yy", "x-signature", "x-timestamp"] {
+                assert!(request.headers().get(header).is_none());
+            }
+        }
+    }
+    #[test]
+    fn plan_quota_missing_or_invalid_personal_group_is_rejected_before_request() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for group in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("bad\r\nX-Evil: 1"),
+            serde_json::json!("x".repeat(257)),
+        ] {
+            assert!(build_request(
+                &client,
+                Request {
+                    endpoint: Endpoint::PlanQuota,
+                    region: Region::Cn,
+                    access_token: Some("synthetic-oauth".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: Some(serde_json::json!({"op_group_id":group}))
+                },
+                1790000000000,
+                0,
+                "linux",
+                "test"
+            )
+            .is_err());
         }
     }
 }

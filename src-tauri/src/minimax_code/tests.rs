@@ -515,7 +515,9 @@ impl Transport for LoginHttp {
         Box::pin(async move {
             self.calls.lock().unwrap().push(r.endpoint);
             match r.endpoint {
-                Endpoint::UserExtra | Endpoint::Membership => Err(Failure::UnsupportedContext),
+                Endpoint::UserExtra | Endpoint::Membership | Endpoint::PlanQuota => {
+                    Err(Failure::UnsupportedContext)
+                }
                 Endpoint::DeviceCode => {
                     let b = r.body.unwrap();
                     assert_eq!(b["client_id"], "mcode-public");
@@ -1569,6 +1571,8 @@ mod entitlement_owner_tests {
         replies: Mutex<VecDeque<Result<Response, Failure>>>,
         calls: Mutex<Vec<(Endpoint, Option<Value>)>>,
         retire_during_query: Option<Arc<SecretSession>>,
+        change_only_on_quota: bool,
+        change_kind: u8,
     }
     impl Queries {
         fn new(values: Vec<Result<Response, Failure>>) -> Self {
@@ -1576,6 +1580,8 @@ mod entitlement_owner_tests {
                 replies: Mutex::new(values.into()),
                 calls: Mutex::default(),
                 retire_during_query: None,
+                change_only_on_quota: false,
+                change_kind: 0,
             }
         }
     }
@@ -1592,11 +1598,26 @@ mod entitlement_owner_tests {
                     .unwrap()
                     .push((request.endpoint, request.body));
                 if let Some(session) = &self.retire_during_query {
-                    access(session, None, |doc, _| {
-                        doc.accounts[0].credential_version += 1;
-                        Ok(((), true))
-                    })
-                    .await?;
+                    if !self.change_only_on_quota || request.endpoint == Endpoint::PlanQuota {
+                        if self.change_kind == 2 {
+                            Engine {
+                                session,
+                                transport: self,
+                            }
+                            .retire("synthetic-account")
+                            .await?;
+                        } else {
+                            access(session, None, |doc, _| {
+                                if self.change_kind == 1 {
+                                    doc.accounts[0].auth_generation += 1;
+                                } else {
+                                    doc.accounts[0].credential_version += 1;
+                                }
+                                Ok(((), true))
+                            })
+                            .await?;
+                        }
+                    }
                 }
                 self.replies
                     .lock()
@@ -1752,5 +1773,164 @@ mod entitlement_owner_tests {
         assert!(run(&f, &q).await.is_err());
         assert_eq!(f.raw(), original);
         assert!(super::super::catalog::list(&f.session).await.unwrap()[0].can_claim);
+    }
+    fn personal_plan(group: Option<&str>, subscribed: bool) -> Response {
+        response(
+            json!({"workspaces":[{"workspace_type":1,"workspace_id":"team-first","op_group_id":"team-only-group","has_token_plan":true},{"workspace_type":0,"workspace_id":"personal","op_group_id":group,"has_token_plan":subscribed,"opcredit_balance":17}]}),
+        )
+    }
+    fn quota_reply() -> Response {
+        Response {
+            status: 200,
+            body: json!({"base_resp":{"status_code":0},"model_remains":[{"current_interval_remaining_percent":70,"current_weekly_remaining_percent":0,"end_time":1790000000000_i64}]}),
+        }
+    }
+    #[tokio::test]
+    async fn plan_quota_original_owner_uses_same_oauth_and_only_personal_group() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let original = f.raw();
+        let q = Queries::new(vec![
+            Ok(personal_plan(Some("personal-group"), true)),
+            Ok(response(
+                json!({"has_token_plan":true,"op_group_id":"scoped-other-group"}),
+            )),
+            Ok(quota_reply()),
+        ]);
+        let e = run(&f, &q).await.unwrap();
+        assert_eq!(
+            e.quota_state,
+            super::super::entitlement::QuotaState::Available
+        );
+        assert_eq!(
+            e.quota.as_ref().unwrap().five_hour.remaining_percent,
+            Some(70.0)
+        );
+        assert_eq!(
+            e.quota.as_ref().unwrap().weekly.remaining_percent,
+            Some(0.0)
+        );
+        assert_eq!(
+            q.calls.lock().unwrap()[2],
+            (
+                Endpoint::PlanQuota,
+                Some(json!({"op_group_id":"personal-group"}))
+            )
+        );
+        let public = serde_json::to_string(&e).unwrap();
+        for secret in [
+            "personal-group",
+            "scoped-other-group",
+            "synthetic-access",
+            "synthetic-user",
+        ] {
+            assert!(!public.contains(secret));
+        }
+        assert_eq!(f.raw(), original);
+    }
+    #[tokio::test]
+    async fn plan_quota_original_owner_never_uses_scoped_or_fallback_group() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        for first in [
+            Ok(personal_plan(None, true)),
+            Err(Failure::NetworkUnavailable),
+        ] {
+            let q = Queries::new(vec![
+                first,
+                Ok(response(
+                    json!({"has_token_plan":true,"op_group_id":"untrusted-for-quota"}),
+                )),
+            ]);
+            let e = run(&f, &q).await.unwrap();
+            assert_eq!(
+                e.quota_state,
+                super::super::entitlement::QuotaState::Unavailable
+            );
+            assert!(e.quota.is_none());
+            assert_eq!(q.calls.lock().unwrap().len(), 2);
+        }
+    }
+    #[tokio::test]
+    async fn plan_quota_original_owner_not_subscribed_does_not_query_remains() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![
+            Ok(personal_plan(Some("personal-group"), false)),
+            Ok(response(json!({"has_token_plan":false}))),
+        ]);
+        let e = run(&f, &q).await.unwrap();
+        assert_eq!(
+            e.quota_state,
+            super::super::entitlement::QuotaState::NotSubscribed
+        );
+        assert!(e.quota.is_none());
+        assert_eq!(q.calls.lock().unwrap().len(), 2);
+    }
+    #[tokio::test]
+    async fn plan_quota_original_owner_failed_optional_read_preserves_credit_not_zero() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        for failed in [
+            Err(Failure::NetworkUnavailable),
+            Ok(Response {
+                status: 401,
+                body: json!({"model_remains":[{"current_interval_remaining_percent":100}]}),
+            }),
+            Ok(Response {
+                status: 200,
+                body: json!({"base_resp":{"status_code":1000},"model_remains":[{"current_interval_remaining_percent":100}]}),
+            }),
+        ] {
+            let q = Queries::new(vec![
+                Ok(personal_plan(Some("personal-group"), true)),
+                Ok(response(json!({"has_token_plan":true}))),
+                failed,
+            ]);
+            let e = run(&f, &q).await.unwrap();
+            assert_eq!(e.remaining_credits.as_deref(), Some("17"));
+            assert!(e.quota.is_none());
+            assert_eq!(
+                e.quota_state,
+                super::super::entitlement::QuotaState::Unavailable
+            );
+            assert_eq!(q.calls.lock().unwrap().len(), 3);
+        }
+    }
+    #[tokio::test]
+    async fn plan_quota_original_owner_credential_change_during_remains_is_terminal() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let mut q = Queries::new(vec![
+            Ok(personal_plan(Some("personal-group"), true)),
+            Ok(response(json!({"has_token_plan":true}))),
+            Ok(quota_reply()),
+        ]);
+        q.retire_during_query = Some(f.session.clone());
+        q.change_only_on_quota = true;
+        assert!(matches!(run(&f, &q).await, Err(Failure::StaleIdentity)));
+        assert_eq!(q.calls.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn plan_quota_original_owner_reauthorization_or_actual_retirement_during_read_cannot_publish(
+    ) {
+        for kind in [1, 2] {
+            let f = Fixture::new().await;
+            f.seed(|_| {});
+            let mut q = Queries::new(vec![
+                Ok(personal_plan(Some("personal-group"), true)),
+                Ok(response(json!({"has_token_plan":true}))),
+                Ok(quota_reply()),
+            ]);
+            q.retire_during_query = Some(f.session.clone());
+            q.change_only_on_quota = true;
+            q.change_kind = kind;
+            assert!(matches!(run(&f, &q).await, Err(Failure::StaleIdentity)));
+            assert_eq!(q.calls.lock().unwrap().len(), 3);
+            if kind == 2 {
+                assert!(!super::super::catalog::list(&f.session).await.unwrap()[0].authorized);
+            }
+        }
     }
 }

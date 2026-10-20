@@ -4998,6 +4998,12 @@
   },
   "minimaxCode": {
     "entitlement": {
+      "quotaNotSubscribed": "Token Plan 使用量：未加入",
+      "quotaUnlimited": "無制限",
+      "quotaPercent": "残り {{percent}}%",
+      "quotaFiveHour": "5 時間の利用枠：{{remaining}}",
+      "quotaWeekly": "週間利用枠：{{remaining}}",
+      "quotaReset": "リセット：{{time}}",
       "remaining": "残りクレジット：{{amount}}",
       "plan": "Token Plan：{{status}}",
       "unknown": "不明（更新して確認）",

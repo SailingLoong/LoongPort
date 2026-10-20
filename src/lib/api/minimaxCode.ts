@@ -10,7 +10,18 @@ export type MiniMaxCodeStatus =
   | "needsLogin";
 export type MiniMaxCodeObservedStatus =
   "claimable" | "alreadyClaimed" | "unavailable";
+export interface MiniMaxCodeQuotaWindow {
+  remainingPercent: number | null;
+  resetAtMs: number | null;
+  unlimited: boolean;
+}
+export interface MiniMaxCodePlanQuota {
+  fiveHour: MiniMaxCodeQuotaWindow;
+  weekly: MiniMaxCodeQuotaWindow;
+}
 export interface MiniMaxCodeEntitlement {
+  quotaState?: "available" | "not-subscribed" | "unavailable";
+  quota?: MiniMaxCodePlanQuota | null;
   remainingCredits: string | null;
   hasTokenPlan: boolean | null;
   tokenPlanExpiresAt: number | null;

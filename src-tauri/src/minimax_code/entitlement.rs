@@ -1,11 +1,34 @@
 use serde::Serialize;
 use serde_json::Value;
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuotaWindow {
+    pub remaining_percent: Option<f64>,
+    pub reset_at_ms: Option<f64>,
+    pub unlimited: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlanQuota {
+    pub five_hour: QuotaWindow,
+    pub weekly: QuotaWindow,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum QuotaState {
+    Available,
+    NotSubscribed,
+    #[default]
+    Unavailable,
+}
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Entitlement {
     pub remaining_credits: Option<String>,
     pub has_token_plan: Option<bool>,
     pub token_plan_expires_at: Option<i64>,
+    pub quota_state: QuotaState,
+    pub quota: Option<PlanQuota>,
 }
 /// Protocol fields from the MIT MiniMax Code pinned matrix-account-client.ts.
 /// Daily sign-in awards are deliberately not interpreted as remaining credits.
@@ -24,6 +47,7 @@ pub(super) fn project(body: &Value) -> Entitlement {
         token_plan_expires_at: field("token_plan_expires_at")
             .and_then(Value::as_i64)
             .filter(|n| *n > 0),
+        ..Entitlement::default()
     }
 }
 fn amount(value: &Value) -> Option<String> {
@@ -50,6 +74,42 @@ fn amount(value: &Value) -> Option<String> {
         return None;
     }
     Some(text)
+}
+/// Pinned official client uses the first object row and treats usage_count as
+/// remaining (not consumed). A missing percentage is unknown, never zero.
+pub(super) fn project_quota(body: &Value) -> Option<PlanQuota> {
+    let primary = body
+        .get("model_remains")?
+        .as_array()?
+        .iter()
+        .find(|v| v.is_object())?;
+    Some(PlanQuota {
+        five_hour: quota_window(primary, "current_interval", "end_time"),
+        weekly: quota_window(primary, "current_weekly", "weekly_end_time"),
+    })
+}
+fn quota_window(value: &Value, prefix: &str, reset_key: &str) -> QuotaWindow {
+    let number = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+    };
+    let unlimited = number(&format!("{prefix}_status")) == Some(3.0);
+    let remaining = number(&format!("{prefix}_remaining_percent")).or_else(|| {
+        let total = number(&format!("{prefix}_total_count")).filter(|v| *v > 0.0)?;
+        let remaining = number(&format!("{prefix}_usage_count"))?;
+        Some(remaining / total * 100.0)
+    });
+    QuotaWindow {
+        remaining_percent: if unlimited {
+            None
+        } else {
+            remaining.map(|v| v.clamp(0.0, 100.0).round())
+        },
+        reset_at_ms: number(reset_key).filter(|v| *v > 0.0),
+        unlimited,
+    }
 }
 // OWNER_READ_BOUNDARY
 use super::{
@@ -139,7 +199,8 @@ pub(crate) async fn read<T: Transport>(
         serde_json::json!({}),
     )
     .await;
-    let result = match extra {
+    let mut personal_group_id = None;
+    let mut result = match extra {
         Err(_) => project(
             &query(
                 session,
@@ -175,6 +236,19 @@ pub(crate) async fn read<T: Transport>(
                             .is_some_and(|s| !s.trim().is_empty() && s.len() <= 256)
                 });
                 if let Some(id) = id {
+                    // Only the verified personal workspace can scope OAuth
+                    // quota reads. Never adopt a scoped/fallback membership's
+                    // group or a team workspace; do not expose this in the DTO.
+                    personal_group_id = personal
+                        .get("op_group_id")
+                        .filter(|v| !v.is_null())
+                        .or_else(|| personal.pointer("/data/op_group_id"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|v| {
+                            !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned);
                     let base = project(personal);
                     match query(
                         session,
@@ -201,6 +275,7 @@ pub(crate) async fn read<T: Transport>(
                                 token_plan_expires_at: scoped
                                     .token_plan_expires_at
                                     .or(base.token_plan_expires_at),
+                                ..Entitlement::default()
                             }
                         }
                         Err(_) => base,
@@ -213,6 +288,26 @@ pub(crate) async fn read<T: Transport>(
             }
         }
     };
+    if result.has_token_plan == Some(false) {
+        result.quota_state = QuotaState::NotSubscribed;
+    } else if let Some(group) = personal_group_id {
+        if let Ok(response) = query(
+            session,
+            transport,
+            &snapshot,
+            Endpoint::PlanQuota,
+            serde_json::json!({"op_group_id":group}),
+        )
+        .await
+        {
+            result.quota = project_quota(&response.body);
+            if result.quota.is_some() {
+                result.quota_state = QuotaState::Available;
+            }
+        }
+    }
+    // Optional quota errors never erase credits, but account changes cannot
+    // publish even the earlier membership snapshot.
     catalog::access(session, Some(&snapshot.binding), |d, _| {
         current(d, &snapshot)?;
         Ok((result, false))
