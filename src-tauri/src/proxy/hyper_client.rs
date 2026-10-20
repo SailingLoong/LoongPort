@@ -2,7 +2,7 @@
 //!
 //! Uses raw TCP/TLS writes to preserve exact original header name casing.
 //! Supports HTTP CONNECT tunneling through upstream proxies.
-//! Falls back to hyper-util Client (title-case headers) when raw write is not feasible.
+//! Falls back to hyper-util Client (title-case headers) only before raw request writes.
 
 use super::ProxyError;
 use bytes::Bytes;
@@ -242,8 +242,8 @@ impl ProxyResponse {
 /// 1. Primary: raw HTTP/1.1 write via TLS stream with exact original header casing
 ///    (from `OriginalHeaderCases` captured by peek in server.rs), then hand off to
 ///    hyper for response parsing.
-/// 2. Fallback: hyper-util Client with `title_case_headers(true)` when raw write
-///    isn't feasible (e.g., missing original cases).
+/// 2. Fallback: hyper-util Client with `title_case_headers(true)` when original
+///    cases are absent or direct setup fails before application-request writes.
 ///
 /// The caller is expected to include `Host` in the supplied `headers` at the
 /// correct position.
@@ -294,13 +294,15 @@ pub async fn send_request(
 
         match result {
             Ok(resp) => return Ok(resp),
-            Err(e) => {
-                if proxy_url.is_some() {
-                    // Don't bypass configured proxy with direct connect fallback
-                    return Err(e);
-                }
-                log::warn!("[HyperClient] Raw write failed, falling back to hyper-util: {e}");
+            Err(RawRequestError::BeforeWrite(e)) if proxy_url.is_none() => {
+                log::warn!(
+                    "[HyperClient] Raw connection setup failed, falling back to hyper-util: {e}"
+                );
                 // Fall through to hyper-util Client
+            }
+            Err(RawRequestError::BeforeWrite(e) | RawRequestError::PossiblyWritten(e)) => {
+                // Never bypass a configured proxy or replay a possibly received request.
+                return Err(e);
             }
         }
     }
@@ -380,6 +382,12 @@ impl tokio::io::AsyncWrite for ProxyStream {
     }
 }
 
+enum RawRequestError {
+    BeforeWrite(ProxyError),
+    // write_all can fail after a partial write, so even a write error is ambiguous.
+    PossiblyWritten(ProxyError),
+}
+
 /// Send request via raw TCP/TLS with exact original header casing.
 ///
 /// When `proxy_url` is provided, establishes an HTTP CONNECT tunnel through
@@ -392,13 +400,11 @@ async fn send_raw_request(
     original_cases: &OriginalHeaderCases,
     body: &[u8],
     proxy_url: Option<&str>,
-) -> Result<ProxyResponse, ProxyError> {
-    use tokio::io::AsyncWriteExt;
-
+) -> Result<ProxyResponse, RawRequestError> {
     let scheme = uri.scheme_str().unwrap_or("https");
-    let host = uri
-        .host()
-        .ok_or_else(|| ProxyError::ForwardFailed("URI has no host".into()))?;
+    let host = uri.host().ok_or_else(|| {
+        RawRequestError::BeforeWrite(ProxyError::ForwardFailed("URI has no host".into()))
+    })?;
     let port = uri
         .port_u16()
         .unwrap_or(if scheme == "https" { 443 } else { 80 });
@@ -409,49 +415,64 @@ async fn send_raw_request(
 
     // Establish TCP connection — either direct or through HTTP CONNECT proxy
     let stream = if let Some(proxy) = proxy_url {
-        connect_via_proxy(proxy, host, port).await?
+        connect_via_proxy(proxy, host, port)
+            .await
+            .map_err(RawRequestError::BeforeWrite)?
     } else {
         ProxyStream::Tcp(
             tokio::net::TcpStream::connect((host, port))
                 .await
-                .map_err(|e| ProxyError::ForwardFailed(format!("TCP connect failed: {e}")))?,
+                .map_err(|e| {
+                    RawRequestError::BeforeWrite(ProxyError::ForwardFailed(format!(
+                        "TCP connect failed: {e}"
+                    )))
+                })?,
         )
     };
 
     if scheme == "https" {
         let tls_connector = global_tls_connector();
-        let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| ProxyError::ForwardFailed(format!("Invalid server name: {e}")))?;
-        let mut tls_stream = tls_connector
+        let server_name =
+            rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
+                RawRequestError::BeforeWrite(ProxyError::ForwardFailed(format!(
+                    "Invalid server name: {e}"
+                )))
+            })?;
+        let tls_stream = tls_connector
             .connect(server_name, stream)
             .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("TLS handshake failed: {e}")))?;
+            .map_err(|e| {
+                RawRequestError::BeforeWrite(ProxyError::ForwardFailed(format!(
+                    "TLS handshake failed: {e}"
+                )))
+            })?;
 
-        tls_stream
-            .write_all(&raw)
-            .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Write failed: {e}")))?;
-        tls_stream
-            .flush()
-            .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Flush failed: {e}")))?;
-
-        let filtered = WriteFilter::new(tls_stream);
-        do_hyper_response(filtered, method.clone()).await
+        write_raw_and_read_response(tls_stream, &raw, method.clone()).await
     } else {
-        let mut stream = stream;
-        stream
-            .write_all(&raw)
-            .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Write failed: {e}")))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Flush failed: {e}")))?;
-
-        let filtered = WriteFilter::new(stream);
-        do_hyper_response(filtered, method.clone()).await
+        write_raw_and_read_response(stream, &raw, method.clone()).await
     }
+}
+
+async fn write_raw_and_read_response<S>(
+    mut stream: S,
+    raw: &[u8],
+    method: http::Method,
+) -> Result<ProxyResponse, RawRequestError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncWriteExt;
+
+    stream.write_all(raw).await.map_err(|e| {
+        RawRequestError::PossiblyWritten(ProxyError::ForwardFailed(format!("Write failed: {e}")))
+    })?;
+    stream.flush().await.map_err(|e| {
+        RawRequestError::PossiblyWritten(ProxyError::ForwardFailed(format!("Flush failed: {e}")))
+    })?;
+
+    do_hyper_response(WriteFilter::new(stream), method)
+        .await
+        .map_err(RawRequestError::PossiblyWritten)
 }
 
 /// Establish a connection through an HTTP CONNECT proxy tunnel.
@@ -677,7 +698,8 @@ fn build_raw_request(
 /// already written the request.
 ///
 /// `WriteFilter` discards any writes from hyper (it would try to send its own
-/// request encoding), while passing reads through transparently.
+/// request encoding). Reads wait until that encoding has established Hyper's
+/// response state; a fast upstream may already have responded to our raw write.
 async fn do_hyper_response<S>(
     stream: WriteFilter<S>,
     method: http::Method,
@@ -693,13 +715,6 @@ where
         .await
         .map_err(|e| ProxyError::ForwardFailed(format!("Handshake failed: {e}")))?;
 
-    // Spawn the connection driver (reads responses from the stream)
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            log::debug!("[HyperClient] raw conn driver error: {e}");
-        }
-    });
-
     // Send a dummy request through hyper — hyper will encode this and try to write it,
     // but WriteFilter discards all writes. Hyper will then read the response from the stream.
     let dummy_req = http::Request::builder()
@@ -708,26 +723,38 @@ where
         .body(http_body_util::Full::new(Bytes::new()))
         .map_err(|e| ProxyError::ForwardFailed(format!("Build dummy request: {e}")))?;
 
-    let resp = sender
-        .send_request(dummy_req)
+    let response = sender.send_request(dummy_req);
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            log::debug!("[HyperClient] raw conn driver error: {e}");
+        }
+    });
+
+    let resp = response
         .await
         .map_err(|e| ProxyError::ForwardFailed(format!("Response parse failed: {e}")))?;
 
     Ok(ProxyResponse::Hyper(resp))
 }
 
-/// A stream wrapper that discards all writes but passes reads through.
+/// Discard dummy writes and gate reads until Hyper has encoded its request.
 ///
 /// This lets hyper's connection driver think it sent a request (its encoded bytes
 /// go to /dev/null), while correctly parsing the response that the upstream server
 /// sends in reply to our raw-written request.
 struct WriteFilter<S> {
     inner: S,
+    dummy_encoded: bool,
+    read_waker: Option<std::task::Waker>,
 }
 
 impl<S> WriteFilter<S> {
     fn new(inner: S) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            dummy_encoded: false,
+            read_waker: None,
+        }
     }
 }
 
@@ -737,8 +764,14 @@ impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for WriteFilter<S> {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        // Pass reads through to the underlying stream
-        let inner = std::pin::Pin::new(&mut self.get_mut().inner);
+        let this = self.get_mut();
+        // Hyper checks for unsolicited idle-connection data before encoding a
+        // queued request. Our raw response is solicited, but is not safe to read yet.
+        if !this.dummy_encoded {
+            this.read_waker = Some(cx.waker().clone());
+            return std::task::Poll::Pending;
+        }
+        let inner = std::pin::Pin::new(&mut this.inner);
         inner.poll_read(cx, buf)
     }
 }
@@ -749,7 +782,16 @@ impl<S: Unpin> tokio::io::AsyncWrite for WriteFilter<S> {
         _cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        // Discard all writes — pretend they succeeded
+        // Only a nonempty encoded request establishes response ownership.
+        // In particular, an idle flush must not open the read gate.
+        let this = self.get_mut();
+        if !buf.is_empty() && !this.dummy_encoded {
+            this.dummy_encoded = true;
+            if let Some(waker) = this.read_waker.take() {
+                waker.wake();
+            }
+        }
+        // Discard all writes — the real request was already written once.
         std::task::Poll::Ready(Ok(buf.len()))
     }
 
@@ -771,6 +813,270 @@ impl<S: Unpin> tokio::io::AsyncWrite for WriteFilter<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn read_loopback_request(stream: &mut tokio::net::TcpStream, body_len: usize) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 256];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "request must contain its complete body");
+            request.extend_from_slice(&chunk[..read]);
+            assert!(request.len() <= 8192, "synthetic request is bounded");
+            if request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .filter(|end| request.len() >= end + 4 + body_len)
+                .is_some()
+            {
+                return request;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_response_ready_before_driver_starts_is_parsed_once() {
+        use tokio::io::AsyncWriteExt;
+
+        let (stream, mut upstream) = tokio::io::duplex(256);
+        upstream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+
+        // The real request has already been written before this helper starts.
+        // A ready response must wait until Hyper has registered its dummy request.
+        let response = do_hyper_response(WriteFilter::new(stream), http::Method::POST)
+            .await
+            .unwrap_or_else(|error| panic!("ready upstream response must parse: {error}"));
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(response.bytes_with_limit(2).await.unwrap(), "ok");
+        drop(upstream);
+    }
+
+    #[tokio::test]
+    async fn raw_ready_response_preserves_http_framing_and_head_semantics() {
+        use tokio::io::AsyncWriteExt;
+
+        for (method, response, expected) in [
+            (
+                http::Method::POST,
+                &b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..],
+                "ok",
+            ),
+            (
+                http::Method::POST,
+                &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n"[..],
+                "ok",
+            ),
+            (
+                http::Method::HEAD,
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n"[..],
+                "",
+            ),
+        ] {
+            let (stream, mut upstream) = tokio::io::duplex(256);
+            upstream.write_all(response).await.unwrap();
+            let response = do_hyper_response(WriteFilter::new(stream), method)
+                .await
+                .unwrap_or_else(|error| panic!("ready framed response must parse: {error}"));
+            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.bytes_with_limit(2).await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_response_streams_before_the_upstream_finishes() {
+        use tokio::io::AsyncWriteExt;
+
+        let (stream, mut upstream) = tokio::io::duplex(256);
+        upstream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhe\r\n")
+            .await
+            .unwrap();
+        let response = do_hyper_response(WriteFilter::new(stream), http::Method::POST)
+            .await
+            .unwrap_or_else(|error| panic!("streaming headers must parse: {error}"));
+        let stream = response.bytes_stream();
+        futures::pin_mut!(stream);
+        assert_eq!(stream.next().await.unwrap().unwrap(), "he");
+        upstream.write_all(b"3\r\nllo\r\n0\r\n\r\n").await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), "llo");
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_partial_write_and_flush_errors_are_possibly_written() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::task::{Context, Poll};
+
+        struct FailingWrite {
+            written: Arc<AtomicUsize>,
+            fail_flush: bool,
+        }
+        impl tokio::io::AsyncRead for FailingWrite {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                panic!("response parsing must not start after a failed write/flush");
+            }
+        }
+        impl tokio::io::AsyncWrite for FailingWrite {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if !self.fail_flush && self.written.load(Ordering::SeqCst) > 0 {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+                }
+                let written = if self.fail_flush { bytes.len() } else { 3 };
+                self.written.fetch_add(written, Ordering::SeqCst);
+                Poll::Ready(Ok(written))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.fail_flush {
+                    Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        for fail_flush in [false, true] {
+            let written = Arc::new(AtomicUsize::new(0));
+            let raw = b"POST /effects HTTP/1.1\r\nContent-Length: 2\r\n\r\n[]";
+            let result = write_raw_and_read_response(
+                FailingWrite {
+                    written: written.clone(),
+                    fail_flush,
+                },
+                raw,
+                http::Method::POST,
+            )
+            .await;
+            assert!(matches!(result, Err(RawRequestError::PossiblyWritten(_))));
+            assert_eq!(
+                written.load(Ordering::SeqCst),
+                if fail_flush { raw.len() } else { 3 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_connect_preserves_wire_headers_and_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let connect = read_loopback_request(&mut stream, 0).await;
+            assert!(connect.starts_with(b"CONNECT synthetic.invalid:80 HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let request = read_loopback_request(&mut stream, 2).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            request
+        });
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-case", "current".parse().unwrap());
+        headers.append("x-dup", "one".parse().unwrap());
+        headers.append("x-dup", "two".parse().unwrap());
+        headers.insert(http::header::HOST, "synthetic.invalid".parse().unwrap());
+        let mut extensions = http::Extensions::new();
+        extensions.insert(OriginalHeaderCases::from_raw_bytes(b"POST /effects?x=1 HTTP/1.1\r\nx-CaSe: old\r\nX-Dup: old1\r\nx-dUP: old2\r\nhOsT: old\r\n\r\n"));
+        let proxy_url = format!("http://{address}");
+        let response = send_request(
+            "http://synthetic.invalid/effects?x=1".parse().unwrap(),
+            "synthetic-loopback",
+            http::Method::POST,
+            headers,
+            extensions,
+            b"[]".to_vec(),
+            std::time::Duration::from_secs(10),
+            Some(&proxy_url),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("CONNECT request must succeed: {error}"));
+        assert_eq!(response.bytes_with_limit(2).await.unwrap(), "ok");
+        assert_eq!(upstream.await.unwrap(), b"POST /effects?x=1 HTTP/1.1\r\nx-CaSe: current\r\nX-Dup: one\r\nx-dUP: two\r\nhOsT: synthetic.invalid\r\nContent-Length: 2\r\n\r\n[]");
+    }
+
+    #[tokio::test]
+    async fn raw_post_parse_failure_does_not_replay_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let upstream_hits = hits.clone();
+        let upstream = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_loopback_request(&mut stream, 2).await;
+                assert!(request.starts_with(b"POST /effects HTTP/1.1\r\n"));
+                assert!(request.ends_with(b"\r\n\r\n[]"));
+                let hit = upstream_hits.fetch_add(1, Ordering::SeqCst);
+                let response: &[u8] = if hit == 0 {
+                    b"not an HTTP response\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                };
+                stream.write_all(response).await.unwrap();
+            }
+        });
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, address.to_string().parse().unwrap());
+        let mut extensions = http::Extensions::new();
+        extensions.insert(OriginalHeaderCases::from_raw_bytes(
+            b"POST /effects HTTP/1.1\r\nHost: synthetic.invalid\r\n\r\n",
+        ));
+        let result = send_request(
+            format!("http://{address}/effects").parse().unwrap(),
+            "synthetic-loopback",
+            http::Method::POST,
+            headers,
+            extensions,
+            b"[]".to_vec(),
+            std::time::Duration::from_secs(10),
+            None,
+        )
+        .await;
+        upstream.abort();
+        assert!(upstream.await.unwrap_err().is_cancelled());
+        let hits = hits.load(Ordering::SeqCst);
+        eprintln!(
+            "raw parse-failure probe: upstream_hits={hits}, returned_error={}",
+            result.is_err()
+        );
+        assert!(
+            result.is_err(),
+            "raw response failure must surface instead of replaying POST"
+        );
+        assert_eq!(hits, 1, "an already received POST must never be replayed");
+    }
 
     fn buffered_with_content_type(content_type: Option<&str>) -> ProxyResponse {
         let mut headers = http::HeaderMap::new();

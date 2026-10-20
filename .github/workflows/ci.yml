@@ -217,15 +217,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo dependency cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: "false"
 
       - name: Create frontend dist placeholder
         shell: bash
@@ -250,6 +255,24 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      # loongport-cli（无桌面静态包）的纯净闸：GUI 关掉后库必须仍能编译。
+      # 有人往共享模块里加了 tauri 引用就会在这里红——否则只有 release
+      # 打 musl 包时才炸。警告不拦（no-gui 下大量 gui-only 代码成为死代码，
+      # 属预期），只拦编译错误。
+      - name: Headless build check (no-default-features, musl target)
+        if: runner.os == 'Linux'
+        run: |
+          # 用 musl 目标检查：openssl 等 target 特有依赖问题只在 musl 下暴露
+          # （曾在 VPS 构建时才炸过一次）。GNU 宿主的 no-gui 检查覆盖不了这层。
+          sudo apt-get install -y --no-install-recommends musl-tools >/dev/null
+          rustup target add x86_64-unknown-linux-musl
+          cargo check --no-default-features --manifest-path src-tauri/Cargo.toml \
+            --target x86_64-unknown-linux-musl
+          # CLI 是独立成员 crate（v6.17.0 事故后的形状），单独在 musl 下过编译
+          # 检查 —— 它就是给无桌面环境用的，host 检查覆盖不了它的目标形态。
+          cargo check -p loongport-cli --manifest-path src-tauri/Cargo.toml \
+            --target x86_64-unknown-linux-musl
 
   backend-tests:
     name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
@@ -293,28 +316,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
-      # 分片并行时缓存只由每平台的第一片保存，其余只恢复：8 个 job 同时
-      # 保存同 key 会把 10GB 的 repo 缓存配额刷穿（LRU 互相挤掉）。
-      - name: Cache Cargo registry and build
-        if: matrix.shard == 1
-        uses: actions/cache@v5
+      # Share dependency artifacts; only the first shard per platform saves them.
+      # Workspace outputs stay out of this cache so source changes do not create
+      # another full target archive on every commit.
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-      - name: Restore Cargo cache (no save)
-        if: matrix.shard != 1
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Create frontend dist placeholder
         shell: bash
@@ -333,24 +351,6 @@ jobs:
           cargo nextest run --profile ci \
             --manifest-path src-tauri/Cargo.toml \
             --partition count:${{ matrix.shard }}/${{ matrix.shards }}
-
-      # loongport-cli（无桌面静态包）的纯净闸：GUI 关掉后库必须仍能编译。
-      # 有人往共享模块里加了 tauri 引用就会在这里红——否则只有 release
-      # 打 musl 包时才炸。警告不拦（no-gui 下大量 gui-only 代码成为死代码，
-      # 属预期），只拦编译错误。
-      - name: Headless build check (no-default-features, musl target)
-        if: runner.os == 'Linux'
-        run: |
-          # 用 musl 目标检查：openssl 等 target 特有依赖问题只在 musl 下暴露
-          # （曾在 VPS 构建时才炸过一次）。GNU 宿主的 no-gui 检查覆盖不了这层。
-          sudo apt-get install -y --no-install-recommends musl-tools >/dev/null
-          rustup target add x86_64-unknown-linux-musl
-          cargo check --no-default-features --manifest-path src-tauri/Cargo.toml \
-            --target x86_64-unknown-linux-musl
-          # CLI 是独立成员 crate（v6.17.0 事故后的形状），单独在 musl 下过编译
-          # 检查 —— 它就是给无桌面环境用的，host 检查覆盖不了它的目标形态。
-          cargo check -p loongport-cli --manifest-path src-tauri/Cargo.toml \
-            --target x86_64-unknown-linux-musl
 
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
@@ -374,15 +374,20 @@ jobs:
           distribution: Ubuntu-24.04
           wsl-version: 2
 
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo dependency cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: "false"
 
       - name: Create frontend dist placeholder
         shell: bash
