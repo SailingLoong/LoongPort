@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+mod agents;
+pub use agents::*;
+
 mod order_profiles;
 pub use order_profiles::*;
 mod announcements;

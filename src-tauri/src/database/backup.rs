@@ -1914,11 +1914,11 @@ mod tests {
             model: "fixture-model".into(),
             max_output_tokens: 128,
             timeout_ms: 1000,
-            budget: Budget {
+            budget: Some(Budget {
                 mode: "estimated".into(),
                 currency: "USD".into(),
                 limit_micros: 1000,
-            },
+            }),
         };
         let binding = contract::binding(&scope, "codex", &task)?;
         db.conn.lock()?.execute("INSERT INTO paperclip_run_bindings(owner,app,company,run,scope,binding,phase,receipt) VALUES('owner','codex','company',?1,?2,?3,'bound',NULL)", rusqlite::params![run,serde_json::to_string(&scope).unwrap(),binding.to_string()])?;

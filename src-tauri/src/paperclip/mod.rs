@@ -4,6 +4,8 @@ pub(crate) mod bindings;
 pub(crate) mod contract;
 pub(crate) mod execution;
 pub(crate) mod snapshot;
+#[cfg(unix)]
+mod tasks;
 use crate::error::AppError;
 #[cfg(any(unix, test))]
 use crate::{app_config::AppType, store::AppState};
@@ -333,6 +335,8 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(1);
 #[cfg(any(unix, test))]
 #[derive(Default)]
 struct Control {
+    #[cfg(unix)]
+    local_task_gate: Mutex<()>,
     stop: AtomicBool,
     #[cfg(unix)]
     active: Mutex<Option<UnixStream>>,

@@ -3713,43 +3713,63 @@ async fn handle_budgeted_native_response(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&evidence.model);
-            if model != evidence.model {
+            if route.requires_legacy_budget() && model != evidence.model {
                 return Err(ProxyError::ConfigError(
                     "paperclip.response_model_changed".into(),
                 ));
             }
-            let id = usage.dedup_request_id(super::usage::parser::dedup_scope_for_app(
-                ctx.app_type_str,
-                &ctx.provider.id,
-            ));
-            let logger = super::usage::logger::UsageLogger::new(&state.db);
-            // This is the only write for the bounded response; no generic async
-            // process_response is subsequently invoked for this branch.
-            match logger.log_with_calculation_confirmed(
-                id,
-                ctx.provider.id.clone(),
-                ctx.app_type_str.into(),
-                model.into(),
-                ctx.request_model.clone(),
-                evidence.model.clone(),
-                usage,
-                evidence.multiplier,
-                ctx.latency_ms(),
-                None,
-                status.as_u16(),
-                Some(ctx.session_id.clone()),
-                None,
-                false,
-                evidence.input_tokens,
-            ) {
-                Ok(row) => {
-                    if let Some(service) = state.service_owner.upgrade() {
-                        let _ = route.record_usage(&service, row);
+            if !route.requires_legacy_budget() {
+                // Preserve the normal proxy pricing source, multiplier and usage owner.
+                log_usage(
+                    state,
+                    &ctx.provider.id,
+                    ctx.app_type_str,
+                    model,
+                    &ctx.request_model,
+                    &evidence.model,
+                    usage,
+                    ctx.latency_ms(),
+                    None,
+                    false,
+                    status.as_u16(),
+                    Some(ctx.session_id.clone()),
+                    evidence.input_tokens,
+                )
+                .await;
+            } else {
+                let id = usage.dedup_request_id(super::usage::parser::dedup_scope_for_app(
+                    ctx.app_type_str,
+                    &ctx.provider.id,
+                ));
+                let logger = super::usage::logger::UsageLogger::new(&state.db);
+                // This is the only write for the bounded response; no generic async
+                // process_response is subsequently invoked for this branch.
+                match logger.log_with_calculation_confirmed(
+                    id,
+                    ctx.provider.id.clone(),
+                    ctx.app_type_str.into(),
+                    model.into(),
+                    ctx.request_model.clone(),
+                    evidence.model.clone(),
+                    usage,
+                    evidence.multiplier,
+                    ctx.latency_ms(),
+                    None,
+                    status.as_u16(),
+                    Some(ctx.session_id.clone()),
+                    None,
+                    false,
+                    evidence.input_tokens,
+                ) {
+                    Ok(row) => {
+                        if let Some(service) = state.service_owner.upgrade() {
+                            let _ = route.record_usage(&service, row);
+                        }
                     }
-                }
-                Err(error) => {
-                    log::warn!("[USG-001] Native usage confirmation unavailable");
-                    let _ = error;
+                    Err(error) => {
+                        log::warn!("[USG-001] Native usage confirmation unavailable");
+                        let _ = error;
+                    }
                 }
             }
         }

@@ -185,10 +185,33 @@ mod tests {
 #[derive(Default)]
 pub(super) struct ListenerSlot {
     bridge: Option<Bridge>,
+    local_owner: Option<Owner>,
     closed: bool,
     registration: Option<(AppType, String, std::path::PathBuf)>,
 }
 impl StartupCoordinator {
+    pub(crate) fn local_agents_owner(&self, state: &AppState) -> Result<Owner, AppError> {
+        let mut slot = self
+            .paperclip_bridge
+            .lock()
+            .map_err(|_| AppError::Config("agents.unavailable".into()))?;
+        let phase = self
+            .phase
+            .lock()
+            .map_err(|_| AppError::Config("agents.unavailable".into()))?;
+        if slot.closed || *phase != Phase::Ready {
+            return Err(AppError::Config("agents.not_ready".into()));
+        }
+        super::super::upgrade::checkpoint::ensure_no_pending_checkpoint(
+            &crate::live::engine::DeviceStore::for_device(),
+        )?;
+        if slot.local_owner.is_none() {
+            let owner = Owner::new(state.clone(), AppType::Codex, "loongport-agents".into())?;
+            owner.recover_execution()?;
+            slot.local_owner = Some(owner);
+        }
+        Ok(slot.local_owner.as_ref().unwrap().clone())
+    }
     fn register_paperclip_bridge(
         &self,
         state: &AppState,
@@ -225,6 +248,9 @@ impl StartupCoordinator {
             .lock()
             .map_err(|_| AppError::Config("paperclip.owner_unavailable".into()))?;
         slot.closed = true;
+        if let Some(owner) = slot.local_owner.take() {
+            owner.stop_local_tasks()?;
+        }
         if let Some(bridge) = slot.bridge.take() {
             bridge.stop()?;
         }
