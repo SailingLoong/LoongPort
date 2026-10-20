@@ -158,16 +158,7 @@ jobs:
         run: pnpm format:check
 
       - name: Unit tests
-        # 套件在 fork 复用下存在偶发的失控分配（本地 3 跑 1 次 OOM、CI 2/3 次把
-        # useApplicationOverview.routingProtocol 的 legacy 分支拖过超时，单文件
-        # 独立进程 35+ 次零失败）。根因（fork 累积泄漏）另案排查；在那之前，
-        # 已知的内存敏感文件在这里列出、单独进程跑，主套件排除它。
-        # 列表形状：再出现同类文件时只往两处各加一个路径，不动其余步骤。
-        run: |
-          pnpm exec vitest run \
-            --exclude "src/components/applications/__tests__/useApplicationOverview.routingProtocol.test.tsx"
-          pnpm exec vitest run \
-            "src/components/applications/__tests__/useApplicationOverview.routingProtocol.test.tsx"
+        run: pnpm test:unit
 
       # remote-config 的 Pages Functions 有自己的 vitest 配置与 tsconfig（node 环境），
       # 根配置只收 src/ 与 tests/ —— 不加这步，observations 解析（吃不可信的

@@ -14,6 +14,14 @@ export default defineConfig({
     // CI 2 核机器上交互重的 jsdom 用例（userEvent 连续操作）比本地慢 3-5 倍，
     // 默认 5s 会成片超时（PiProviderForm 等），放宽到 15s。
     testTimeout: 15_000,
+    // fork 复用下套件存在偶发的失控内存分配（曾把 worker 推到堆 OOM、CI 上把
+    // 邻近测试拖过超时）。vm 系池是 vitest 的原生对策：VM 上下文保住按文件隔离，
+    // vmMemoryLimit 给 worker 划内存水位、到限即回收 —— Jest 侧对应物是
+    // workerIdleMemoryLimit。同时环境（jsdom）按 worker 复用，省掉 295 次
+    // 环境创建（曾占全程 25%）。普通 forks/threads 池没有水位回收旋钮
+    // （vitest 5.0.1 源码 getMemoryLimit 仅对 vm 池生效）。
+    pool: "vmThreads",
+    vmMemoryLimit: "1GB",
     setupFiles: ["./tests/setupGlobals.ts", "./tests/setupTests.ts"],
     globals: true,
     // ⚠️ **必须限定到这两处，不能用默认的全仓扫**。
