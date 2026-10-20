@@ -1,5 +1,8 @@
 import type { ProviderUpdateInput } from "@/lib/api/providers";
-import { applicationRoutingApi } from "@/lib/api/applicationRouting";
+import {
+  applicationRoutingApi,
+  isApplicationRoutingWriteBlocked,
+} from "@/lib/api/applicationRouting";
 import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -80,6 +83,14 @@ import {
   type ApplicationWorkspaceHandle,
 } from "@/components/applications/ApplicationWorkspace";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
+import {
+  OPEN_ACCOUNT_MANAGER,
+  isAccountPlatform,
+} from "@/components/relay/accounts/accountPlatforms";
+import {
+  ManagedAccountApplicationPanel,
+  type ManagedAccountApplicationHandle,
+} from "@/components/relay/accounts/ManagedAccountApplicationPanel";
 import { useAccountSessionStartup } from "@/components/relay/accounts/useAccountSessionStartup";
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
 import { useServiceOnboardingStatus } from "@/components/relay/onboarding/useServiceOnboarding";
@@ -177,18 +188,25 @@ function App() {
 
   const workspaceRef = useRef<ApplicationWorkspaceHandle>(null);
   const settingsRef = useRef<SettingsPageHandle>(null);
+  const managedAccountRef = useRef<ManagedAccountApplicationHandle>(null);
+  const editingSessionApp = useRef<AppId | null>(null);
   const pendingNavigation = useRef<(() => void) | null>(null);
   const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
   const beforeNavigate = useCallback(
     (proceed: () => void) => {
-      if (workspaceRef.current?.submitting || settingsRef.current?.submitting) {
+      if (
+        workspaceRef.current?.submitting ||
+        settingsRef.current?.submitting ||
+        managedAccountRef.current?.submitting
+      ) {
         toast.info(t("common.saving"));
         return;
       }
       if (pendingNavigation.current) return;
       if (
         !workspaceRef.current?.hasPendingChanges &&
-        !settingsRef.current?.hasPendingChanges
+        !settingsRef.current?.hasPendingChanges &&
+        !managedAccountRef.current?.hasPendingChanges
       ) {
         proceed();
         return;
@@ -219,14 +237,44 @@ function App() {
     isProxyAppId(activeApp) &&
     (!routingAdmission.data ||
       Boolean(routingAdmission.error) ||
-      routingAdmission.data.modeState?.canWrite === false);
-  const setActiveApp = navigation.setApp;
+      isApplicationRoutingWriteBlocked(
+        activeApp,
+        routingAdmission.data.modeState,
+      ));
+  const setActiveApp = useCallback(
+    (app: AppId) => {
+      if (editingSessionApp.current && app !== editingSessionApp.current)
+        return;
+      navigation.setApp(app);
+    },
+    [navigation.setApp],
+  );
   const usesStore = usesProviderStore(activeApp);
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const currentView = navigation.view;
-  const setCurrentView = navigation.navigate;
+  const setCurrentView = useCallback(
+    (...args: Parameters<typeof navigation.navigate>) => {
+      if (
+        editingSessionApp.current &&
+        args[1] &&
+        args[1] !== editingSessionApp.current
+      )
+        return;
+      navigation.navigate(...args);
+    },
+    [navigation.navigate],
+  );
   const goBack = navigation.back;
+  useEffect(() => {
+    const open = (event: Event) => {
+      const platform = (event as CustomEvent<unknown>).detail;
+      if (isAccountPlatform(platform))
+        setCurrentView("services", undefined, undefined, platform);
+    };
+    window.addEventListener(OPEN_ACCOUNT_MANAGER, open);
+    return () => window.removeEventListener(OPEN_ACCOUNT_MANAGER, open);
+  }, [setCurrentView]);
   const isApplicationView =
     currentView === "providers" || currentView === "image";
   const [addHubEntries, setAddHubEntries] = useState<
@@ -951,10 +999,16 @@ function App() {
     setCurrentView("skillsDiscovery");
   };
 
-  /** 打开聚合页；`tab` 缺省落「中转站」（首启引导同）。 */
+  /** 打开聚合页；默认先选平台，首启引导显式进入中转站。 */
   const handleOpenAddHub = useCallback(
-    (tab: AddHubTab = "directory", opts?: { firstVisit?: boolean }) => {
-      const app = usesProviderStore(activeApp) ? activeApp : "codex";
+    (
+      tab: AddHubTab = "accounts",
+      opts?: { firstVisit?: boolean; appId?: AppId },
+    ) => {
+      const app =
+        opts?.appId ?? (usesProviderStore(activeApp) ? activeApp : "codex");
+      if (editingSessionApp.current && app !== editingSessionApp.current)
+        return;
       setAddHubEntries((entries) => ({
         ...entries,
         [app]: {
@@ -1032,6 +1086,7 @@ function App() {
         activeProviderId={activeProviderId}
         onSwitch={activeApp === "pi" ? handleEnablePiProvider : guardedSwitch}
         onEdit={(provider) => {
+          editingSessionApp.current = activeApp;
           setEditingProvider(provider);
         }}
         onDelete={(provider) =>
@@ -1096,6 +1151,10 @@ function App() {
               onOpenChange={goBack}
               onImportSuccess={handleImportSuccess}
               defaultTab={settingsDefaultTab}
+              onManageAccounts={() => {
+                setSettingsDefaultTab("general");
+                setCurrentView("services");
+              }}
             />
           );
         case "prompts":
@@ -1197,6 +1256,14 @@ function App() {
                   >
                     {activeApp === "zcode" ? (
                       <ZCodeProviderPanel
+                        onManageAccounts={() =>
+                          setCurrentView(
+                            "services",
+                            activeApp,
+                            undefined,
+                            "zcode",
+                          )
+                        }
                         onNavigationBlockedChange={setZcodeNavigationBusy}
                       />
                     ) : activeApp === "codex-image" ? (
@@ -1222,6 +1289,13 @@ function App() {
                       >
                         {(mutationsDisabled) => providerList(mutationsDisabled)}
                       </ApplicationWorkspace>
+                    )}
+                    {(activeApp === "claude" || activeApp === "codex") && (
+                      <ManagedAccountApplicationPanel
+                        key={activeApp}
+                        appId={activeApp}
+                        ref={managedAccountRef}
+                      />
                     )}
                   </motion.div>
                 </AnimatePresence>
@@ -1309,7 +1383,10 @@ function App() {
       <ClientSidebar
         view={currentView}
         top={dragBarHeight}
-        disabled={managementBusy}
+        disabled={
+          managementBusy ||
+          (editingProvider !== null && currentView === "services")
+        }
         onNavigate={navigateSection}
         onHelp={() =>
           void settingsApi
@@ -1648,6 +1725,11 @@ function App() {
           <ServicesPage
             appId={activeApp}
             account={navigation.account}
+            platform={navigation.platform}
+            onOpenPlatform={(platform) =>
+              setCurrentView("services", activeApp, undefined, platform)
+            }
+            onNavigationBlockedChange={setZcodeNavigationBusy}
             onBack={navigation.back}
             onSelectAccount={(account, app) =>
               setCurrentView("services", app, account)
@@ -1666,6 +1748,12 @@ function App() {
             <AddHubPage
               sourceAppId={app}
               entryRequest={addHubEntries[app]}
+              onOpenPlatform={(platform) =>
+                setCurrentView("services", app, undefined, platform)
+              }
+              onOpenConfiguration={(appId, tab) =>
+                handleOpenAddHub(tab, { appId })
+              }
               firstVisit={addHubEntries[app]?.firstVisit}
               onBack={goBack}
               onAddProvider={addProvider}
@@ -1697,29 +1785,34 @@ function App() {
           if (!proceed) return;
           if (
             workspaceRef.current?.submitting ||
-            settingsRef.current?.submitting
+            settingsRef.current?.submitting ||
+            managedAccountRef.current?.submitting
           ) {
             toast.info(t("common.saving"));
             return;
           }
           workspaceRef.current?.discard();
           settingsRef.current?.discard();
+          managedAccountRef.current?.discard();
           proceed();
         }}
       />
-      <EditProviderDialog
-        mutationsDisabled={providerWritesBlocked}
-        open={Boolean(editingProvider)}
-        provider={effectiveEditingProvider}
-        onOpenChange={(open) => {
-          if (!open) {
-            setEditingProvider(null);
-          }
-        }}
-        onSubmit={handleEditProvider}
-        appId={activeApp}
-        isProxyTakeover={isCurrentAppTakeoverActive}
-      />
+      <PreservedView active={currentView !== "services"}>
+        <EditProviderDialog
+          mutationsDisabled={providerWritesBlocked}
+          open={Boolean(editingProvider)}
+          provider={effectiveEditingProvider}
+          onOpenChange={(open) => {
+            if (!open) {
+              editingSessionApp.current = null;
+              setEditingProvider(null);
+            }
+          }}
+          onSubmit={handleEditProvider}
+          appId={activeApp}
+          isProxyTakeover={isCurrentAppTakeoverActive}
+        />
+      </PreservedView>
 
       {effectiveUsageProvider && (
         <UsageScriptModal

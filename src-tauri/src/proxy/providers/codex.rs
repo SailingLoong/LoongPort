@@ -26,6 +26,14 @@ pub struct CodexAdapter;
 /// OpenAI Chat Completions, even if the local Codex client is talking to CC
 /// Switch through the Responses API.
 pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
+    // The Qoder SDK adapter emits Chat-shaped responses. This is a transport
+    // capability, independent of the client's Responses wire_api declaration.
+    if crate::proxy::qoder_http::enabled(provider) {
+        return true;
+    }
+    if crate::proxy::managed_accounts::selected(provider).is_some() {
+        return crate::proxy::managed_accounts::is_chat(provider);
+    }
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -166,6 +174,13 @@ pub fn inject_codex_chat_prompt_cache_key(
 /// Determined solely from explicit config (apiFormat / wire_api); no base_url
 /// guessing — Anthropic gateway addresses vary widely and guessing easily misfires.
 pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
+    if crate::proxy::qoder_http::enabled(provider) {
+        return false;
+    }
+    if super::super::managed_accounts::selected(provider).is_some() {
+        return super::super::managed_accounts::is_anthropic(provider);
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()

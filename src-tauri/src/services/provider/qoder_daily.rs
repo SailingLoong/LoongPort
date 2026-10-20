@@ -189,7 +189,7 @@ pub(crate) fn prepare_claim(
 
 /// Compare the exact configured candidate consumed by the existing SDK route.
 /// Neither extraction success nor equality proves PAT family or account subject.
-fn credential_candidate(provider: &Provider) -> Result<Option<String>, String> {
+pub(crate) fn credential_candidate(provider: &Provider) -> Result<Option<String>, String> {
     let adapter = crate::proxy::providers::get_adapter(&crate::app_config::AppType::Codex);
     if let Some(config) = provider
         .settings_config
@@ -411,7 +411,7 @@ pub(crate) fn prepare_selected(
     let response = adapter.post(&context, &operation.binding);
     complete_response(db, &context, &operation, response, Action::Post)
 }
-fn initialize_provider(db: &Database, provider_id: &str) -> Result<Provider, AppError> {
+pub(crate) fn initialize_provider(db: &Database, provider_id: &str) -> Result<Provider, AppError> {
     let mut provider = load(db, provider_id)?;
     if provider
         .meta

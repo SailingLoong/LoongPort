@@ -1,4 +1,5 @@
 import { useCallback, useReducer, useRef } from "react";
+import type { AccountPlatform } from "@/components/relay/accounts/accountPlatforms";
 import type { AppId } from "@/lib/api";
 
 export type ClientView =
@@ -71,7 +72,7 @@ export function getNavigationSection(view: ClientView): ClientView {
 }
 
 function getParentView(route: ClientRoute): ClientView | undefined {
-  return route.account ? "services" : parentViews[route.view];
+  return route.account || route.platform ? "services" : parentViews[route.view];
 }
 
 export interface AccountRoute {
@@ -83,6 +84,7 @@ export interface ClientRoute {
   view: ClientView;
   app: AppId;
   account?: AccountRoute;
+  platform?: AccountPlatform;
 }
 export interface NavigationState {
   current: ClientRoute;
@@ -94,6 +96,7 @@ type NavigationAction =
       view: ClientView;
       app?: AppId;
       account?: AccountRoute;
+      platform?: AccountPlatform;
     }
   | { type: "app"; app: AppId }
   | { type: "back" };
@@ -116,6 +119,9 @@ export function navigationReducer(
   const current: ClientRoute = {
     view: action.view,
     app: action.app ?? state.current.app,
+    ...(action.view === "services" && action.platform
+      ? { platform: action.platform }
+      : {}),
     ...(action.view === "services" && action.account
       ? { account: action.account }
       : {}),
@@ -124,13 +130,16 @@ export function navigationReducer(
     current.view === state.current.view &&
     current.app === state.current.app &&
     current.account?.kind === state.current.account?.kind &&
-    current.account?.id === state.current.account?.id
+    current.account?.id === state.current.account?.id &&
+    current.platform === state.current.platform
   )
     return state;
   const sameAccount =
-    current.account !== undefined &&
-    current.account.kind === state.current.account?.kind &&
-    current.account.id === state.current.account?.id;
+    (current.platform !== undefined &&
+      current.platform === state.current.platform) ||
+    (current.account !== undefined &&
+      current.account.kind === state.current.account?.kind &&
+      current.account.id === state.current.account?.id);
   return {
     current,
     history: !getParentView(current)
@@ -149,7 +158,7 @@ export function useClientNavigation(
     const savedView = initial();
     const app = initialApp();
     const view =
-      app === "zcode" && savedView !== "settings"
+      app === "zcode" && savedView !== "settings" && savedView !== "services"
         ? "providers"
         : savedView === "providers" && app === "codex-image"
           ? "image"
@@ -171,8 +180,12 @@ export function useClientNavigation(
     else proceed();
   }, []);
   const navigate = useCallback(
-    (view: ClientView, app?: AppId, account?: AccountRoute) =>
-      request({ type: "navigate", view, app, account }),
+    (
+      view: ClientView,
+      app?: AppId,
+      account?: AccountRoute,
+      platform?: AccountPlatform,
+    ) => request({ type: "navigate", view, app, account, platform }),
     [request],
   );
   const replace = useCallback(
@@ -188,6 +201,7 @@ export function useClientNavigation(
     view: state.current.view,
     app: state.current.app,
     account: state.current.account,
+    platform: state.current.platform,
     navigate,
     replace,
     setApp,

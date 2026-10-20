@@ -1,25 +1,27 @@
-import { useTranslation } from "react-i18next";
-import { FullScreenPanel } from "@/components/common/FullScreenPanel";
-import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
+import { useEffect, useRef } from "react";
 import type { ManagedAuthProvider } from "@/lib/api";
+import { OPEN_ACCOUNT_MANAGER } from "@/components/relay/accounts/accountPlatforms";
 
-interface AuthSettingsPanelProps {
+/** Compatibility entry: open the one account owner view instead of mounting another manager. */
+export function AuthSettingsPanel({
+  target,
+  onClose,
+}: {
   target: ManagedAuthProvider | null;
   onClose: () => void;
-}
-
-export function AuthSettingsPanel({ target, onClose }: AuthSettingsPanelProps) {
-  const { t } = useTranslation();
-  const isOpen = target !== null;
-
-  return (
-    <FullScreenPanel
-      isOpen={isOpen}
-      title={t("settings.tabAuth", { defaultValue: "认证" })}
-      onClose={onClose}
-      motionPreset="slide-from-right"
-    >
-      {target ? <AuthCenterPanel authScrollTarget={target} /> : null}
-    </FullScreenPanel>
-  );
+}) {
+  const sent = useRef<ManagedAuthProvider | null>(null);
+  useEffect(() => {
+    if (!target) {
+      sent.current = null;
+      return;
+    }
+    if (sent.current === target) return;
+    sent.current = target;
+    window.dispatchEvent(
+      new CustomEvent(OPEN_ACCOUNT_MANAGER, { detail: target }),
+    );
+    onClose();
+  }, [target, onClose]);
+  return null;
 }

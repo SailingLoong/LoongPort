@@ -66,6 +66,9 @@ describe("AddHub completion", () => {
         onAddProvider={vi.fn()}
       />,
     );
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.sections.relay" }),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "domain" }),
       "panel.example",

@@ -704,7 +704,7 @@ async fn handle_claude_transform(
         ProxyError::TransformError(format!("Failed to serialize response: {e}"))
     })?;
 
-    let body = axum::body::Body::from(response_body);
+    let body = super::forwarder::final_buffered_body(connection_guard, response_body);
     builder.body(body).map_err(|e| {
         log::error!("[Claude] 构建响应失败: {e}");
         ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -786,108 +786,6 @@ pub async fn handle_chat_completions(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
-    if ctx
-        .provider
-        .meta
-        .as_ref()
-        .and_then(|m| m.provider_type.as_deref())
-        == Some("qoder_sdk")
-    {
-        // The SDK transport has no verified free route. HTTP provider settings
-        // cannot certify it; enforce free intent before resolving auth/runtime.
-        super::free_models::enforce(
-            &mut false,
-            &body,
-            &body,
-            "",
-            super::free_models::configured(&ctx.provider.settings_config),
-        )?;
-        let auth =
-            get_adapter(&AppType::Codex).and_then(|adapter| adapter.extract_auth(&ctx.provider));
-        let Some(auth) = auth else {
-            return Ok((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":{"code":"qoder_auth_required"}})),
-            )
-                .into_response());
-        };
-        // Trusted fixture injection exists only in the Rust test build. HTTP
-        // fields/headers cannot select an executable, SDK root or runtime.
-        #[cfg(test)]
-        let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
-        #[cfg(not(test))]
-        let test_host: Option<super::qoder_host::HostConfig> = None;
-        let host = if let Some(host) = test_host {
-            host
-        } else {
-            let worker = (|| {
-                #[cfg(feature = "gui")]
-                if let Some(app) = &state.app_handle {
-                    use tauri::Manager;
-                    if let Ok(resources) = app.path().resource_dir() {
-                        let path = resources.join("qoder/worker.mjs");
-                        if path.is_file() {
-                            return Some(path);
-                        }
-                    }
-                }
-                #[cfg(debug_assertions)]
-                {
-                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../scripts/qoder/worker.mjs");
-                    if path.is_file() {
-                        return Some(path);
-                    }
-                }
-                None
-            })();
-            let Some(worker) = worker else {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error":{"code":"qoder_runtime_unavailable"}})),
-                )
-                    .into_response());
-            };
-            let node = tokio::task::spawn_blocking(crate::commands::locate_node_runtime)
-                .await
-                .ok()
-                .and_then(Result::ok);
-            let Some(node) = node else {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error":{"type":"qoder_runtime_error","code":"qoder_node_unavailable","message":"Qoder requires an available Node.js executable."}})),
-                )
-                    .into_response());
-            };
-            let root = crate::config::get_app_config_dir().join("runtimes/qoder/1.0.53");
-            match super::qoder_runtime::resolve_runtime(node, worker, root).await {
-                Ok(host) => host,
-                Err(error) => {
-                    return Ok((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({"error":{"type":"qoder_runtime_error","code":error.code(),"message":error.message()}})),
-                    )
-                        .into_response())
-                }
-            }
-        };
-        let timeouts = ctx.streaming_timeout_config();
-        let guard = ActiveConnectionGuard::acquire(state.status.clone()).await;
-        // Account binding comes from the selected provider, never request JSON.
-        let dispatch = super::qoder_http::Dispatch {
-            host,
-            account_id: ctx.provider.id.clone(),
-            access_token: auth.api_key,
-            first_byte_timeout: timeouts.first_byte_timeout,
-            idle_timeout: timeouts.idle_timeout,
-            non_streaming_timeout: if ctx.failover_active {
-                ctx.app_config.non_streaming_timeout as u64
-            } else {
-                0
-            },
-        };
-        return Ok(super::qoder_http::handle(body, dispatch, (guard, ctx)).await);
-    }
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -1339,7 +1237,6 @@ async fn handle_codex_responses_namespace_restore(
 
     // Non-streaming: restore the flattened function-call names in the full body,
     // then account usage from the (restore-neutral) Responses payload.
-    let _connection_guard = connection_guard;
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
     } else {
@@ -1423,7 +1320,10 @@ async fn handle_codex_responses_namespace_restore(
         axum::http::HeaderValue::from_static("application/json"),
     );
     builder
-        .body(axum::body::Body::from(restored_bytes))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            restored_bytes,
+        ))
         .map_err(|e| {
             log::error!("[{}] 构建 namespace 还原响应失败: {e}", ctx.tag);
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -1543,7 +1443,6 @@ async fn handle_codex_chat_to_responses_transform(
         return Ok((headers, body).into_response());
     }
 
-    let _connection_guard = connection_guard;
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
     } else {
@@ -1660,7 +1559,10 @@ async fn handle_codex_chat_to_responses_transform(
     })?;
 
     builder
-        .body(axum::body::Body::from(response_body))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            response_body,
+        ))
         .map_err(|e| {
             log::error!("[Codex] 构建 Responses 响应失败: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -1752,7 +1654,6 @@ async fn handle_codex_anthropic_to_responses_transform(
         );
     }
 
-    let _connection_guard = connection_guard;
     let responses_response =
         transform_codex_anthropic::anthropic_response_to_responses_with_context(
             anthropic_response,
@@ -1825,7 +1726,10 @@ async fn handle_codex_anthropic_to_responses_transform(
     })?;
 
     builder
-        .body(axum::body::Body::from(response_body))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            response_body,
+        ))
         .map_err(|e| {
             log::error!("[Codex] Failed to build Responses response: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -3730,7 +3634,7 @@ async fn handle_budgeted_native_response(
     ctx: &RequestContext,
     state: &ProxyState,
     route: crate::paperclip::RouteBinding,
-    _connection_guard: Option<ActiveConnectionGuard>,
+    connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (mut headers, status, bytes) =
         read_decoded_body(response, ctx.tag, std::time::Duration::from_secs(30)).await?;
@@ -3810,7 +3714,10 @@ async fn handle_budgeted_native_response(
         builder = builder.header(name, value);
     }
     builder
-        .body(axum::body::Body::from(bytes))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            bytes,
+        ))
         .map_err(|_| ProxyError::Internal("paperclip.response_unavailable".into()))
 }
 

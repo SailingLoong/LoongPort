@@ -197,10 +197,8 @@ describe("ServicesPage", () => {
     await screen.findByText("Example Official");
     await user.click(screen.getByRole("button", { name: "Codex" }));
     expect(onOpenApp).toHaveBeenCalledWith("codex");
-    await user.click(
-      screen.getByRole("button", { name: "loongport.accounts.add" }),
-    );
-    expect(onOpenAddHub).toHaveBeenCalledWith("directory");
+    await user.click(screen.getByRole("button", { name: "common.add" }));
+    expect(onOpenAddHub).toHaveBeenCalledWith("accounts");
   });
 });
 

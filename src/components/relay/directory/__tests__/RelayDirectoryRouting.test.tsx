@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -89,6 +90,9 @@ describe("relay directory routing", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "loongport.addEntry.title" }),
     );
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "loongport.sections.relay" }),
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: "connect-account" }),
     );
@@ -109,20 +113,26 @@ describe("relay directory routing", () => {
   });
 
   it.each([["claude"], ["codex"], ["gemini"], ["openclaw"]])(
-    "opens the add hub from %s on the relay directory",
+    "opens the add hub from %s and reaches the relay directory",
     async (appId) => {
       localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
 
-      // 顶栏大「+」进聚合页，默认落中转站标签
-      //（i18n 空资源下 aria-label 就是 key 本身）。
+      // Unified add opens accounts; the original relay flow remains one tab away.
       fireEvent.click(
         await screen.findByRole("button", {
           name: "loongport.addEntry.title",
         }),
       );
 
-      expect(await screen.findByTestId("relay-directory")).toBeInTheDocument();
+      expect(await screen.findByRole("tab", { name: "账号" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await userEvent.click(
+        await screen.findByRole("tab", { name: "loongport.sections.relay" }),
+      );
+      expect(await screen.findByTestId("relay-directory")).toBeVisible();
       expect(screen.getByTestId("directory-source-app")).toHaveTextContent(
         appId,
       );
@@ -142,13 +152,16 @@ describe("relay directory routing", () => {
     },
   );
 
-  it("opens the overview add-service entry on the relay directory", async () => {
+  it("reaches the relay directory from the overview add-service entry", async () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
     renderApp();
     fireEvent.click(
       await screen.findByRole("button", { name: "applications.addService" }),
     );
 
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "loongport.sections.relay" }),
+    );
     expect(await screen.findByTestId("directory-source-app")).toHaveTextContent(
       "codex",
     );

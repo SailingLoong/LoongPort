@@ -1,0 +1,24 @@
+// Test-only entry. Never shipped as worker.mjs; production has no endpoint seam.
+import {Transform} from 'node:stream';
+import net from 'node:net';
+import tls from 'node:tls';
+import dgram from 'node:dgram';
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+const port=Number(process.argv[2]);
+if(!Number.isInteger(port)||port<1||port>65535)throw Error('FIXTURE_PORT');
+const realFetch=globalThis.fetch, connect=net.Socket.prototype.connect;
+const deny=()=>{throw Error('FIXTURE_DENIED');};
+net.Socket.prototype.connect=function(...args){const a=Array.isArray(args[0])?args[0][0]:args[0];if(!a||typeof a!=='object'||(a.host??a.hostname)!=='127.0.0.1'||Number(a.port)!==port)return deny();return connect.apply(this,args);};
+tls.connect=deny;dgram.createSocket=deny;net.Server.prototype.listen=deny;
+for(const k of ['spawn','exec','execFile','fork','spawnSync','execSync','execFileSync'])cp[k]=deny;
+syncBuiltinESMExports();
+const allowed=new Set(['/algo/api/v2/model/list?Encode=1','/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1']);
+globalThis.fetch=(input,init)=>{const u=new URL(String(input));if(u.origin!=='https://api3.qoder.sh'||!allowed.has(u.pathname+u.search))return deny();return realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,init);};
+let pending='';
+const gate=new Transform({transform(chunk,encoding,cb){try{pending+=chunk.toString('utf8');if(Buffer.byteLength(pending)>1048576)throw Error('FIXTURE_LINE_LIMIT');let n;while((n=pending.indexOf('\n'))>=0){const line=pending.slice(0,n);pending=pending.slice(n+1);let v;try{v=JSON.parse(line);}catch{}const s=v?.request?.snapshot;if(s&&(s.access!=='SYNTHETIC_HTTP_WORKER_ACCESS'||s.uid!=='fixture-user'||s.machineId!=='fixture-machine'))throw Error('FIXTURE_CREDENTIALS_ONLY');this.push(line+'\n');}cb();}catch{cb(Error('FIXTURE_INPUT_DENIED'));}},flush(cb){if(pending)this.push(pending);cb();}});
+const {runWorker}=await import('../../../scripts/qoder/worker.mjs');
+process.stdin.pipe(gate);
+const result=await runWorker({input:gate,output:process.stdout});
+if(result.outputUnavailable)process.exit(0);
+process.stdin.destroy();

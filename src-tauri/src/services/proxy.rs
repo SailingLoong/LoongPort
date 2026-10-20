@@ -1358,9 +1358,16 @@ impl ProxyService {
     }
 
     pub(crate) async fn start_for_mode(&self) -> Result<(), String> {
+        self.start_for_mode_owned().await.map(|_| ())
+    }
+
+    /// Original listener slot owner reports whether this call actually created it.
+    pub(crate) async fn start_for_mode_owned(&self) -> Result<bool, String> {
         #[cfg(any(feature = "gui", feature = "test-hooks"))]
         {
-            self.start().await.map(|_| ())
+            self.start_checked(None::<&fn() -> Result<(), String>>, None)
+                .await
+                .map(|(_, created)| created)
         }
         #[cfg(not(any(feature = "gui", feature = "test-hooks")))]
         {
@@ -1632,12 +1639,43 @@ impl ProxyService {
     /// - 开启：自动启动代理服务，仅接管当前 app 的 Live 配置
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
+        self.set_takeover_for_app_with_initial_route(app_type, enabled, None)
+            .await
+    }
+
+    pub async fn prepare_proxy_takeover_request(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        request_id: &str,
+    ) -> Result<crate::mode::state::SaveRequest, String> {
+        let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
+        let _guard = self.switch_locks.lock_for_app(app.as_str()).await;
+        crate::mode::controller::prepare_proxy_enter_locked(self, &app, provider_id, request_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn set_takeover_for_app_with_initial_route(
+        &self,
+        app_type: &str,
+        enabled: bool,
+        initial_route: Option<crate::mode::controller::InitialProxyRoute>,
+    ) -> Result<(), String> {
         let _lifecycle = self.takeover_lock.lock().await;
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
         if !app.supports_local_proxy() {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
         let _guard = self.switch_locks.lock_for_app(app.as_str()).await;
+        if let Some(initial) = initial_route {
+            if !enabled
+                || !crate::mode::operation::uses_upstream4_schema(&self.db)
+                    .map_err(|e| e.to_string())?
+            {
+                return Err("mode.invalid_save_request".into());
+            }
+            return crate::mode::controller::enter_initial_route_locked(self, &app, initial).await;
+        }
         self.set_takeover_for_app_inner(&app, enabled).await
     }
 
@@ -11639,3 +11677,11 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(backup.original_config, original_backup);
     }
 }
+
+#[cfg(all(test, any(feature = "gui", feature = "test-hooks")))]
+#[path = "proxy_bootstrap_tests.rs"]
+mod bootstrap_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "proxy_vendor_bootstrap_tests.rs"]
+mod vendor_bootstrap_tests;

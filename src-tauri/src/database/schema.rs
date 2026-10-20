@@ -39,6 +39,9 @@ impl Database {
             crate::paperclip::bindings::validate_schema(conn)?;
             crate::paperclip::bindings::read_rows(conn)?;
         }
+        if loongport_version >= 27 {
+            crate::database::dao::qoder_http_auth::validate_column(conn)?;
+        }
         if loongport_version >= 26 {
             crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
         }
@@ -61,6 +64,7 @@ impl Database {
                 icon TEXT,
                 icon_color TEXT,
                 meta TEXT NOT NULL DEFAULT '{}',
+                qoder_http_secret TEXT NOT NULL DEFAULT '',
                 is_current BOOLEAN NOT NULL DEFAULT 0,
                 in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, app_type)

@@ -23,3 +23,4 @@ pub use failover::FailoverQueueItem;
 pub use profiles::Profile;
 
 pub(crate) mod qoder_campaign_operations;
+pub(crate) mod qoder_http_auth;

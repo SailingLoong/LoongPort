@@ -16,7 +16,7 @@ pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Explicitly supported historical and current checkpoint identities. This is
 /// only an admission bound; manifest/database checks still require exact equality.
 pub(crate) fn supports_loongport_version(version: i32) -> bool {
-    [24, 25, 26].contains(&version)
+    [24, 25, 26, 27].contains(&version)
 }
 
 fn legacy_archive_source_versions() -> SchemaVersions {
@@ -1007,7 +1007,7 @@ mod paperclip_schema_lifecycle_tests {
     fn historical_source() -> super::super::checkpoint_tests::Fixture {
         let fixture = super::super::checkpoint_tests::Fixture::new();
         let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret; DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
         fixture
     }
 
@@ -1074,7 +1074,27 @@ mod paperclip_schema_lifecycle_tests {
     }
 
     #[test]
-    fn qoder_current_v26_checkpoint_keeps_recorded_identity() {
+    fn qoder_historical_v26_checkpoint_remains_exact_without_http_column() {
+        let f = historical_source();
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        crate::paperclip::bindings::ensure_schema(&source).unwrap();
+        crate::database::create_qoder_campaign_operations_schema(&source).unwrap();
+        source
+            .execute_batch("UPDATE loongport_schema_version SET version=26 WHERE id=1")
+            .unwrap();
+        let before = Database::content_digest(&source).unwrap();
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            26
+        );
+        assert!(!crate::database::has_qoder_http_auth_column(&staged).unwrap());
+        assert_eq!(Database::content_digest(&source).unwrap(), before);
+    }
+
+    #[test]
+    fn qoder_http_current_v27_checkpoint_keeps_recorded_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         database::loongport_schema::apply(&source).unwrap();
@@ -1083,11 +1103,12 @@ mod paperclip_schema_lifecycle_tests {
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&staged).unwrap(),
-            26
+            27
         );
         // The existing read-only owner validates the receipt schema and rows.
         database::vault::preflight_connection(&staged).unwrap();
-        assert!(!supports_loongport_version(27));
+        assert!(supports_loongport_version(26));
+        assert!(!supports_loongport_version(28));
     }
 
     #[test]

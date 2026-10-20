@@ -1,5 +1,6 @@
 import {
   applicationRoutingApi,
+  isApplicationCommonConfigWritable,
   type ApplicationRouting,
 } from "@/lib/api/applicationRouting";
 import {
@@ -322,8 +323,7 @@ function ProviderFormFull({
   const commonConfigReadOnly =
     !snippetAdmission.data ||
     Boolean(snippetAdmission.error) ||
-    (snippetAdmission.data.modeState != null &&
-      snippetAdmission.data.modeState.legacyCommonConfigWritable !== true);
+    !isApplicationCommonConfigWritable(appId, snippetAdmission.data.modeState);
   const isCommonConfigWriteAllowed = () => {
     const current = queryClient.getQueryState<ApplicationRouting>([
       "applicationRouting",
@@ -333,8 +333,7 @@ function ProviderFormFull({
       commonSnippetApp &&
       Boolean(current?.data) &&
       !current?.error &&
-      (current?.data?.modeState == null ||
-        current.data.modeState.legacyCommonConfigWritable === true)
+      isApplicationCommonConfigWritable(appId, current?.data?.modeState)
     );
   };
   const { data: settingsData } = useSettingsQuery();
@@ -2374,9 +2373,9 @@ function ProviderFormFull({
 
           {isQoderProvider && (
             <p className="text-sm text-muted-foreground">
-              {t("qoderDaily.configNotice", {
+              {t("qoderHttpIdentity.configNotice", {
                 defaultValue:
-                  "Qoder 国际版类型用于保留原生路由与独立积分入口。积分操作需另行声明国际 PAT 来源；这不代表 PAT 已验证可用于 SDK 推理。模型请按实际可用配置填写。设备组件来源未验证时不能领取。",
+                  "Qoder 国际版类型保留原供应商路由与独立积分入口。保存配置不会自动交换凭据；推理身份需在供应商卡片中明确声明国际版 PAT 后主动建立，旧 SDK Token 不会自动转换为 PAT。当前版本尚未开放 HTTP 推理。积分领取仍需独立声明与已验证的设备组件。模型请按实际可用配置填写。",
               })}
             </p>
           )}

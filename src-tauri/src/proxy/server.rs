@@ -496,209 +496,8 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::Mutex;
 
-    /// Full product router/RequestContext/auth boundary. Run with an isolated
-    /// CC_SWITCH_TEST_HOME; this test never needs an SDK or a real account.
-    #[tokio::test]
-    async fn qoder_chat_route_uses_selected_provider_auth_and_preserves_history() {
-        use tower::ServiceExt;
-        assert!(
-            std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
-            "isolated test home required"
-        );
-        let db = Arc::new(Database::memory().unwrap());
-        let mut provider = Provider::with_id(
-            "qoder-account".into(),
-            "Qoder fixture".into(),
-            json!({"auth":{"OPENAI_API_KEY":"synthetic:pat"}}),
-            None,
-        );
-        provider.meta = Some(ProviderMeta {
-            provider_type: Some("qoder_sdk".into()),
-            ..Default::default()
-        });
-        db.save_provider("codex", &provider).unwrap();
-        db.set_current_provider("codex", &provider.id).unwrap();
-        let proxy = ProxyServer::new(
-            ProxyConfig::default(),
-            db,
-            #[cfg(feature = "gui")]
-            None,
-            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-            Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
-        );
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .to_owned();
-        let runtime = super::super::qoder_host::HostConfig {
-            node: std::env::var_os("QODER_HOST_NODE")
-                .unwrap_or_else(|| "node".into())
-                .into(),
-            worker: root.join("tests/qoder-runtime/fixtures/http-context.mjs"),
-            sdk_root: None,
-        };
-        let router = proxy.build_router().layer(axum::Extension(runtime));
-        let body = json!({"model":"fixture","stream":false,"options":{"auth":"untrusted"},"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"prior"},{"role":"user","content":"second"}]});
-        for _ in 0..2 {
-            let request = axum::http::Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer ignored-client-token")
-                .body(axum::body::Body::from(body.to_string()))
-                .unwrap();
-            let response = router.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap();
-            let value: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(
-                value["choices"][0]["message"]["content"],
-                "history-and-auth-ok"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn qoder_chat_route_rejects_free_intent_before_launching_worker() {
-        use tower::ServiceExt;
-        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
-        let temp = tempfile::tempdir().unwrap();
-        let marker = temp.path().join("worker-started");
-        let worker = temp.path().join("worker.mjs");
-        std::fs::write(
-            &worker,
-            format!(
-                "import {{ writeFileSync }} from 'node:fs'; writeFileSync({}, 'started');",
-                serde_json::to_string(&marker).unwrap()
-            ),
-        )
-        .unwrap();
-        let runtime = super::super::qoder_host::HostConfig {
-            node: std::env::var_os("QODER_HOST_NODE")
-                .unwrap_or_else(|| "node".into())
-                .into(),
-            worker,
-            sdk_root: None,
-        };
-        let mut failures = Vec::new();
-        for free_only in [false, true] {
-            let db = Arc::new(Database::memory().unwrap());
-            let mut provider = Provider::with_id(
-                "qoder-free-policy-fixture".into(),
-                "Qoder free policy fixture".into(),
-                // An HTTP free origin cannot certify the separate SDK transport.
-                json!({"freeOnly":free_only,"base_url":"https://openrouter.ai/api/v1","auth":{"OPENAI_API_KEY":"synthetic:never-used"}}),
-                None,
-            );
-            provider.meta = Some(ProviderMeta {
-                provider_type: Some("qoder_sdk".into()),
-                ..Default::default()
-            });
-            db.save_provider("codex", &provider).unwrap();
-            db.set_current_provider("codex", &provider.id).unwrap();
-            let proxy = ProxyServer::new(
-                ProxyConfig::default(),
-                db,
-                #[cfg(feature = "gui")]
-                None,
-                crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-                Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
-            );
-            let router = proxy.build_router().layer(axum::Extension(runtime.clone()));
-            let models: Vec<&str> = if free_only {
-                vec!["fixture"]
-            } else {
-                ["openrouter/free", "vendor/model:free"]
-                    .into_iter()
-                    .chain(crate::vendor::opencode::FREE_CHAT_MODELS.iter().copied())
-                    .collect()
-            };
-            for model in models {
-                for stream in [false, true] {
-                    let body = json!({"model":model,"stream":stream,"messages":[{"role":"user","content":"synthetic, never sent"}]});
-                    let request = axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/v1/chat/completions")
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(body.to_string()))
-                        .unwrap();
-                    let response = router.clone().oneshot(request).await.unwrap();
-                    let status = response.status();
-                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap();
-                    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                    if status != StatusCode::BAD_REQUEST
-                        || !value["error"]["message"]
-                            .as_str()
-                            .is_some_and(|message| message.contains("Free-only route unavailable"))
-                    {
-                        failures.push(format!(
-                            "freeOnly={free_only}, model={model}, stream={stream}: {status}, {}",
-                            String::from_utf8_lossy(&bytes)
-                        ));
-                    }
-                }
-            }
-        }
-        assert!(
-            failures.is_empty(),
-            "worker launched: {}; {}",
-            marker.exists(),
-            failures.join("\n")
-        );
-        assert!(
-            !marker.exists(),
-            "free requests must not launch the SDK worker"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires official SDK/runtime provisioned in isolated application data root"]
-    async fn qoder_real_runtime_http_admission_ignores_payload_paths() {
-        use tower::ServiceExt;
-        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
-        let db = Arc::new(Database::memory().unwrap());
-        let mut provider = Provider::with_id(
-            "qoder-runtime-fixture".into(),
-            "Qoder runtime fixture".into(),
-            json!({"auth":{"OPENAI_API_KEY":"synthetic:never-used"}}),
-            None,
-        );
-        provider.meta = Some(ProviderMeta {
-            provider_type: Some("qoder_sdk".into()),
-            ..Default::default()
-        });
-        db.save_provider("codex", &provider).unwrap();
-        db.set_current_provider("codex", &provider.id).unwrap();
-        let proxy = ProxyServer::new(
-            ProxyConfig::default(),
-            db,
-            #[cfg(feature = "gui")]
-            None,
-            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-            Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
-        );
-        // Admission loads the real fixed SDK/runtime; unsupported tools then
-        // reject the request before query(), so no account or model is used.
-        let body = json!({"model":"fixture","tools":[],"messages":[{"role":"user","content":"never sent"}],"nodePath":"/invalid-http-node","sdkRoot":"/invalid-http-sdk","options":{"sdkRoot":"/invalid-option-sdk","transport":"untrusted"}});
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body.to_string()))
-            .unwrap();
-        let response = proxy.build_router().oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
-        assert_eq!(value["error"]["code"], "unsupported_qoder_input");
-    }
+    // Qoder's HTTP replacement keeps the original router contracts in the
+    // adjacent qoder_http_pool_tests module, using the real private auth owner.
 
     #[derive(Debug)]
     struct CapturedRequest {
@@ -1048,3 +847,31 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "minimax_pool_tests.rs"]
+mod minimax_pool_tests;
+
+#[cfg(test)]
+#[path = "workbuddy_pool_tests.rs"]
+mod workbuddy_pool_tests;
+
+#[cfg(all(test, unix))]
+#[path = "zcode_pool_tests.rs"]
+mod zcode_pool_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "opencode_vendor_pool_tests.rs"]
+mod opencode_vendor_pool_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "openrouter_pool_tests.rs"]
+mod openrouter_pool_tests;
+
+#[cfg(test)]
+#[path = "trae_pool_tests.rs"]
+mod trae_pool_tests;
+
+#[cfg(test)]
+#[path = "qoder_http_pool_tests.rs"]
+mod qoder_http_pool_tests;

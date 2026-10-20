@@ -1002,6 +1002,18 @@ mod tests {
     #[test]
     fn an_upgraded_database_gets_the_table() {
         let conn = Connection::open_in_memory().expect("内存库");
+        // This partial v13 fixture still needs the original Provider owner for
+        // later migrations. Do not create all current tables: that would create
+        // the balance snapshot table before the migration under test.
+        conn.execute(
+            "CREATE TABLE providers (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                PRIMARY KEY (id, app_type)
+            )",
+            [],
+        )
+        .expect("建原有 Provider 表");
         // 造一个停在 v13 的库：版本表写 13，不建快照表。
         conn.execute(
             "CREATE TABLE loongport_schema_version (

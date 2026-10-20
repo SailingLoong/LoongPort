@@ -66,8 +66,27 @@ pub async fn apply_application_routing(
     change: crate::services::application_selection::ApplicationRoutingChange,
     quit_chatgpt: Option<bool>,
     request: Option<crate::mode::state::SaveRequest>,
+    legacy_review: Option<crate::services::application_selection::LegacyRoutingReview>,
 ) -> Result<serde_json::Value, String> {
     let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    if request.is_some() && legacy_review.is_some() {
+        return Err("mode.invalid_save_request".into());
+    }
+    if let Some(review) = legacy_review {
+        return crate::services::application_selection::apply_reviewed_legacy_application_routing(
+            &app_handle,
+            app,
+            change,
+            quit_chatgpt,
+            review,
+        )
+        .await
+        .and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(|error| crate::error::AppError::Message(error.to_string()))
+        })
+        .map_err(|error| error.to_string());
+    }
     if let Some(request) = request {
         return crate::services::application_selection::apply_requested_application_routing(
             &app_handle,
@@ -78,6 +97,11 @@ pub async fn apply_application_routing(
         )
         .await
         .map_err(|error| error.to_string());
+    }
+    // A missing native receipt is not a legacy instruction. Only the original
+    // catalog preview may use the no-write/no-request route.
+    if !change.catalog_preview_only {
+        return Err("mode.invalid_save_request".into());
     }
     crate::services::application_selection::apply_application_routing(
         &app_handle,
@@ -99,9 +123,9 @@ pub fn prepare_application_routing_request(
     app_type: String,
     change: crate::services::application_selection::ApplicationRoutingChange,
     request_id: String,
-) -> Result<crate::mode::state::SaveRequest, String> {
+) -> Result<crate::services::application_selection::PreparedRoutingRequest, String> {
     let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
-    crate::services::application_selection::prepare_routing_request(
+    crate::services::application_selection::prepare_routing_strategy(
         &state,
         &app,
         &change,
@@ -135,7 +159,7 @@ pub(crate) async fn application_routing_impl(
 ) -> Result<ApplicationRouting, ApplicationRoutingReadError> {
     let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
     let _guard = state.proxy_service.lock_switch_for_app(app_type).await;
-    let mode_state = crate::mode::current::read_view(&state.proxy_service, &app);
+    let mode_state = crate::mode::current::read_application_view(&state.proxy_service, &app);
     if mode_state.as_ref().is_some_and(|mode| !mode.can_write) {
         return Err(ApplicationRoutingReadError {
             code: "mode.verification_required",
@@ -153,7 +177,10 @@ pub(crate) async fn application_routing_impl(
     let enabled = supports_proxy
         && routing::failover_enabled(&state.db, app_type).map_err(|e| e.to_string())?;
     let model_routing_active = supports_proxy
-        && match mode_state.as_ref() {
+        && match mode_state
+            .as_ref()
+            .filter(|mode| mode.write_protocol == Some("native"))
+        {
             Some(mode) => {
                 mode.mode == Some(crate::mode::state::Mode::Proxy) && mode.attached == Some(true)
             }

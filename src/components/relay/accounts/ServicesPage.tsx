@@ -1,4 +1,5 @@
-import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
+import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
+import { accountPlatforms, type AccountPlatform } from "./accountPlatforms";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -19,9 +20,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { AccountRoute } from "@/components/shell/navigation";
-import { getAppDisplayName } from "@/config/appConfig";
+import { getAppDisplayName, usesProviderStore } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
-import { RelaySection, type RelaySectionProps } from "../RelaySection";
+import { RelaySection } from "../RelaySection";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 import { formatResetAt } from "@/components/applications/tierMetrics";
 import { usageApi } from "@/lib/api/usage";
@@ -38,10 +39,16 @@ import {
 
 export interface ServicesPageProps {
   appId: AppId;
+  platform?: AccountPlatform;
+  onOpenPlatform?: (platform: AccountPlatform) => void;
+  onNavigationBlockedChange?: (blocked: boolean) => void;
   account?: AccountRoute;
   onBack?: () => void;
   onSelectAccount?: (account: AccountRoute | undefined, app: AppId) => void;
-  onOpenAddHub: RelaySectionProps["onOpenAddHub"];
+  onOpenAddHub: (
+    tab: import("../AddHubPage").AddHubTab,
+    opts?: { firstVisit?: boolean },
+  ) => void;
   onOpenApp: (appId: AppId) => void;
 }
 
@@ -73,6 +80,9 @@ function useAccountActivity() {
 
 export function ServicesPage({
   appId,
+  platform,
+  onOpenPlatform,
+  onNavigationBlockedChange,
   account,
   onBack,
   onSelectAccount,
@@ -115,6 +125,21 @@ export function ServicesPage({
       (account) =>
         account.kind === selection.kind && account.id === selection.id,
     );
+
+  if (platform) {
+    return (
+      <section className="page-content space-y-6">
+        <h2 className="text-xl font-semibold">
+          {accountPlatforms.find((item) => item.id === platform)?.name}
+        </h2>
+        <AuthCenterPanel
+          key={platform}
+          platform={platform}
+          onNavigationBlockedChange={onNavigationBlockedChange}
+        />
+      </section>
+    );
+  }
 
   if (selection) {
     return (
@@ -230,15 +255,46 @@ export function ServicesPage({
           <header className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="max-w-xl text-sm leading-6 text-muted-foreground">
-                {t("loongport.accounts.description")}
+                {t("loongport.accounts.title")}
               </p>
             </div>
-            <Button onClick={() => onOpenAddHub("directory")}>
+            <Button onClick={() => onOpenAddHub("accounts")}>
               <Plus className="h-4 w-4" />
-              {t("loongport.accounts.add")}
+              {t("common.add")}
             </Button>
           </header>
-          <WorkBuddyAccounts />
+          <div className="grid gap-2 sm:grid-cols-2">
+            {accountPlatforms.map((item) => (
+              <Button
+                key={item.id}
+                variant="outline"
+                className="justify-between"
+                onClick={() => onOpenPlatform?.(item.id)}
+              >
+                {item.name}
+                <ArrowRight className="h-4 w-4" />
+              </Button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => onOpenApp("codex")}>
+              Qoder · {t("loongport.accounts.openApp")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                onOpenApp(usesProviderStore(appId) ? appId : "codex")
+              }
+            >
+              OpenRouter · {t("loongport.accounts.openApp")}
+            </Button>
+            <Button variant="outline" onClick={() => onOpenAddHub("official")}>
+              OpenCode · {t("loongport.accounts.add")}
+            </Button>
+          </div>
+          <h2 className="text-sm font-medium">
+            {t("loongport.accounts.relay")} · {t("loongport.accounts.vendor")}
+          </h2>
           {isPending && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("common.loading")}

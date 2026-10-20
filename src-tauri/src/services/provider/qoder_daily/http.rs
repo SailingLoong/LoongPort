@@ -5,7 +5,7 @@ use super::{
     *,
 };
 use reqwest::{header, Method, Url};
-use std::time::Duration;
+
 use zeroize::Zeroizing;
 const ORIGIN: &str = "https://openapi.qoder.sh";
 const CAMPAIGNS: &str = "/sash/api/v1/me/campaigns?clientType=10";
@@ -48,12 +48,7 @@ impl HttpAdapter {
         declaration: Option<PatDeclaration>,
         device: Box<dyn DeviceSource>,
     ) -> Result<Self, AppError> {
-        let client_builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30));
+        let client_builder = crate::services::provider::qoder_auth_http::client_builder();
         // Synthetic local-server tests must never inherit a host proxy. This
         // branch is absent from production and changes no real HTTPS policy.
         #[cfg(test)]
@@ -174,10 +169,14 @@ impl CampaignAdapter for HttpAdapter {
         let exchange = self
             .request(
                 Method::POST,
-                "/api/v1/jobToken/exchange",
+                crate::services::provider::qoder_auth_http::PAT_EXCHANGE_PATH,
                 None,
                 None,
-                Some(serde_json::json!({"personal_token":candidate.as_str()})),
+                Some(
+                    crate::services::provider::qoder_auth_http::pat_exchange_body(
+                        candidate.as_str(),
+                    ),
+                ),
             )
             .map_err(|_| Dependency::AuthenticationFailed)?;
         if exchange.response.status() != reqwest::StatusCode::OK {

@@ -50,13 +50,19 @@ describe("AddHubPage", () => {
     listVendorAccounts.mockReset();
   });
 
-  it("lands on the relay directory tab and switches in place", async () => {
+  it("lands on accounts and reaches the relay directory before switching in place", async () => {
     const user = userEvent.setup();
     listVendorAccounts.mockResolvedValue({ supported: true, accounts: [] });
     renderHub("codex");
 
-    // 默认展示中转站广场 —— 点一次「+」进来不用再选。
-    expect(screen.getByTestId("directory-content")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "zcode.accounts.login.account" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("directory-content")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.sections.relay" }),
+    );
+    expect(screen.getByTestId("directory-content")).toBeVisible();
 
     // supported 是异步查询，等官方 API 标签出现再切。
     const officialTab = await screen.findByRole("tab", {

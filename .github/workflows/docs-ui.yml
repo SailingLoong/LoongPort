@@ -8,6 +8,12 @@ on:
       - "docs/guide/**"
       - "tests/browser/**"
       - "src/components/zcode/**"
+      - "src/components/relay/accounts/**"
+      - "src/components/relay/AddHubPage.tsx"
+      - "src/components/settings/AuthCenterPanel.tsx"
+      - "src/components/providers/forms/MiniMaxCodeSection.tsx"
+      - "src/components/shell/ClientSidebar.tsx"
+      - "src/components/shell/layout.ts"
       - "src/components/ui/dialog.tsx"
       - "src/index.css"
   workflow_dispatch:
@@ -92,6 +98,10 @@ jobs:
           export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright-core/index.mjs"
           git rev-parse HEAD > "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-source.txt"
           node tests/browser/run-zcode-layout.mjs | tee "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-results.jsonl"
+          UNIFIED_LAYOUT_SOURCE_SHA="$(git rev-parse HEAD)"
+          export UNIFIED_LAYOUT_SOURCE_SHA
+          export UNIFIED_LAYOUT_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/unified-accounts"
+          node tests/browser/run-unified-accounts.mjs
       - name: Save short-lived review artifacts
         if: always()
         uses: actions/upload-artifact@v7
