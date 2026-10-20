@@ -423,6 +423,13 @@ export function WorkBuddyAccounts() {
                 if (!alive.current) return;
                 if (result.state === "saved") {
                   setLogin(null);
+                  // The legacy owner may replace this row and clear its inference
+                  // grant. Retire all transient reads/flows before either reload;
+                  // late IPC completions must not restore the previous grant's UI.
+                  closeInference();
+                  inferenceStatusGeneration.current += 1;
+                  setInferenceAccounts([]);
+                  setInferenceFailed(false);
                   setModels({});
                   await loadAccounts();
                   await loadInferenceAccounts();

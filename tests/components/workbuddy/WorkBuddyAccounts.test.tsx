@@ -659,3 +659,234 @@ it.each(["cancel", "open"])(
     );
   },
 );
+
+async function saveLegacyAuthorization() {
+  api.beginLogin.mockResolvedValue({
+    flowId: "legacy-renewal",
+    verificationUri: "https://www.codebuddy.cn/login?state=synthetic-renewal",
+  });
+  api.finishLogin.mockResolvedValue({ state: "saved" });
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await screen.findByRole("link", { name: "workbuddy.authorize" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.finishAuthorization" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("link", { name: "workbuddy.authorize" }),
+    ).not.toBeInTheDocument(),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "workbuddy.add" })).toBeEnabled(),
+  );
+}
+
+it.each(["success", "failure"] as const)(
+  "legacy same-account reauthorization retires late inference discovery %s",
+  async (outcome) => {
+    api.listInferenceAccounts.mockResolvedValueOnce([
+      { id: row.id, state: "ready" },
+    ]);
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: Error) => void;
+    api.discoverModels.mockImplementationOnce(
+      () =>
+        new Promise((ok, fail) => {
+          resolve = ok;
+          reject = fail;
+        }),
+    );
+    render(<WorkBuddyAccounts />);
+    await screen.findByText(row.label);
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.models" }),
+    );
+    await saveLegacyAuthorization();
+    expect(
+      screen.getByText("workbuddy.inference.state.needsAuthorization"),
+    ).toBeVisible();
+    await act(async () => {
+      if (outcome === "success")
+        resolve([{ id: "retired-model", name: "Retired model" }]);
+      else reject(new Error("SYNTHETIC_RETIRED_SECRET"));
+    });
+    expect(
+      screen.queryByText(/Retired model|SYNTHETIC_RETIRED_SECRET/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("workbuddy.inference.failed"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "workbuddy.inference.models" }),
+    ).toBeDisabled();
+  },
+);
+
+it("adding another account retires only transient inference UI and allows a fresh discovery", async () => {
+  const other = { ...row, id: "cn-account-b", label: "Synthetic account B" };
+  api.listInferenceAccounts.mockResolvedValue([
+    { id: row.id, state: "ready" },
+    { id: other.id, state: "needsAuthorization" },
+  ]);
+  let resolveOld!: (value: unknown) => void;
+  api.discoverModels.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText(row.label);
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.models" }),
+  );
+  api.list.mockResolvedValue([row, other]);
+  await saveLegacyAuthorization();
+  const cards = screen.getAllByRole("article");
+  expect(
+    within(cards[0]).getByRole("button", {
+      name: "workbuddy.inference.models",
+    }),
+  ).toBeEnabled();
+  expect(
+    within(cards[1]).getByRole("button", {
+      name: "workbuddy.inference.models",
+    }),
+  ).toBeDisabled();
+  await userEvent.click(
+    within(cards[0]).getByRole("button", {
+      name: "workbuddy.inference.models",
+    }),
+  );
+  await screen.findByText("Live model · live-cli-model");
+  await act(async () =>
+    resolveOld([{ id: "retired-model", name: "Retired model" }]),
+  );
+  expect(screen.getByText("Live model · live-cli-model")).toBeVisible();
+  expect(screen.queryByText(/Retired model/)).not.toBeInTheDocument();
+  expect(api.discoverModels).toHaveBeenCalledTimes(2);
+  expect(api.cancelInferenceLogin).not.toHaveBeenCalled();
+});
+
+it("legacy save closes a pending inference poll and ignores its late success", async () => {
+  let finishPoll!: (value: unknown) => void;
+  api.pollInferenceLogin.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPoll = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText(row.label);
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+  );
+  await screen.findByRole("link", { name: "workbuddy.inference.open" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.finish" }),
+  );
+  await saveLegacyAuthorization();
+  expect(api.cancelInferenceLogin).toHaveBeenCalledWith("inference-a");
+  expect(
+    screen.queryByRole("link", { name: "workbuddy.inference.open" }),
+  ).not.toBeInTheDocument();
+  const reads = api.listInferenceAccounts.mock.calls.length;
+  await act(async () => finishPoll({ state: "saved" }));
+  expect(api.listInferenceAccounts).toHaveBeenCalledTimes(reads);
+  expect(
+    screen.getByText("workbuddy.inference.state.needsAuthorization"),
+  ).toBeVisible();
+});
+
+it.each(["cancel", "unmount"] as const)(
+  "late inference begin after legacy save cannot replace the new flow before %s",
+  async (cleanup) => {
+    let oldBegin!: (value: unknown) => void;
+    api.beginInferenceLogin.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          oldBegin = resolve;
+        }),
+    );
+    const view = render(<WorkBuddyAccounts />);
+    await screen.findByText(row.label);
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+    );
+    await saveLegacyAuthorization();
+    api.beginInferenceLogin.mockResolvedValue({
+      flowId: "new-inference",
+      accountId: row.id,
+      verificationUri: "https://copilot.tencent.com/login?state=new",
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+    );
+    const link = await screen.findByRole("link", {
+      name: "workbuddy.inference.open",
+    });
+    await act(async () =>
+      oldBegin({
+        flowId: "old-inference",
+        accountId: row.id,
+        verificationUri: "https://copilot.tencent.com/login?state=old",
+      }),
+    );
+    expect(api.cancelInferenceLogin).toHaveBeenCalledWith("old-inference");
+    expect(api.cancelInferenceLogin).not.toHaveBeenCalledWith("new-inference");
+    expect(link).toHaveAttribute(
+      "href",
+      "https://copilot.tencent.com/login?state=new",
+    );
+    if (cleanup === "cancel")
+      await userEvent.click(
+        screen.getByRole("button", { name: "workbuddy.inference.cancel" }),
+      );
+    else view.unmount();
+    await waitFor(() =>
+      expect(api.cancelInferenceLogin).toHaveBeenCalledWith("new-inference"),
+    );
+    expect(api.finishLogin).toHaveBeenCalledOnce();
+  },
+);
+
+it("legacy save fences an older inference status read while its account reload is pending", async () => {
+  let oldStatus!: (value: unknown) => void;
+  let reloadAccounts!: (value: unknown) => void;
+  api.listInferenceAccounts.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        oldStatus = resolve;
+      }),
+  );
+  api.list.mockResolvedValueOnce([row]).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        reloadAccounts = resolve;
+      }),
+  );
+  api.beginLogin.mockResolvedValue({
+    flowId: "legacy",
+    verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
+  });
+  api.finishLogin.mockResolvedValue({ state: "saved" });
+  render(<WorkBuddyAccounts />);
+  await screen.findByText(row.label);
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await screen.findByRole("link", { name: "workbuddy.authorize" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.finishAuthorization" }),
+  );
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  await act(async () => oldStatus([{ id: row.id, state: "ready" }]));
+  expect(
+    screen.queryByText("workbuddy.inference.state.ready"),
+  ).not.toBeInTheDocument();
+  await act(async () => reloadAccounts([row]));
+  await waitFor(() =>
+    expect(api.listInferenceAccounts).toHaveBeenCalledTimes(2),
+  );
+  expect(
+    screen.getByText("workbuddy.inference.state.needsAuthorization"),
+  ).toBeVisible();
+});
