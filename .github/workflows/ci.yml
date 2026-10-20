@@ -172,6 +172,7 @@ jobs:
   backend:
     name: Backend Checks
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
     strategy:
@@ -186,6 +187,11 @@ jobs:
         # 「只有 macOS 能验的 chatgpt_app.rs AppleScript 分支，维护者本机就是 macOS，
         # 六道闸本来就在本机先跑一遍」。开源后 PR 来自外部贡献者，他们的本机不一定是
         # macOS，「维护者本机会先跑」这个前提不再覆盖所有改动 ⇒ 那条分支必须由 CI 兜住。
+        #
+        # 这条 job 只做静态闸（fmt / clippy / 守卫 / headless musl 检查）。
+        # 测试挪到 backend-tests：那边用 cargo-nextest 按测试名哈希分片并行，
+        # Windows 腿 6200+ 串行测试曾实跑 4.7 小时（2 核 runner + 进程型测试），
+        # 静态/测试混跑还让每个分片重复付一遍 clippy 的编译。
         os: [ubuntu-22.04, windows-latest, macos-14]
     steps:
       - name: Checkout
@@ -211,15 +217,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo dependency cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: "false"
 
       - name: Create frontend dist placeholder
         shell: bash
@@ -245,9 +256,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
 
-      - name: Run tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
       # loongport-cli（无桌面静态包）的纯净闸：GUI 关掉后库必须仍能编译。
       # 有人往共享模块里加了 tauri 引用就会在这里红——否则只有 release
       # 打 musl 包时才炸。警告不拦（no-gui 下大量 gui-only 代码成为死代码，
@@ -265,6 +273,84 @@ jobs:
           # 检查 —— 它就是给无桌面环境用的，host 检查覆盖不了它的目标形态。
           cargo check -p loongport-cli --manifest-path src-tauri/Cargo.toml \
             --target x86_64-unknown-linux-musl
+
+  backend-tests:
+    name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 分片数按各平台历史实跑时长定：Windows 串行实测 4.7h（2 核 + 大量
+          # 子进程型测试，进程创建与 Defender 扫描是 ubuntu 的数倍）→ 4 片；
+          # ubuntu ~1.6h / macOS ~1.1h → 各 2 片。nextest 的 count 分片按测试
+          # 名哈希切分，跨运行稳定：任何测试恰好落进且只落进一片。
+          - { os: ubuntu-22.04, shard: 1, shards: 2, timeout: 75 }
+          - { os: ubuntu-22.04, shard: 2, shards: 2, timeout: 75 }
+          - { os: windows-latest, shard: 1, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 2, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 3, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 4, shards: 4, timeout: 150 }
+          - { os: macos-14, shard: 1, shards: 2, timeout: 90 }
+          - { os: macos-14, shard: 2, shards: 2, timeout: 90 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        # 工具链同 backend job：跟 rust-toolchain.toml 走（理由见那边注释）。
+        run: rustup show
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      # Share dependency artifacts; only the first shard per platform saves them.
+      # Workspace outputs stay out of this cache so source changes do not create
+      # another full target archive on every commit.
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: ${{ matrix.shard == 1 }}
+
+      - name: Create frontend dist placeholder
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run tests
+        # --profile ci：src-tauri/.config/nextest.toml 里给 CI 档配了重试，
+        # 只兜时序型偶发；一致性失败连挂三次仍会红。
+        shell: bash
+        run: |
+          cargo nextest run --profile ci \
+            --manifest-path src-tauri/Cargo.toml \
+            --partition count:${{ matrix.shard }}/${{ matrix.shards }}
 
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
@@ -288,15 +374,20 @@ jobs:
           distribution: Ubuntu-24.04
           wsl-version: 2
 
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v5
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo dependency cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: "false"
 
       - name: Create frontend dist placeholder
         shell: bash
@@ -383,7 +474,7 @@ jobs:
     name: Required Checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [changes, frontend, backend, backend-windows-wsl2, workflow-lint]
+    needs: [changes, frontend, backend, backend-tests, backend-windows-wsl2, workflow-lint]
     steps:
       - name: Gate on upstream results
         shell: bash

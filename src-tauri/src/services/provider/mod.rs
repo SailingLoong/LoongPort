@@ -2382,6 +2382,8 @@ command = "legacy-cmd"
     #[serial]
     async fn update_current_codex_provider_refreshes_and_clears_catalog_during_takeover() {
         let _home = TempHome::new();
+        let _settings = crate::settings::TestSettingsScope::enter().expect("isolated settings");
+        crate::secrets::testing::initialize_settings().expect("unlock isolated settings");
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2512,6 +2514,8 @@ requires_openai_auth = true
     #[serial]
     async fn update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active() {
         let home = TempHome::new();
+        let _settings = crate::settings::TestSettingsScope::enter().expect("isolated settings");
+        crate::secrets::testing::initialize_settings().expect("unlock isolated settings");
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));

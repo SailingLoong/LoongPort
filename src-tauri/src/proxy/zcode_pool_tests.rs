@@ -49,6 +49,7 @@ struct ZCodeRouterFixture {
     synthetic_tokens: Vec<String>,
     upstream: tokio::task::JoinHandle<()>,
     _isolation: tokio::sync::OwnedMutexGuard<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl Drop for ZCodeRouterFixture {
     fn drop(&mut self) {
@@ -59,6 +60,7 @@ impl ZCodeRouterFixture {
     async fn new(behavior: UpstreamBehavior) -> Self {
         // Follow the original crate's test-home isolation. Never consult the
         // user's normal settings home when the real handlers run.
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let isolation = isolation().await;
         let db = Arc::new(Database::memory().unwrap());
@@ -153,6 +155,7 @@ impl ZCodeRouterFixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
+            _home: home,
             db,
             proxy,
             transport,
@@ -252,6 +255,7 @@ async fn isolation() -> tokio::sync::OwnedMutexGuard<()> {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_responses_pool_uses_second_account_after_429() {
     for stream in [false, true] {
         let fixture = ZCodeRouterFixture::new(UpstreamBehavior::FirstRateLimited).await;
@@ -273,6 +277,7 @@ async fn zcode_responses_pool_uses_second_account_after_429() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_responses_final_body_rejects_retired_buffer_and_stream() {
     for stream in [false, true] {
         let fixture = ZCodeRouterFixture::new(UpstreamBehavior::Complete).await;
@@ -292,6 +297,7 @@ async fn zcode_responses_final_body_rejects_retired_buffer_and_stream() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_responses_midstream_failure_never_replays_output_or_switches_account() {
     let fixture = ZCodeRouterFixture::new(UpstreamBehavior::FailAfterOutput).await;
     let response = fixture.request(true).await;
@@ -347,6 +353,7 @@ async fn zcode_responses_midstream_failure_never_replays_output_or_switches_acco
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_responses_preserves_tools_history_and_selected_pool_identity() {
     let fixture = ZCodeRouterFixture::new(UpstreamBehavior::Complete).await;
     let response = fixture.request_body(json!({
@@ -406,6 +413,7 @@ async fn zcode_responses_preserves_tools_history_and_selected_pool_identity() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_router_fixture_missing_or_cross_root_is_zero_http() {
     let fixture = ZCodeRouterFixture::new(UpstreamBehavior::Complete).await;
     let body = json!({"model":"glm-synthetic","input":"synthetic prompt","stream":false});
@@ -451,6 +459,7 @@ async fn zcode_router_fixture_missing_or_cross_root_is_zero_http() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn zcode_401_marks_only_selected_original_owner_needs_login_then_falls_back() {
     for stream in [false, true, false, true] {
         let fixture = ZCodeRouterFixture::new(UpstreamBehavior::FirstUnauthorized).await;

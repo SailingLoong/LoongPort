@@ -217,6 +217,7 @@ struct HttpFixture {
     directory: tempfile::TempDir,
     upstream: Arc<Upstream>,
     listener: tokio::task::JoinHandle<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl HttpFixture {
     async fn new(accounts: &[(&str, bool)], reply: Reply) -> Self {
@@ -227,6 +228,7 @@ impl HttpFixture {
         reply: Reply,
         terminal_fault: Option<&str>,
     ) -> Self {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(
             std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
             "isolated original test home required"
@@ -364,6 +366,7 @@ impl HttpFixture {
             worker: private_wrapper,
         };
         Self {
+            _home: home,
             proxy,
             db,
             runtime,
@@ -451,6 +454,7 @@ fn final_response(text: &str, streaming: bool) -> Value {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
     for streaming in [false, true] {
         let f = HttpFixture::new(&[("qoder-a", true)], Reply::ToolsThenText).await;
@@ -551,6 +555,7 @@ async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_original_pool_selects_authorized_second_account_for_responses_and_chat() {
     for endpoint in ["/v1/responses", "/v1/chat/completions"] {
         let f =
@@ -574,6 +579,7 @@ async fn http_original_pool_selects_authorized_second_account_for_responses_and_
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_unknown_submission_never_replays_on_second_account() {
     for streaming in [false, true] {
         let f = HttpFixture::new(
@@ -595,6 +601,7 @@ async fn http_unknown_submission_never_replays_on_second_account() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_partial_failure_never_completes_or_replays() {
     let f = HttpFixture::new(
         &[("qoder-partial", true), ("qoder-b", true)],
@@ -638,6 +645,7 @@ async fn http_partial_failure_never_completes_or_replays() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_client_body_drop_closes_upstream_without_account_replay() {
     for read_prefix in [false, true] {
         let f = HttpFixture::new(&[("qoder-a", true), ("qoder-b", true)], Reply::Hold).await;
@@ -671,6 +679,7 @@ async fn http_client_body_drop_closes_upstream_without_account_replay() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_revocation_before_first_final_body_poll_rejects_buffered_bytes() {
     let f = HttpFixture::new(&[("qoder-a", true), ("qoder-b", true)], Reply::Hold).await;
     let response = f
@@ -691,6 +700,7 @@ async fn http_revocation_before_first_final_body_poll_rejects_buffered_bytes() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
     let f = HttpFixture::new(
         &[("qoder-a", true), ("qoder-b", true)],
@@ -738,6 +748,7 @@ async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_original_override_exclusion_keeps_compatible_account() {
     let f = HttpFixture::new(
         &[("qoder-incompatible", true), ("qoder-b", true)],
@@ -755,6 +766,7 @@ async fn http_original_override_exclusion_keeps_compatible_account() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_invalid_model_and_unsupported_capabilities_never_launch_worker() {
     for body in [
         json!({"model":null,"input":"hello"}),
@@ -784,6 +796,7 @@ async fn http_invalid_model_and_unsupported_capabilities_never_launch_worker() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_free_intent_remains_original_preflight_policy() {
     for endpoint in ["/v1/responses", "/v1/chat/completions"] {
         for streaming in [false, true] {
@@ -810,6 +823,7 @@ async fn http_free_intent_remains_original_preflight_policy() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_worker_rejects_invalid_tool_policy_before_any_upstream_get_or_post() {
     for invalid in [
         json!({"tool_choice":"unknown"}),
@@ -838,6 +852,7 @@ async fn http_worker_rejects_invalid_tool_policy_before_any_upstream_get_or_post
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_supported_responses_image_is_forwarded_without_local_url_fetch() {
     let f = HttpFixture::new(&[("qoder-a", true)], Reply::Plain).await;
     let response=f.request("/v1/responses",json!({"model":MODEL,"input":[{"role":"user","content":[{"type":"input_text","text":"look"},{"type":"input_image","image_url":"https://fixture-image.invalid/image.png"}]}]})).await;
@@ -852,6 +867,7 @@ async fn http_supported_responses_image_is_forwarded_without_local_url_fetch() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_free_only_provider_and_untrusted_runtime_hints_remain_preflight_rejections() {
     for body in [
         json!({"model":MODEL,"input":"hello","nodePath":"/untrusted/node"}),
@@ -892,6 +908,7 @@ async fn http_free_only_provider_and_untrusted_runtime_hints_remain_preflight_re
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_complete_chat_done_cannot_hide_missing_end_or_nonzero_worker_exit() {
     for terminal_fault in ["missing-end", "nonzero", "extra-after-done"] {
         let f = HttpFixture::new_with_terminal_fault(
@@ -952,6 +969,7 @@ async fn http_complete_chat_done_cannot_hide_missing_end_or_nonzero_worker_exit(
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_concurrent_chat_requests_have_independent_completion_ids() {
     let f = HttpFixture::new(&[("qoder-a", true)], Reply::Plain).await;
     let request =
@@ -981,6 +999,7 @@ async fn http_concurrent_chat_requests_have_independent_completion_ids() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_fragmented_private_jsonl_still_completes_chat() {
     let f = HttpFixture::new_with_terminal_fault(
         &[("qoder-a", true)],
@@ -1021,6 +1040,7 @@ async fn http_fragmented_private_jsonl_still_completes_chat() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_cleanup_failure_after_complete_chat_cannot_publish_success() {
     for endpoint in ["/v1/chat/completions", "/v1/responses"] {
         let f = HttpFixture::new_with_terminal_fault(
@@ -1081,6 +1101,7 @@ async fn http_cleanup_failure_after_complete_chat_cannot_publish_success() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_chat_three_message_history_ignores_request_auth_and_runtime_hints() {
     for streaming in [false, true] {
         let f = HttpFixture::new(&[("qoder-a", true)], Reply::Plain).await;
@@ -1153,6 +1174,7 @@ async fn http_chat_three_message_history_ignores_request_auth_and_runtime_hints(
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn http_nonstream_source_error_is_bad_gateway_without_completion_or_replay() {
     for endpoint in ["/v1/chat/completions", "/v1/responses"] {
         let f = HttpFixture::new(

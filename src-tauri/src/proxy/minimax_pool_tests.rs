@@ -47,6 +47,7 @@ struct MiniMaxRouterFixture {
     origin: String,
     upstream: tokio::task::JoinHandle<()>,
     _isolation: tokio::sync::OwnedMutexGuard<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl Drop for MiniMaxRouterFixture {
     fn drop(&mut self) {
@@ -57,6 +58,7 @@ impl MiniMaxRouterFixture {
     async fn new(behavior: UpstreamBehavior) -> Self {
         // Follow the original crate's test-home isolation. Never consult the
         // user's normal settings home when the real handlers run.
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let isolation = crate::minimax_code::isolated_fixture_guard().await;
         let db = Arc::new(Database::memory().unwrap());
@@ -142,6 +144,7 @@ impl MiniMaxRouterFixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
+            _home: home,
             db,
             proxy,
             transport,
@@ -249,6 +252,7 @@ fn assert_wire(call: &CapturedRequest, account: &str, region: &str) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn minimax_responses_pool_uses_second_account_after_429() {
     for stream in [false, true] {
         let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::FirstRateLimited).await;
@@ -274,6 +278,7 @@ async fn minimax_responses_pool_uses_second_account_after_429() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn minimax_responses_final_body_rejects_retired_buffer_and_stream() {
     for stream in [false, true] {
         let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::Complete).await;
@@ -293,6 +298,7 @@ async fn minimax_responses_final_body_rejects_retired_buffer_and_stream() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn minimax_responses_midstream_failure_never_replays_output_or_switches_account() {
     let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::FailAfterOutput).await;
     let response = fixture.request(true).await;
@@ -348,6 +354,7 @@ async fn minimax_responses_midstream_failure_never_replays_output_or_switches_ac
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn minimax_responses_preserves_tools_history_and_selected_pool_identity() {
     let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::Complete).await;
     let response = fixture.request_body(json!({
@@ -407,6 +414,7 @@ async fn minimax_responses_preserves_tools_history_and_selected_pool_identity() 
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn minimax_router_fixture_missing_or_cross_root_is_zero_http() {
     let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::Complete).await;
     let body = json!({"model":"MiniMax-M2.7","input":"synthetic prompt","stream":false});

@@ -39,6 +39,7 @@ struct Fixture {
     origin: String,
     upstream: tokio::task::JoinHandle<()>,
     _serial: tokio::sync::OwnedMutexGuard<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -47,6 +48,7 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(behavior: Behavior) -> Self {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         static SERIAL: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
             std::sync::OnceLock::new();
@@ -150,6 +152,7 @@ impl Fixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
+            _home: home,
             db,
             proxy,
             transport,
@@ -227,6 +230,7 @@ fn wire(call: &Captured, account: &str) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_chat_original_pool_uses_second_account_after_technical_429() {
     let f = Fixture::new(Behavior::FirstRateLimited).await;
     let request = chat(true);
@@ -244,6 +248,7 @@ async fn workbuddy_chat_original_pool_uses_second_account_after_technical_429() 
     f.idle().await;
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_exact_denials_are_terminal_before_account_failover() {
     for (status, code) in [(403, 11004), (403, 11140), (401, 11140), (200, 11004)] {
         let f = Fixture::new(Behavior::Refused(status, code)).await;
@@ -258,6 +263,7 @@ async fn workbuddy_exact_denials_are_terminal_before_account_failover() {
     }
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_nonstream_request_is_explicitly_unsupported_and_zero_post() {
     let f = Fixture::new(Behavior::Complete).await;
     let response = f.request("/v1/chat/completions", chat(false)).await;
@@ -268,6 +274,7 @@ async fn workbuddy_nonstream_request_is_explicitly_unsupported_and_zero_post() {
     f.idle().await;
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_final_body_rejects_retired_session_after_original_prime() {
     let f = Fixture::new(Behavior::Complete).await;
     let response = f.request("/v1/chat/completions", chat(true)).await;
@@ -284,6 +291,7 @@ async fn workbuddy_final_body_rejects_retired_session_after_original_prime() {
     f.idle().await;
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_midstream_failure_and_refusal_never_replay_or_switch_account() {
     for behavior in [Behavior::StreamFailure, Behavior::StreamRefusal] {
         let f = Fixture::new(behavior).await;
@@ -330,6 +338,7 @@ async fn workbuddy_midstream_failure_and_refusal_never_replay_or_switch_account(
     }
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_claude_original_entry_converts_tools_once_into_chat() {
     let f = Fixture::new(Behavior::Complete).await;
     let response=f.request("/v1/messages",json!({"model":"synthetic-wb-model","stream":true,"max_tokens":64,"system":"preserved system","tools":[{"name":"lookup","description":"test","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}],"tool_choice":{"type":"auto"},"messages":[{"role":"user","content":"synthetic prompt"}]})).await;
@@ -351,6 +360,7 @@ async fn workbuddy_claude_original_entry_converts_tools_once_into_chat() {
     f.idle().await;
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_missing_or_foreign_fixture_is_zero_http_without_public_fallback() {
     let f = Fixture::new(Behavior::Complete).await;
     let response = f
@@ -378,6 +388,7 @@ async fn workbuddy_missing_or_foreign_fixture_is_zero_http_without_public_fallba
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_codex_responses_original_entry_roundtrips_text_and_tools_via_chat() {
     let f = Fixture::new(Behavior::Complete).await;
     let response = f.request("/v1/responses", json!({
@@ -407,6 +418,7 @@ async fn workbuddy_codex_responses_original_entry_roundtrips_text_and_tools_via_
     f.idle().await;
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_unsafe_first_event_is_terminal_and_never_uses_second_account() {
     for endpoint in ["/v1/chat/completions", "/v1/responses"] {
         let f = Fixture::new(Behavior::UnicodeFirst).await;
@@ -429,6 +441,7 @@ async fn workbuddy_unsafe_first_event_is_terminal_and_never_uses_second_account(
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn workbuddy_structured_sse_refusal_keeps_meaning_at_all_original_entries() {
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
         for code in [11004, 11140] {

@@ -155,6 +155,7 @@ impl CrossOwnerFixture {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn cross_owner_priority_keeps_healthy_first_owner_and_private_identity() {
     let f = CrossOwnerFixture::new(UpstreamBehavior::Complete, ZCodeReply::Text).await;
     let response = f.request(json!({"model":"MiniMax-M2.7","input":"synthetic question","stream":false,"account_id":"synthetic-b"})).await;
@@ -171,6 +172,7 @@ async fn cross_owner_priority_keeps_healthy_first_owner_and_private_identity() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn cross_owner_tool_roundtrip_survives_preoutput_fallback_and_attributes_usage() {
     let f =
         CrossOwnerFixture::new(UpstreamBehavior::FirstRateLimited, ZCodeReply::ToolThenText).await;
@@ -300,6 +302,7 @@ async fn cross_owner_tool_roundtrip_survives_preoutput_fallback_and_attributes_u
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn cross_owner_explicit_denial_never_falls_back_to_other_owner() {
     let f = CrossOwnerFixture::new(UpstreamBehavior::Complete, ZCodeReply::Denied).await;
     f.minimax
@@ -318,6 +321,7 @@ async fn cross_owner_explicit_denial_never_falls_back_to_other_owner() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn cross_owner_midstream_failure_is_terminal_not_cross_owner_replay() {
     let f = CrossOwnerFixture::new(UpstreamBehavior::FailAfterOutput, ZCodeReply::Text).await;
     let response = f

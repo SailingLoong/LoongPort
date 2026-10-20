@@ -12,6 +12,7 @@ struct Fixture {
     calls: Arc<std::sync::Mutex<Vec<Value>>>,
     upstream: tokio::task::JoinHandle<()>,
     _serial: tokio::sync::OwnedMutexGuard<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -23,6 +24,7 @@ impl Fixture {
         Self::with_denial(false).await
     }
     async fn with_denial(deny: bool) -> Self {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let _ = rustls::crypto::ring::default_provider().install_default();
         let serial = FixtureTransport::serial().await;
@@ -88,6 +90,7 @@ impl Fixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
+            _home: home,
             db,
             proxy,
             transport,
@@ -129,6 +132,7 @@ impl Fixture {
     }
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn trae_original_chat_claude_and_responses_text_consumers() {
     for (path, body) in [
         (
@@ -169,6 +173,7 @@ async fn trae_original_chat_claude_and_responses_text_consumers() {
     }
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn trae_tools_and_explicit_usage_are_excluded_before_account_attempt() {
     let f = Fixture::new().await;
     for extra in [
@@ -186,6 +191,7 @@ async fn trae_tools_and_explicit_usage_are_excluded_before_account_attempt() {
     assert!(f.calls.lock().unwrap().is_empty());
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn trae_missing_fixture_is_closed_before_http() {
     let f = Fixture::new().await;
     let response=f.request_with("/v1/chat/completions",json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}]}),None).await;
@@ -194,6 +200,7 @@ async fn trae_missing_fixture_is_closed_before_http() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn trae_final_body_rechecks_authorization_after_prime() {
     use futures::StreamExt;
     let f = Fixture::new().await;
@@ -219,6 +226,7 @@ async fn trae_final_body_rechecks_authorization_after_prime() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn trae_explicit_refusal_is_terminal_at_all_original_entries() {
     for (path, body) in [
         (

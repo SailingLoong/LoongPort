@@ -79,6 +79,7 @@ struct Fixture {
     calls: Arc<std::sync::Mutex<Vec<Captured>>>,
     release: Arc<tokio::sync::Notify>,
     upstream: tokio::task::JoinHandle<()>,
+    _home: crate::secrets::testing::TestHome,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -90,6 +91,7 @@ impl Fixture {
         // Match the original application setup (lib.rs) before creating the
         // native Claude hyper-rustls client; oneshot does not run app setup.
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(
             std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
             "test runner must provide an isolated home"
@@ -161,6 +163,7 @@ impl Fixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
+            _home: home,
             db,
             proxy,
             protocol,

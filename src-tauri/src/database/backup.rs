@@ -4539,7 +4539,8 @@ mod tests {
     #[test]
     #[serial]
     fn periodic_maintenance_runs_even_when_auto_backup_disabled() -> Result<(), AppError> {
-        let _test_home = TestHomeGuard::new();
+        let _test_home = crate::secrets::testing::TestHome::new().expect("isolated test home");
+        crate::secrets::testing::initialize_settings()?;
 
         let settings = AppSettings {
             backup_interval_hours: Some(0),
