@@ -114,6 +114,9 @@ it.each(["legacy", "native"] as const)(
     });
     expect(result.current.confirmation).toBeNull();
   },
+  // Three act-wrapped round trips through the real hook and query client;
+  // contended CI runners have exceeded the 15s default without stalling.
+  30_000,
 );
 
 it("keeps a backend-rejected legacy catalog confirmation failed without replay or model change", async () => {
