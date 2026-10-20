@@ -1531,25 +1531,41 @@ mod check_diagnostic_tests {
         assert!(!events.iter().any(|event| event["outcome"] == "failed"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn total_deadline_cancels_all_started_routes_and_remains_an_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         assert_eq!(policy::CHECK_BUDGET, Duration::from_secs(12));
         assert_eq!(policy::STARTUP_CHECK_BUDGET, Duration::from_secs(5));
         assert_eq!(policy::CHECK_HEDGE_DELAY, Duration::from_millis(750));
         let events = Events::default();
+        let started = Arc::new(AtomicUsize::new(0));
         let checks = [false, true]
             .into_iter()
             .map(|direct| {
+                let started = started.clone();
                 (
                     Duration::ZERO,
-                    observed_check(direct, events.clone(), Box::pin(pending())),
+                    observed_check(
+                        direct,
+                        events.clone(),
+                        Box::pin(async move {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            pending().await
+                        }),
+                    ),
                 )
             })
             .collect();
-        assert!(matches!(
-            policy::race_update_checks(checks, Duration::from_millis(5), |a, b| a > b).await,
-            Err(CheckFailure::TimedOut)
-        ));
+        let race = policy::race_update_checks(checks, Duration::from_millis(5), |a, b| a > b);
+        tokio::pin!(race);
+        assert!(futures::poll!(&mut race).is_pending());
+        // Let both zero-delay routes start before testing cancellation at the deadline.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures::poll!(&mut race).is_pending());
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        tokio::time::advance(Duration::from_millis(5)).await;
+        assert!(matches!(race.await, Err(CheckFailure::TimedOut)));
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(
