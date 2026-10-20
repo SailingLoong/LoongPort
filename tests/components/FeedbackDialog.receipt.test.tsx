@@ -1695,7 +1695,7 @@ describe("FeedbackDialog preview resource and lifecycle boundaries", () => {
   it("focuses the completed preview so the user can inspect its actual contents", async () => {
     render(<FeedbackDialog open onClose={vi.fn()} />);
     const preview = await prepareDraft();
-    expect(preview).toHaveFocus();
+    await waitFor(() => expect(preview).toHaveFocus());
   });
 
   it.each([
