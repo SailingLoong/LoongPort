@@ -812,7 +812,7 @@ pub async fn handle_chat_completions(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -914,7 +914,7 @@ async fn handle_responses_for_app(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -1035,7 +1035,7 @@ pub async fn handle_alpha_search(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, false, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, false);
         }
     };
 
@@ -1119,7 +1119,7 @@ async fn handle_responses_compact_for_app(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -1344,7 +1344,7 @@ async fn handle_codex_chat_to_responses_transform(
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
-        return handle_codex_chat_error_response(response, ctx, status).await;
+        return handle_codex_chat_error_response(response, ctx, status, is_stream).await;
     }
 
     if is_stream || response.is_sse() {
@@ -1588,7 +1588,7 @@ async fn handle_codex_anthropic_to_responses_transform(
     let status = response.status();
 
     if !status.is_success() {
-        return handle_codex_chat_error_response(response, ctx, status).await;
+        return handle_codex_chat_error_response(response, ctx, status, is_stream).await;
     }
 
     // Preserve live streaming when the gateway marks SSE correctly or omits an
@@ -1832,11 +1832,12 @@ fn build_codex_anthropic_sse_response(
 /// 与正常响应分支配套：正常响应已经被改写成 Responses 形式，错误响应若仍保留
 /// Chat 错误体（如 MiniMax 的 `{"base_resp": {"status_code": 2013}}`），Codex
 /// 客户端的错误处理就无法对齐字段。这里读取上游 body、规整成
-/// `{"error": {message, type, code, param}}` 并保留原始 HTTP 状态码。
+/// `{"error": {message, type, code, param}}`。输入超限的流式请求改为 failed SSE，以支持客户端压缩恢复；其余保留原始 HTTP 状态码。
 async fn handle_codex_chat_error_response(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     status: axum::http::StatusCode,
+    is_stream: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
@@ -1871,6 +1872,11 @@ async fn handle_codex_chat_error_response(
     };
 
     let responses_error = transform_codex_chat::chat_error_to_response_error(Some(&parsed_value));
+    if let Some(response) =
+        codex_context_window_sse_response(&ctx.request_model, &responses_error, status, is_stream)
+    {
+        return Ok(response);
+    }
 
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
@@ -1910,10 +1916,23 @@ fn build_codex_proxy_error_response(
     ctx: &RequestContext,
     endpoint: &str,
     error: &ProxyError,
+    is_stream: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let body = codex_proxy_error_json(&ctx.provider.name, &ctx.request_model, endpoint, error);
+    let responses_endpoint = matches!(
+        endpoint.split('?').next(),
+        Some("/responses" | "/v1/responses")
+    );
+    if let Some(response) = codex_context_window_sse_response(
+        &ctx.request_model,
+        &body,
+        status,
+        is_stream && responses_endpoint,
+    ) {
+        return Ok(response);
+    }
     let body = serde_json::to_vec(&body).map_err(|e| {
         log::error!("[Codex] 序列化代理错误体失败: {e}");
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
@@ -1930,6 +1949,44 @@ fn build_codex_proxy_error_response(
             log::error!("[Codex] 构建代理错误响应失败: {e}");
             ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
         })
+}
+
+/// Codex recognizes context-budget failures in `response.failed` SSE events.
+/// A bare HTTP 400 is an invalid request to the client, even when its JSON has
+/// the right code. Return a failed stream so local compaction can trim history
+/// and retry. Other HTTP errors and non-streaming callers keep their status.
+fn codex_context_window_sse_response(
+    model: &str,
+    body: &Value,
+    status: StatusCode,
+    is_stream: bool,
+) -> Option<axum::response::Response> {
+    if !is_stream
+        || status != StatusCode::BAD_REQUEST
+        || body.pointer("/error/code").and_then(Value::as_str) != Some("context_length_exceeded")
+    {
+        return None;
+    }
+    let response = json!({
+        "id": format!("resp_{}", uuid::Uuid::new_v4().simple()),
+        "object": "response",
+        "created_at": chrono::Utc::now().timestamp(),
+        "status": "failed",
+        "model": model,
+        "output": [],
+        "error": body["error"],
+    });
+    Some(
+        (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            super::providers::codex_responses_sse::response_failed(&response),
+        )
+            .into_response(),
+    )
 }
 
 fn codex_proxy_error_json(
@@ -3796,5 +3853,66 @@ mod paperclip_usage_boundary_tests {
         let mut v = good;
         v["id"] = serde_json::json!("private task echo");
         assert!(!budget_usage_is_lossless(&v));
+    }
+}
+
+#[cfg(test)]
+mod codex_overflow_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn input_overflow_failed_stream_preserves_error_and_model() {
+        let error = json!({"error": {"code": "context_length_exceeded", "message": "input too long", "param": null}});
+        let response =
+            codex_context_window_sse_response("model-alias", &error, StatusCode::BAD_REQUEST, true)
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let wire = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(wire.starts_with("event: response.failed\n"));
+        let data = wire
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let event: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["type"], "response.failed");
+        assert_eq!(event["response"]["status"], "failed");
+        assert_eq!(event["response"]["model"], "model-alias");
+        assert_eq!(event["response"]["error"], error["error"]);
+        assert!(!wire.contains("response.completed"));
+    }
+
+    #[test]
+    fn unrelated_errors_and_non_streaming_keep_http_semantics() {
+        for (code, status, stream) in [
+            (
+                json!("context_length_exceeded"),
+                StatusCode::BAD_REQUEST,
+                false,
+            ),
+            (
+                json!("context_length_exceeded"),
+                StatusCode::TOO_MANY_REQUESTS,
+                true,
+            ),
+            (
+                json!("context_length_exceeded"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                true,
+            ),
+            (json!(400), StatusCode::BAD_REQUEST, true),
+            (json!("invalid_api_key"), StatusCode::BAD_REQUEST, true),
+            (Value::Null, StatusCode::BAD_REQUEST, true),
+        ] {
+            assert!(codex_context_window_sse_response(
+                "alias",
+                &json!({"error":{"code":code}}),
+                status,
+                stream
+            )
+            .is_none());
+        }
     }
 }
