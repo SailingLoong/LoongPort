@@ -1251,8 +1251,8 @@ mod tests {
     #[test]
     #[serial]
     fn repeated_direct_import_preserves_the_selected_model_in_native_configuration() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = TestHomeGuard::set(home.path());
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        crate::secrets::testing::initialize_settings().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(Database::memory().unwrap());
         let state = crate::store::AppState::new(db.clone()).unwrap();
@@ -1291,8 +1291,8 @@ mod tests {
     #[test]
     #[serial]
     fn import_rejects_official_or_blocked_active_targets_before_publication() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = TestHomeGuard::set(home.path());
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        crate::secrets::testing::initialize_settings().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(Database::memory().unwrap());
         let state = crate::store::AppState::new(db.clone()).unwrap();
@@ -1347,8 +1347,8 @@ mod tests {
     #[test]
     #[serial]
     fn repeated_import_keeps_local_takeover_and_projects_the_changed_current_model() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = TestHomeGuard::set(home.path());
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        crate::secrets::testing::initialize_settings().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(Database::memory().unwrap());
         let state = crate::store::AppState::new(db.clone()).unwrap();
@@ -1410,8 +1410,8 @@ mod tests {
     #[test]
     #[serial]
     fn import_rejects_removing_an_active_target_without_a_source_selection_before_publish() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = TestHomeGuard::set(home.path());
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        crate::secrets::testing::initialize_settings().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(Database::memory().unwrap());
         let state = crate::store::AppState::new(db.clone()).unwrap();

@@ -5,7 +5,7 @@ use super::{
 use crate::{database::Database, error::AppError};
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 use zeroize::Zeroizing;
 
@@ -37,6 +37,11 @@ impl KeyStore for MemoryKeyStore {
 }
 
 pub(crate) fn initialize_database() -> Result<Database, AppError> {
+    Database::init_with_secrets(initialize_settings()?)
+}
+
+/// Unlock settings in the selected synthetic home, including memory-only DB fixtures.
+pub(crate) fn initialize_settings() -> Result<Arc<SecretSession>, AppError> {
     let test_home = std::env::var_os("CC_SWITCH_TEST_HOME")
         .expect("disk tests must select an isolated home before initializing the secret session");
     let app_root = crate::config::get_app_config_dir();
@@ -51,7 +56,7 @@ pub(crate) fn initialize_database() -> Result<Database, AppError> {
     static STORE: OnceLock<MemoryKeyStore> = OnceLock::new();
     let session = SecretSession::open(&app_root, STORE.get_or_init(MemoryKeyStore::default), None)?;
     crate::settings::unlock_settings_for_test(session.clone())?;
-    Database::init_with_secrets(session)
+    Ok(session)
 }
 
 /// Build the actual source17 schema for legacy-path fixtures, without downgrading

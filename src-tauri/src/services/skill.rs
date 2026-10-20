@@ -5642,9 +5642,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_treats_an_aliased_pi_root_as_the_ssot() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join(".agents"));
 
@@ -5668,9 +5668,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_warns_when_the_pi_root_cannot_be_resolved() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(Path::new("relative/pi-agent"));
 
@@ -5693,21 +5693,30 @@ mod tests {
     }
 
     /// CC_SWITCH_TEST_HOME 隔离守卫（serial 测试间互斥由 #[serial] 保证，
-    /// 守卫只负责在测试结束后恢复原值）。
-    struct TestHomeGuard(Option<std::ffi::OsString>);
+    /// 守卫同时隔离 settings，并在测试结束后恢复原值）。
+    struct TestHomeGuard {
+        previous: Option<std::ffi::OsString>,
+        settings: crate::settings::TestSettingsScope,
+    }
     impl TestHomeGuard {
         fn set(home: &Path) -> Self {
-            let guard = Self(std::env::var_os("CC_SWITCH_TEST_HOME"));
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            let guard = Self {
+                previous,
+                settings: crate::settings::TestSettingsScope::enter().expect("isolated settings"),
+            };
+            crate::secrets::testing::initialize_settings().expect("unlock isolated settings");
             guard
         }
     }
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.previous.take() {
                 Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+            self.settings.restore();
         }
     }
 
@@ -5936,9 +5945,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn aliased_skill_roots_reject_sync_and_remove_without_deleting_the_source() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join(".agents"));
 
@@ -5965,9 +5974,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_rejects_an_aliased_destination_before_moving_skills() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join(".agents"));
 
@@ -5998,9 +6007,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_safely_leaves_an_existing_pi_ssot_alias() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join(".agents"));
 
@@ -6071,9 +6080,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_a_managed_pi_symlink() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
         let db = std::sync::Arc::new(Database::memory().expect("memory db"));
@@ -6109,9 +6118,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_an_equivalent_relative_pi_symlink() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join("pi-agent"));
 
@@ -6149,10 +6158,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_skips_bad_rows_without_moving_foreign_dirs() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
-
         let temp = tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
 
         // migrate_storage 会 fs::rename / remove_dir_all，脏 directory 能把
         // SSOT 之外的任意目录搬走或删掉。

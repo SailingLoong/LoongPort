@@ -499,8 +499,10 @@ mod tests {
     /// Full product router/RequestContext/auth boundary. Run with an isolated
     /// CC_SWITCH_TEST_HOME; this test never needs an SDK or a real account.
     #[tokio::test]
+    #[serial_test::serial]
     async fn qoder_chat_route_uses_selected_provider_auth_and_preserves_history() {
         use tower::ServiceExt;
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(
             std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
             "isolated test home required"
@@ -561,8 +563,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn qoder_chat_route_rejects_free_intent_before_launching_worker() {
         use tower::ServiceExt;
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("worker-started");

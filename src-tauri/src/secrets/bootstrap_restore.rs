@@ -128,9 +128,11 @@ async fn fetch(source: &RestoreSource) -> Result<DownloadedSnapshot, AppError> {
         .map_err(|_| AppError::Config("secret.transport_unavailable".into()))?;
     match source {
         RestoreSource::Webdav(settings) => {
-            crate::services::webdav_sync::fetch_snapshot(settings).await
+            crate::services::webdav_sync::fetch_snapshot_for_startup(settings).await
         }
-        RestoreSource::S3(settings) => crate::services::s3_sync::fetch_snapshot(settings).await,
+        RestoreSource::S3(settings) => {
+            crate::services::s3_sync::fetch_snapshot_for_startup(settings).await
+        }
     }
 }
 pub(crate) async fn preview(source: &RestoreSource) -> Result<RestorePreview, AppError> {
@@ -572,7 +574,7 @@ pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::testing::MemoryKeyStore;
+    use crate::secrets::{testing::MemoryKeyStore, upgrade::checkpoint};
     use std::{collections::BTreeMap, io::Write};
     struct Fixture {
         home: tempfile::TempDir,
@@ -843,47 +845,289 @@ mod tests {
         assert!(!pending(&fixture.root()).unwrap());
     }
 
+    struct SnapshotServer {
+        origin: String,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl SnapshotServer {
+        async fn start(snapshot: DownloadedSnapshot) -> Self {
+            let artifacts = BTreeMap::from([
+                (
+                    sync_protocol::REMOTE_MANIFEST,
+                    serde_json::to_vec(&snapshot.manifest).unwrap(),
+                ),
+                (sync_protocol::REMOTE_DB_SQL, snapshot.db_sql),
+                (sync_protocol::REMOTE_SKILLS_ZIP, snapshot.skills_zip),
+            ]);
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = requests.clone();
+            let app =
+                axum::Router::new().fallback(axum::routing::get(move |uri: axum::http::Uri| {
+                    let body = uri
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .and_then(|name| artifacts.get(name))
+                        .cloned();
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        match body {
+                            Some(bytes) => (axum::http::StatusCode::OK, bytes),
+                            None => (axum::http::StatusCode::NOT_FOUND, Vec::new()),
+                        }
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                origin,
+                requests,
+                task,
+            }
+        }
+
+        fn sources(&self) -> [RestoreSource; 2] {
+            [
+                RestoreSource::Webdav(WebDavSyncSettings {
+                    base_url: self.origin.clone(),
+                    username: "fixture".into(),
+                    password: "fixture-password".into(),
+                    ..Default::default()
+                }),
+                RestoreSource::S3(S3SyncSettings {
+                    endpoint: self.origin.clone(),
+                    region: "fixture-region".into(),
+                    bucket: "fixture-bucket".into(),
+                    access_key_id: "fixture-access".into(),
+                    secret_access_key: "fixture-secret".into(),
+                    ..Default::default()
+                }),
+            ]
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for SnapshotServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn assert_settings_locked() {
+        assert!(matches!(
+            crate::settings::get_settings_for_frontend(),
+            Err(AppError::Config(code)) if code == "secret.locked"
+        ));
+    }
+
+    async fn ordinary_fetch(source: &RestoreSource) -> Result<DownloadedSnapshot, AppError> {
+        match source {
+            RestoreSource::Webdav(settings) => {
+                crate::services::webdav_sync::fetch_snapshot(settings).await
+            }
+            RestoreSource::S3(settings) => crate::services::s3_sync::fetch_snapshot(settings).await,
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn startup_preview_and_prepare_use_supplied_mock_transport_without_app_state() {
         let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
         let snapshot = fixture.snapshot();
         let expected = snapshot.manifest.snapshot_id.clone();
-        let manifest = serde_json::to_vec(&snapshot.manifest).unwrap();
-        let sql = snapshot.db_sql;
-        let zip = snapshot.skills_zip;
-        let app = axum::Router::new().fallback(axum::routing::get(move |uri: axum::http::Uri| {
-            let manifest = manifest.clone();
-            let sql = sql.clone();
-            let zip = zip.clone();
-            async move {
-                let bytes = if uri.path().ends_with(sync_protocol::REMOTE_MANIFEST) {
-                    manifest
-                } else if uri.path().ends_with(sync_protocol::REMOTE_DB_SQL) {
-                    sql
-                } else if uri.path().ends_with(sync_protocol::REMOTE_SKILLS_ZIP) {
-                    zip
-                } else {
-                    return (axum::http::StatusCode::NOT_FOUND, Vec::new());
-                };
-                (axum::http::StatusCode::OK, bytes)
-            }
-        }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let transport = RestoreSource::Webdav(WebDavSyncSettings {
-            base_url: format!("http://{address}"),
-            username: "fixture".into(),
-            password: "fixture-password".into(),
-            ..Default::default()
-        });
+        let server = SnapshotServer::start(snapshot).await;
+        let transport = server.sources()[0].clone();
+        assert_settings_locked();
         assert_eq!(preview(&transport).await.unwrap().snapshot_id, expected);
+        let preview_requests = server.request_count();
+        assert!(preview_requests > 0);
         prepare(transport, "remote recovery password", &expected)
             .await
             .unwrap();
+        assert!(server.request_count() > preview_requests);
         assert!(!fixture.root().exists());
-        server.abort();
+        assert_settings_locked();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_s3_preview_and_prepare_keep_settings_locked_without_app_state() {
+        let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let snapshot = fixture.snapshot();
+        let expected = snapshot.manifest.snapshot_id.clone();
+        let server = SnapshotServer::start(snapshot).await;
+        let transport = server.sources()[1].clone();
+        assert_settings_locked();
+        assert_eq!(preview(&transport).await.unwrap().snapshot_id, expected);
+        let preview_requests = server.request_count();
+        assert!(preview_requests > 0);
+        prepare(transport, "remote recovery password", &expected)
+            .await
+            .unwrap();
+        assert!(server.request_count() > preview_requests);
+        assert!(!fixture.root().exists());
+        assert_settings_locked();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn normal_snapshot_fetch_requires_unlock_before_any_transport_request() {
+        let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let server = SnapshotServer::start(fixture.snapshot()).await;
+        for transport in server.sources() {
+            assert!(matches!(
+                ordinary_fetch(&transport).await,
+                Err(AppError::Config(code)) if code == "secret.locked"
+            ));
+        }
+        assert_eq!(server.request_count(), 0);
+        assert!(!fixture.root().exists());
+        assert_settings_locked();
+    }
+
+    async fn assert_checkpoint_blocks_both_entries(server: &SnapshotServer) {
+        for transport in server.sources() {
+            assert!(matches!(
+                ordinary_fetch(&transport).await,
+                Err(AppError::Config(code)) if code == "upgrade.sync_paused"
+            ));
+            assert!(matches!(
+                preview(&transport).await,
+                Err(AppError::Config(code)) if code == "upgrade.sync_paused"
+            ));
+            assert!(matches!(
+                prepare(transport, "unused", "unused").await,
+                Err(AppError::Config(code)) if code == "upgrade.sync_paused"
+            ));
+        }
+        assert_eq!(server.request_count(), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_and_normal_fetch_refuse_pending_and_corrupt_checkpoints_before_requests() {
+        for corrupt in [false, true] {
+            let fixture = Fixture::new();
+            let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+            let server = SnapshotServer::start(fixture.snapshot()).await;
+            let device = crate::live::engine::DeviceStore::for_device();
+            if corrupt {
+                crate::config_file_io::ensure_private_directory(device.root()).unwrap();
+                std::fs::write(device.root().join(checkpoint::FILE), b"corrupt").unwrap();
+            } else {
+                let db = crate::secrets::testing::initialize_database().unwrap();
+                checkpoint::create(
+                    &fixture.root(),
+                    &device,
+                    &db.secret_session().read().unwrap(),
+                    &[],
+                )
+                .unwrap();
+            }
+            let checkpoint = device.root().join(checkpoint::FILE);
+            let before = std::fs::read(&checkpoint).unwrap();
+            let _locked = crate::settings::TestSettingsScope::enter().unwrap();
+            assert_settings_locked();
+            assert_checkpoint_blocks_both_entries(&server).await;
+            assert_eq!(std::fs::read(checkpoint).unwrap(), before);
+            assert_settings_locked();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_and_normal_fetch_refuse_symlinked_checkpoint_before_requests() {
+        let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let server = SnapshotServer::start(fixture.snapshot()).await;
+        let device = crate::live::engine::DeviceStore::for_device();
+        crate::config_file_io::ensure_private_directory(device.root()).unwrap();
+        let target = fixture.home.path().join("checkpoint-target");
+        std::fs::write(&target, b"unchanged checkpoint target").unwrap();
+        std::os::unix::fs::symlink(&target, device.root().join(checkpoint::FILE)).unwrap();
+        assert_checkpoint_blocks_both_entries(&server).await;
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"unchanged checkpoint target"
+        );
+        assert!(!fixture.root().join("vault.json").exists());
+        assert_settings_locked();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn normal_snapshot_fetch_keeps_completed_upgrade_sync_paused_before_requests() {
+        let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let server = SnapshotServer::start(fixture.snapshot()).await;
+        let db = crate::secrets::testing::initialize_database().unwrap();
+        crate::settings::set_upgrade_completion_with_vault(
+            "completed-checkpoint-fixture",
+            db.secret_session(),
+            &db.secret_session().read().unwrap(),
+        )
+        .unwrap();
+        assert!(!crate::live::engine::DeviceStore::for_device()
+            .root()
+            .join(checkpoint::FILE)
+            .exists());
+        for transport in server.sources() {
+            assert!(matches!(
+                ordinary_fetch(&transport).await,
+                Err(AppError::Config(code)) if code == "upgrade.sync_paused"
+            ));
+        }
+        assert_eq!(server.request_count(), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_transport_preserves_password_snapshot_and_hash_rejections() {
+        let fixture = Fixture::new();
+        let _settings = crate::settings::TestSettingsScope::enter().unwrap();
+        let snapshot = fixture.snapshot();
+        let expected = snapshot.manifest.snapshot_id.clone();
+        let server = SnapshotServer::start(snapshot).await;
+        for transport in server.sources() {
+            let before = server.request_count();
+            assert!(prepare(transport.clone(), "wrong password", &expected)
+                .await
+                .is_err());
+            assert!(server.request_count() > before);
+            assert!(matches!(
+                prepare(transport, "remote recovery password", "changed-snapshot").await,
+                Err(AppError::Localized {
+                    key: "sync.conflict",
+                    ..
+                })
+            ));
+            assert!(!fixture.root().exists());
+        }
+        let mut damaged = fixture.snapshot();
+        damaged.db_sql[0] ^= 1;
+        let corrupted = SnapshotServer::start(damaged).await;
+        for transport in corrupted.sources() {
+            assert!(matches!(
+                preview(&transport).await,
+                Err(AppError::Localized {
+                    key: "sync.artifact_hash_mismatch",
+                    ..
+                })
+            ));
+        }
+        assert!(corrupted.request_count() > 0);
+        assert!(!fixture.root().exists());
+        assert_settings_locked();
     }
 
     #[test]
