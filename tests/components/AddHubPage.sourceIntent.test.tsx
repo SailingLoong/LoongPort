@@ -288,3 +288,34 @@ it("does not reset a manual draft after an internal form Tab round trip", async 
   expect(document.querySelector('input[name="name"]')).toHaveValue("New draft");
   expect(back).not.toHaveBeenCalled();
 });
+
+it("clears the real manual form after successful completion", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const back = vi.fn();
+  render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <AddHubPage
+        sourceAppId="codex"
+        initialTab="manual"
+        onBack={back}
+        onAddProvider={save}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.type(document.querySelector('input[name="name"]')!, "Old draft");
+  await user.type(
+    screen.getByLabelText("API Key", { selector: "input" }),
+    "synthetic-test-key",
+  );
+  await user.type(
+    document.getElementById("codexBaseUrl")!,
+    "https://example.test/v1",
+  );
+  fireEvent.submit(document.querySelector("form")!);
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(document.querySelector('input[name="name"]')).toHaveValue(""),
+  );
+  expect(back).toHaveBeenCalledTimes(1);
+});

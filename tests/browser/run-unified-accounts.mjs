@@ -115,14 +115,49 @@ try {
           `http://127.0.0.1:4314/tests/browser/unified-accounts.html?scenario=${scenario}&lang=${variant.language}&dark=${variant.dark}`,
         );
         const main = page.locator("main");
-        if (scenario === "native")
-          await main
-            .getByRole("article", { name: "Synthetic account B" })
+        if (scenario === "native") {
+          const detail = main.getByRole("region", {
+            name: "账号详情",
+            exact: true,
+          });
+          await detail
+            .getByRole("heading", { name: "Synthetic account A", exact: true })
             .waitFor();
-        else
           await main
-            .getByRole("button", { name: "MiniMax Code", exact: true })
+            .getByRole("button", {
+              name: "查看 Synthetic account B",
+              exact: true,
+            })
+            .click();
+          await detail
+            .getByRole("heading", { name: "Synthetic account B", exact: true })
             .waitFor();
+          assert.equal(
+            await main
+              .getByRole("button", {
+                name: "查看 Synthetic account B",
+                exact: true,
+              })
+              .getAttribute("aria-pressed"),
+            "true",
+          );
+          assert.equal(
+            await detail
+              .getByRole("heading", {
+                name: "Synthetic account A",
+                exact: true,
+              })
+              .count(),
+            0,
+          );
+        } else {
+          await main
+            .getByRole(scenario === "add" ? "button" : "tab", {
+              name: "MiniMax Code 国内版",
+              exact: true,
+            })
+            .waitFor();
+        }
         await page.waitForFunction(() => window.unifiedLayout.settled());
         await page.evaluate(() => document.fonts.ready);
         if (scenario === "populated") {
@@ -230,7 +265,9 @@ try {
               `Tab must reach platform button ${name} after the panel`,
             );
         }
-        const critical = main.locator("button, .page-content h2");
+        const critical = main.locator(
+          "button, .page-content h2, .page-content h3, .page-content h4",
+        );
         for (const control of await critical.all()) {
           if (!(await control.isVisible())) continue;
           await control.scrollIntoViewIfNeeded();
@@ -289,28 +326,67 @@ try {
           fullPage: false,
         });
         if (scenario === "add") {
-          for (const [name, destination] of [
-            ["Qoder", "manual"],
-            ["OpenRouter · API Key", "manual"],
-            ["OpenCode", "official"],
-          ]) {
+          // Verify actual typed destinations, not obsolete generic-tab redirects.
+          for (const name of ["Qoder", "OpenRouter · API Key", "OpenCode"]) {
             await main.getByRole("button", { name, exact: true }).click();
-            const key =
-              destination === "manual"
-                ? "loongport.addEntry.manual"
-                : "loongport.sections.official";
-            assert.equal(
-              await page
-                .getByRole("tab", { name: t(key), exact: true })
-                .getAttribute("aria-selected"),
-              "true",
-            );
-            await page
-              .getByRole("tab", {
-                name: t("zcode.accounts.login.account"),
-                exact: true,
-              })
+            const destination = main.getByRole("region", {
+              name: "服务接入",
+              exact: true,
+            });
+            await destination.waitFor();
+            if (name === "Qoder") {
+              await destination
+                .getByRole("heading", {
+                  name: "Qoder 账号接入待完善",
+                  exact: true,
+                })
+                .waitFor();
+              assert.equal(
+                await destination.getByRole("textbox").count(),
+                0,
+                "Qoder account entry must not masquerade as a custom API form",
+              );
+            } else if (name === "OpenRouter · API Key") {
+              const providerName = destination.locator('input[name="name"]');
+              await providerName.waitFor();
+              await page.waitForFunction(
+                () =>
+                  document.querySelector('input[name="name"]')?.value ===
+                    "OpenRouter" &&
+                  document.querySelector("#codexBaseUrl")?.value ===
+                    "https://openrouter.ai/api/v1",
+              );
+              assert.equal(
+                await providerName.inputValue(),
+                "OpenRouter",
+                "Original OpenRouter preset must be selected",
+              );
+              assert.equal(
+                await destination.locator("#codexBaseUrl").inputValue(),
+                "https://openrouter.ai/api/v1",
+              );
+            } else {
+              await destination
+                .getByRole("heading", {
+                  name: t("loongport.officialApi.title"),
+                  exact: true,
+                })
+                .waitFor();
+              await destination
+                .getByRole("button", { name: /opencode/i })
+                .waitFor();
+              assert.equal(
+                await destination.getByRole("button").count(),
+                2,
+                "OpenCode destination contains only Back and the original vendor action",
+              );
+            }
+            await destination
+              .getByRole("button", { name: "返回平台列表", exact: true })
               .click();
+            await main
+              .getByRole("button", { name: "Qoder", exact: true })
+              .waitFor();
           }
           await page
             .getByRole("tab", {
@@ -337,22 +413,69 @@ try {
             .click();
           await page.locator('main[data-layout-view="services"]').waitFor();
           await main
-            .getByRole("button", { name: "MiniMax Code", exact: true })
+            .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .waitFor();
         } else if (scenario === "native") {
+          const platformTabs = main.getByRole("tablist", {
+            name: "服务平台",
+            exact: true,
+          });
+          await platformTabs
+            .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
+            .focus();
+          for (const [key, name] of [
+            ["Home", "GitHub Copilot"],
+            ["ArrowRight", "ChatGPT"],
+            ["End", "OpenCode"],
+          ]) {
+            await page.keyboard.press(key);
+            const selected = platformTabs.getByRole("tab", {
+              name,
+              exact: true,
+            });
+            await page.waitForFunction(
+              (name) =>
+                document.activeElement?.getAttribute("aria-label") === name &&
+                document.activeElement?.getAttribute("aria-selected") ===
+                  "true",
+              name,
+            );
+            assert.equal(await selected.getAttribute("aria-selected"), "true");
+            assert.equal(
+              await selected.evaluate(
+                (node) => document.activeElement === node,
+              ),
+              true,
+            );
+            assert.ok(
+              isReachableFocus(
+                await page.evaluate(readFocusEvidence),
+                variant.height,
+              ),
+              `Platform ${name} must remain keyboard reachable and hit-visible`,
+            );
+          }
           await page
             .locator("[data-layout-header]")
             .getByRole("button", { name: t("common.back"), exact: true })
             .click();
           await main
-            .getByRole("button", { name: "MiniMax Code", exact: true })
+            .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .waitFor();
           assert.equal(
             await main
-              .getByRole("article", { name: "Synthetic account A" })
+              .getByRole("region", { name: "账号详情", exact: true })
               .count(),
             0,
           );
+          for (const name of [
+            "查看 Synthetic account A",
+            "查看 Synthetic account B",
+          ])
+            assert.equal(
+              await main.getByRole("button", { name, exact: true }).count(),
+              0,
+            );
         }
         await page.waitForFunction(() => window.unifiedLayout.settled());
         assert.deepEqual(
