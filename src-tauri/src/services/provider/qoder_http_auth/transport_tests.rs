@@ -52,16 +52,33 @@ impl LocalServer {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
                 let request = read_request(&mut stream);
                 captured.lock().unwrap().push(request);
                 let Some(reply) = replies.next() else {
                     return;
                 };
                 let response=format!("HTTP/1.1 {} Synthetic\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",reply.status,reply.body.len(),reply.headers,reply.body);
-                let _ = stream.write_all(response.as_bytes());
+                // A socket timeout applies to each write, not the whole response.
+                // Partial progress and interruptions must share one fixed budget.
+                let write_deadline = Instant::now() + Duration::from_secs(2);
+                let mut remaining_response = response.as_bytes();
+                while !remaining_response.is_empty() {
+                    let Some(remaining_time) =
+                        write_deadline.checked_duration_since(Instant::now())
+                    else {
+                        break;
+                    };
+                    if remaining_time.is_zero() {
+                        break;
+                    }
+                    stream.set_write_timeout(Some(remaining_time)).unwrap();
+                    match stream.write(remaining_response) {
+                        Ok(0) => break,
+                        Ok(written) => remaining_response = &remaining_response[written..],
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
                 // Last expected response still leaves this listener alive briefly
                 // so forbidden automatic retries/redirects are observable.
                 if replies.len() == 0 {
