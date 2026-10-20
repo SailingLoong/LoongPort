@@ -450,6 +450,16 @@ function ProviderFormFull({
     mode: "onSubmit",
   });
   const { isSubmitting } = form.formState;
+  const domSubmitEpoch = useRef(0);
+  const pendingDomSubmit = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      // Activity hide/unmount ends this form session, even when its values survive.
+      ++domSubmitEpoch.current;
+      pendingDomSubmit.current = null;
+    },
+    [appId, providerId],
+  );
 
   const handleSettingsConfigChange = useCallback(
     (config: string) => {
@@ -1068,67 +1078,87 @@ function ProviderFormFull({
 
   const watchedDraft = useWatch({
     control: form.control,
-    disabled: !onDraftRevisionChange,
   });
   // Include raw/invalid input and hidden catalog metadata, not loading or layout.
-  const draftSignature = onDraftRevisionChange
-    ? JSON.stringify([
-        watchedDraft,
-        category,
-        selectedPresetId,
-        activePreset,
-        endpointAutoSelect,
-        localIsFullUrl,
-        pricingConfig,
-        localApiKeyField,
-        localApiFormat,
-        templateValues,
-        apiKey,
-        baseUrl,
-        claudeModel,
-        defaultHaikuModel,
-        defaultHaikuModelName,
-        defaultSonnetModel,
-        defaultSonnetModelName,
-        defaultOpusModel,
-        defaultOpusModelName,
-        defaultFableModel,
-        defaultFableModelName,
-        subagentModel,
-        selectedGitHubAccountId,
-        selectedCodexAccountId,
-        selectedXaiAccountId,
-        hasValidCodexOfficialSelection,
-        codexFastMode,
-        codexChatReasoning,
-        promptCacheRouting,
-        customUserAgent,
-        localProxyHeadersOverride,
-        localProxyBodyOverride,
-        codexAuth,
-        codexConfig,
-        codexCompactDraft,
-        codexApiKey,
-        codexBaseUrl,
-        codexModel,
-        codexCatalogModels,
-        localCodexApiFormat,
-        localCodexAnthropicAuthField,
-        localCodexImpersonateClaudeCode,
-        localCodexMaxOutputTokens,
-        geminiEnv,
-        geminiConfig,
-        geminiApiKey,
-        geminiBaseUrl,
-        geminiModel,
-        useCommonConfig,
-        commonConfigSnippet,
-        useCodexCommonConfigFlag,
-        codexCommonConfigSnippet,
-        useGeminiCommonConfigFlag,
-        geminiCommonConfigSnippet,
-      ])
-    : "";
+  const draftSignature = JSON.stringify([
+    watchedDraft,
+    category,
+    selectedPresetId,
+    activePreset,
+    endpointAutoSelect,
+    draftCustomEndpoints,
+    opencodeForm.opencodeProviderKey,
+    opencodeForm.opencodeNpm,
+    opencodeForm.opencodeApiKey,
+    opencodeForm.opencodeBaseUrl,
+    opencodeForm.opencodeHeaders,
+    opencodeForm.opencodeModels,
+    opencodeForm.opencodeExtraOptions,
+    openclawForm.openclawProviderKey,
+    openclawForm.openclawBaseUrl,
+    openclawForm.openclawApiKey,
+    openclawForm.openclawApi,
+    openclawForm.openclawModels,
+    openclawForm.openclawUserAgent,
+    hermesForm.hermesProviderKey,
+    hermesForm.hermesBaseUrl,
+    hermesForm.hermesApiKey,
+    hermesForm.hermesApiMode,
+    hermesForm.hermesModels,
+    hermesForm.hermesRateLimitDelay,
+    omoDraft.omoAgents,
+    omoDraft.omoCategories,
+    omoDraft.omoOtherFieldsStr,
+    localIsFullUrl,
+    pricingConfig,
+    localApiKeyField,
+    localApiFormat,
+    templateValues,
+    apiKey,
+    baseUrl,
+    claudeModel,
+    defaultHaikuModel,
+    defaultHaikuModelName,
+    defaultSonnetModel,
+    defaultSonnetModelName,
+    defaultOpusModel,
+    defaultOpusModelName,
+    defaultFableModel,
+    defaultFableModelName,
+    subagentModel,
+    selectedGitHubAccountId,
+    selectedCodexAccountId,
+    selectedXaiAccountId,
+    hasValidCodexOfficialSelection,
+    codexFastMode,
+    codexChatReasoning,
+    promptCacheRouting,
+    customUserAgent,
+    localProxyHeadersOverride,
+    localProxyBodyOverride,
+    codexAuth,
+    codexConfig,
+    codexCompactDraft,
+    codexApiKey,
+    codexBaseUrl,
+    codexModel,
+    codexCatalogModels,
+    localCodexApiFormat,
+    localCodexAnthropicAuthField,
+    localCodexImpersonateClaudeCode,
+    localCodexMaxOutputTokens,
+    geminiEnv,
+    geminiConfig,
+    geminiApiKey,
+    geminiBaseUrl,
+    geminiModel,
+    useCommonConfig,
+    commonConfigSnippet,
+    useCodexCommonConfigFlag,
+    codexCommonConfigSnippet,
+    useGeminiCommonConfigFlag,
+    geminiCommonConfigSnippet,
+  ]);
   const draftRevision = useRef({ signature: draftSignature, value: 0 });
   const pendingSoftRevision = useRef<number | null>(null);
   const acceptedSoftRevision = useRef<number | null>(null);
@@ -2164,9 +2194,44 @@ function ProviderFormFull({
       <Form {...form}>
         <form
           id="provider-form"
-          onSubmit={form.handleSubmit(handleSubmit)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            // RHF's isSubmitting state alone does not exclude two same-tick submits.
+            if (pendingDomSubmit.current !== null) return;
+            const epoch = ++domSubmitEpoch.current;
+            pendingDomSubmit.current = epoch;
+            const submittedValues = JSON.stringify(form.getValues());
+            const submittedRevision = draftRevision.current.value;
+            form.clearErrors("root.submit");
+            void form
+              .handleSubmit(handleSubmit)(event)
+              .catch(() => {
+                // The mutation owns its detailed error toast. This DOM boundary
+                // consumes the rejected event Promise and keeps a retryable form
+                // error without changing the save callback's rejection contract.
+                if (
+                  epoch === domSubmitEpoch.current &&
+                  submittedRevision === draftRevision.current.value &&
+                  submittedValues === JSON.stringify(form.getValues())
+                ) {
+                  form.setError("root.submit", {
+                    type: "submit",
+                    message: t("notifications.saveFailedGeneric"),
+                  });
+                }
+              })
+              .finally(() => {
+                if (pendingDomSubmit.current === epoch)
+                  pendingDomSubmit.current = null;
+              });
+          }}
           className="space-y-6 glass rounded-xl p-6 border border-white/10"
         >
+          {form.formState.errors.root?.submit?.message && (
+            <p role="alert" className="text-sm text-destructive">
+              {form.formState.errors.root.submit.message}
+            </p>
+          )}
           {!initialData && (
             <ProviderPresetSelector
               selectedPresetId={selectedPresetId}

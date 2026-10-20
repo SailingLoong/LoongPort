@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { PreservedView } from "@/components/ui/PreservedView";
+import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 import { AddHubPage } from "@/components/relay/AddHubPage";
 import { createTestQueryClient } from "../utils/testQueryClient";
 import { vendorApi } from "@/lib/api/vendor";
@@ -318,4 +319,247 @@ it("clears the real manual form after successful completion", async () => {
     expect(document.querySelector('input[name="name"]')).toHaveValue(""),
   );
   expect(back).toHaveBeenCalledTimes(1);
+});
+
+async function setupManualSave(save: (value: any) => Promise<void>) {
+  const back = vi.fn();
+  const client = createTestQueryClient();
+  const view = (active: boolean) => (
+    <QueryClientProvider client={client}>
+      <PreservedView active={active}>
+        <AddHubPage
+          sourceAppId="codex"
+          initialTab="manual"
+          onBack={back}
+          onAddProvider={save}
+        />
+      </PreservedView>
+    </QueryClientProvider>
+  );
+  const rendered = render(view(true));
+  const user = userEvent.setup();
+  await user.type(
+    document.querySelector('input[name="name"]')!,
+    "Retained draft",
+  );
+  await user.type(
+    screen.getByLabelText("API Key", { selector: "input" }),
+    "synthetic-key",
+  );
+  await user.type(
+    document.getElementById("codexBaseUrl")!,
+    "https://example.test/v1",
+  );
+  return {
+    back,
+    user,
+    rendered,
+    view,
+    submit: () => fireEvent.submit(document.querySelector("form")!),
+  };
+}
+
+it("shows a failed real save on its original form, keeps input, and retries successfully", async () => {
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Synthetic save failure"))
+    .mockResolvedValue(undefined);
+  const { back, submit } = await setupManualSave(save);
+  submit();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "notifications.saveFailedGeneric",
+  );
+  expect(document.querySelector('input[name="name"]')).toHaveValue(
+    "Retained draft",
+  );
+  expect(back).not.toHaveBeenCalled();
+  submit();
+  await waitFor(() => expect(back).toHaveBeenCalledTimes(1));
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(document.querySelector('input[name="name"]')).toHaveValue("");
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+});
+
+it("does not send duplicate real saves while one submission is pending", async () => {
+  let resolve!: () => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((done) => {
+        resolve = done;
+      }),
+  );
+  const { back, submit } = await setupManualSave(save);
+  submit();
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  await act(async () => resolve());
+  expect(back).toHaveBeenCalledTimes(1);
+});
+
+it("does not attach a late save failure to an edited draft", async () => {
+  let reject!: (error: Error) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const { back, submit, user } = await setupManualSave(save);
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const name = document.querySelector('input[name="name"]')!;
+  await user.clear(name);
+  await user.type(name, "Newer draft");
+  await act(async () => reject(new Error("Late synthetic save failure")));
+  expect(document.querySelector('input[name="name"]')).toHaveValue(
+    "Newer draft",
+  );
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+  expect(back).not.toHaveBeenCalled();
+});
+
+it("does not attach a late failure to a restored form session", async () => {
+  let reject!: (error: Error) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const { back, submit, rendered, view } = await setupManualSave(save);
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  rendered.rerender(view(false));
+  rendered.rerender(view(true));
+  await act(async () => reject(new Error("Old session synthetic failure")));
+  expect(document.querySelector('input[name="name"]')).toHaveValue(
+    "Retained draft",
+  );
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+  expect(back).not.toHaveBeenCalled();
+});
+
+it("does not attach an old save failure after a hook-owned API format change", async () => {
+  let reject!: (error: Error) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const { back, submit, user } = await setupManualSave(save);
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const advanced = screen.getByRole("button", {
+    name: /高级选项|Advanced options|providerForm.advancedOptionsToggle/i,
+  });
+  if (advanced.getAttribute("aria-expanded") !== "true")
+    await user.click(advanced);
+  fireEvent.keyDown(document.getElementById("codex-upstream-format")!, {
+    key: "ArrowDown",
+  });
+  await user.click(
+    await screen.findByRole("option", {
+      name: /Chat Completions|codexConfig.upstreamFormatChat/,
+    }),
+  );
+  await act(async () => reject(new Error("Old API format synthetic failure")));
+  expect(document.getElementById("codex-upstream-format")).toHaveTextContent(
+    /Chat Completions|codexConfig.upstreamFormatChat/,
+  );
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+  expect(back).not.toHaveBeenCalled();
+});
+
+it("releases the real submit gate after resolver validation fails", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const { back, submit, user } = await setupManualSave(save);
+  const website = document.querySelector('input[name="websiteUrl"]')!;
+  await user.type(website, "not-a-url");
+  submit();
+  expect(await screen.findByText("请输入有效的网址")).toBeInTheDocument();
+  expect(save).not.toHaveBeenCalled();
+  await user.clear(website);
+  submit();
+  await waitFor(() => expect(back).toHaveBeenCalledTimes(1));
+  expect(save).toHaveBeenCalledTimes(1);
+});
+
+it("does not release a restored session's pending submit gate when an older save fails", async () => {
+  let rejectOld!: (error: Error) => void;
+  let resolveNew!: () => void;
+  const save = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((_, fail) => {
+          rejectOld = fail;
+        }),
+    )
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolveNew = done;
+        }),
+    );
+  const { back, submit, rendered, view } = await setupManualSave(save);
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  rendered.rerender(view(false));
+  rendered.rerender(view(true));
+  submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  await act(async () => rejectOld(new Error("Old submission failed")));
+  await act(async () => submit());
+  expect(save).toHaveBeenCalledTimes(2);
+  await act(async () => resolveNew());
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(back).toHaveBeenCalledTimes(1);
+});
+
+it("does not attach a late failure after only the Hermes provider key changes", async () => {
+  let reject!: (error: Error) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <ProviderForm
+        appId="hermes"
+        providerId="original-key"
+        submitLabel="save"
+        onSubmit={save}
+        onCancel={vi.fn()}
+        initialData={{
+          name: "Synthetic Hermes",
+          settingsConfig: {
+            base_url: "https://example.test/v1",
+            api_key: "synthetic-key",
+            api_mode: "chat_completions",
+            models: [],
+          },
+        }}
+      />
+    </QueryClientProvider>,
+  );
+  fireEvent.submit(document.querySelector("form")!);
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  const key = document.getElementById("hermes-key")!;
+  fireEvent.change(key, { target: { value: "new-key" } });
+  await act(async () => reject(new Error("Old Hermes key synthetic failure")));
+  expect(key).toHaveValue("new-key");
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
 });
