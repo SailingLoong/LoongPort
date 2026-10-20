@@ -63,6 +63,14 @@ impl Fixture {
             crate::database::Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap())
                 .unwrap();
         }
+        // nextest runs tests in separate processes; each fixture needs its own
+        // ephemeral listener instead of the shared default port.
+        futures::executor::block_on(async {
+            let mut config = db.get_global_proxy_config().await.unwrap();
+            config.listen_address = "127.0.0.1".into();
+            config.listen_port = 0;
+            db.update_global_proxy_config(config).await.unwrap();
+        });
         let state = AppState::new(db).unwrap();
         state::update(
             &DeviceStore::for_device(),
