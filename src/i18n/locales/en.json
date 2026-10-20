@@ -4997,6 +4997,14 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "remaining": "Remaining credits: {{amount}}",
+      "plan": "Token Plan: {{status}}",
+      "unknown": "Unknown (refresh to check)",
+      "active": "Active",
+      "inactive": "Not active",
+      "expires": "Token Plan expires: {{time}}"
+    },
     "description": "Sign in through the official MiniMax Code device authorization flow. Token Plan and API keys are not Code login credentials.",
     "region": "Account region",
     "regions": {

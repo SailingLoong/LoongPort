@@ -2,6 +2,7 @@
 pub(crate) mod auth;
 pub(crate) mod catalog;
 pub(crate) mod checkin;
+pub(crate) mod entitlement;
 pub(crate) mod http;
 pub(crate) mod inference;
 

@@ -4998,6 +4998,14 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "remaining": "剩餘積分：{{amount}}",
+      "plan": "Token Plan：{{status}}",
+      "unknown": "未知（重新整理查詢）",
+      "active": "已開通",
+      "inactive": "未開通",
+      "expires": "Token Plan 到期：{{time}}"
+    },
     "description": "透過 MiniMax Code 官方裝置授權登入。Token Plan 與 API Key 不能作為 Code 登入憑證。",
     "region": "帳號地區",
     "regions": {

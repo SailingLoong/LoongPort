@@ -515,6 +515,7 @@ impl Transport for LoginHttp {
         Box::pin(async move {
             self.calls.lock().unwrap().push(r.endpoint);
             match r.endpoint {
+                Endpoint::UserExtra | Endpoint::Membership => Err(Failure::UnsupportedContext),
                 Endpoint::DeviceCode => {
                     let b = r.body.unwrap();
                     assert_eq!(b["client_id"], "mcode-public");
@@ -1560,3 +1561,196 @@ async fn lifecycle_partial_authorization_publication_remains_uncertain_without_r
 
 #[path = "inference_tests.rs"]
 mod inference_tests;
+
+mod entitlement_owner_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    struct Queries {
+        replies: Mutex<VecDeque<Result<Response, Failure>>>,
+        calls: Mutex<Vec<(Endpoint, Option<Value>)>>,
+        retire_during_query: Option<Arc<SecretSession>>,
+    }
+    impl Queries {
+        fn new(values: Vec<Result<Response, Failure>>) -> Self {
+            Self {
+                replies: Mutex::new(values.into()),
+                calls: Mutex::default(),
+                retire_during_query: None,
+            }
+        }
+    }
+    impl Transport for Queries {
+        fn request(
+            &self,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                assert_eq!(request.access_token.as_deref(), Some("synthetic-access"));
+                assert_eq!(request.real_user_id.as_deref(), Some("synthetic-user"));
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((request.endpoint, request.body));
+                if let Some(session) = &self.retire_during_query {
+                    access(session, None, |doc, _| {
+                        doc.accounts[0].credential_version += 1;
+                        Ok(((), true))
+                    })
+                    .await?;
+                }
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Err(Failure::NetworkUnavailable))
+            })
+        }
+    }
+    async fn run(
+        f: &Fixture,
+        q: &Queries,
+    ) -> Result<super::super::entitlement::Entitlement, Failure> {
+        let view = super::super::catalog::list(&f.session).await?.remove(0);
+        super::super::entitlement::read(&f.session, q, &view).await
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_selects_valid_personal_workspace_and_preserves_catalog() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let original = f.raw();
+        let q = Queries::new(vec![
+            Ok(response(
+                json!({"workspaces":[{"workspace_type":0},{"workspace_type":1,"workspace_id":"team","opcredit_balance":999},{"workspace_type":0,"workspace_id":"personal","opcredit_balance":20,"has_token_plan":false}]}),
+            )),
+            Ok(response(
+                json!({"op_credit_summary":{"total_remaining_amount":"15.75"},"has_token_plan":true}),
+            )),
+        ]);
+        let e = run(&f, &q).await.unwrap();
+        assert_eq!(e.remaining_credits.as_deref(), Some("15.75"));
+        assert_eq!(e.has_token_plan, Some(true));
+        assert_eq!(
+            *q.calls.lock().unwrap(),
+            vec![
+                (Endpoint::UserExtra, Some(json!({}))),
+                (
+                    Endpoint::Membership,
+                    Some(json!({"workspace_id":"personal"}))
+                )
+            ]
+        );
+        assert_eq!(f.raw(), original);
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_failed_lookup_falls_back_without_workspace() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![
+            Err(Failure::NetworkUnavailable),
+            Ok(response(
+                json!({"opcredit_balance":0,"has_token_plan":false}),
+            )),
+        ]);
+        assert_eq!(
+            run(&f, &q).await.unwrap().remaining_credits.as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            q.calls.lock().unwrap()[1],
+            (Endpoint::Membership, Some(json!({})))
+        );
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_missing_personal_stays_unknown_without_membership_query() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![Ok(response(
+            json!({"workspaces":[{"workspace_type":1,"workspace_id":"team","opcredit_balance":99}]}),
+        ))]);
+        let e = run(&f, &q).await.unwrap();
+        assert_eq!(e.remaining_credits, None);
+        assert_eq!(e.has_token_plan, None);
+        assert_eq!(q.calls.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_scoped_failure_retains_personal_observation() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![
+            Ok(response(
+                json!({"workspaces":[{"workspace_type":0,"workspace_id":7,"opcredit_balance":12}]}),
+            )),
+            Err(Failure::NetworkUnavailable),
+        ]);
+        assert_eq!(
+            run(&f, &q).await.unwrap().remaining_credits.as_deref(),
+            Some("12")
+        );
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_stale_expected_generation_makes_zero_requests() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let mut view = super::super::catalog::list(&f.session)
+            .await
+            .unwrap()
+            .remove(0);
+        view.auth_generation += 1;
+        let q = Queries::new(vec![]);
+        assert!(matches!(
+            super::super::entitlement::read(&f.session, &q, &view).await,
+            Err(Failure::StaleIdentity)
+        ));
+        assert!(q.calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_expected_version_and_identity_mismatch_make_zero_requests()
+    {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![]);
+        for kind in 0..3 {
+            let mut view = super::super::catalog::list(&f.session)
+                .await
+                .unwrap()
+                .remove(0);
+            match kind {
+                0 => view.credential_version += 1,
+                1 => view.real_user_id = "other-user".into(),
+                _ => view.region = Region::Global,
+            }
+            assert!(matches!(
+                super::super::entitlement::read(&f.session, &q, &view).await,
+                Err(Failure::StaleIdentity)
+            ));
+        }
+        assert!(q.calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_changed_credential_during_query_never_publishes() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let mut q = Queries::new(vec![Ok(response(
+            json!({"workspaces":[{"workspace_type":0,"workspace_id":7,"opcredit_balance":12}]}),
+        ))]);
+        q.retire_during_query = Some(f.session.clone());
+        assert!(matches!(run(&f, &q).await, Err(Failure::StaleIdentity)));
+        assert_eq!(q.calls.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn entitlement_original_owner_failed_reads_do_not_create_credit_or_change_claimability() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let original = f.raw();
+        let q = Queries::new(vec![
+            Ok(Response {
+                status: 401,
+                body: json!({"opcredit_balance":999}),
+            }),
+            Err(Failure::NetworkUnavailable),
+        ]);
+        assert!(run(&f, &q).await.is_err());
+        assert_eq!(f.raw(), original);
+        assert!(super::super::catalog::list(&f.session).await.unwrap()[0].can_claim);
+    }
+}

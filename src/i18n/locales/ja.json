@@ -4997,6 +4997,14 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "remaining": "残りクレジット：{{amount}}",
+      "plan": "Token Plan：{{status}}",
+      "unknown": "不明（更新して確認）",
+      "active": "有効",
+      "inactive": "未加入",
+      "expires": "Token Plan 有効期限：{{time}}"
+    },
     "description": "MiniMax Code 公式のデバイス認証でログインします。Token Plan と API キーは Code のログイン資格情報ではありません。",
     "region": "アカウントの地域",
     "regions": {

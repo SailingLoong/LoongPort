@@ -10,7 +10,14 @@ export type MiniMaxCodeStatus =
   | "needsLogin";
 export type MiniMaxCodeObservedStatus =
   "claimable" | "alreadyClaimed" | "unavailable";
+export interface MiniMaxCodeEntitlement {
+  remainingCredits: string | null;
+  hasTokenPlan: boolean | null;
+  tokenPlanExpiresAt: number | null;
+}
 export interface MiniMaxCodeAccount {
+  /** Informational snapshot from explicit refresh; absent/unknown is not zero. */
+  entitlement?: MiniMaxCodeEntitlement | null;
   id: string;
   label: string;
   region: MiniMaxCodeRegion;

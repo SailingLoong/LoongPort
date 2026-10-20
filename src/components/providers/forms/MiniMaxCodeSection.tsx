@@ -67,7 +67,7 @@ export function MiniMaxCodeSection() {
   const activeLogin = useRef<MiniMaxCodeLogin | null>(null);
   const loginRequest = useRef(false);
 
-  const loadAccounts = useCallback(async () => {
+  const loadAccounts = useCallback(async (refreshed?: MiniMaxCodeAccount) => {
     const generation = ++listGeneration.current;
     const isCurrent = () =>
       alive.current && generation === listGeneration.current;
@@ -75,7 +75,19 @@ export function MiniMaxCodeSection() {
     try {
       const rows = await minimaxCodeApi.list();
       if (!isCurrent()) return;
-      setAccounts(rows);
+      setAccounts(
+        rows.map((row) =>
+          refreshed?.entitlement &&
+          row.authorized &&
+          row.id === refreshed.id &&
+          row.authGeneration === refreshed.authGeneration &&
+          row.credentialVersion === refreshed.credentialVersion &&
+          row.realUserId === refreshed.realUserId &&
+          row.region === refreshed.region
+            ? { ...row, entitlement: refreshed.entitlement }
+            : row,
+        ),
+      );
       setLoaded(true);
     } catch (cause) {
       if (!isCurrent()) return;
@@ -124,10 +136,13 @@ export function MiniMaxCodeSection() {
     // A list requested before this action must not replace its newer projection.
     listGeneration.current += 1;
     try {
-      await minimaxCodeApi[action](account.id);
+      const refreshed = await minimaxCodeApi[action](account.id);
       // Re-read the sole catalog instead of publishing a possibly late command
       // response. This also retains pending operations on every other account.
-      if (alive.current) await loadAccounts();
+      if (alive.current)
+        await loadAccounts(
+          action === "refresh" && refreshed ? refreshed : undefined,
+        );
     } catch (cause) {
       if (!alive.current) return;
       setError(failureCode(cause));
@@ -358,6 +373,33 @@ export function MiniMaxCodeSection() {
               {t(`minimaxCode.regions.${account.region}`)} ·{" "}
               {account.realUserId}
             </p>
+            <div className="text-xs text-muted-foreground">
+              <p>
+                {t("minimaxCode.entitlement.remaining", {
+                  amount:
+                    account.entitlement?.remainingCredits ??
+                    t("minimaxCode.entitlement.unknown"),
+                })}
+              </p>
+              <p>
+                {t("minimaxCode.entitlement.plan", {
+                  status: t(
+                    account.entitlement?.hasTokenPlan === true
+                      ? "minimaxCode.entitlement.active"
+                      : account.entitlement?.hasTokenPlan === false
+                        ? "minimaxCode.entitlement.inactive"
+                        : "minimaxCode.entitlement.unknown",
+                  ),
+                })}
+              </p>
+              {account.entitlement?.tokenPlanExpiresAt != null && (
+                <p>
+                  {t("minimaxCode.entitlement.expires", {
+                    time: date(account.entitlement.tokenPlanExpiresAt),
+                  })}
+                </p>
+              )}
+            </div>
             {account.creditAmount !== null && (
               <p className="text-sm">
                 {t("minimaxCode.creditAmount", {

@@ -4997,6 +4997,14 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "remaining": "剩余积分：{{amount}}",
+      "plan": "Token Plan：{{status}}",
+      "unknown": "未知（刷新查询）",
+      "active": "已开通",
+      "inactive": "未开通",
+      "expires": "Token Plan 到期：{{time}}"
+    },
     "description": "通过 MiniMax Code 官方设备授权登录。Token Plan 和 API Key 不能作为 Code 登录凭据。",
     "region": "账号地区",
     "regions": {
