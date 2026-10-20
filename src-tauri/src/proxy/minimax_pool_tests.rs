@@ -455,3 +455,7 @@ async fn minimax_router_fixture_missing_or_cross_root_is_zero_http() {
     assert_eq!(fixture.calls.lock().unwrap().len(), 1);
     fixture.assert_idle().await;
 }
+
+#[cfg(unix)]
+#[path = "cross_owner_pool_tests.rs"]
+mod cross_owner_pool_tests;

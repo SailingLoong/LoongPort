@@ -10,15 +10,25 @@ export interface ManagedInferenceAccount {
   available: boolean;
 }
 
-/** Original TRAE catalog/protocol text contract, not an entitlement check. */
-export function isTraeModelText(value: string): boolean {
+/** Original native catalog/protocol text bounds, not an entitlement check. */
+function isDiscoveredModelText(
+  value: string,
+  nativeWhitespace = false,
+): boolean {
   return (
     typeof value === "string" &&
-    !!value.trim() &&
+    (nativeWhitespace ? /\P{White_Space}/u.test(value) : !!value.trim()) &&
     new TextEncoder().encode(value).length <= 256 &&
     !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
   );
 }
+
+// Reuse byte/control bounds without changing TRAE's existing whitespace rule.
+export const isTraeModelText = (value: string): boolean =>
+  isDiscoveredModelText(value);
+// Rust str::trim follows Unicode White_Space; unlike JS trim, U+FEFF is content.
+export const isWorkBuddyModelText = (value: string): boolean =>
+  isDiscoveredModelText(value, true);
 
 /** Model-only application projection. Never accept a token or editable endpoint. */
 export function buildManagedAccountProvider(
@@ -27,8 +37,9 @@ export function buildManagedAccountProvider(
   requestedModel: string,
   id: string,
 ): Provider {
-  const model =
-    account.authProvider === "trae" ? requestedModel : requestedModel.trim();
+  const model = ["trae", "workbuddy"].includes(account.authProvider)
+    ? requestedModel
+    : requestedModel.trim();
   if (
     !account.available ||
     !account.id.trim() ||
@@ -37,9 +48,11 @@ export function buildManagedAccountProvider(
       account.authProvider,
     ) ||
     !["claude", "codex"].includes(app) ||
-    !(account.authProvider === "trae"
-      ? isTraeModelText(model)
-      : /^[A-Za-z0-9._:/@+-]{1,200}$/.test(model))
+    !(account.authProvider === "workbuddy"
+      ? isWorkBuddyModelText(model)
+      : account.authProvider === "trae"
+        ? isTraeModelText(model)
+        : /^[A-Za-z0-9._:/@+-]{1,200}$/.test(model))
   ) {
     throw new Error("managedAccount.invalidSelection");
   }
@@ -85,7 +98,7 @@ export async function managedAccountProviderId(
     app,
     account.authProvider,
     account.id,
-    account.authProvider === "trae" ? model : model.trim(),
+    ["trae", "workbuddy"].includes(account.authProvider) ? model : model.trim(),
   ]);
   const digest = await crypto.subtle.digest(
     "SHA-256",

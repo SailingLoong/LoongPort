@@ -1416,3 +1416,84 @@ it("retries a failed legacy chain append only after a fresh read and never queri
     }),
   );
 });
+
+it.each(
+  ["claude", "codex"].flatMap((app) =>
+    [' 模型 "native" / v1 ', "\uFEFF"].map((model) => [app, model]),
+  ),
+)(
+  "keeps exact WorkBuddy discovered model through existing %s route entry (%j)",
+  async (app, model) => {
+    workbuddyReady();
+    vi.mocked(workbuddyApi.discoverModels).mockResolvedValue([
+      { id: model, name: "Native text model" },
+    ]);
+    mount();
+    await selectWorkbuddy(app);
+    fireEvent.click(
+      screen.getByRole("button", { name: "获取 WorkBuddy 模型" }),
+    );
+    await screen.findByRole("option", { name: "Native text model" });
+    fireEvent.change(screen.getByLabelText("官方模型 ID"), {
+      target: { value: model },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+    await screen.findByRole("status");
+    expect(workbuddyApi.discoverModels).toHaveBeenCalledTimes(2);
+    const saved = Object.values(rows)[0];
+    if (app === "claude")
+      expect(saved.settingsConfig.env.ANTHROPIC_MODEL).toBe(model);
+    else
+      expect(saved.settingsConfig.config).toBe(
+        `model = ${JSON.stringify(model)}\n`,
+      );
+    expect(chain).toEqual([saved.id]);
+    expect(saved.meta?.authBinding?.accountId).toBe(wb.id);
+  },
+);
+
+it("filters WorkBuddy models using original UTF-8/control bounds, not ASCII length", async () => {
+  workbuddyReady();
+  const valid = "界".repeat(85);
+  vi.mocked(workbuddyApi.discoverModels).mockResolvedValue([
+    { id: valid, name: "Valid native boundary" },
+    { id: "x".repeat(256), name: "Valid ASCII boundary" },
+    ...["", "  ", "x\n", "x\u0085", "界".repeat(86), "x".repeat(257)].map(
+      (id, i) => ({ id, name: `Invalid native ${i}` }),
+    ),
+  ]);
+  mount();
+  await selectWorkbuddy();
+  fireEvent.click(screen.getByRole("button", { name: "获取 WorkBuddy 模型" }));
+  expect(
+    await screen.findByRole("option", { name: "Valid native boundary" }),
+  ).toHaveValue(valid);
+  expect(
+    screen.getByRole("option", { name: "Valid ASCII boundary" }),
+  ).toHaveValue("x".repeat(256));
+  expect(
+    screen.queryByRole("option", { name: /Invalid native/ }),
+  ).not.toBeInTheDocument();
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("does not confuse exact WorkBuddy IDs with their trimmed live replacement", async () => {
+  workbuddyReady();
+  const model = " native-model ";
+  vi.mocked(workbuddyApi.discoverModels).mockResolvedValue([
+    { id: model, name: "Exact native model" },
+  ]);
+  mount();
+  await selectWorkbuddy();
+  fireEvent.click(screen.getByRole("button", { name: "获取 WorkBuddy 模型" }));
+  await screen.findByRole("option", { name: "Exact native model" });
+  fireEvent.change(screen.getByLabelText("官方模型 ID"), {
+    target: { value: model },
+  });
+  vi.mocked(workbuddyApi.discoverModels).mockResolvedValue([
+    { id: model.trim(), name: "Different model" },
+  ]);
+  fireEvent.click(screen.getByRole("button", { name: "加入应用路由链" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("重新获取");
+  expect(invoke).not.toHaveBeenCalled();
+});

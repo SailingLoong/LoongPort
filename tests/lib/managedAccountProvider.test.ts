@@ -248,3 +248,70 @@ it.each(["", "  ", "x\n", "x\u007f", "x\u0085", "界".repeat(86)])(
     ).toThrow();
   },
 );
+
+describe("WorkBuddy native discovered model identity", () => {
+  const wb = { ...account, authProvider: "workbuddy" as const };
+  it.each(["claude", "codex"] as const)(
+    "preserves exact discovered IDs for %s",
+    async (app) => {
+      for (const model of [
+        ' 模型 "native" / v1 ',
+        "x".repeat(256),
+        "界".repeat(85),
+        "\uFEFF",
+        "😀".repeat(64),
+      ]) {
+        const id = await managedAccountProviderId(wb, app, model);
+        const p = buildManagedAccountProvider(wb, app, model, id);
+        if (app === "codex")
+          expect(parseToml(p.settingsConfig.config as string).model).toBe(
+            model,
+          );
+        else expect(p.settingsConfig.env.ANTHROPIC_MODEL).toBe(model);
+        if (model.trim() && model !== model.trim())
+          expect(id).not.toBe(
+            await managedAccountProviderId(wb, app, model.trim()),
+          );
+      }
+    },
+  );
+  it.each([
+    "",
+    "  ",
+    "x\n",
+    "x\u007f",
+    "x\u0085",
+    "x".repeat(257),
+    "界".repeat(86),
+  ])("rejects outside owner text bounds %j", (model) => {
+    expect(() =>
+      buildManagedAccountProvider(wb, "codex", model, "id"),
+    ).toThrow();
+  });
+});
+
+it.each(["minimax_code", "zcode_start_plan"] as const)(
+  "does not widen %s model validation to WorkBuddy text",
+  (authProvider) => {
+    for (const model of ['模型 "native" / v1', "x".repeat(201)])
+      expect(() =>
+        buildManagedAccountProvider(
+          { ...account, authProvider },
+          "claude",
+          model,
+          "id",
+        ),
+      ).toThrow();
+  },
+);
+
+it("retains TRAE whitespace behavior while WorkBuddy follows its Rust owner", () => {
+  expect(() =>
+    buildManagedAccountProvider(
+      { ...account, authProvider: "trae" },
+      "claude",
+      "\uFEFF",
+      "id",
+    ),
+  ).toThrow();
+});

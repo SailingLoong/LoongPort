@@ -19,6 +19,7 @@ import type { Provider } from "@/types";
 import {
   buildManagedAccountProvider,
   isTraeModelText,
+  isWorkBuddyModelText,
   managedAccountProviderId,
   sameManagedAccountProvider,
   type ManagedInferenceAccount,
@@ -228,9 +229,7 @@ export function ManagedAccountProviderSection({
       const unique = [
         ...new Map(
           found
-            .filter(
-              (item) => trae || /^[A-Za-z0-9._:/@+-]{1,200}$/.test(item.id),
-            )
+            .filter((item) => trae || isWorkBuddyModelText(item.id))
             .map((item) => [item.id, item]),
         ).values(),
       ];
@@ -377,7 +376,7 @@ export function ManagedAccountProviderSection({
       loading ||
       !account?.available ||
       !app ||
-      !model.trim() ||
+      (workbuddy ? !isWorkBuddyModelText(model) : !model.trim()) ||
       !modelSelected ||
       modelsBusy
     )
@@ -596,7 +595,7 @@ export function ManagedAccountProviderSection({
             modelsBusy ||
             !account?.available ||
             !app ||
-            !model.trim() ||
+            (workbuddy ? !isWorkBuddyModelText(model) : !model.trim()) ||
             !modelSelected
           }
           onClick={() => void save()}
