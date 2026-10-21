@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+mod agents;
+pub use agents::*;
+
 mod order_profiles;
 pub use order_profiles::*;
 mod announcements;
@@ -136,3 +139,8 @@ pub(crate) use workbuddy::*;
 mod minimax_code;
 #[cfg(feature = "gui")]
 pub(crate) use minimax_code::*;
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod trae_accounts;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod trae_models;

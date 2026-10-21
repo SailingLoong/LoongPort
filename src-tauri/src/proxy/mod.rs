@@ -36,6 +36,7 @@ pub mod providers;
 pub mod qoder_host;
 pub mod qoder_http;
 pub mod qoder_runtime;
+pub(crate) mod response_lease;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod response_processor;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
@@ -78,3 +79,8 @@ pub(crate) use types::*;
 
 #[cfg(test)]
 pub(crate) mod redirect_test_support;
+
+pub(crate) mod managed_accounts;
+
+#[cfg(all(test, feature = "gui"))]
+pub(crate) mod opencode_vendor_fixture;

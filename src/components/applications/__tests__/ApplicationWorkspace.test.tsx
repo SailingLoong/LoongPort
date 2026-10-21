@@ -853,7 +853,14 @@ it.each([
   "shows backend mode %s with attached=%s independently of failover permission",
   (mode, attached, label) => {
     state.routing.autoFailoverEnabled = false;
-    state.modeState = { status: "ready", mode, attached, canWrite: true };
+    state.modeState = {
+      status: "ready",
+      mode,
+      attached,
+      canWrite: true,
+      writeProtocol: "native",
+      blockedReason: null,
+    };
     render(<ApplicationWorkspace {...props} />);
     expect(screen.getByText(`applications.${label}`)).toBeVisible();
   },
@@ -955,4 +962,27 @@ it("offers an inactive binding for an unconfigured App while keeping unknown wri
   expect(
     screen.getByRole("button", { name: "applications.bindSource.open" }),
   ).toBeDisabled();
+});
+
+it("does not label an explicit legacy mode with null mode/attachment as proxy or detached", async () => {
+  state.modeState = {
+    status: "ready",
+    mode: null,
+    attached: null,
+    canWrite: true,
+    writeProtocol: "legacy",
+    blockedReason: null,
+  };
+  render(<ApplicationWorkspace {...props} />);
+  expect(
+    screen.queryByText("applications.routingModeProxy"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("applications.routingModeDetached"),
+  ).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      screen.getByRole("switch", { name: "applications.autoFailover" }),
+    ).toBeEnabled(),
+  );
 });

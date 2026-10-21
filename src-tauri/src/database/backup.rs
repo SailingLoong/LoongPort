@@ -1886,6 +1886,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     include!("backup_qoder_tests.rs");
+    include!("backup_qoder_http_auth_tests.rs");
     use super::{lock_backup_file_operations, Database};
     use crate::error::AppError;
     use crate::secrets::VaultContext;
@@ -1913,11 +1914,11 @@ mod tests {
             model: "fixture-model".into(),
             max_output_tokens: 128,
             timeout_ms: 1000,
-            budget: Budget {
+            budget: Some(Budget {
                 mode: "estimated".into(),
                 currency: "USD".into(),
                 limit_micros: 1000,
-            },
+            }),
         };
         let binding = contract::binding(&scope, "codex", &task)?;
         db.conn.lock()?.execute("INSERT INTO paperclip_run_bindings(owner,app,company,run,scope,binding,phase,receipt) VALUES('owner','codex','company',?1,?2,?3,'bound',NULL)", rusqlite::params![run,serde_json::to_string(&scope).unwrap(),binding.to_string()])?;
@@ -4538,7 +4539,8 @@ mod tests {
     #[test]
     #[serial]
     fn periodic_maintenance_runs_even_when_auto_backup_disabled() -> Result<(), AppError> {
-        let _test_home = TestHomeGuard::new();
+        let _test_home = crate::secrets::testing::TestHome::new().expect("isolated test home");
+        crate::secrets::testing::initialize_settings()?;
 
         let settings = AppSettings {
             backup_interval_hours: Some(0),

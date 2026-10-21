@@ -1,163 +1,75 @@
-import { useEffect, useRef } from "react";
-import { ShieldCheck } from "lucide-react";
-
-import { GithubIcon } from "@/components/icons/GithubIcon";
-import { useTranslation } from "react-i18next";
-import { Badge } from "@/components/ui/badge";
-import { CodexIcon } from "@/components/BrandIcons";
 import { CopilotAuthSection } from "@/components/providers/forms/CopilotAuthSection";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
-import { RestoreOfficialLoginButton } from "@/components/relay/RestoreOfficialLoginButton";
-import type { ManagedAuthProvider } from "@/lib/api";
 import { XaiOAuthSection } from "@/components/providers/forms/XaiOAuthSection";
 import { MiniMaxCodeSection } from "@/components/providers/forms/MiniMaxCodeSection";
-import { ProviderIcon } from "@/components/ProviderIcon";
+import { RestoreOfficialLoginButton } from "@/components/relay/RestoreOfficialLoginButton";
+import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
+import { TraeAccounts } from "@/components/trae/TraeAccounts";
+import { ZCodeAccountPanel } from "@/components/zcode/ZCodeAccountPanel";
+import type { AccountPlatform } from "@/components/relay/accounts/accountPlatforms";
 
-interface AuthCenterPanelProps {
-  authScrollTarget?: ManagedAuthProvider | null;
-}
-
-export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
-  const { t } = useTranslation();
-  const copilotSectionRef = useRef<HTMLElement | null>(null);
-  const codexOauthSectionRef = useRef<HTMLElement | null>(null);
-  const xaiOauthSectionRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!authScrollTarget) return;
-
-    const sectionRef =
-      authScrollTarget === "github_copilot"
-        ? copilotSectionRef
-        : authScrollTarget === "codex_oauth"
-          ? codexOauthSectionRef
-          : xaiOauthSectionRef;
-
-    const frame = requestAnimationFrame(() => {
-      const prefersReducedMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)",
-      ).matches;
-
-      sectionRef.current?.scrollIntoView({
-        behavior: prefersReducedMotion ? "auto" : "smooth",
-        block: "start",
-      });
-    });
-
-    return () => cancelAnimationFrame(frame);
-  }, [authScrollTarget]);
-
-  return (
-    <div className="space-y-6">
-      <section className="rounded-xl border border-border/60 bg-card/60 p-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="h-5 w-5 text-primary" />
-              <h3 className="text-base font-semibold">
-                {t("settings.authCenter.title", {
-                  defaultValue: "OAuth 认证中心",
-                })}
-              </h3>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {t("settings.authCenter.description", {
-                defaultValue:
-                  "在 Claude Code 中使用您的其他订阅，请注意合规风险。",
-              })}
-            </p>
-          </div>
-          <Badge variant="secondary">
-            {t("settings.authCenter.beta", { defaultValue: "Beta" })}
-          </Badge>
+/** A single selected manager. Never mount a second copy in settings or provider dialogs. */
+export function AuthCenterPanel({
+  platform,
+  editionScoped = false,
+  onNavigationBlockedChange,
+}: {
+  platform: AccountPlatform;
+  editionScoped?: boolean;
+  onNavigationBlockedChange?: (blocked: boolean) => void;
+}) {
+  switch (platform) {
+    case "qoder":
+    case "openrouter":
+    case "opencode":
+      return (
+        <p>
+          请从服务与账号页面进入对应服务连接，不以 API 配置替代原生账号授权。
+        </p>
+      );
+    case "github_copilot":
+      return <CopilotAuthSection unified={editionScoped} />;
+    case "codex_oauth":
+      return (
+        <>
+          <CodexOAuthSection showAccountQuota unified={editionScoped} />
+          <RestoreOfficialLoginButton />
+        </>
+      );
+    case "minimax_code":
+      return (
+        <MiniMaxCodeSection
+          unified={editionScoped}
+          edition={editionScoped ? "cn" : undefined}
+        />
+      );
+    case "minimax_code_global":
+      return <MiniMaxCodeSection unified={editionScoped} edition="global" />;
+    case "trae_cn":
+      return (
+        <div
+          role="status"
+          className="rounded-xl border border-dashed p-8 text-sm"
+        >
+          <h3 className="font-semibold">TRAE 中国版尚未接入</h3>
+          <p className="mt-2 text-muted-foreground">
+            优先推进中国版。国际版 SG / US
+            账号、模型与授权不会复用到此版本；当前不能签到或使用中国版积分。
+          </p>
         </div>
-      </section>
-
-      <section
-        ref={copilotSectionRef}
-        className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6"
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
-            <GithubIcon className="h-5 w-5" />
-          </div>
-          <div>
-            <h4 className="font-medium">GitHub Copilot</h4>
-            <p className="text-sm text-muted-foreground">
-              {t("settings.authCenter.copilotDescription", {
-                defaultValue: "管理 GitHub Copilot 账号",
-              })}
-            </p>
-          </div>
-        </div>
-
-        <CopilotAuthSection />
-      </section>
-
-      <section
-        ref={codexOauthSectionRef}
-        className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6"
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
-            <CodexIcon size={20} />
-          </div>
-          <div>
-            <h4 className="font-medium">ChatGPT (Codex OAuth)</h4>
-            <p className="text-sm text-muted-foreground">
-              {t("settings.authCenter.codexOauthDescription", {
-                defaultValue: "管理 ChatGPT 账号",
-              })}
-            </p>
-          </div>
-        </div>
-
-        <CodexOAuthSection showAccountQuota />
-
-        {/* 「切回 ChatGPT 官方登录」——**LoongPort 自己的东西**，收在
-            `components/relay/` 下（这里只挂一行，见 AGENTS.md §一）。
-            放这一节是因为语义对口：它做的就是「把 codex 从中转站切回 ChatGPT 官方」，
-            而用户在 ChatGPT 里点「注销」是没用的（配的是 provider auth 模式）。 */}
-        <RestoreOfficialLoginButton />
-      </section>
-
-      <section className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6">
-        <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
-            <ProviderIcon icon="minimax" name="MiniMax Code" size={20} />
-          </div>
-          <div>
-            <h4 className="font-medium">MiniMax Code</h4>
-            <p className="text-sm text-muted-foreground">
-              {t("settings.authCenter.minimaxCodeDescription", {
-                defaultValue: "管理 MiniMax Code 账号与每日领取状态",
-              })}
-            </p>
-          </div>
-        </div>
-        <MiniMaxCodeSection />
-      </section>
-
-      <section
-        ref={xaiOauthSectionRef}
-        className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6"
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
-            <ProviderIcon icon="xai" name="xAI" size={20} />
-          </div>
-          <div>
-            <h4 className="font-medium">xAI (Grok OAuth)</h4>
-            <p className="text-sm text-muted-foreground">
-              {t("settings.authCenter.xaiOauthDescription", {
-                defaultValue: "管理 xAI / Grok 账号",
-              })}
-            </p>
-          </div>
-        </div>
-
-        <XaiOAuthSection />
-      </section>
-    </div>
-  );
+      );
+    case "xai_oauth":
+      return <XaiOAuthSection unified={editionScoped} />;
+    case "workbuddy":
+      return <WorkBuddyAccounts unified={editionScoped} />;
+    case "trae":
+      return <TraeAccounts unified={editionScoped} />;
+    case "zcode":
+      return (
+        <ZCodeAccountPanel
+          unified={editionScoped}
+          onBusyChange={onNavigationBlockedChange}
+        />
+      );
+  }
 }

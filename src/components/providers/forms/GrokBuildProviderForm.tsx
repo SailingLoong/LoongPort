@@ -77,6 +77,7 @@ export function GrokBuildProviderForm({
   onDraftRevisionChange,
   preserveBlankCredential = false,
   initialData,
+  initialPresetName,
   showButtons = true,
 }: GrokBuildProviderFormProps) {
   const { t } = useTranslation();
@@ -473,6 +474,17 @@ export function GrokBuildProviderForm({
   const rawConfigError = validateGrokBuildConfig(rawConfig, {
     allowBlankCredential: preserveBlankCredential && !!initialData,
   });
+
+  const initialPresetApplied = useRef(false);
+  useEffect(() => {
+    if (!initialPresetName || initialData || initialPresetApplied.current)
+      return;
+    initialPresetApplied.current = true;
+    const entry = grokPresetEntries.find(
+      (item) => item.preset.name === initialPresetName,
+    );
+    if (entry) handlePresetChange(entry.id);
+  }, [initialPresetName, initialData, grokPresetEntries]);
 
   return (
     <Form {...form}>

@@ -1,4 +1,13 @@
-import { useState } from "react";
+import {
+  accountPlatforms,
+  accountPlatformLabel,
+  type AccountPlatform,
+} from "./accounts/accountPlatforms";
+import {
+  serviceEntryIntent,
+  type ServiceEntryIntent,
+} from "./accounts/serviceEntryIntent";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Plus } from "lucide-react";
 
@@ -16,27 +25,62 @@ import {
 import { RelayDirectoryPage } from "./directory/RelayDirectoryPage";
 import { OfficialApiPage } from "./OfficialApiPage";
 
-export type AddHubTab = "directory" | "official" | "manual";
+export type AddHubTab = "accounts" | "directory" | "official" | "manual";
 
 export function AddHubPage({
   sourceAppId,
-  initialTab = "directory",
+  initialTab = "accounts",
+  onOpenPlatform,
   onBack,
   onAddProvider,
   firstVisit = false,
   entryRequest,
 }: {
   sourceAppId: AppId;
-  /** 进来落在哪个标签；顶栏大「+」与首启引导不传（落默认「中转站」）。 */
+  onOpenPlatform?: (platform: AccountPlatform) => void;
+  /** 统一添加默认先选平台；首启与旧直达入口显式指定原标签。 */
   initialTab?: AddHubTab;
   onBack: () => void;
   onAddProvider: AddProviderFormProps["onSubmit"];
   /** 首次连接弹窗由后端引导状态决定。 */
   firstVisit?: boolean;
   /** Increment id for an explicit destination request; history navigation keeps it unchanged. */
-  entryRequest?: { id: number; tab: AddHubTab };
+  entryRequest?: { id: number; tab: AddHubTab; intent?: ServiceEntryIntent };
 }) {
   const { t } = useTranslation();
+  const [sourceIntent, setSourceIntent] = useState<
+    ServiceEntryIntent | undefined
+  >(entryRequest?.intent);
+  const [sourceRevision, setSourceRevision] = useState(0);
+  const sourceGeneration = useRef(0);
+  // Saving belongs to a visibility lifetime, while sourceRevision preserves navigation.
+  const saveGeneration = useRef(0);
+  const advanceDestination = () => {
+    ++saveGeneration.current;
+    return ++sourceGeneration.current;
+  };
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+      ++saveGeneration.current;
+    };
+  }, []);
+  const leaveHub = () => {
+    advanceDestination();
+    onBack();
+  };
+  const closeSource = (revision: number) => {
+    if (!active.current || revision !== sourceGeneration.current) return false;
+    advanceDestination();
+    setSourceIntent(undefined);
+    return true;
+  };
+  const openSource = (intent: ServiceEntryIntent) => {
+    setSourceIntent(intent);
+    setSourceRevision(advanceDestination());
+  };
   const [domain, setDomain] = useState("");
   const [account, setAccount] = useState<ConnectedService | null>(null);
   const [configuring, setConfiguring] = useState(false);
@@ -45,7 +89,7 @@ export function AddHubPage({
     setAccount(null);
     setConfiguring(false);
     setDomain("");
-    onBack();
+    leaveHub();
   };
   const connected = (value: ConnectedService) => {
     setAccount(value);
@@ -57,13 +101,55 @@ export function AddHubPage({
   if (entryRequest && entryRequest.id !== appliedEntryId) {
     setAppliedEntryId(entryRequest.id);
     setTab(entryRequest.tab);
+    setSourceIntent(entryRequest.intent);
+    setSourceRevision(advanceDestination());
     setConfiguring(false);
   }
 
   return (
     <div className="page-content h-full overflow-auto">
+      {sourceIntent && (
+        <section className="space-y-4" aria-label="服务接入">
+          <Button variant="ghost" onClick={() => closeSource(sourceRevision)}>
+            返回平台列表
+          </Button>
+          {sourceIntent.kind === "account-boundary" ? (
+            <div role="status" className="rounded-xl border p-6 space-y-3">
+              <h2 className="font-semibold">Qoder 账号接入待完善</h2>
+              <p>不会以自定义 API 或 SDK 配置代替账号接入。</p>
+              <p>
+                现有 Qoder 配置仍由原 Provider
+                记录管理。账号身份、领取权益与真实推理消费需要分别验证；本页不会创建另一份账号或凭据。
+              </p>
+            </div>
+          ) : sourceIntent.kind === "vendor" ? (
+            <OfficialApiPage
+              key={`source-${sourceRevision}`}
+              sourceAppId={sourceAppId}
+              vendorId={sourceIntent.vendorId}
+              onBack={() => closeSource(sourceRevision)}
+              onConnected={(value) => {
+                if (closeSource(sourceRevision)) connected(value);
+              }}
+              embedded
+            />
+          ) : (
+            <AddProviderForm
+              key={`source-${sourceRevision}`}
+              appId={sourceAppId}
+              initialPresetName={sourceIntent.preset}
+              onSubmit={onAddProvider}
+              onSaveStart={() => saveGeneration.current}
+              onDone={(reason, saveEpoch) => {
+                if (reason !== "saved" || saveEpoch === saveGeneration.current)
+                  closeSource(sourceRevision);
+              }}
+            />
+          )}
+        </section>
+      )}
       {account && (
-        <PreservedView active={configuring}>
+        <PreservedView active={configuring && !sourceIntent}>
           <ServiceConfiguration
             key={`${account.kind}:${account.rowId}`}
             account={account}
@@ -73,10 +159,13 @@ export function AddHubPage({
           />
         </PreservedView>
       )}
-      <PreservedView active={!configuring}>
+      <PreservedView active={!configuring && !sourceIntent}>
         <Tabs
           value={tab}
-          onValueChange={(v) => setTab(v as AddHubTab)}
+          onValueChange={(v) => {
+            advanceDestination();
+            setTab(v as AddHubTab);
+          }}
           className="flex min-h-full w-full flex-col"
         >
           <div className="flex shrink-0 flex-wrap items-center gap-4 border-b border-border-default pb-5">
@@ -85,13 +174,16 @@ export function AddHubPage({
               variant="ghost"
               size="sm"
               className="h-8 shrink-0"
-              onClick={onBack}
+              onClick={leaveHub}
               aria-label={t("common.back")}
             >
               <ArrowLeft className="h-4 w-4" />
               {t("common.back")}
             </Button>
             <TabsList>
+              <TabsTrigger value="accounts">
+                {t("zcode.accounts.login.account", { defaultValue: "账号" })}
+              </TabsTrigger>
               <TabsTrigger value="directory">
                 {t("loongport.sections.relay")}
               </TabsTrigger>
@@ -114,6 +206,25 @@ export function AddHubPage({
             )}
           </div>
 
+          <TabsContent value="accounts" className="mt-4">
+            <div className="grid gap-2 sm:grid-cols-2">
+              {accountPlatforms.map((platform) => (
+                <Button
+                  key={platform.id}
+                  variant="outline"
+                  onClick={() => {
+                    const intent = serviceEntryIntent(platform.id);
+                    if (intent) openSource(intent);
+                    else onOpenPlatform?.(platform.id);
+                  }}
+                >
+                  {platform.id === "openrouter"
+                    ? "OpenRouter · API Key"
+                    : accountPlatformLabel(platform)}
+                </Button>
+              ))}
+            </div>
+          </TabsContent>
           <TabsContent
             value="directory"
             forceMount
@@ -122,7 +233,7 @@ export function AddHubPage({
             <PreservedView active={tab === "directory"}>
               <RelayDirectoryPage
                 sourceAppId={sourceAppId}
-                onBack={onBack}
+                onBack={leaveHub}
                 embedded
                 firstVisit={firstVisit}
                 domain={domain}
@@ -141,7 +252,7 @@ export function AddHubPage({
             <PreservedView active={tab === "official"}>
               <OfficialApiPage
                 sourceAppId={sourceAppId}
-                onBack={onBack}
+                onBack={leaveHub}
                 onConnected={connected}
                 embedded
               />
@@ -157,11 +268,18 @@ export function AddHubPage({
               <AddProviderForm
                 key={manualRevision}
                 appId={sourceAppId}
-                onSubmit={async (values) => {
-                  await onAddProvider(values);
-                  setManualRevision((value) => value + 1);
+                onSaveStart={() => saveGeneration.current}
+                onSubmit={onAddProvider}
+                onDone={(reason, saveEpoch) => {
+                  if (
+                    reason !== "saved" ||
+                    (active.current && saveEpoch === saveGeneration.current)
+                  ) {
+                    if (reason === "saved")
+                      setManualRevision((value) => value + 1);
+                    leaveHub();
+                  }
                 }}
-                onDone={onBack}
               />
             </PreservedView>
           </TabsContent>

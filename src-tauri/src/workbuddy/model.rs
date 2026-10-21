@@ -68,6 +68,8 @@ pub(crate) struct Attempt {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavedAccount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) inference: Option<super::inference::Authorization>,
     pub account: Account,
     pub credits: Credits,
     pub claim_state: ClaimState,
@@ -78,6 +80,7 @@ pub(crate) struct SavedAccount {
 impl SavedAccount {
     pub fn new(account: Account) -> Self {
         Self {
+            inference: None,
             account,
             credits: Credits::default(),
             claim_state: ClaimState::Unconfirmed,

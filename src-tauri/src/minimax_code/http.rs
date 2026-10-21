@@ -11,6 +11,9 @@ pub(crate) enum Endpoint {
     Refresh,
     Status,
     Claim,
+    UserExtra,
+    Membership,
+    PlanQuota,
 }
 pub(crate) struct Request {
     pub endpoint: Endpoint,
@@ -68,6 +71,36 @@ pub(super) fn build_request(
     os: &str,
     version: &str,
 ) -> Result<reqwest::Request, Failure> {
+    if r.endpoint == Endpoint::PlanQuota {
+        // Code OAuth is not the API-key adapter: use its verified official
+        // open-platform origins and personal group, without Matrix signing.
+        let origin = match r.region {
+            Region::Cn => "https://www.minimaxi.com",
+            Region::Global => "https://platform.minimax.io",
+        };
+        let token = r
+            .access_token
+            .as_deref()
+            .filter(|v| !v.trim().is_empty() && v.len() <= 16384)
+            .ok_or(Failure::NeedsLogin)?;
+        let group = r
+            .body
+            .as_ref()
+            .and_then(|v| v.get("op_group_id"))
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
+            .ok_or(Failure::UnsupportedContext)?;
+        let mut group = reqwest::header::HeaderValue::from_str(group)
+            .map_err(|_| Failure::UnsupportedContext)?;
+        group.set_sensitive(true);
+        return client
+            .get(format!("{origin}/v1/api/openplatform/coding_plan/remains"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(token)
+            .header("X-Group-Id", group)
+            .build()
+            .map_err(|_| Failure::InvalidResponse);
+    }
     let account_origin = match r.region {
         Region::Cn => "https://account.minimax.cn",
         Region::Global => "https://account.minimax.io",
@@ -77,11 +110,14 @@ pub(super) fn build_request(
         Region::Global => "https://agent.minimax.io",
     };
     let path = match r.endpoint {
+        Endpoint::PlanQuota => return Err(Failure::UnsupportedContext),
         Endpoint::DeviceCode => "/oauth2/device/code",
         Endpoint::Token | Endpoint::Refresh => "/oauth2/token",
         Endpoint::Profile => "/v1/api/user/info",
         Endpoint::Status => "/minimax-cloud/api/v1/signin/status",
         Endpoint::Claim => "/minimax-cloud/api/v1/signin/claim",
+        Endpoint::UserExtra => "/matrix/api/v1/user/get_user_extra_info",
+        Endpoint::Membership => "/matrix/api/v1/commerce/get_membership_info",
     };
     if matches!(
         r.endpoint,
@@ -126,7 +162,10 @@ pub(super) fn build_request(
     let mut pairs = vec![
         (
             "device_platform",
-            if r.endpoint == Endpoint::Profile {
+            if matches!(
+                r.endpoint,
+                Endpoint::Profile | Endpoint::UserExtra | Endpoint::Membership
+            ) {
                 "mcode"
             } else {
                 "web"
@@ -136,7 +175,10 @@ pub(super) fn build_request(
         ("app_id", "3001"),
         ("version_code", "22201"),
     ];
-    if r.endpoint != Endpoint::Profile {
+    if !matches!(
+        r.endpoint,
+        Endpoint::Profile | Endpoint::UserExtra | Endpoint::Membership
+    ) {
         pairs.extend([("is_desktop", "1"), ("desktop_version", version.trim())]);
     }
     pairs.extend([
@@ -153,7 +195,19 @@ pub(super) fn build_request(
     let mut url = reqwest::Url::parse(&format!("{agent_origin}{path}"))
         .map_err(|_| Failure::UnsupportedContext)?;
     url.query_pairs_mut().extend_pairs(pairs);
-    let body = if r.endpoint == Endpoint::Claim {
+    let matrix_body = if matches!(r.endpoint, Endpoint::UserExtra | Endpoint::Membership) {
+        let value = r
+            .body
+            .as_ref()
+            .filter(|v| v.is_object())
+            .ok_or(Failure::InvalidResponse)?;
+        Some(serde_json::to_string(value).map_err(|_| Failure::InvalidResponse)?)
+    } else {
+        None
+    };
+    let body = if let Some(body) = matrix_body.as_deref() {
+        Some(body)
+    } else if r.endpoint == Endpoint::Claim {
         if r.body != Some(serde_json::json!({})) {
             return Err(Failure::InvalidResponse);
         }
@@ -175,7 +229,7 @@ pub(super) fn build_request(
     ));
     let mut request = client
         .request(
-            if r.endpoint == Endpoint::Claim {
+            if body.is_some() {
                 reqwest::Method::POST
             } else {
                 reqwest::Method::GET
@@ -190,7 +244,7 @@ pub(super) fn build_request(
         .header("x-timestamp", second)
         .header("x-signature", signature);
     if let Some(body) = body {
-        request = request.body(body)
+        request = request.body(body.to_owned())
     }
     request.build().map_err(|_| Failure::InvalidResponse)
 }
@@ -235,7 +289,16 @@ impl Transport for OfficialHttp {
         request: Request,
     ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
         Box::pin(async move {
-            let client = new_client(Duration::from_secs(30))?;
+            let client = new_client(Duration::from_secs(
+                if matches!(
+                    request.endpoint,
+                    Endpoint::UserExtra | Endpoint::Membership | Endpoint::PlanQuota
+                ) {
+                    3
+                } else {
+                    30
+                },
+            ))?;
             let os = if cfg!(target_os = "windows") {
                 "win32"
             } else if cfg!(target_os = "macos") {
@@ -253,5 +316,165 @@ impl Transport for OfficialHttp {
             )?;
             send_once(&client, request).await
         })
+    }
+}
+
+#[cfg(test)]
+mod entitlement_wire_tests {
+    use super::*;
+    #[test]
+    fn membership_queries_use_official_mcode_routing_and_signed_post_body() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for (endpoint, path, body) in [
+            (
+                Endpoint::UserExtra,
+                "/matrix/api/v1/user/get_user_extra_info",
+                serde_json::json!({}),
+            ),
+            (
+                Endpoint::Membership,
+                "/matrix/api/v1/commerce/get_membership_info",
+                serde_json::json!({"workspace_id":"personal-a"}),
+            ),
+        ] {
+            let request = build_request(
+                &client,
+                Request {
+                    endpoint,
+                    region: Region::Cn,
+                    access_token: Some("synthetic-access".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: Some(body.clone()),
+                },
+                1790000000000,
+                28800,
+                "linux",
+                "test",
+            )
+            .unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().host_str(), Some("agent.minimaxi.com"));
+            assert_eq!(request.url().path(), path);
+            assert_eq!(request.url().query().unwrap(), "device_platform=mcode&biz_id=3&app_id=3001&version_code=22201&unix=1790000000000&timezone_offset=28800&sys_language=zh&lang=zh&device_id=0&os_name=linux&browser_name=mcode&user_id=synthetic-user&client=mcode");
+            assert_eq!(
+                request.body().unwrap().as_bytes().unwrap(),
+                serde_json::to_vec(&body).unwrap()
+            );
+            let (yy, signature) = if endpoint == Endpoint::UserExtra {
+                (
+                    "b0cc2e36f30ab097078880f1658aeffc",
+                    "baa0719f19a44df3100cf47ac059c8cb",
+                )
+            } else {
+                (
+                    "65bd5e4a071db2641b7b81453c089641",
+                    "496afb41b07f84ea163421be7dbe7e55",
+                )
+            };
+            assert_eq!(request.headers()["yy"], yy);
+            assert_eq!(request.headers()["x-signature"], signature);
+        }
+    }
+    #[test]
+    fn profile_and_checkin_keep_original_methods_and_routing() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for endpoint in [Endpoint::Profile, Endpoint::Status, Endpoint::Claim] {
+            let request = build_request(
+                &client,
+                Request {
+                    endpoint,
+                    region: Region::Global,
+                    access_token: Some("synthetic-access".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: (endpoint == Endpoint::Claim).then(|| serde_json::json!({})),
+                },
+                1790000000000,
+                0,
+                "linux",
+                "test",
+            )
+            .unwrap();
+            assert_eq!(
+                request.method(),
+                if endpoint == Endpoint::Claim {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                }
+            );
+            assert_eq!(request.url().host_str(), Some("agent.minimax.io"));
+            assert_eq!(
+                request
+                    .url()
+                    .query_pairs()
+                    .any(|(k, v)| k == "device_platform" && v == "web"),
+                endpoint != Endpoint::Profile
+            );
+        }
+    }
+    #[test]
+    fn plan_quota_uses_official_oauth_origins_group_and_get_without_matrix_signature() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for (region, host) in [
+            (Region::Cn, "www.minimaxi.com"),
+            (Region::Global, "platform.minimax.io"),
+        ] {
+            let request = build_request(
+                &client,
+                Request {
+                    endpoint: Endpoint::PlanQuota,
+                    region,
+                    access_token: Some("synthetic-oauth".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: Some(serde_json::json!({"op_group_id":"personal-group"})),
+                },
+                1790000000000,
+                0,
+                "linux",
+                "test",
+            )
+            .unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().host_str(), Some(host));
+            assert_eq!(
+                request.url().path(),
+                "/v1/api/openplatform/coding_plan/remains"
+            );
+            assert!(request.url().query().is_none());
+            assert!(request.body().is_none());
+            assert_eq!(request.headers()["authorization"], "Bearer synthetic-oauth");
+            assert!(request.headers()["authorization"].is_sensitive());
+            assert_eq!(request.headers()["x-group-id"], "personal-group");
+            assert!(request.headers()["x-group-id"].is_sensitive());
+            for header in ["yy", "x-signature", "x-timestamp"] {
+                assert!(request.headers().get(header).is_none());
+            }
+        }
+    }
+    #[test]
+    fn plan_quota_missing_or_invalid_personal_group_is_rejected_before_request() {
+        let client = new_client(Duration::from_secs(1)).unwrap();
+        for group in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!("bad\r\nX-Evil: 1"),
+            serde_json::json!("x".repeat(257)),
+        ] {
+            assert!(build_request(
+                &client,
+                Request {
+                    endpoint: Endpoint::PlanQuota,
+                    region: Region::Cn,
+                    access_token: Some("synthetic-oauth".into()),
+                    real_user_id: Some("synthetic-user".into()),
+                    body: Some(serde_json::json!({"op_group_id":group}))
+                },
+                1790000000000,
+                0,
+                "linux",
+                "test"
+            )
+            .is_err());
+        }
     }
 }

@@ -623,8 +623,23 @@ impl<'a> VaultAccountStore<'a> {
         let encoded = catalog.seal(self.vault, native)?;
         self.expect(Role::Journal, journal.as_ref())?;
         self.expect(Role::Recovery, recovery.as_ref())?;
-        self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
-        self.catalog_status(native)
+        let published = self.publish(Role::Profiles, before.as_ref(), encoded.as_bytes())?;
+        self.catalog_status_for_published(native, &published)
+    }
+
+    fn catalog_status_for_published(
+        &self,
+        native: &NativeCipher,
+        published: &FileImage,
+    ) -> Result<CatalogStatus, TransactionError> {
+        let published_revision = catalog_revision(Some(published));
+        let status = self.catalog_status(native)?;
+        // Do not let a concurrent external write turn this operation's result
+        // into authority for an unrelated newer catalog.
+        if status.revision != published_revision {
+            return Err(TransactionError::CatalogChanged);
+        }
+        Ok(status)
     }
     pub(crate) fn login_receipt(
         &self,

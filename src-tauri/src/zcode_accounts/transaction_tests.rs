@@ -3619,3 +3619,80 @@ async fn import_resolution_distinguishes_live_preview_prewrite_failure_and_unkno
         ImportResultStatus::Unknown
     );
 }
+
+#[test]
+fn evidence_update_returns_only_the_revision_of_its_own_published_catalog() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let before = store.catalog_status(&f.native).unwrap();
+    let catalog = store.import_catalog(&f.native, &before.revision).unwrap();
+    let snapshot = catalog
+        .profiles()
+        .find(|snapshot| snapshot.identity() == &f.a)
+        .unwrap();
+    let report = super::super::session_checks::SessionCheckReport::start_auth_rejected(
+        &f.native, snapshot, None, 1,
+    );
+    let result = store
+        .update_profile_evidence(&f.native, &before.revision, &f.a.opaque_id(), report)
+        .unwrap();
+    let published = store.read(Role::Profiles).unwrap().unwrap();
+    assert_ne!(result.revision, before.revision);
+    assert_eq!(result.revision, catalog_revision(Some(&published)));
+    assert_eq!(
+        store
+            .catalog_status_for_published(&f.native, &published)
+            .unwrap()
+            .revision,
+        result.revision
+    );
+}
+
+#[test]
+fn evidence_status_cannot_adopt_another_profile_write_after_publication() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let store = VaultAccountStore::new(f.vault_root.path(), &f.vault).unwrap();
+    let before = store.read(Role::Profiles).unwrap().unwrap();
+    let mut catalog = store
+        .import_catalog(&f.native, &catalog_revision(Some(&before)))
+        .unwrap();
+    let snapshot = catalog
+        .profiles()
+        .find(|snapshot| snapshot.identity() == &f.a)
+        .unwrap();
+    let report = super::super::session_checks::SessionCheckReport::start_auth_rejected(
+        &f.native, snapshot, None, 1,
+    );
+    catalog.set_evidence(&f.a, &f.native, report).unwrap();
+    let encoded = catalog.seal(&f.vault, &f.native).unwrap();
+    let published = store
+        .publish(Role::Profiles, Some(&before), encoded.as_bytes())
+        .unwrap();
+    let published_revision = catalog_revision(Some(&published));
+    assert_eq!(
+        store
+            .catalog_status_for_published(&f.native, &published)
+            .unwrap()
+            .revision,
+        published_revision
+    );
+    // This is the exact production boundary: publication succeeded, but a
+    // different writer changed another profile before the status reread.
+    catalog
+        .set_label(&f.b, &f.native, Some("External profile edit".into()))
+        .unwrap();
+    let changed = catalog.seal(&f.vault, &f.native).unwrap();
+    write_durable(&f.vault_root.path().join(PROFILE_FILE), changed.as_bytes()).unwrap();
+    assert_ne!(
+        store.catalog_status(&f.native).unwrap().revision,
+        published_revision
+    );
+    assert!(matches!(
+        store.catalog_status_for_published(&f.native, &published),
+        Err(TransactionError::CatalogChanged)
+    ));
+    assert_eq!(
+        fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        changed.as_bytes()
+    );
+}

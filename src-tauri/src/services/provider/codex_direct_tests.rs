@@ -31,6 +31,9 @@ impl Fixture {
             let conn = db.conn.lock().unwrap();
             crate::database::Database::apply_upstream4_migrations_on_conn(&conn).unwrap();
         }
+        let mut proxy_config = crate::rt::block_on(db.get_global_proxy_config()).unwrap();
+        proxy_config.listen_port = 0;
+        crate::rt::block_on(db.update_global_proxy_config(proxy_config)).unwrap();
         for id in ["a", "b"] {
             let provider = Provider::with_id(
                 id.into(),

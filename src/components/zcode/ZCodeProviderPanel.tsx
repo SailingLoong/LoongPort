@@ -30,7 +30,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ZCodeAccountPanel } from "@/components/zcode/ZCodeAccountPanel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const queryKey = ["zcodeConfig"];
@@ -39,12 +38,14 @@ type Draft = Omit<ZCodeProviderInput, "models"> & { modelText: string };
 /** Native file is authoritative. Only redacted read results enter the query cache. */
 export function ZCodeProviderPanel({
   onNavigationBlockedChange,
+  onManageAccounts,
 }: {
   onNavigationBlockedChange?: (blocked: boolean) => void;
+  onManageAccounts?: () => void;
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const [tab, setTab] = useState("accounts");
+  const [tab, setTab] = useState("api");
   const query = useQuery({
     queryKey,
     queryFn: zcodeApi.read,
@@ -57,7 +58,7 @@ export function ZCodeProviderPanel({
     revision: string;
   } | null>(null);
   const [providerBusy, setBusy] = useState(false);
-  const [accountBusy, setAccountBusy] = useState(false);
+  const accountBusy = false;
   const busy = providerBusy || accountBusy;
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,6 +192,15 @@ export function ZCodeProviderPanel({
             })}
           </p>
         </div>
+        <Button
+          variant="outline"
+          onClick={onManageAccounts}
+          disabled={busy || !!draft || !!removing}
+        >
+          {t("loongport.accounts.title", {
+            defaultValue: "Services & accounts",
+          })}
+        </Button>
       </div>
       <Tabs
         value={tab}
@@ -203,24 +213,10 @@ export function ZCodeProviderPanel({
             defaultValue: "ZCode account and API views",
           })}
         >
-          <TabsTrigger
-            value="accounts"
-            disabled={busy || !!draft || !!removing}
-          >
-            {t("zcode.accounts.signInTab", {
-              defaultValue: "Sign-in accounts",
-            })}
-          </TabsTrigger>
           <TabsTrigger value="api" disabled={busy || !!draft || !!removing}>
             {t("zcode.accounts.apiTab", { defaultValue: "API configuration" })}
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="accounts">
-          <ZCodeAccountPanel
-            disabled={providerBusy || !!draft || !!removing}
-            onBusyChange={setAccountBusy}
-          />
-        </TabsContent>
         <TabsContent value="api" className="space-y-4">
           <div className="flex justify-end gap-2">
             <Button

@@ -31,7 +31,8 @@ pub(crate) struct Task {
     pub model: String,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
-    pub budget: Budget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,7 +40,8 @@ pub(crate) struct Constraints {
     pub model: String,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
-    pub budget: Budget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
 }
 impl Constraints {
     fn valid(&self) -> bool {
@@ -51,7 +53,7 @@ impl Constraints {
                 .all(|c| c.is_ascii_alphanumeric() || b"-_.:/".contains(&c))
             && (1..=4096).contains(&self.max_output_tokens)
             && (100..=30_000).contains(&self.timeout_ms)
-            && self.budget.valid()
+            && self.budget.as_ref().is_none_or(Budget::valid)
     }
 }
 #[cfg(any(unix, test))]
@@ -219,7 +221,7 @@ pub(crate) fn validate_receipt(b: &Value, r: &Value) -> Result<(), AppError> {
         }
     }
     if status == "completed"
-        && (r["usage"].is_null()
+        && ((b["constraints"].get("budget").is_some() && r["usage"].is_null())
             || r["outputDigest"].is_null()
             || r["providerWorkStarted"] != json!(true)
             || !r["reason"].is_null())
@@ -238,11 +240,11 @@ mod tests {
             model: "fixture-model".into(),
             max_output_tokens: 128,
             timeout_ms: 1000,
-            budget: Budget {
+            budget: Some(Budget {
                 mode: "estimated".into(),
                 currency: "USD".into(),
                 limit_micros: 1000,
-            },
+            }),
         }
     }
     fn scope() -> Scope {
@@ -257,27 +259,27 @@ mod tests {
         }
     }
     #[test]
-    fn requires_estimated_budget_v3() {
+    fn accepts_bounded_task_without_budget_v3() {
         assert!(task().valid());
         let mut old = task();
         old.version = 2;
         assert!(!old.valid());
         let mut v = serde_json::to_value(task()).unwrap();
         v.as_object_mut().unwrap().remove("budget");
-        assert!(serde_json::from_value::<Task>(v).is_err());
+        assert!(serde_json::from_value::<Task>(v).unwrap().valid());
     }
     #[test]
     fn rejects_null_missing_wrong_currency_and_unsafe_budget() {
         let mut t = task();
         for currency in ["EUR", ""] {
-            t.budget.currency = currency.into();
+            t.budget.as_mut().unwrap().currency = currency.into();
             assert!(!t.valid());
         }
         t = task();
-        t.budget.limit_micros = MAX_SAFE_INTEGER + 1;
+        t.budget.as_mut().unwrap().limit_micros = MAX_SAFE_INTEGER + 1;
         assert!(!t.valid());
         t = task();
-        t.budget.mode = "hard".into();
+        t.budget.as_mut().unwrap().mode = "hard".into();
         assert!(!t.valid());
     }
     #[test]
@@ -296,7 +298,7 @@ mod tests {
             let mut changed = t.clone();
             match n {
                 0 => changed.input.push('!'),
-                1 => changed.budget.limit_micros += 1,
+                1 => changed.budget.as_mut().unwrap().limit_micros += 1,
                 2 => changed.model.push('x'),
                 _ => changed.input = b["taskFingerprint"].as_str().unwrap().into(),
             };

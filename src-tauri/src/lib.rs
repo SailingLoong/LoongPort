@@ -69,6 +69,8 @@ mod rt;
 mod secrets;
 mod services;
 #[cfg(any(feature = "gui", test))]
+mod trae_accounts;
+#[cfg(any(feature = "gui", test))]
 mod workbuddy;
 // Native account commands remain gated by the reviewed platform manifest.
 #[cfg(any(feature = "gui", test))]
@@ -1752,6 +1754,9 @@ pub fn run() {
                 return true;
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+            commands::create_agents_task,
+            commands::list_agents_tasks,
+            commands::cancel_agents_task,
             secrets::startup::unlock_secret_vault,
             secrets::startup::get_startup_recovery,
             secrets::startup::get_startup_upgrade_review,
@@ -1903,6 +1908,8 @@ pub fn run() {
             commands::get_provider_edit_settings,
             commands::qoder_daily_claim_context,
             commands::claim_qoder_daily_credits,
+            commands::qoder_http_identity_context,
+            commands::qoder_http_identity_action,
             commands::get_application_model_settings,
             commands::preview_application_model_settings,
             commands::confirm_application_model_settings,
@@ -2002,6 +2009,11 @@ pub fn run() {
             commands::claim_all_workbuddy_today,
             commands::begin_workbuddy_authorization,
             commands::finish_workbuddy_authorization,
+            commands::list_workbuddy_inference_accounts,
+            commands::begin_workbuddy_inference_authorization,
+            commands::poll_workbuddy_inference_authorization,
+            commands::cancel_workbuddy_inference_authorization,
+            commands::discover_workbuddy_inference_models,
             commands::get_zcode_config,
             commands::save_zcode_provider,
             commands::remove_zcode_provider,
@@ -2148,6 +2160,15 @@ pub fn run() {
             commands::stop_proxy_with_restore,
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
+            commands::prepare_proxy_takeover_request,
+            commands::trae_models::begin_trae_model_discovery,
+            commands::trae_models::list_trae_discovered_models,
+            commands::trae_models::cancel_trae_model_discovery,
+            commands::trae_accounts::list_trae_accounts,
+            commands::trae_accounts::begin_trae_authorization,
+            commands::trae_accounts::confirm_trae_authorization,
+            commands::trae_accounts::cancel_trae_authorization,
+            commands::trae_accounts::retire_trae_account,
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
@@ -2344,6 +2365,7 @@ pub fn run() {
             if code.is_some() {
                 zcode_accounts::claim_runtime::shutdown();
                 minimax_code::shutdown();
+                trae_accounts::store::shutdown();
             }
             match classify_exit_request(*code) {
                 // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
@@ -2514,6 +2536,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
     minimax_code::shutdown();
+    trae_accounts::store::shutdown();
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 
@@ -2927,6 +2950,7 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
     secrets::startup::paperclip_ready::stop_for_app(app_handle);
     zcode_accounts::claim_runtime::shutdown();
     minimax_code::shutdown();
+    trae_accounts::store::shutdown();
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);
     let env = app_handle.env();

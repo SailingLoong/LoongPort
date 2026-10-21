@@ -72,3 +72,6 @@ pub use usage_stats::{
     RequestLogDetail, UsageSummary, UsageSummaryByApp,
 };
 pub mod codex_reset;
+
+#[cfg(any(feature = "gui", feature = "test-hooks", test))]
+pub(crate) mod vendor_response_fence;

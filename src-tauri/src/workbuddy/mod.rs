@@ -15,3 +15,6 @@ mod store;
 mod tests;
 
 pub(crate) mod clock;
+
+pub(crate) mod inference;
+pub(crate) mod inference_commands;

@@ -1,3 +1,4 @@
+import { isProxyAppId } from "@/config/appConfig";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProviderCatalogDecision } from "./providers";
 import type { SwitchTierCommandResult } from "./relay";
@@ -38,8 +39,35 @@ export interface ApplicationModeState {
   directProviderId: string | null;
   publicationStarted: boolean | null;
   canWrite: boolean;
+  writeProtocol: "legacy" | "native" | null;
+  blockedReason: string | null;
   canRecheck: boolean;
   legacyCommonConfigWritable?: boolean;
+}
+
+/** Missing ownership facts fail closed only for the four managed applications. */
+export function isApplicationRoutingWriteBlocked(
+  appType: string,
+  state: ApplicationModeState | null | undefined,
+): boolean {
+  if (!isProxyAppId(appType)) return state?.canWrite === false;
+  return (
+    state?.status !== "ready" ||
+    state.canWrite !== true ||
+    state.blockedReason != null ||
+    (state.writeProtocol !== "native" && state.writeProtocol !== "legacy")
+  );
+}
+
+export function isApplicationCommonConfigWritable(
+  appType: string,
+  state: ApplicationModeState | null | undefined,
+): boolean {
+  return (
+    !isApplicationRoutingWriteBlocked(appType, state) &&
+    (state?.writeProtocol === "legacy" ||
+      state?.legacyCommonConfigWritable === true)
+  );
 }
 
 export interface ApplicationRouting {
@@ -70,6 +98,15 @@ export interface ApplicationRoutingRequest {
   draftDigest: string;
   revision: string;
 }
+/** A short-lived review, never a durable save receipt. */
+export interface ApplicationRoutingLegacyReview {
+  draftDigest: string;
+  revision: string;
+}
+export type ApplicationRoutingPreparedRequest =
+  | { protocol: "native"; request: ApplicationRoutingRequest }
+  | { protocol: "legacy"; review: ApplicationRoutingLegacyReview };
+
 export interface ApplicationRoutingRequestResult {
   request: ApplicationRoutingRequest;
   status:
@@ -86,6 +123,33 @@ export type ApplicationRoutingCommandResult =
   | SwitchTierCommandResult
   | { status: "requestResolved"; result: ApplicationRoutingRequestResult };
 
+const prepareRoutingRequest = async (
+  appType: string,
+  change: ApplicationRoutingChange,
+  requestId: string,
+): Promise<ApplicationRoutingPreparedRequest> => {
+  const prepared = await invoke<ApplicationRoutingPreparedRequest>(
+    "prepare_application_routing_request",
+    { appType, change, requestId },
+  );
+  const credential =
+    prepared?.protocol === "native"
+      ? prepared.request
+      : prepared?.protocol === "legacy"
+        ? prepared.review
+        : undefined;
+  if (
+    !credential ||
+    typeof credential.draftDigest !== "string" ||
+    typeof credential.revision !== "string" ||
+    (prepared.protocol === "native" &&
+      (typeof prepared.request.id !== "string" ||
+        prepared.request.scope !== "applicationRouting"))
+  )
+    throw new Error("mode.invalid_save_request");
+  return prepared;
+};
+
 function applyRouting(
   appType: string,
   change: ApplicationRoutingChange,
@@ -95,33 +159,76 @@ function applyRouting(
   appType: string,
   change: ApplicationRoutingChange,
   quitChatgpt: boolean | undefined,
-  request: ApplicationRoutingRequest,
+  request: ApplicationRoutingRequest | ApplicationRoutingPreparedRequest,
 ): Promise<ApplicationRoutingCommandResult>;
 function applyRouting(
   appType: string,
   change: ApplicationRoutingChange,
+  quitChatgpt: boolean | undefined,
+  request: undefined,
+  legacyReview: ApplicationRoutingLegacyReview,
+): Promise<SwitchTierCommandResult>;
+async function applyRouting(
+  appType: string,
+  change: ApplicationRoutingChange,
   quitChatgpt?: boolean,
-  request?: ApplicationRoutingRequest,
+  credential?: ApplicationRoutingRequest | ApplicationRoutingPreparedRequest,
+  legacyReview?: ApplicationRoutingLegacyReview,
 ): Promise<ApplicationRoutingCommandResult> {
-  return invoke("apply_application_routing", {
-    appType,
-    change,
-    quitChatgpt,
-    ...(request ? { request } : {}),
-  });
+  if (credential && legacyReview) throw new Error("mode.invalid_save_request");
+  const implicit = !credential && !legacyReview && !change.catalogPreviewOnly;
+  // Old consumers already have an explicit confirmation. Prepare that exact
+  // commit once; never prepare a preview or replace an existing reviewed token.
+  if (implicit)
+    credential = await prepareRoutingRequest(
+      appType,
+      change,
+      crypto.randomUUID(),
+    );
+  let request: ApplicationRoutingRequest | undefined;
+  if (credential) {
+    if ("protocol" in credential) {
+      if (credential.protocol === "native") request = credential.request;
+      else if (credential.protocol === "legacy")
+        legacyReview = credential.review;
+      else throw new Error("mode.invalid_save_request");
+    } else request = credential;
+  }
+  if (!change.catalogPreviewOnly && !request && !legacyReview)
+    throw new Error("mode.invalid_save_request");
+  const result = await invoke<ApplicationRoutingCommandResult>(
+    "apply_application_routing",
+    {
+      appType,
+      change,
+      quitChatgpt,
+      ...(request ? { request } : {}),
+      ...(legacyReview ? { legacyReview } : {}),
+    },
+  );
+  if (implicit && result.status === "requestResolved") {
+    if (
+      !request ||
+      result.result.request.id !== request.id ||
+      result.result.request.draftDigest !== request.draftDigest ||
+      result.result.request.revision !== request.revision ||
+      result.result.request.scope !== request.scope ||
+      result.result.status !== "completed"
+    )
+      throw new Error("mode.verification_required");
+    return {
+      status: "switched",
+      providerName: "",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    };
+  }
+  return result;
 }
 export const applicationRoutingApi = {
   apply: applyRouting,
-  prepareRequest: (
-    appType: string,
-    change: ApplicationRoutingChange,
-    requestId: string,
-  ): Promise<ApplicationRoutingRequest> =>
-    invoke("prepare_application_routing_request", {
-      appType,
-      change,
-      requestId,
-    }),
+  prepareRequest: prepareRoutingRequest,
   queryRequest: (
     appType: string,
     request: ApplicationRoutingRequest,

@@ -379,6 +379,16 @@ impl Database {
         }
         session.ensure_available()?;
         let conn = lock_conn!(self.conn);
+        Self::get_provider_by_id_on_connection(&conn, vault, id, app_type)
+    }
+
+    /// Reuse the original row decoder inside a caller-owned read transaction.
+    pub(crate) fn get_provider_by_id_on_connection(
+        conn: &rusqlite::Connection,
+        vault: &VaultContext,
+        id: &str,
+        app_type: &str,
+    ) -> Result<Option<Provider>, AppError> {
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue, available_models
              FROM providers WHERE id = ?1 AND app_type = ?2",
@@ -425,7 +435,7 @@ impl Database {
                 )?);
                 if let Some(meta) = &mut provider.meta {
                     meta.custom_endpoints =
-                        Self::get_endpoints_on_connection(&conn, vault, id, app_type)?;
+                        Self::get_endpoints_on_connection(conn, vault, id, app_type)?;
                 }
                 Ok(Some(provider))
             }
@@ -528,6 +538,11 @@ impl Database {
         } else {
             Self::preserve_qoder_state_on_save(app_type, current.as_ref(), &mut replacement);
         }
+        let retire_http_auth = current.as_ref().is_some_and(|previous| {
+            qoder_daily::authentication_changed(previous, &replacement)
+                || crate::services::vendor_source_binding::is_reference(previous)
+                    != crate::services::vendor_source_binding::is_reference(&replacement)
+        });
         let provider = &replacement;
         if let Some(expected) = expected {
             let current = current
@@ -557,6 +572,9 @@ impl Database {
             }
         }
 
+        if retire_http_auth {
+            super::qoder_http_auth::retire_on(&tx, app_type, &provider.id)?;
+        }
         if let Some(operation) = qoder_operation {
             if let Some(previous) =
                 super::qoder_campaign_operations::insert_unknown_on(&tx, operation)?
@@ -847,6 +865,9 @@ impl Database {
             return Err(AppError::Config("qoder.local_operations_changed".into()));
         }
         let tx = target.unchecked_transaction()?;
+        // Every incoming image is a rollback of refresh-token spend history,
+        // even when its source/PAT/generation or Ready state matches live data.
+        super::qoder_http_auth::retire_all_on(&tx)?;
         for (id, mut provider) in incoming {
             Self::preserve_qoder_state_on_save("codex", current.get(&id), &mut provider);
             if let Some(pending) = provider

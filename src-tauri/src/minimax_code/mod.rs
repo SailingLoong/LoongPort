@@ -2,7 +2,9 @@
 pub(crate) mod auth;
 pub(crate) mod catalog;
 pub(crate) mod checkin;
+pub(crate) mod entitlement;
 pub(crate) mod http;
+pub(crate) mod inference;
 
 #[cfg(test)]
 mod tests;
@@ -39,6 +41,20 @@ pub(crate) fn shutdown() {
     }
     // A poisoned Runtime remains poisoned: all future admission fails closed.
 }
+/// The one process-wide MiniMax test lock. Hold until all fixture IO/body work
+/// finishes. Only this cfg(test) entry can combine serialization with reset.
+#[cfg(test)]
+pub(crate) async fn isolated_fixture_guard() -> tokio::sync::OwnedMutexGuard<()> {
+    static SERIAL: OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let serial = SERIAL
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
+    reset_for_isolated_fixture();
+    serial
+}
+
 #[cfg(test)]
 fn reset_for_isolated_fixture() {
     let mut guard = runtime().lock().unwrap();

@@ -131,6 +131,9 @@ impl RouteBinding {
             state: Arc::new(Mutex::new(AttemptState::default())),
         })
     }
+    pub(crate) fn requires_legacy_budget(&self) -> bool {
+        self.task.budget.is_some()
+    }
     pub(crate) fn has_sent(&self) -> bool {
         self.state.lock().map(|s| s.sent).unwrap_or(true)
     }
@@ -213,7 +216,12 @@ impl RouteBinding {
         if attempt.sent {
             return Err(rejected("outcome_unresolved_no_replay"));
         }
-        if self.task.budget.currency != "USD" {
+        if self
+            .task
+            .budget
+            .as_ref()
+            .is_some_and(|b| b.currency != "USD")
+        {
             return Err(rejected("currency_unavailable"));
         }
         if body.get("stream").and_then(Value::as_bool) != Some(false)
@@ -247,6 +255,32 @@ impl RouteBinding {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| rejected("model_unavailable"))?;
+        // LoongPort tasks use the existing account chain; a price table or a
+        // synthetic currency budget is not permission to run. Legacy persisted
+        // budget-bearing bindings retain their old validation during recovery.
+        if self.task.budget.is_none() {
+            if !service
+                .request_identity_is_current(app, Some(&self.identity))
+                .unwrap_or(false)
+            {
+                return Err(rejected("identity_changed"));
+            }
+            attempt.sent = true;
+            #[cfg(any(unix, test))]
+            {
+                attempt.rejection = None;
+            }
+            attempt.evidence = Some(SendEvidence {
+                provider_id: provider.id.clone(),
+                model: model.into(),
+                price_hash: String::new(),
+                multiplier: Decimal::ONE,
+                input_tokens: crate::proxy::local_tokens::count_request_tokens(body),
+                #[cfg(test)]
+                estimate_micros: 0,
+            });
+            return Ok(());
+        }
         let input_tokens = crate::proxy::local_tokens::count_request_tokens(body);
         let input = u32::try_from(input_tokens)
             .ok()
@@ -303,7 +337,7 @@ impl RouteBinding {
         }))
         .map_err(|_| rejected("estimate_overflow"))?;
         let estimate = cost_micros(cost.total_cost).map_err(|_| rejected("estimate_overflow"))?;
-        if estimate > self.task.budget.limit_micros {
+        if estimate > self.task.budget.as_ref().unwrap().limit_micros {
             return Err(rejected("estimate_exceeds_budget"));
         }
         if estimate > available {
@@ -350,15 +384,17 @@ impl RouteBinding {
         let evidence = self.evidence()?;
         if row.provider_id != evidence.provider_id
             || row.app_type != self.app
-            || row.pricing_model.as_deref() != Some(evidence.model.as_str())
+            || (self.task.budget.is_some()
+                && row.pricing_model.as_deref() != Some(evidence.model.as_str()))
             || row.request_model.as_deref() != Some(self.task.model.as_str())
             || row.session_id.as_deref()
                 != Some(usage_session_for_binding(&self.execution_id)?.as_str())
-            || row
-                .cost_multiplier
-                .as_deref()
-                .and_then(|v| Decimal::from_str(v).ok())
-                != Some(evidence.multiplier)
+            || self.task.budget.is_some()
+                && row
+                    .cost_multiplier
+                    .as_deref()
+                    .and_then(|v| Decimal::from_str(v).ok())
+                    != Some(evidence.multiplier)
         {
             return Err(unavailable());
         }
@@ -367,6 +403,13 @@ impl RouteBinding {
         #[cfg(any(unix, test))]
         {
             self.state.lock().map_err(|_| unavailable())?.usage = Some(row);
+        }
+        if self.task.budget.is_none() {
+            #[cfg(any(unix, test))]
+            {
+                self.state.lock().map_err(|_| unavailable())?.usage_trusted = true;
+            }
+            return Ok(());
         }
         // Compare the very row used for calculation, not just a later current
         // lookup: A -> B (calculated) -> A must not regain completion authority.
@@ -465,7 +508,7 @@ impl Executions {
 }
 #[cfg(any(unix, test))]
 impl Owner {
-    pub(super) fn recover_execution(&self) -> Result<(), AppError> {
+    pub(crate) fn recover_execution(&self) -> Result<(), AppError> {
         let c = self.db_admission(Instant::now() + REQUEST_BUDGET)?;
         c.execute("UPDATE paperclip_run_bindings SET phase='unknown' WHERE owner=?1 AND app=?2 AND phase='accepted'",params![self.owner,self.app.as_str()]).map_err(|_|unavailable())?;
         Ok(())
@@ -520,7 +563,7 @@ impl Owner {
         tx.commit().map_err(|_| unavailable())?;
         Ok(b)
     }
-    fn execution_scope(&self, b: &Value) -> Result<Scope, AppError> {
+    pub(super) fn execution_scope(&self, b: &Value) -> Result<Scope, AppError> {
         let s = contract::scope_in_binding(b)?;
         if s.owner_id != self.owner {
             return Err(unavailable());
@@ -716,12 +759,15 @@ impl Owner {
                 value["usage"]=json!({"requestId":row.request_id,"digest":contract::digest(b"paperclip-original-usage-v3\0",&serde_json::to_vec(&row).unwrap_or_default()),"currency":"USD"});
                 if !attempt.state.lock().map(|s|s.usage_trusted).unwrap_or(false){value["reason"]=json!("pricing_evidence_changed");}
                 else if let Ok(actual)=Decimal::from_str(&row.total_cost_usd).map_err(|_|unavailable()).and_then(cost_micros){
-                    if actual>task.budget.limit_micros{value["status"]=json!("failed");value["reason"]=json!("actual_budget_exceeded");}
+                    if task.budget.as_ref().is_some_and(|b| actual>b.limit_micros){value["status"]=json!("failed");value["reason"]=json!("actual_budget_exceeded");}
                     else if !value["outputDigest"].is_null(){value["status"]=json!("completed");}
                     else {value["status"]=json!("failed");value["reason"]=json!("output_unavailable");}
                 }
             } else if !attempt.has_sent(){value["status"]=json!("failed");value["reason"]=json!(attempt.state.lock().ok().and_then(|s|s.rejection.clone()).unwrap_or_else(||"admission_or_request_failed".into()));}
             else {value["reason"]=json!("usage_or_outcome_unresolved");}
+            if task.budget.is_none() && attempt.has_sent() && !value["outputDigest"].is_null() {
+                value["status"]=json!("completed"); value["reason"]=Value::Null;
+            }
             let receipt=contract::durable_result(&value);
             if contract::validate_receipt(&binding,&receipt).is_ok()&&owner.finish_execution(&s,&binding,&receipt).is_ok(){if let Ok(mut out)=output.lock(){*out=Some(value);}}
         });
@@ -896,6 +942,27 @@ mod paperclip_admission_tests {
     }
     #[test]
     #[serial_test::serial]
+    fn local_task_without_budget_uses_chain_without_balance_or_price_gate() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, state, _owner) = super::super::tests::fixture();
+        let provider = state
+            .db
+            .get_provider_by_id("synthetic", "codex")
+            .unwrap()
+            .unwrap();
+        let mut task = super::super::tests::task();
+        task.budget = None;
+        let route = route(&state, task);
+        route
+            .before_send(&state.proxy_service, "codex", &provider, &body())
+            .unwrap();
+        assert!(route.has_sent());
+        assert!(route
+            .before_send(&state.proxy_service, "codex", &provider, &body())
+            .is_err());
+    }
+    #[test]
+    #[serial_test::serial]
     fn paperclip_admission_reuses_original_price_and_balance_and_claims_once() {
         let (_home, _rt, state, _owner, p) = seeded();
         let route = route(&state, super::super::tests::task());
@@ -963,14 +1030,14 @@ mod paperclip_admission_tests {
     fn paperclip_admission_unknown_price_currency_stale_balance_and_small_budget_never_claim() {
         let (_home, _rt, state, _owner, p) = seeded();
         let mut task = super::super::tests::task();
-        task.budget.currency = "CNY".into();
+        task.budget.as_mut().unwrap().currency = "CNY".into();
         let r = route(&state, task);
         assert!(r
             .before_send(&state.proxy_service, "codex", &p, &body())
             .is_err());
         assert!(!r.has_sent());
         let mut task = super::super::tests::task();
-        task.budget.limit_micros = 1;
+        task.budget.as_mut().unwrap().limit_micros = 1;
         let r = route(&state, task);
         assert!(r
             .before_send(&state.proxy_service, "codex", &p, &body())
@@ -1309,6 +1376,8 @@ mod paperclip_admission_tests {
                 .proxy_service
                 .paperclip_install_original_test_server(mode != "logging_disabled"),
         );
+        let failover = rt.block_on(state.proxy_service.active_failover_manager_for_test());
+        let failover_gate = skip_unfunded.then(|| failover.pause_next_switch_for_test());
         let mut t = super::super::tests::task();
         t.timeout_ms = if timeout_case { 100 } else { 5000 };
         let b = owner
@@ -1493,6 +1562,32 @@ mod paperclip_admission_tests {
                 Decimal::ZERO
             );
         }
+        if let Some((entered, release)) = failover_gate {
+            rt.block_on(async {
+                use futures::FutureExt;
+                tokio::time::timeout(Duration::from_secs(8), entered)
+                    .await
+                    .expect("original failover did not acquire its app lock")
+                    .unwrap();
+                // Completion may precede the original asynchronous switch. Its
+                // held app lock must still reject start admission without replay.
+                assert!(matches!(
+                    owner.start_execution(json!({"binding":b,"task":t})),
+                    Err(AppError::Config(code)) if code == "paperclip.owner_unavailable"
+                ));
+                let joined = failover.join_spawned_for_test();
+                tokio::pin!(joined);
+                assert!(joined.as_mut().now_or_never().is_none());
+                assert_eq!(count.load(Ordering::SeqCst), 1);
+                release.send(()).unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(8), joined)
+                        .await
+                        .expect("original failover did not finish"),
+                    1
+                );
+            });
+        }
         assert_eq!(
             owner
                 .start_execution(json!({"binding":b,"task":t}))
@@ -1518,6 +1613,81 @@ mod paperclip_admission_tests {
         owner.control.executions.stop().unwrap();
         server.abort();
     }
+    #[test]
+    #[serial_test::serial]
+    fn paperclip_failover_join_includes_original_switch_before_first_poll() {
+        let (_home, rt, state, _owner, _) = seeded();
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE proxy_config SET enabled=1,auto_failover_enabled=1 WHERE app_type='codex'",
+                [],
+            )
+            .unwrap();
+        rt.block_on(
+            state
+                .proxy_service
+                .paperclip_install_original_test_server(true),
+        );
+        let manager = rt.block_on(state.proxy_service.active_failover_manager_for_test());
+        let (entered, release) = manager.pause_next_switch_for_test();
+        let clock = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        clock.block_on(async {
+            use futures::FutureExt;
+            let worker = manager.clone();
+            let identity = state.proxy_service.request_identity("codex").unwrap();
+            let task = tokio::spawn(async move {
+                // This is the original manager and service, not a replacement
+                // router. Its terminal outcome is irrelevant to the join barrier.
+                let _ = worker
+                    .try_switch(
+                        #[cfg(feature = "gui")]
+                        None,
+                        "codex",
+                        "synthetic",
+                        "Synthetic",
+                        "synthetic",
+                        Some(&identity),
+                    )
+                    .await;
+            });
+            // A current-thread runtime cannot poll the spawned task before this
+            // runnable task yields. Empty pending_switches would be a false idle.
+            manager.record_spawned_for_test(task);
+            let joined = manager.join_spawned_for_test();
+            tokio::pin!(joined);
+            assert!(joined.as_mut().now_or_never().is_none());
+            tokio::time::timeout(Duration::from_secs(8), entered)
+                .await
+                .expect("original failover did not acquire its app lock")
+                .unwrap();
+            assert!(state
+                .proxy_service
+                .lock_switch_for_app("codex")
+                .now_or_never()
+                .is_none());
+            assert!(joined.as_mut().now_or_never().is_none());
+            release.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(8), joined)
+                    .await
+                    .expect("original failover did not finish"),
+                1
+            );
+            assert!(state
+                .proxy_service
+                .lock_switch_for_app("codex")
+                .now_or_never()
+                .is_some());
+        });
+    }
+
     #[test]
     #[serial_test::serial]
     fn paperclip_final_body_overrides_cannot_replace_input_or_add_tools() {

@@ -76,6 +76,7 @@ type PresetEntry = {
 };
 
 export interface ClaudeDesktopProviderFormProps {
+  initialPresetName?: string;
   submitLabel: string;
   onSubmit: (values: ClaudeDesktopProviderFormValues) => Promise<void> | void;
   onCancel: () => void;
@@ -243,6 +244,7 @@ export function ClaudeDesktopProviderForm({
   onCancel,
   onSubmittingChange,
   initialData,
+  initialPresetName,
   showButtons = true,
   onManageAuthAccounts,
 }: ClaudeDesktopProviderFormProps) {
@@ -843,6 +845,17 @@ export function ClaudeDesktopProviderForm({
       </Button>
     </div>
   );
+
+  const initialPresetApplied = useRef(false);
+  useEffect(() => {
+    if (!initialPresetName || initialData || initialPresetApplied.current)
+      return;
+    initialPresetApplied.current = true;
+    const entry = presetEntries.find(
+      (item) => item.preset.name === initialPresetName,
+    );
+    if (entry) handlePresetChange(entry.id);
+  }, [initialPresetName, initialData, presetEntries]);
 
   return (
     <Form {...form}>

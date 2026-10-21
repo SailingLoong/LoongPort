@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2 } from "lucide-react";
@@ -21,6 +21,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
  */
 export interface OfficialApiPageProps {
   sourceAppId: AppId;
+  vendorId?: string;
   onBack: () => void;
   onConnected?: (account: ConnectedService) => void;
   /** 内嵌在统一添加聚合页（`AddHubPage`）里时不带返回箭头与页面级容器。 */
@@ -29,6 +30,7 @@ export interface OfficialApiPageProps {
 
 export function OfficialApiPage({
   sourceAppId,
+  vendorId,
   onBack,
   embedded = false,
   onConnected,
@@ -36,13 +38,25 @@ export function OfficialApiPage({
   const { t } = useTranslation();
   const [loginningVendor, setLoginningVendor] = useState<string | null>(null);
 
+  const alive = useRef(true);
+  const generation = useRef(0);
+  useEffect(() => {
+    alive.current = true;
+    setLoginningVendor(null);
+    return () => {
+      alive.current = false;
+      generation.current += 1;
+    };
+  }, []);
   const handlePick = async (vendorId: string) => {
     if (loginningVendor) return;
+    const request = generation.current;
+    const current = () => alive.current && request === generation.current;
     setLoginningVendor(vendorId);
     try {
       const result = await vendorApi.openLogin(vendorId, sourceAppId);
       // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
-      if (result === null) return;
+      if (!current() || result === null) return;
       toast.success(t("loongport.session.connected"));
       if (onConnected)
         onConnected({
@@ -54,9 +68,9 @@ export function OfficialApiPage({
         });
       else onBack();
     } catch (e) {
-      toast.error(extractErrorMessage(e));
+      if (current()) toast.error(extractErrorMessage(e));
     } finally {
-      setLoginningVendor(null);
+      if (current()) setLoginningVendor(null);
     }
   };
 
@@ -91,7 +105,9 @@ export function OfficialApiPage({
       </div>
 
       <div className="grid gap-4 py-6 sm:grid-cols-2">
-        {VENDOR_CATALOG.map((vendor) => (
+        {VENDOR_CATALOG.filter(
+          (vendor) => !vendorId || vendor.id === vendorId,
+        ).map((vendor) => (
           <button
             key={vendor.id}
             type="button"

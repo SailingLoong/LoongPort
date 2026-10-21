@@ -11,7 +11,10 @@ export default defineConfig({
     emptyOutDir: true,
     target: "esnext",
     rollupOptions: {
-      input: path.resolve(import.meta.dirname, "zcode-provider.html"),
+      input: [
+        path.resolve(import.meta.dirname, "zcode-provider.html"),
+        path.resolve(import.meta.dirname, "unified-accounts.html"),
+      ],
     },
   },
   server: { host: "127.0.0.1", port: 4314, strictPort: true },

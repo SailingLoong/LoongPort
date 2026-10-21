@@ -36,6 +36,8 @@ const modernRouting: ApplicationRouting = {
     directProviderId: null,
     publicationStarted: null,
     canWrite: true,
+    writeProtocol: "native",
+    blockedReason: null,
     canRecheck: true,
     legacyCommonConfigWritable: false,
   },

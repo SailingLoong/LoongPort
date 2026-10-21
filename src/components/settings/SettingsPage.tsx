@@ -54,7 +54,6 @@ import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
-import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { CodexAuthSettings } from "@/components/settings/CodexAuthSettings";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
@@ -79,6 +78,7 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void;
   onImportSuccess?: () => void | Promise<void>;
   defaultTab?: string;
+  onManageAccounts?: () => void;
 }
 
 export function SettingsPage({
@@ -91,6 +91,7 @@ export function SettingsPage({
   onOpenChange,
   onImportSuccess,
   defaultTab = "general",
+  onManageAccounts,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
   const {
@@ -137,13 +138,16 @@ export function SettingsPage({
       retry: false,
     })),
   });
+  const manageAccountsRef = useRef(onManageAccounts);
+  manageAccountsRef.current = onManageAccounts;
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (open) {
-      setActiveTab(defaultTab);
+      if (defaultTab === "auth") manageAccountsRef.current?.();
+      setActiveTab(defaultTab === "auth" ? "general" : defaultTab);
       resetStatus();
     }
   }, [open, resetStatus, defaultTab]);
@@ -261,8 +265,8 @@ export function SettingsPage({
             <TabsTrigger value="proxy">
               {t("settings.tabConnection", { defaultValue: "连接设置" })}
             </TabsTrigger>
-            <TabsTrigger value="auth">
-              {t("settings.tabAuth", { defaultValue: "认证" })}
+            <TabsTrigger value="security">
+              {t("secrets.protectionTitle")}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               {t("settings.tabAdvanced")}
@@ -343,9 +347,8 @@ export function SettingsPage({
                 ) : null}
               </TabsContent>
 
-              <TabsContent value="auth" className="space-y-6 mt-0 pb-4">
+              <TabsContent value="security" className="space-y-6 mt-0 pb-4">
                 <div className="space-y-6">
-                  <AuthCenterPanel />
                   <SecretProtectionSettings />
                 </div>
               </TabsContent>

@@ -130,6 +130,23 @@ pub(crate) async fn fetch_snapshot(
     settings: &WebDavSyncSettings,
 ) -> Result<DownloadedSnapshot, AppError> {
     super::sync_protocol::ensure_upgrade_sync_admitted()?;
+    fetch_snapshot_inner(settings).await
+}
+
+/// Startup restoration supplies credentials before the local settings owner unlocks.
+/// The device checkpoint remains authoritative for download admission.
+pub(crate) async fn fetch_snapshot_for_startup(
+    settings: &WebDavSyncSettings,
+) -> Result<DownloadedSnapshot, AppError> {
+    crate::secrets::upgrade::checkpoint::ensure_sync_admitted(
+        &crate::live::engine::DeviceStore::for_device(),
+    )?;
+    fetch_snapshot_inner(settings).await
+}
+
+async fn fetch_snapshot_inner(
+    settings: &WebDavSyncSettings,
+) -> Result<DownloadedSnapshot, AppError> {
     settings.validate()?;
     let auth = auth_for(settings);
     let snapshot = find_remote_snapshot(settings, &auth)

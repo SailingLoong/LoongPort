@@ -1,3 +1,7 @@
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Loader2, Plus, RefreshCw } from "lucide-react";
@@ -12,6 +16,9 @@ import {
   type WorkBuddyAccount,
   type WorkBuddyClaimResult,
   type WorkBuddyLogin,
+  type WorkBuddyInferenceLogin,
+  type WorkBuddyInferenceAccount,
+  type WorkBuddyInferenceModel,
 } from "@/lib/api/workbuddy";
 import { settingsApi } from "@/lib/api/settings";
 const amount = (value: number | null) =>
@@ -20,7 +27,9 @@ const amount = (value: number | null) =>
     : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 const date = (value: number | null) =>
   value == null ? "—" : new Date(value).toLocaleString();
-export function WorkBuddyAccounts() {
+export function WorkBuddyAccounts({
+  unified = false,
+}: { unified?: boolean } = {}) {
   const { t } = useTranslation();
   const [accounts, setAccounts] = useState<WorkBuddyAccount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +40,152 @@ export function WorkBuddyAccounts() {
   const listGeneration = useRef(0);
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
+  const [inferenceAccounts, setInferenceAccounts] = useState<
+    WorkBuddyInferenceAccount[]
+  >([]);
+  const [inferenceLogin, setInferenceLogin] =
+    useState<WorkBuddyInferenceLogin | null>(null);
+  const [inferenceTarget, setInferenceTarget] = useState<string | null>(null);
+  const [inferenceBusy, setInferenceBusy] = useState<string | null>(null);
+  const [inferenceWaiting, setInferenceWaiting] = useState(false);
+  const [inferenceFailed, setInferenceFailed] = useState(false);
+  const [models, setModels] = useState<
+    Record<string, WorkBuddyInferenceModel[]>
+  >({});
+  const inferenceGeneration = useRef(0);
+  const inferenceFlow = useRef<WorkBuddyInferenceLogin | null>(null);
+  const inferenceOperation = useRef<string | null>(null);
+  const inferenceStatusGeneration = useRef(0);
+  const loadInferenceAccounts = useCallback(async () => {
+    const generation = ++inferenceStatusGeneration.current;
+    const operationGeneration = inferenceGeneration.current;
+    try {
+      const rows = await workbuddyApi.listInferenceAccounts();
+      if (alive.current && generation === inferenceStatusGeneration.current) {
+        setInferenceAccounts(rows);
+      }
+    } catch {
+      if (alive.current && generation === inferenceStatusGeneration.current) {
+        setInferenceAccounts([]);
+        if (operationGeneration === inferenceGeneration.current)
+          setInferenceFailed(true);
+      }
+    }
+  }, []);
+  const closeInference = () => {
+    const generation = ++inferenceGeneration.current;
+    const flow = inferenceFlow.current;
+    inferenceFlow.current = null;
+    inferenceOperation.current = null;
+    setInferenceLogin(null);
+    setInferenceTarget(null);
+    setInferenceBusy(null);
+    setInferenceWaiting(false);
+    if (flow)
+      void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {
+        if (alive.current && generation === inferenceGeneration.current)
+          setInferenceFailed(true);
+      });
+  };
+  const beginInference = async (accountId: string) => {
+    if (inferenceOperation.current === `begin:${accountId}`) return;
+    const generation = ++inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    const previous = inferenceFlow.current;
+    inferenceFlow.current = null;
+    inferenceOperation.current = `begin:${accountId}`;
+    setInferenceLogin(null);
+    setInferenceTarget(accountId);
+    setInferenceBusy("begin");
+    setInferenceWaiting(false);
+    setInferenceFailed(false);
+    setModels((old) => {
+      const next = { ...old };
+      delete next[accountId];
+      return next;
+    });
+    try {
+      if (previous) await workbuddyApi.cancelInferenceLogin(previous.flowId);
+      if (!current()) return;
+      const flow = await workbuddyApi.beginInferenceLogin(accountId);
+      if (!current() || flow.accountId !== accountId) {
+        await workbuddyApi.cancelInferenceLogin(flow.flowId);
+        if (current()) setInferenceFailed(true);
+        return;
+      }
+      inferenceFlow.current = flow;
+      setInferenceLogin(flow);
+    } catch {
+      if (current()) setInferenceFailed(true);
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+  const pollInference = async () => {
+    const flow = inferenceFlow.current;
+    if (!flow || inferenceOperation.current) return;
+    const generation = inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    inferenceOperation.current = "poll";
+    setInferenceBusy("poll");
+    setInferenceFailed(false);
+    try {
+      const result = await workbuddyApi.pollInferenceLogin(flow.flowId);
+      if (!current()) return;
+      if (result.state === "saved") {
+        inferenceFlow.current = null;
+        setInferenceLogin(null);
+        setInferenceTarget(null);
+        setInferenceWaiting(false);
+        await loadInferenceAccounts();
+      } else setInferenceWaiting(true);
+    } catch {
+      if (current()) {
+        inferenceFlow.current = null;
+        setInferenceLogin(null);
+        setInferenceFailed(true);
+        // Also releases a backend flow when the command failed before polling.
+        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
+      }
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+  const discoverModels = async (accountId: string) => {
+    if (inferenceOperation.current || inferenceFlow.current) return;
+    const generation = ++inferenceGeneration.current;
+    const current = () =>
+      alive.current && generation === inferenceGeneration.current;
+    inferenceOperation.current = "models";
+    setInferenceTarget(accountId);
+    setInferenceBusy("models");
+    setInferenceFailed(false);
+    setModels((old) => {
+      const next = { ...old };
+      delete next[accountId];
+      return next;
+    });
+    try {
+      const discovered = await workbuddyApi.discoverModels(accountId);
+      if (current()) setModels((old) => ({ ...old, [accountId]: discovered }));
+    } catch {
+      if (current()) setInferenceFailed(true);
+    } finally {
+      if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+
   const [claimResults, setClaimResults] = useState<
     { id: string; error: WorkBuddyClaimResult["error"] }[] | null
   >(null);
@@ -54,11 +209,18 @@ export function WorkBuddyAccounts() {
   useEffect(() => {
     alive.current = true;
     void loadAccounts();
+    void loadInferenceAccounts();
     return () => {
       alive.current = false;
       listGeneration.current += 1;
+      inferenceGeneration.current += 1;
+      inferenceStatusGeneration.current += 1;
+      const flow = inferenceFlow.current;
+      inferenceFlow.current = null;
+      if (flow)
+        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
     };
-  }, [loadAccounts]);
+  }, [loadAccounts, loadInferenceAccounts]);
   const run = async (key: string, operation: () => Promise<void>) => {
     if (active.current) return;
     active.current = true;
@@ -173,6 +335,76 @@ export function WorkBuddyAccounts() {
           {t("workbuddy.failed")}
         </p>
       )}
+      {inferenceFailed && (
+        <p role="alert" className="text-sm text-destructive">
+          {t("workbuddy.inference.failed", {
+            defaultValue:
+              "Inference authorization or model discovery failed. Select the matching account and try again.",
+          })}
+        </p>
+      )}
+      {inferenceTarget && (inferenceLogin || inferenceBusy === "begin") && (
+        <div
+          role="region"
+          aria-label={t("workbuddy.inference.authorization", {
+            defaultValue: "Inference authorization",
+          })}
+          className="space-y-2 rounded-xl border p-3 text-sm"
+        >
+          <p>{accounts.find((row) => row.id === inferenceTarget)?.label}</p>
+          <p>
+            {t("workbuddy.inference.identityNotice", {
+              defaultValue:
+                "Authorize this same WorkBuddy account in the same region. The existing check-in login is retained.",
+            })}
+          </p>
+          {inferenceLogin && (
+            <>
+              <a
+                href={inferenceLogin.verificationUri}
+                className="text-primary underline"
+                onClick={(event) => {
+                  event.preventDefault();
+                  const generation = inferenceGeneration.current;
+                  const flowId = inferenceLogin.flowId;
+                  void settingsApi
+                    .openExternal(inferenceLogin.verificationUri)
+                    .catch(() => {
+                      if (
+                        alive.current &&
+                        generation === inferenceGeneration.current &&
+                        inferenceFlow.current?.flowId === flowId
+                      )
+                        setInferenceFailed(true);
+                    });
+                }}
+              >
+                {t("workbuddy.inference.open", {
+                  defaultValue: "Open inference authorization",
+                })}
+              </a>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={inferenceBusy !== null}
+                onClick={() => void pollInference()}
+              >
+                {t("workbuddy.inference.finish", {
+                  defaultValue: "I have authorized this account",
+                })}
+              </Button>
+            </>
+          )}
+          <Button size="sm" variant="ghost" onClick={closeInference}>
+            {t("workbuddy.inference.cancel", {
+              defaultValue: "Cancel authorization",
+            })}
+          </Button>
+          {inferenceWaiting && (
+            <p role="status">{t("workbuddy.authorizationWaiting")}</p>
+          )}
+        </div>
+      )}
       {login && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border p-3 text-sm">
           <a
@@ -197,7 +429,16 @@ export function WorkBuddyAccounts() {
                 if (!alive.current) return;
                 if (result.state === "saved") {
                   setLogin(null);
+                  // The legacy owner may replace this row and clear its inference
+                  // grant. Retire all transient reads/flows before either reload;
+                  // late IPC completions must not restore the previous grant's UI.
+                  closeInference();
+                  inferenceStatusGeneration.current += 1;
+                  setInferenceAccounts([]);
+                  setInferenceFailed(false);
+                  setModels({});
                   await loadAccounts();
+                  await loadInferenceAccounts();
                 } else setWaiting(true);
               })
             }
@@ -255,107 +496,228 @@ export function WorkBuddyAccounts() {
         </div>
       )}
       <div className="grid gap-2">
-        {accounts.map((account) => (
-          <article
-            key={account.id}
-            className="rounded-xl border border-border bg-card p-3"
+        {
+          <AccountWorkspace
+            accounts={accounts}
+            label={(account) => account.label}
+            enabled={unified}
           >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h3 className="text-sm font-medium">{account.label}</h3>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy !== null || !account.canRefresh}
-                  onClick={() =>
-                    void run(account.id, async () =>
-                      update(await workbuddyApi.refresh(account.id)),
-                    )
-                  }
-                >
-                  {t("common.refresh")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy !== null || !account.canClaim}
-                  onClick={() =>
-                    void run(account.id, async () =>
-                      update(await workbuddyApi.claim(account.id)),
-                    )
-                  }
-                >
-                  {t("workbuddy.claim")}
-                </Button>
-              </div>
-            </div>
-            <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
-              <div>
-                <dt>{t("workbuddy.total")}</dt>
-                <dd
-                  data-testid="workbuddy-total"
-                  className="mt-1 tabular-nums text-foreground"
-                >
-                  {amount(account.credits.totalRemaining)}
-                </dd>
-              </div>
-              <div>
-                <dt>{t("workbuddy.expiry")}</dt>
-                <dd className="mt-1">{date(account.credits.nearestExpiry)}</dd>
-              </div>
-              <div>
-                <dt>{t("workbuddy.updated")}</dt>
-                <dd className="mt-1">{date(account.credits.updatedAt)}</dd>
-              </div>
-            </dl>
-            <p
-              role="status"
-              className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
-            >
-              {busy === account.id && (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              )}
-              {t(`workbuddy.state.${account.claimState}`)}
-              {account.credited != null && (
-                <span>
-                  {t("workbuddy.credited", {
-                    amount: amount(account.credited),
-                  })}
-                </span>
-              )}
-            </p>
-            {account.credits.packages.length > 0 && (
-              <Collapsible className="mt-2">
-                <CollapsibleTrigger asChild>
+            {(account) => {
+              const actions = (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  {!unified && (
+                    <h3 className="text-sm font-medium">{account.label}</h3>
+                  )}
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy !== null || !account.canRefresh}
+                      onClick={() =>
+                        void run(account.id, async () =>
+                          update(await workbuddyApi.refresh(account.id)),
+                        )
+                      }
+                    >
+                      {t("common.refresh")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy !== null || !account.canClaim}
+                      onClick={() =>
+                        void run(account.id, async () =>
+                          update(await workbuddyApi.claim(account.id)),
+                        )
+                      }
+                    >
+                      {t("workbuddy.claim")}
+                    </Button>
+                  </div>
+                </div>
+              );
+              const authorization = (
+                <>
+                  <p role="status">
+                    {t(
+                      `workbuddy.inference.state.${inferenceAccounts.find((row) => row.id === account.id)?.state ?? "needsAuthorization"}`,
+                      {
+                        defaultValue: (
+                          {
+                            needsAuthorization:
+                              "New inference authorization required",
+                            ready: "Inference authorization available",
+                            refreshRequired:
+                              "Inference authorization needs refresh",
+                            expired: "Inference authorization expired",
+                          } as const
+                        )[
+                          inferenceAccounts.find((row) => row.id === account.id)
+                            ?.state ?? "needsAuthorization"
+                        ],
+                      },
+                    )}
+                  </p>
                   <Button
                     size="sm"
-                    variant="ghost"
-                    className="h-7 px-0 text-xs"
+                    variant="outline"
+                    disabled={
+                      busy !== null ||
+                      (inferenceTarget === account.id &&
+                        inferenceBusy === "begin")
+                    }
+                    onClick={() => void beginInference(account.id)}
                   >
-                    {t("workbuddy.packages")}
-                    <ChevronDown className="h-3 w-3" />
+                    {t("workbuddy.inference.authorize", {
+                      defaultValue: "Authorize inference",
+                    })}
                   </Button>
-                </CollapsibleTrigger>
-                <CollapsibleContent>
-                  <ul className="divide-y divide-border/40">
-                    {account.credits.packages.map((pack, index) => (
-                      <li
-                        key={`${pack.id}:${index}`}
-                        className="flex flex-wrap justify-between gap-2 py-2 text-xs"
+                </>
+              );
+              const inference = (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      busy !== null ||
+                      inferenceBusy !== null ||
+                      inferenceLogin !== null ||
+                      !inferenceAccounts.some(
+                        (row) =>
+                          row.id === account.id &&
+                          (row.state === "ready" ||
+                            row.state === "refreshRequired"),
+                      )
+                    }
+                    onClick={() => void discoverModels(account.id)}
+                  >
+                    {t("workbuddy.inference.models", {
+                      defaultValue: "Discover inference models",
+                    })}
+                  </Button>
+                  {models[account.id] && (
+                    <ul
+                      aria-label={t("workbuddy.inference.availableModels", {
+                        defaultValue: "Available inference models",
+                      })}
+                    >
+                      {models[account.id].map((model) => (
+                        <li key={model.id}>
+                          {model.name} · {model.id}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              );
+              const credits = (
+                <>
+                  <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
+                    <div>
+                      <dt>{t("workbuddy.total")}</dt>
+                      <dd
+                        data-testid="workbuddy-total"
+                        className="mt-1 tabular-nums text-foreground"
                       >
-                        <span>{pack.name || t("workbuddy.package")}</span>
-                        <span className="tabular-nums">
-                          {t("workbuddy.remaining")} {amount(pack.remaining)} ·{" "}
-                          {t("workbuddy.expires")} {date(pack.expireAt)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </CollapsibleContent>
-              </Collapsible>
-            )}
-          </article>
-        ))}
+                        {amount(account.credits.totalRemaining)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t("workbuddy.expiry")}</dt>
+                      <dd className="mt-1">
+                        {date(account.credits.nearestExpiry)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t("workbuddy.updated")}</dt>
+                      <dd className="mt-1">
+                        {date(account.credits.updatedAt)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p
+                    role="status"
+                    className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
+                  >
+                    {busy === account.id && (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {t(`workbuddy.state.${account.claimState}`)}
+                    {account.credited != null && (
+                      <span>
+                        {t("workbuddy.credited", {
+                          amount: amount(account.credited),
+                        })}
+                      </span>
+                    )}
+                  </p>
+                  {account.credits.packages.length > 0 && (
+                    <Collapsible className="mt-2">
+                      <CollapsibleTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-0 text-xs"
+                        >
+                          {t("workbuddy.packages")}
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <ul className="divide-y divide-border/40">
+                          {account.credits.packages.map((pack, index) => (
+                            <li
+                              key={`${pack.id}:${index}`}
+                              className="flex flex-wrap justify-between gap-2 py-2 text-xs"
+                            >
+                              <span>{pack.name || t("workbuddy.package")}</span>
+                              <span className="tabular-nums">
+                                {t("workbuddy.remaining")}{" "}
+                                {amount(pack.remaining)} ·{" "}
+                                {t("workbuddy.expires")} {date(pack.expireAt)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )}
+                </>
+              );
+              if (unified)
+                return (
+                  <AccountDetailSections
+                    authorization={authorization}
+                    entitlements={
+                      <>
+                        {actions}
+                        {credits}
+                      </>
+                    }
+                    inference={
+                      <>
+                        {inference}
+                        <p className="text-xs text-muted-foreground">
+                          真实推理消费尚未验收。领取成功、授权就绪或模型发现均不等于积分已用于推理。
+                        </p>
+                      </>
+                    }
+                  />
+                );
+              return (
+                <article className="rounded-xl border border-border bg-card p-3">
+                  {actions}
+                  <div className="mt-3 space-y-2 border-t pt-3 text-xs">
+                    {authorization}
+                    {inference}
+                  </div>
+                  {credits}
+                </article>
+              );
+            }}
+          </AccountWorkspace>
+        }
       </div>
     </section>
   );

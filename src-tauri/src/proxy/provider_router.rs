@@ -58,6 +58,96 @@ impl ProviderRouter {
         }
     }
 
+    pub(crate) fn managed_secret_session(&self) -> Arc<crate::secrets::session::SecretSession> {
+        self.db.secrets.clone()
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks", test))]
+    pub(crate) fn vendor_response_fence(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<Option<crate::services::vendor_response_fence::Fence>, crate::proxy::ProxyError>
+    {
+        crate::services::vendor_response_fence::Fence::acquire(
+            self.db.clone(),
+            app.clone(),
+            provider,
+        )
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks", test))]
+    pub(crate) async fn prepare_qoder_http_dispatch(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+        host: super::qoder_host::HostConfig,
+        timeouts: [u64; 3],
+        transport: &dyn crate::services::provider::qoder_http_auth::AuthTransport,
+    ) -> Result<
+        (
+            super::qoder_http::Dispatch,
+            super::response_lease::ResponseLease,
+        ),
+        super::ProxyError,
+    > {
+        use crate::services::provider::qoder_http_auth;
+        if app.as_str() != "codex" {
+            return Err(super::ProxyError::InvalidRequest(
+                "unsupported_qoder_application".into(),
+            ));
+        }
+        if !cfg!(test) && !qoder_http_auth::PRODUCTION_ADMISSION {
+            return Err(super::ProxyError::ConfigError(
+                "qoder_http_admission_pending".into(),
+            ));
+        }
+        let snapshot = Arc::new(
+            qoder_http_auth::acquire(&self.db, provider, transport, || {
+                chrono::Utc::now().timestamp_millis()
+            })
+            .await
+            .map_err(|error| match error {
+                qoder_http_auth::AcquireError::PreflightMissingSource => {
+                    super::ProxyError::AuthError("qoder_auth_required".into())
+                }
+                qoder_http_auth::AcquireError::NonRetryable => {
+                    super::ProxyError::Internal("qoder.http_auth.unavailable".into())
+                }
+            })?,
+        );
+        qoder_http_auth::check_selected_provider(provider, &snapshot).map_err(|_| {
+            super::ProxyError::Internal("qoder.http_auth.selected_source_changed".into())
+        })?;
+        self.db
+            .check_qoder_http_snapshot(&snapshot, chrono::Utc::now().timestamp_millis())
+            .map_err(|_| {
+                super::ProxyError::Internal("qoder.http_auth.authorization_changed".into())
+            })?;
+        let fence_db = self.db.clone();
+        let fence_snapshot = snapshot.clone();
+        let lease = super::response_lease::ResponseLease::new(move || {
+            let db = fence_db.clone();
+            let snapshot = fence_snapshot.clone();
+            async move {
+                db.check_qoder_http_snapshot_fence(&snapshot).map_err(|_| {
+                    super::ProxyError::Internal("qoder.http_auth.authorization_changed".into())
+                })
+            }
+        });
+        Ok((
+            super::qoder_http::Dispatch {
+                host,
+                database: self.db.clone(),
+                snapshot,
+                first_byte_timeout: timeouts[0],
+                idle_timeout: timeouts[1],
+                non_streaming_timeout: timeouts[2],
+            },
+            lease,
+        ))
+    }
+
     pub(crate) fn resolve_vendor_auth(
         &self,
         app: &AppType,
@@ -498,7 +588,8 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
+            // Device-path admission rejects symlink ancestors (for example macOS /var).
+            let dir = crate::secrets::testing::tempdir().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
             let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
@@ -721,6 +812,20 @@ mod tests {
                 before,
                 "view read must not mutate the database"
             );
+            if app == "claude" {
+                let mode = board.mode_state.as_ref().expect("explicit legacy owner");
+                assert_eq!(mode.write_protocol, Some("legacy"));
+                assert!(mode.can_write);
+                assert!(
+                    mode.mode.is_none(),
+                    "source-schema reads must not invent native mode"
+                );
+            } else {
+                assert!(
+                    board.mode_state.is_none(),
+                    "independent apps keep their original contract"
+                );
+            }
             assert_eq!(board.tiers.len(), 2);
             assert_eq!(
                 board.tiers[0].skip_reason, None,
@@ -782,6 +887,58 @@ mod tests {
                 assert!(board.tiers.iter().all(|tier| !tier.can_failover));
             }
         }
+    }
+
+    /// The getter must return its safe unknown projection, not grant writes,
+    /// when a synthetic home alias fails the original checkpoint path guard.
+    #[cfg(all(feature = "gui", unix))]
+    #[tokio::test]
+    #[serial]
+    async fn application_routing_getter_rejects_symlinked_home_without_writes() {
+        let home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        assert_eq!(
+            Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
+            0
+        );
+        assert!(!crate::mode::operation::uses_upstream4_schema(&db).unwrap());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let physical_home = home.dir.path();
+        let alias = physical_home.join("synthetic-home-alias");
+        std::os::unix::fs::symlink(physical_home, &alias).unwrap();
+        // TempHome restores this override even if an assertion fails.
+        env::set_var("CC_SWITCH_TEST_HOME", &alias);
+        let device = crate::live::engine::DeviceStore::for_device();
+        assert_eq!(device.root(), alias.join(crate::config::APP_DIR_NAME));
+        let error =
+            crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(&device).unwrap_err();
+        assert!(
+            matches!(error, AppError::Config(ref code) if code == "secret.invalid_storage_path")
+        );
+        // Before the application-only projection, this source-schema read had
+        // no device-path admission. Preserve that separate edit-reader contract.
+        assert!(crate::mode::current::read_view(&state.proxy_service, &AppType::Claude).is_none());
+        let physical_device = physical_home.join(crate::config::APP_DIR_NAME);
+        let existed = physical_device.exists();
+        let before = db.conn.lock().unwrap().total_changes();
+        let error = crate::commands::application_routing_impl(&state, "claude")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "mode.verification_required");
+        let mode = error
+            .mode_state
+            .expect("recovery UI needs the safe projection");
+        assert_eq!(mode.status, "unknown");
+        assert_eq!(mode.write_protocol, None);
+        assert_eq!(mode.blocked_reason, Some("mode.verification_required"));
+        assert!(!mode.can_write);
+        assert!(mode.can_recheck);
+        assert_eq!(db.conn.lock().unwrap().total_changes(), before);
+        assert_eq!(physical_device.exists(), existed);
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[tokio::test]

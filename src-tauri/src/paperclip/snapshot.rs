@@ -21,7 +21,7 @@ pub(crate) fn snapshot_on_connection(
     );
     let resource_id = resource_id(owner, app);
     Ok(
-        json!({"version":3,"ownerId":owner,"revision":revision,"executionMode":"estimated-budget","resources":[{"resourceId":resource_id,"nativeSupport":app=="codex"&&!chain.is_empty(),"reason":if app!="codex" {"unsupported_app"} else if chain.is_empty(){"applied_chain_empty"}else{"facts_checked_before_each_send"}}]}),
+        json!({"version":3,"ownerId":owner,"revision":revision,"executionMode":"bounded-task","resources":[{"resourceId":resource_id,"nativeSupport":app=="codex"&&!chain.is_empty(),"reason":if app!="codex" {"unsupported_app"} else if chain.is_empty(){"applied_chain_empty"}else{"facts_checked_before_each_send"}}]}),
     )
 }
 pub(crate) fn resource_id(owner: &str, app: &str) -> String {

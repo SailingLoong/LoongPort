@@ -27,12 +27,17 @@ pub(crate) async fn refresh_minimax_code_account(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<AccountView, Failure> {
-    Engine {
+    let mut account = Engine {
         session: state.db.secret_session(),
         transport: &OfficialHttp,
     }
     .refresh(&id)
-    .await
+    .await?;
+    account.entitlement =
+        crate::minimax_code::entitlement::read(state.db.secret_session(), &OfficialHttp, &account)
+            .await
+            .ok();
+    Ok(account)
 }
 
 #[tauri::command]

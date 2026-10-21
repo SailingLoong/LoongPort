@@ -5001,6 +5001,20 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "quotaNotSubscribed": "Token Plan 使用量：未加入",
+      "quotaUnlimited": "無制限",
+      "quotaPercent": "残り {{percent}}%",
+      "quotaFiveHour": "5 時間の利用枠：{{remaining}}",
+      "quotaWeekly": "週間利用枠：{{remaining}}",
+      "quotaReset": "リセット：{{time}}",
+      "remaining": "残りクレジット：{{amount}}",
+      "plan": "Token Plan：{{status}}",
+      "unknown": "不明（更新して確認）",
+      "active": "有効",
+      "inactive": "未加入",
+      "expires": "Token Plan 有効期限：{{time}}"
+    },
     "description": "MiniMax Code 公式のデバイス認証でログインします。Token Plan と API キーは Code のログイン資格情報ではありません。",
     "region": "アカウントの地域",
     "regions": {

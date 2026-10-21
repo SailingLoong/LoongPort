@@ -5,6 +5,13 @@ import { ProviderCard } from "@/components/providers/ProviderCard";
 import type { Provider } from "@/types";
 import { createTestQueryClient } from "../utils/testQueryClient";
 const entry = vi.hoisted(() => vi.fn());
+const identityEntry = vi.hoisted(() => vi.fn());
+vi.mock("@/components/providers/qoder/QoderInferenceIdentity", () => ({
+  QoderInferenceIdentity: (props: unknown) => {
+    identityEntry(props);
+    return <span>qoder-identity-entry</span>;
+  },
+}));
 vi.mock("@/components/providers/qoder/QoderDailyClaim", () => ({
   QoderDailyClaim: (props: unknown) => {
     entry(props);
@@ -28,18 +35,26 @@ vi.mock("@/lib/query/failover", () => ({
 vi.mock("@/lib/query/queries", () => ({
   useUsageQuery: () => ({ data: undefined }),
 }));
-function card(providerType: string) {
+function card(
+  providerType: string,
+  appId: "codex" | "claude" = "codex",
+  generation?: string,
+) {
+  const meta = {
+    providerType,
+    qoderCampaignState: generation ? { generation, pending: null } : undefined,
+  };
   const provider: Provider = {
     id: "qoder-fixture",
     name: "Synthetic",
     settingsConfig: {},
-    meta: { providerType },
+    meta,
   };
   return (
     <QueryClientProvider client={createTestQueryClient()}>
       <ProviderCard
         provider={provider}
-        appId="codex"
+        appId={appId}
         isCurrent={false}
         isProxyRunning={false}
         mutationsDisabled={true}
@@ -64,4 +79,41 @@ it("connects only the explicit Qoder Provider card and preserves mutation blocki
 it("does not expose claim controls for generic inference credentials", () => {
   render(card("generic"));
   expect(screen.queryByText("qoder-explicit-entry")).not.toBeInTheDocument();
+});
+
+it("mounts the inference identity beside Daily in the original Qoder slot", () => {
+  render(card("qoder_sdk"));
+  expect(screen.getByText("qoder-identity-entry")).toBeInTheDocument();
+  expect(screen.getByText("qoder-explicit-entry")).toBeInTheDocument();
+  expect(identityEntry).toHaveBeenCalledWith({
+    providerId: "qoder-fixture",
+    sourceGeneration: undefined,
+    disabled: true,
+  });
+});
+it.each(["generic", "codex_oauth"])(
+  "does not mount inference identity for %s",
+  (type) => {
+    render(card(type));
+    expect(screen.queryByText("qoder-identity-entry")).not.toBeInTheDocument();
+  },
+);
+it("keeps Qoder identity specific to the original Codex Provider route", () => {
+  render(card("qoder_sdk", "claude"));
+  expect(screen.queryByText("qoder-identity-entry")).not.toBeInTheDocument();
+});
+
+it("passes only the non-secret original source generation as an invalidation signal", () => {
+  const view = render(card("qoder_sdk", "codex", "generation-a"));
+  expect(identityEntry).toHaveBeenLastCalledWith({
+    providerId: "qoder-fixture",
+    sourceGeneration: "generation-a",
+    disabled: true,
+  });
+  view.rerender(card("qoder_sdk", "codex", "generation-b"));
+  expect(identityEntry).toHaveBeenLastCalledWith({
+    providerId: "qoder-fixture",
+    sourceGeneration: "generation-b",
+    disabled: true,
+  });
 });

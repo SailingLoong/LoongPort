@@ -1,3 +1,10 @@
+import type { ApplicationRoutingRequest } from "@/lib/api/applicationRouting";
+
+export interface InitialProxyRoute {
+  providerId: string;
+  request: ApplicationRoutingRequest;
+}
+
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ProxyStatus,
@@ -46,8 +53,25 @@ export const proxyApi = {
   async setProxyTakeoverForApp(
     appType: string,
     enabled: boolean,
+    initialRoute?: InitialProxyRoute,
   ): Promise<void> {
-    return invoke("set_proxy_takeover_for_app", { appType, enabled });
+    return invoke("set_proxy_takeover_for_app", {
+      appType,
+      enabled,
+      ...(initialRoute ? { initialRoute } : {}),
+    });
+  },
+
+  async prepareTakeoverRequest(
+    appType: "claude" | "codex",
+    providerId: string,
+    requestId: string,
+  ): Promise<ApplicationRoutingRequest> {
+    return invoke("prepare_proxy_takeover_request", {
+      appType,
+      providerId,
+      requestId,
+    });
   },
 
   // ========== v3+ 全局/应用级配置 API ==========

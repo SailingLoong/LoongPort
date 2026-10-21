@@ -17,11 +17,16 @@ pub(crate) mod gemini_direct;
 mod gemini_direct_tests;
 pub(crate) mod grok_direct;
 mod live;
+pub(crate) mod managed_inference;
+#[cfg(test)]
+mod managed_inference_tests;
 pub(crate) mod model_settings;
 mod native;
 pub(crate) use native::service_configuration_revision;
 mod pi;
+pub(crate) mod qoder_auth_http;
 pub(crate) mod qoder_daily;
+pub(crate) mod qoder_http_auth;
 mod transaction;
 mod usage;
 pub(crate) use transaction::with_provider_config_transaction;
@@ -281,6 +286,9 @@ pub fn provider_routing_requirement(
     app_type: &AppType,
     provider: &Provider,
 ) -> Option<ProviderRoutingReason> {
+    if managed_inference::is_managed_inference(provider) {
+        return Some(ProviderRoutingReason::ManagedOAuth);
+    }
     if provider.category.as_deref() == Some("official") {
         return None;
     }
@@ -468,7 +476,9 @@ pub fn provider_presentation_with_context(
         .then_some(ProviderSwitchBlockReason::OfficialBlockedByProxy);
     let uses_official_subscription_usage =
         provider_uses_official_subscription_usage(app_type, provider);
-    let can_configure_usage = (!is_official || uses_official_subscription_usage)
+    let account_route = managed_inference::is_managed_inference(provider);
+    let can_configure_usage = !account_route
+        && (!is_official || uses_official_subscription_usage)
         && !provider.is_github_copilot()
         && !provider.is_codex_oauth()
         && !provider.is_xai_oauth();
@@ -481,8 +491,8 @@ pub fn provider_presentation_with_context(
         is_managed,
         is_read_only,
         can_delete: !is_read_only && (is_omo || app_type.is_additive_mode() || !is_current),
-        can_edit: !is_read_only,
-        can_test_connectivity: !is_official,
+        can_edit: !is_read_only && !account_route,
+        can_test_connectivity: !is_official && !account_route,
         can_configure_usage,
         uses_official_subscription_usage,
         can_set_as_default: matches!(app_type, AppType::OpenClaw | AppType::Hermes) && is_in_config,
@@ -2372,6 +2382,8 @@ command = "legacy-cmd"
     #[serial]
     async fn update_current_codex_provider_refreshes_and_clears_catalog_during_takeover() {
         let _home = TempHome::new();
+        let _settings = crate::settings::TestSettingsScope::enter().expect("isolated settings");
+        crate::secrets::testing::initialize_settings().expect("unlock isolated settings");
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2502,6 +2514,8 @@ requires_openai_auth = true
     #[serial]
     async fn update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active() {
         let home = TempHome::new();
+        let _settings = crate::settings::TestSettingsScope::enter().expect("isolated settings");
+        crate::secrets::testing::initialize_settings().expect("unlock isolated settings");
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -5341,7 +5355,7 @@ impl ProviderService {
             && crate::mode::operation::uses_upstream4_schema(&state.db)?;
         let managed = matches!(app_type, AppType::Codex)
             && Self::managed_codex_oauth_account_id(&provider).is_some();
-        let _guard = if modern || managed {
+        let _guard = if modern || managed || managed_inference::is_managed_inference(&provider) {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
@@ -5359,6 +5373,31 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
     ) -> Result<bool, AppError> {
+        // The explicit account entry joins the existing application chain. It
+        // never assigns the direct pointer, merges credential-bearing snippets,
+        // or writes native files, even when this is the first provider.
+        if managed_inference::is_managed_inference(&provider) {
+            if add_to_live {
+                return Err(AppError::Config(
+                    "managedAccount.explicitRouteSaveRequired".into(),
+                ));
+            }
+            managed_inference::validate_new_entry(&app_type, &provider)?;
+            // This entry is creation-only. Under the original app lock a
+            // concurrent confirmation cannot replace an existing route/model.
+            if state
+                .db
+                .get_provider_by_id(&provider.id, app_type.as_str())?
+                .is_some()
+            {
+                return Err(AppError::Config(
+                    "managedAccount.providerAlreadyExists".into(),
+                ));
+            }
+            state.db.save_provider(app_type.as_str(), &provider)?;
+            return Ok(true);
+        }
+
         if app_type == AppType::Pi {
             return pi::add(state, provider, add_to_live);
         }
@@ -5607,6 +5646,16 @@ impl ProviderService {
         original_id: Option<&str>,
         mut provider: Provider,
     ) -> Result<Provider, AppError> {
+        let previous = state
+            .db
+            .get_provider_by_id(original_id.unwrap_or(&provider.id), app_type.as_str())?;
+        if managed_inference::is_managed_inference(&provider)
+            || previous
+                .as_ref()
+                .is_some_and(managed_inference::is_managed_inference)
+        {
+            return Err(managed_inference::edit_error());
+        }
         // ## 托管档位**可以**改内容，但**不许改 id**
         //
         // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
@@ -5688,6 +5737,10 @@ impl ProviderService {
         app_type: &AppType,
         mut provider: Provider,
     ) -> Result<Provider, AppError> {
+        if managed_inference::is_managed_inference(&provider) {
+            managed_inference::validate(app_type, &provider)?;
+            return Ok(provider);
+        }
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(app_type, &mut provider);
         Self::validate_provider_settings(app_type, &provider)?;
@@ -6361,6 +6414,7 @@ impl ProviderService {
                 .map_err(AppError::Message)?;
                 return Ok(SwitchResult::default());
             }
+            managed_inference::reject_direct(&provider)?;
             let previous = match app_type {
                 AppType::Claude | AppType::Codex | AppType::GrokBuild => {
                     crate::mode::current::direct_provider(&state.db, &app_type)?
@@ -6496,6 +6550,8 @@ impl ProviderService {
             return Ok(result);
         }
 
+        // Account-backed routes cannot become a native/API-key configuration.
+        managed_inference::reject_direct(_provider)?;
         // Normal mode: full switch with Live config write
         let mut result = Self::switch_normal(state, app_type.clone(), id, &providers)?;
         Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);

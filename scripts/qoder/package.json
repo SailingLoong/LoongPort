@@ -1,21 +1,12 @@
 {
-  "name": "@loongport/qoder-task-runtime",
+  "name": "@loongport/qoder-http-runtime",
   "private": true,
   "type": "module",
   "version": "0.1.0",
   "engines": {
     "node": ">=22"
   },
-  "exports": "./task-entry.mjs",
   "scripts": {
     "test": "node --test ../../tests/qoder-runtime/*.node-test.mjs"
-  },
-  "peerDependencies": {
-    "@qoder-ai/qoder-agent-sdk": "1.0.53"
-  },
-  "peerDependenciesMeta": {
-    "@qoder-ai/qoder-agent-sdk": {
-      "optional": true
-    }
   }
 }

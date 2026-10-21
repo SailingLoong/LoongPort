@@ -1,3 +1,12 @@
+import { StartupUpgrade } from "@/components/StartupUpgrade";
+import { startupUpgradeApi } from "@/lib/api/startupUpgrade";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { BindVendorSource } from "./BindVendorSource";
 import {
@@ -266,6 +275,20 @@ export function ApplicationWorkspace({
   const model = useApplicationOverview(appId, providers, onSwitchProvider);
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
+  const [reviewUpgrade, setReviewUpgrade] = useState(false);
+  const checkpointBlocked =
+    routing.modeState?.blockedReason === "upgrade.checkpoint_pending";
+  const upgrade = useQuery({
+    queryKey: ["startupUpgrade", "applicationRouting", appId],
+    queryFn: startupUpgradeApi.query,
+    enabled: checkpointBlocked,
+  });
+  const canReviewUpgrade =
+    checkpointBlocked &&
+    !upgrade.error &&
+    upgrade.data?.status === "database_verified" &&
+    Boolean(upgrade.data.reviewToken);
+
   const [modelSettingsBusy, setModelSettingsBusy] = useState(false);
   const [modelSettingsTarget, setModelSettingsTarget] =
     useState<ApplicationConfiguration | null>(null);
@@ -695,7 +718,14 @@ export function ApplicationWorkspace({
     Boolean(draft.confirmation) ||
     routing.busy ||
     model.busy;
-  const ownerBlocked = routing.modeState?.canWrite === false;
+  const ownerBlocked =
+    routing.modeState?.canWrite === false ||
+    Boolean(
+      routing.data &&
+      routing.writeBlocked &&
+      !routing.originalResult &&
+      !routing.error,
+    );
   const writesBlocked =
     Boolean(routing.writeBlocked) ||
     ownerBlocked ||
@@ -742,17 +772,20 @@ export function ApplicationWorkspace({
                   {configurations.length}
                 </span>
               </h2>
-              {routing.modeState?.status === "ready" && !routing.error && (
-                <span className="text-xs text-muted-foreground">
-                  {t(
-                    routing.modeState.mode === "direct"
-                      ? "applications.routingModeDirect"
-                      : routing.modeState.attached
-                        ? "applications.routingModeProxy"
-                        : "applications.routingModeDetached",
-                  )}
-                </span>
-              )}
+              {routing.modeState?.status === "ready" &&
+                routing.modeState.mode !== null &&
+                routing.modeState.writeProtocol === "native" &&
+                !routing.error && (
+                  <span className="text-xs text-muted-foreground">
+                    {t(
+                      routing.modeState.mode === "direct"
+                        ? "applications.routingModeDirect"
+                        : routing.modeState.attached
+                          ? "applications.routingModeProxy"
+                          : "applications.routingModeDetached",
+                    )}
+                  </span>
+                )}
               {isProxyAppId(appId) && (
                 <div className="inline-flex items-center gap-1">
                   <label className="inline-flex cursor-pointer items-center gap-2 text-sm">
@@ -945,6 +978,20 @@ export function ApplicationWorkspace({
             className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm"
           >
             <p>{t("applications.operationNeedsVerification")}</p>
+            {routing.modeState?.blockedReason?.startsWith("upgrade.") && (
+              <p data-blocked-reason={routing.modeState.blockedReason}>
+                {t(
+                  routing.modeState.blockedReason === "upgrade.source_changed"
+                    ? "codexSharedSettings.error.sourceChanged"
+                    : "startupUpgrade.verificationRequired",
+                )}
+              </p>
+            )}
+            {canReviewUpgrade && (
+              <Button variant="outline" onClick={() => setReviewUpgrade(true)}>
+                {t("startupUpgrade.reviewApps")}
+              </Button>
+            )}
             {routing.modeState?.publicationStarted === true && (
               <p>{t("applications.operationPublicationStarted")}</p>
             )}
@@ -959,6 +1006,7 @@ export function ApplicationWorkspace({
                 void model.refetch();
                 void routing.refetch();
                 void profilesQuery.refetch();
+                if (checkpointBlocked) void upgrade.refetch();
               }}
             >
               {t("applications.recheckOperation")}
@@ -1178,6 +1226,26 @@ export function ApplicationWorkspace({
           }
         />
       )}
+      <Dialog
+        open={reviewUpgrade && canReviewUpgrade}
+        onOpenChange={(open) => {
+          setReviewUpgrade(open);
+          if (!open) {
+            void routing.refetch();
+            void upgrade.refetch();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t("startupUpgrade.title")}</DialogTitle>
+            <DialogDescription>
+              {t("startupUpgrade.notComplete")}
+            </DialogDescription>
+          </DialogHeader>
+          {reviewUpgrade && canReviewUpgrade && <StartupUpgrade embedded />}
+        </DialogContent>
+      </Dialog>
       {editDialogs}
       <ApplicationChangeConfirmDialog
         review={review}

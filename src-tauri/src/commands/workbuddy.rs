@@ -103,3 +103,38 @@ pub(crate) async fn finish_workbuddy_authorization(
     )
     .await
 }
+
+#[tauri::command]
+pub(crate) async fn list_workbuddy_inference_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::workbuddy::inference::InferenceAccount>, Failure> {
+    crate::workbuddy::inference_commands::accounts(state.db.secret_session()).await
+}
+#[tauri::command]
+pub(crate) async fn begin_workbuddy_inference_authorization(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::workbuddy::inference_commands::Login, Failure> {
+    crate::workbuddy::inference_commands::begin(state.db.secrets.clone(), id).await
+}
+#[tauri::command]
+pub(crate) async fn poll_workbuddy_inference_authorization(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::workbuddy::inference_commands::PollResult, Failure> {
+    crate::workbuddy::inference_commands::poll(state.db.secrets.clone(), &flow_id).await
+}
+#[tauri::command]
+pub(crate) async fn cancel_workbuddy_inference_authorization(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<(), Failure> {
+    crate::workbuddy::inference_commands::cancel(state.db.secrets.clone(), &flow_id).await
+}
+#[tauri::command]
+pub(crate) async fn discover_workbuddy_inference_models(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::workbuddy::inference::Model>, Failure> {
+    crate::workbuddy::inference_commands::models(state.db.secrets.clone(), &id).await
+}

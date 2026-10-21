@@ -36,7 +36,7 @@ vi.mock("@/components/relay/onboarding/ServiceConfiguration", () => ({
   ),
 }));
 vi.mock("@/components/providers/AddProviderForm", () => ({
-  AddProviderForm: ({ onSubmit }: any) => {
+  AddProviderForm: ({ onSubmit, onSaveStart, onDone }: any) => {
     const [value, setValue] = useState("");
     return (
       <>
@@ -46,9 +46,12 @@ vi.mock("@/components/providers/AddProviderForm", () => ({
           onChange={(e) => setValue(e.target.value)}
         />
         <button
-          onClick={() =>
-            void Promise.resolve(onSubmit({ name: value })).catch(() => {})
-          }
+          onClick={() => {
+            const epoch = onSaveStart?.();
+            void Promise.resolve(onSubmit({ name: value }))
+              .then(() => onDone("saved", epoch))
+              .catch(() => {});
+          }}
         >
           Save
         </button>
@@ -65,6 +68,9 @@ describe("AddHub completion", () => {
         onBack={vi.fn()}
         onAddProvider={vi.fn()}
       />,
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.sections.relay" }),
     );
     await user.type(
       screen.getByRole("textbox", { name: "domain" }),

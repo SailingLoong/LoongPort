@@ -289,6 +289,20 @@ pub fn bind_vendor_source(db: &Database, source: &str, app: &AppType) -> Result<
         &[source, app.as_str()],
         &serde_json::to_string(&provider.meta).map_err(|_| invalid())?,
     )?;
+    // Missing priority is a legacy read-time projection of all existing rows.
+    // Materialize that exact pre-insert projection in this same transaction so
+    // an explicitly inactive attachment cannot join the fallback candidates.
+    // Existing order (including []) and duplicate bindings remain unchanged.
+    let priority_key = crate::proxy::application_routing::priority_key(app.as_str());
+    let priority_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+        [&priority_key],
+        |row| row.get(0),
+    )?;
+    if !priority_exists {
+        let before = crate::proxy::application_routing::chain_ids_on(&tx, app.as_str())?;
+        crate::proxy::application_routing::write_order_on(&tx, app.as_str(), &before)?;
+    }
     tx.execute("INSERT INTO providers(id,app_type,name,settings_config,website_url,category,meta,is_current,in_failover_queue) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0)",params![source,app.as_str(),provider.name,settings,provider.website_url,provider.category,meta])?;
     tx.commit()?;
     Ok(true)
@@ -370,7 +384,22 @@ mod tests {
     fn vendor_binding_creates_only_the_requested_inactive_reference() {
         let (db, source) = fixture();
         let before = db.get_all_providers("codex").unwrap();
-        let inventory = inventory_except_target(&db, &source);
+        let mut inventory = inventory_except_target(&db, &source);
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        // The only non-provider change is materializing the exact pre-insert
+        // empty chain. Keep the full snapshot comparison for every other row.
+        inventory
+            .iter_mut()
+            .find(|(table, _)| table == "settings")
+            .unwrap()
+            .1
+            .push(vec![
+                rusqlite::types::Value::Text("application_priority_claude".into()),
+                rusqlite::types::Value::Text("[]".into()),
+            ]);
         assert!(bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
         assert!(!bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
         assert_eq!(
@@ -378,6 +407,9 @@ mod tests {
             serde_json::to_value(before).unwrap()
         );
         assert_eq!(inventory_except_target(&db, &source), inventory);
+        assert!(crate::proxy::application_routing::chain_ids(&db, "claude")
+            .unwrap()
+            .is_empty());
         assert_eq!(db.get_all_providers("claude").unwrap().len(), 1);
         assert!(db.get_all_providers("gemini").unwrap().is_empty());
         assert!(db.get_current_provider("claude").unwrap().is_none());
@@ -786,5 +818,108 @@ mod tests {
             .settings_config
             .to_string()
             .contains("SYNTHETIC_BACKFILL_KEY"));
+    }
+
+    #[test]
+    fn vendor_binding_missing_priority_materializes_only_preinsert_candidates() {
+        let (db, source) = fixture();
+        let prior = Provider::with_id(
+            "prior".into(),
+            "Prior route".into(),
+            serde_json::json!({"env":{}}),
+            None,
+        );
+        db.save_provider("claude", &prior).unwrap();
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        assert!(bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
+        assert_eq!(
+            crate::proxy::application_routing::chain_ids(&db, "claude").unwrap(),
+            vec!["prior"]
+        );
+        assert_eq!(
+            db.get_setting("application_priority_claude")
+                .unwrap()
+                .as_deref(),
+            Some("[\"prior\"]")
+        );
+        assert!(db.get_current_provider("claude").unwrap().is_none());
+    }
+
+    #[test]
+    fn vendor_binding_existing_and_explicit_empty_priorities_remain_exact() {
+        for order in ["[]", "[\"prior-b\",\"prior-a\"]"] {
+            let (db, source) = fixture();
+            for id in ["prior-a", "prior-b"] {
+                db.save_provider(
+                    "claude",
+                    &Provider::with_id(id.into(), id.into(), serde_json::json!({"env":{}}), None),
+                )
+                .unwrap();
+            }
+            db.set_setting("application_priority_claude", order)
+                .unwrap();
+            assert!(bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
+            assert_eq!(
+                db.get_setting("application_priority_claude")
+                    .unwrap()
+                    .as_deref(),
+                Some(order)
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_binding_duplicate_does_not_repair_or_mutate_missing_priority() {
+        let (db, source) = fixture();
+        assert!(bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM settings WHERE key='application_priority_claude'",
+                [],
+            )
+            .unwrap();
+        let before = serde_json::to_value(db.get_all_providers("claude").unwrap()).unwrap();
+        assert!(!bind_vendor_source(&db, &source, &AppType::Claude).unwrap());
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(db.get_all_providers("claude").unwrap()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn vendor_binding_failed_insert_rolls_back_missing_priority_materialization() {
+        let (db, source) = fixture();
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        db.conn.lock().unwrap().execute_batch("CREATE TEMP TRIGGER synthetic_binding_insert_failure BEFORE INSERT ON providers WHEN NEW.app_type='claude' BEGIN SELECT RAISE(ABORT,'synthetic insert failure'); END;").unwrap();
+        assert!(bind_vendor_source(&db, &source, &AppType::Claude).is_err());
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        assert!(db.get_all_providers("claude").unwrap().is_empty());
+        assert!(db.get_provider_by_id(&source, "codex").unwrap().is_some());
+    }
+
+    #[test]
+    fn vendor_binding_invalid_source_never_materializes_missing_priority() {
+        let (db, _) = fixture();
+        assert!(bind_vendor_source(&db, "not-a-source", &AppType::Claude).is_err());
+        assert!(db
+            .get_setting("application_priority_claude")
+            .unwrap()
+            .is_none());
+        assert!(db.get_all_providers("claude").unwrap().is_empty());
     }
 }

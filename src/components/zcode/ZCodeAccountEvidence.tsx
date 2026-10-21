@@ -8,9 +8,11 @@ import type {
 /** Official amounts and windows are separate observations; never sum or convert them. */
 export function ZCodeAccountEvidence({
   value,
+  section = "all",
   quotaPresentation = "previous",
 }: {
   value: SessionCheckDisplay;
+  section?: "all" | "authorization" | "entitlements";
   quotaPresentation?: "previous" | "checking" | "current" | "unknown";
 }) {
   const { t } = useTranslation();
@@ -99,265 +101,287 @@ export function ZCodeAccountEvidence({
   );
   return (
     <div className="mt-2 space-y-3 text-xs text-muted-foreground">
-      <p>
-        {quotaPresentation === "current"
-          ? copy("quotaCurrentCheck", "Quota returned by this check")
-          : quotaPresentation === "checking"
-            ? copy(
-                "quotaPreviousChecking",
-                "Previous quota values · checking for updates",
-              )
-            : quotaPresentation === "unknown"
-              ? copy(
-                  "quotaPreviousNotCurrent",
-                  "Previous quota values · not current",
-                )
-              : copy("quotaLastKnown", "Last known quota values")}
-      </p>
-      {check(copy("businessSession", "Business session"), value.business.check)}
-      <div className="space-y-1">
-        {check("Start Plan", value.start.check)}
-        <p>{entitlements[value.start.entitlement]}</p>
-        {value.start.effectiveAtSeconds !== null &&
-          optional(
-            copy("effectiveAt", "Effective at"),
-            time(value.start.effectiveAtSeconds),
+      {section !== "entitlements" && (
+        <>
+          {check(
+            copy("businessSession", "Business session"),
+            value.business.check,
           )}
-        {check(copy("startQuota", "Start quota"), value.start.quota)}
-        {(quotaPresentation === "unknown" ||
-          value.start.quota.state === "unknown") && (
+        </>
+      )}
+      {section !== "authorization" && (
+        <>
           <p>
-            {copy(
-              "startQuotaCurrentUnknown",
-              "Current Start quota is unknown.",
-            )}
+            {quotaPresentation === "current"
+              ? copy("quotaCurrentCheck", "Quota returned by this check")
+              : quotaPresentation === "checking"
+                ? copy(
+                    "quotaPreviousChecking",
+                    "Previous quota values · checking for updates",
+                  )
+                : quotaPresentation === "unknown"
+                  ? copy(
+                      "quotaPreviousNotCurrent",
+                      "Previous quota values · not current",
+                    )
+                  : copy("quotaLastKnown", "Last known quota values")}
           </p>
-        )}
-        {quotaPresentation === "current" &&
-          value.start.quota.state !== "accepted" &&
-          value.start.buckets.length > 0 && (
-            <p>
-              {copy(
-                "quotaPreviousNotCurrent",
-                "Previous quota values · not current",
-              )}
-            </p>
-          )}
-        {value.start.serverTimeSeconds !== null &&
-          optional(
-            copy("serverTime", "Official server time"),
-            time(value.start.serverTimeSeconds),
-          )}
-        {value.start.plans.map((plan, index) => (
-          <div
-            key={index}
-            className="space-y-1 rounded border border-border-default p-2"
-          >
-            {optional(copy("planName", "Plan"), plan.name)}
-            {optional(copy("planInstance", "Plan instance"), plan.userPlanId)}
-            {optional(copy("planId", "Plan ID"), plan.planId)}
-            {optional(
-              copy("officialPlanStatus", "Official plan status"),
-              plan.status,
-            )}
-            {plan.startsAtSeconds !== null &&
+          <div className="space-y-1">
+            {check("Start Plan", value.start.check)}
+            <p>{entitlements[value.start.entitlement]}</p>
+            {value.start.effectiveAtSeconds !== null &&
               optional(
-                copy("startsAt", "Starts at"),
-                time(plan.startsAtSeconds),
+                copy("effectiveAt", "Effective at"),
+                time(value.start.effectiveAtSeconds),
               )}
-            {plan.endsAtSeconds !== null &&
-              optional(copy("endsAt", "Ends at"), time(plan.endsAtSeconds))}
-            {plan.entitlements.map((entry, entryIndex) => (
-              <div key={entryIndex}>
-                {optional(
-                  copy("entitlementName", "Entitlement"),
-                  entry.showName,
+            {check(copy("startQuota", "Start quota"), value.start.quota)}
+            {(quotaPresentation === "unknown" ||
+              value.start.quota.state === "unknown") && (
+              <p>
+                {copy(
+                  "startQuotaCurrentUnknown",
+                  "Current Start quota is unknown.",
                 )}
+              </p>
+            )}
+            {quotaPresentation === "current" &&
+              value.start.quota.state !== "accepted" &&
+              value.start.buckets.length > 0 && (
+                <p>
+                  {copy(
+                    "quotaPreviousNotCurrent",
+                    "Previous quota values · not current",
+                  )}
+                </p>
+              )}
+            {value.start.serverTimeSeconds !== null &&
+              optional(
+                copy("serverTime", "Official server time"),
+                time(value.start.serverTimeSeconds),
+              )}
+            {value.start.plans.map((plan, index) => (
+              <div
+                key={index}
+                className="space-y-1 rounded border border-border-default p-2"
+              >
+                {optional(copy("planName", "Plan"), plan.name)}
+                {optional(
+                  copy("planInstance", "Plan instance"),
+                  plan.userPlanId,
+                )}
+                {optional(copy("planId", "Plan ID"), plan.planId)}
+                {optional(
+                  copy("officialPlanStatus", "Official plan status"),
+                  plan.status,
+                )}
+                {plan.startsAtSeconds !== null &&
+                  optional(
+                    copy("startsAt", "Starts at"),
+                    time(plan.startsAtSeconds),
+                  )}
+                {plan.endsAtSeconds !== null &&
+                  optional(copy("endsAt", "Ends at"), time(plan.endsAtSeconds))}
+                {plan.entitlements.map((entry, entryIndex) => (
+                  <div key={entryIndex}>
+                    {optional(
+                      copy("entitlementName", "Entitlement"),
+                      entry.showName,
+                    )}
+                    {optional(
+                      copy("entitlementId", "Entitlement ID"),
+                      entry.entitlementId,
+                    )}
+                    {optional(copy("quotaPeriod", "Period"), entry.period)}
+                    {entry.effectiveAtSeconds !== null &&
+                      optional(
+                        copy("effectiveAt", "Effective at"),
+                        time(entry.effectiveAtSeconds),
+                      )}
+                  </div>
+                ))}
+              </div>
+            ))}
+            {value.start.buckets.map((bucket, index) => (
+              <div
+                key={index}
+                className="space-y-1 rounded border border-border-default p-2"
+                role="group"
+                aria-label={copy("quotaBucket", "Quota bucket {{number}}", {
+                  number: index + 1,
+                })}
+              >
+                {optional(copy("quotaName", "Quota"), bucket.showName)}
+                {optional(copy("bucketId", "Bucket ID"), bucket.bucketId)}
+                {optional(
+                  copy("planInstance", "Plan instance"),
+                  bucket.userPlanId,
+                )}
+                {optional(copy("planId", "Plan ID"), bucket.planId)}
                 {optional(
                   copy("entitlementId", "Entitlement ID"),
-                  entry.entitlementId,
+                  bucket.entitlementId,
                 )}
-                {optional(copy("quotaPeriod", "Period"), entry.period)}
-                {entry.effectiveAtSeconds !== null &&
+                {optional(copy("quotaMeter", "Meter"), bucket.meter)}
+                <p>
+                  {copy("quotaUnit", "Unit")}:{" "}
+                  {bucket.unitType ?? copy("quotaUnitMissing", "Not provided")}
+                </p>
+                {amount(
+                  copy("quotaTotal", "Total"),
+                  bucket.totalUnits,
+                  bucket.unitType,
+                )}
+                {amount(
+                  copy("quotaUsed", "Used"),
+                  bucket.usedUnits,
+                  bucket.unitType,
+                )}
+                {amount(
+                  copy("quotaReserved", "Reserved"),
+                  bucket.reservedUnits,
+                  bucket.unitType,
+                )}
+                {amount(
+                  copy("quotaRemaining", "Remaining"),
+                  bucket.remainingUnits,
+                  bucket.unitType,
+                )}
+                {amount(
+                  copy("quotaAvailable", "Available"),
+                  bucket.availableUnits,
+                  bucket.unitType,
+                )}
+                {bucket.periodStartSeconds !== null &&
                   optional(
-                    copy("effectiveAt", "Effective at"),
-                    time(entry.effectiveAtSeconds),
+                    copy("periodStartsAt", "Window starts"),
+                    time(bucket.periodStartSeconds),
+                  )}
+                {bucket.periodEndSeconds !== null &&
+                  optional(
+                    copy("periodEndsAt", "Window ends"),
+                    time(bucket.periodEndSeconds),
+                  )}
+                {bucket.expiresAtSeconds !== null &&
+                  optional(
+                    copy("expiresAt", "Expires at"),
+                    time(bucket.expiresAtSeconds),
                   )}
               </div>
             ))}
           </div>
-        ))}
-        {value.start.buckets.map((bucket, index) => (
-          <div
-            key={index}
-            className="space-y-1 rounded border border-border-default p-2"
-            role="group"
-            aria-label={copy("quotaBucket", "Quota bucket {{number}}", {
-              number: index + 1,
-            })}
-          >
-            {optional(copy("quotaName", "Quota"), bucket.showName)}
-            {optional(copy("bucketId", "Bucket ID"), bucket.bucketId)}
-            {optional(copy("planInstance", "Plan instance"), bucket.userPlanId)}
-            {optional(copy("planId", "Plan ID"), bucket.planId)}
-            {optional(
-              copy("entitlementId", "Entitlement ID"),
-              bucket.entitlementId,
+          <div className="space-y-1">
+            {check("Coding Plan", value.coding.check)}
+            <p>{entitlements[value.coding.entitlement]}</p>
+            {check(
+              copy("codingSubscription", "Coding subscription"),
+              value.coding.subscription,
             )}
-            {optional(copy("quotaMeter", "Meter"), bucket.meter)}
-            <p>
-              {copy("quotaUnit", "Unit")}:{" "}
-              {bucket.unitType ?? copy("quotaUnitMissing", "Not provided")}
-            </p>
-            {amount(
-              copy("quotaTotal", "Total"),
-              bucket.totalUnits,
-              bucket.unitType,
-            )}
-            {amount(
-              copy("quotaUsed", "Used"),
-              bucket.usedUnits,
-              bucket.unitType,
-            )}
-            {amount(
-              copy("quotaReserved", "Reserved"),
-              bucket.reservedUnits,
-              bucket.unitType,
-            )}
-            {amount(
-              copy("quotaRemaining", "Remaining"),
-              bucket.remainingUnits,
-              bucket.unitType,
-            )}
-            {amount(
-              copy("quotaAvailable", "Available"),
-              bucket.availableUnits,
-              bucket.unitType,
-            )}
-            {bucket.periodStartSeconds !== null &&
-              optional(
-                copy("periodStartsAt", "Window starts"),
-                time(bucket.periodStartSeconds),
-              )}
-            {bucket.periodEndSeconds !== null &&
-              optional(
-                copy("periodEndsAt", "Window ends"),
-                time(bucket.periodEndSeconds),
-              )}
-            {bucket.expiresAtSeconds !== null &&
-              optional(
-                copy("expiresAt", "Expires at"),
-                time(bucket.expiresAtSeconds),
-              )}
-          </div>
-        ))}
-      </div>
-      <div className="space-y-1">
-        {check("Coding Plan", value.coding.check)}
-        <p>{entitlements[value.coding.entitlement]}</p>
-        {check(
-          copy("codingSubscription", "Coding subscription"),
-          value.coding.subscription,
-        )}
-        {value.coding.subscriptions.map((subscription, index) => (
-          <div
-            key={index}
-            className="space-y-1 rounded border border-border-default p-2"
-          >
-            {optional(copy("planName", "Plan"), subscription.productName)}
-            {optional(copy("planId", "Plan ID"), subscription.productId)}
-            {optional(
-              copy("officialPlanStatus", "Official plan status"),
-              subscription.status,
-            )}
-            {optional(
-              copy("billingCycle", "Billing cycle"),
-              subscription.billingCycle,
-            )}
-            {optional(
-              copy("nextRenewal", "Next renewal"),
-              subscription.nextRenewTime,
-            )}
-            {optional(
-              copy("officialValidity", "Official validity"),
-              subscription.valid,
-            )}
-          </div>
-        ))}
-        {check(copy("codingQuota", "Coding quota"), value.coding.quota)}
-        {(quotaPresentation === "unknown" ||
-          value.coding.quota.state === "unknown") && (
-          <p>
-            {copy(
-              "codingQuotaCurrentUnknown",
-              "Current Coding quota is unknown.",
-            )}
-          </p>
-        )}
-        {quotaPresentation === "current" &&
-          value.coding.quota.state !== "accepted" &&
-          value.coding.limits.length > 0 && (
-            <p>
-              {copy(
-                "quotaPreviousNotCurrent",
-                "Previous quota values · not current",
-              )}
-            </p>
-          )}
-        {value.coding.limits.map((limit, index) => (
-          <div
-            key={index}
-            className="space-y-1 rounded border border-border-default p-2"
-            role="group"
-            aria-label={copy("codingLimit", "Coding limit {{number}}", {
-              number: index + 1,
-            })}
-          >
-            <p>{limit.limitType}</p>
-            <p>
-              {copy("quotaUnit", "Unit")}:{" "}
-              {limit.displayUnit ?? copy("quotaUnitMissing", "Not provided")}
-            </p>
-            <p>
-              {copy("quotaWindow", "Window")}:{" "}
-              {limit.windowLabel ?? copy("quotaWindowMissing", "Not provided")}
-            </p>
-            {amount(copy("officialUsage", "Official usage value"), limit.usage)}
-            {amount(
-              copy("quotaCurrentValue", "Current value"),
-              limit.currentValue,
-              limit.displayUnit,
-            )}
-            {amount(
-              copy("quotaRemaining", "Remaining"),
-              limit.remaining,
-              limit.displayUnit,
-            )}
-            {amount(
-              copy("quotaPercentage", "Percentage"),
-              limit.percentage,
-              "%",
-            )}
-            {limit.nextResetTimeMs !== null &&
-              optional(
-                copy("nextReset", "Next reset"),
-                time(limit.nextResetTimeMs, true),
-              )}
-            {limit.usageDetails.map((entry, entryIndex) => (
-              <div key={entryIndex}>
+            {value.coding.subscriptions.map((subscription, index) => (
+              <div
+                key={index}
+                className="space-y-1 rounded border border-border-default p-2"
+              >
+                {optional(copy("planName", "Plan"), subscription.productName)}
+                {optional(copy("planId", "Plan ID"), subscription.productId)}
                 {optional(
-                  copy("usageModel", "Model"),
-                  entry.displayName ?? entry.modelCode,
+                  copy("officialPlanStatus", "Official plan status"),
+                  subscription.status,
                 )}
-                {amount(
-                  copy("officialUsage", "Official usage value"),
-                  entry.usage,
+                {optional(
+                  copy("billingCycle", "Billing cycle"),
+                  subscription.billingCycle,
+                )}
+                {optional(
+                  copy("nextRenewal", "Next renewal"),
+                  subscription.nextRenewTime,
+                )}
+                {optional(
+                  copy("officialValidity", "Official validity"),
+                  subscription.valid,
                 )}
               </div>
             ))}
+            {check(copy("codingQuota", "Coding quota"), value.coding.quota)}
+            {(quotaPresentation === "unknown" ||
+              value.coding.quota.state === "unknown") && (
+              <p>
+                {copy(
+                  "codingQuotaCurrentUnknown",
+                  "Current Coding quota is unknown.",
+                )}
+              </p>
+            )}
+            {quotaPresentation === "current" &&
+              value.coding.quota.state !== "accepted" &&
+              value.coding.limits.length > 0 && (
+                <p>
+                  {copy(
+                    "quotaPreviousNotCurrent",
+                    "Previous quota values · not current",
+                  )}
+                </p>
+              )}
+            {value.coding.limits.map((limit, index) => (
+              <div
+                key={index}
+                className="space-y-1 rounded border border-border-default p-2"
+                role="group"
+                aria-label={copy("codingLimit", "Coding limit {{number}}", {
+                  number: index + 1,
+                })}
+              >
+                <p>{limit.limitType}</p>
+                <p>
+                  {copy("quotaUnit", "Unit")}:{" "}
+                  {limit.displayUnit ??
+                    copy("quotaUnitMissing", "Not provided")}
+                </p>
+                <p>
+                  {copy("quotaWindow", "Window")}:{" "}
+                  {limit.windowLabel ??
+                    copy("quotaWindowMissing", "Not provided")}
+                </p>
+                {amount(
+                  copy("officialUsage", "Official usage value"),
+                  limit.usage,
+                )}
+                {amount(
+                  copy("quotaCurrentValue", "Current value"),
+                  limit.currentValue,
+                  limit.displayUnit,
+                )}
+                {amount(
+                  copy("quotaRemaining", "Remaining"),
+                  limit.remaining,
+                  limit.displayUnit,
+                )}
+                {amount(
+                  copy("quotaPercentage", "Percentage"),
+                  limit.percentage,
+                  "%",
+                )}
+                {limit.nextResetTimeMs !== null &&
+                  optional(
+                    copy("nextReset", "Next reset"),
+                    time(limit.nextResetTimeMs, true),
+                  )}
+                {limit.usageDetails.map((entry, entryIndex) => (
+                  <div key={entryIndex}>
+                    {optional(
+                      copy("usageModel", "Model"),
+                      entry.displayName ?? entry.modelCode,
+                    )}
+                    {amount(
+                      copy("officialUsage", "Official usage value"),
+                      entry.usage,
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
     </div>
   );
 }

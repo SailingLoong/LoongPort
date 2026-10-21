@@ -704,7 +704,7 @@ async fn handle_claude_transform(
         ProxyError::TransformError(format!("Failed to serialize response: {e}"))
     })?;
 
-    let body = axum::body::Body::from(response_body);
+    let body = super::forwarder::final_buffered_body(connection_guard, response_body);
     builder.body(body).map_err(|e| {
         log::error!("[Claude] 构建响应失败: {e}");
         ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -786,108 +786,6 @@ pub async fn handle_chat_completions(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
-    if ctx
-        .provider
-        .meta
-        .as_ref()
-        .and_then(|m| m.provider_type.as_deref())
-        == Some("qoder_sdk")
-    {
-        // The SDK transport has no verified free route. HTTP provider settings
-        // cannot certify it; enforce free intent before resolving auth/runtime.
-        super::free_models::enforce(
-            &mut false,
-            &body,
-            &body,
-            "",
-            super::free_models::configured(&ctx.provider.settings_config),
-        )?;
-        let auth =
-            get_adapter(&AppType::Codex).and_then(|adapter| adapter.extract_auth(&ctx.provider));
-        let Some(auth) = auth else {
-            return Ok((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":{"code":"qoder_auth_required"}})),
-            )
-                .into_response());
-        };
-        // Trusted fixture injection exists only in the Rust test build. HTTP
-        // fields/headers cannot select an executable, SDK root or runtime.
-        #[cfg(test)]
-        let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
-        #[cfg(not(test))]
-        let test_host: Option<super::qoder_host::HostConfig> = None;
-        let host = if let Some(host) = test_host {
-            host
-        } else {
-            let worker = (|| {
-                #[cfg(feature = "gui")]
-                if let Some(app) = &state.app_handle {
-                    use tauri::Manager;
-                    if let Ok(resources) = app.path().resource_dir() {
-                        let path = resources.join("qoder/worker.mjs");
-                        if path.is_file() {
-                            return Some(path);
-                        }
-                    }
-                }
-                #[cfg(debug_assertions)]
-                {
-                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../scripts/qoder/worker.mjs");
-                    if path.is_file() {
-                        return Some(path);
-                    }
-                }
-                None
-            })();
-            let Some(worker) = worker else {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error":{"code":"qoder_runtime_unavailable"}})),
-                )
-                    .into_response());
-            };
-            let node = tokio::task::spawn_blocking(crate::commands::locate_node_runtime)
-                .await
-                .ok()
-                .and_then(Result::ok);
-            let Some(node) = node else {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error":{"type":"qoder_runtime_error","code":"qoder_node_unavailable","message":"Qoder requires an available Node.js executable."}})),
-                )
-                    .into_response());
-            };
-            let root = crate::config::get_app_config_dir().join("runtimes/qoder/1.0.53");
-            match super::qoder_runtime::resolve_runtime(node, worker, root).await {
-                Ok(host) => host,
-                Err(error) => {
-                    return Ok((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({"error":{"type":"qoder_runtime_error","code":error.code(),"message":error.message()}})),
-                    )
-                        .into_response())
-                }
-            }
-        };
-        let timeouts = ctx.streaming_timeout_config();
-        let guard = ActiveConnectionGuard::acquire(state.status.clone()).await;
-        // Account binding comes from the selected provider, never request JSON.
-        let dispatch = super::qoder_http::Dispatch {
-            host,
-            account_id: ctx.provider.id.clone(),
-            access_token: auth.api_key,
-            first_byte_timeout: timeouts.first_byte_timeout,
-            idle_timeout: timeouts.idle_timeout,
-            non_streaming_timeout: if ctx.failover_active {
-                ctx.app_config.non_streaming_timeout as u64
-            } else {
-                0
-            },
-        };
-        return Ok(super::qoder_http::handle(body, dispatch, (guard, ctx)).await);
-    }
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -914,7 +812,7 @@ pub async fn handle_chat_completions(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -1016,7 +914,7 @@ async fn handle_responses_for_app(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -1137,7 +1035,7 @@ pub async fn handle_alpha_search(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, false, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, false);
         }
     };
 
@@ -1221,7 +1119,7 @@ async fn handle_responses_compact_for_app(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
         }
     };
 
@@ -1339,7 +1237,6 @@ async fn handle_codex_responses_namespace_restore(
 
     // Non-streaming: restore the flattened function-call names in the full body,
     // then account usage from the (restore-neutral) Responses payload.
-    let _connection_guard = connection_guard;
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
     } else {
@@ -1423,7 +1320,10 @@ async fn handle_codex_responses_namespace_restore(
         axum::http::HeaderValue::from_static("application/json"),
     );
     builder
-        .body(axum::body::Body::from(restored_bytes))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            restored_bytes,
+        ))
         .map_err(|e| {
             log::error!("[{}] 构建 namespace 还原响应失败: {e}", ctx.tag);
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -1444,7 +1344,7 @@ async fn handle_codex_chat_to_responses_transform(
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
-        return handle_codex_chat_error_response(response, ctx, status).await;
+        return handle_codex_chat_error_response(response, ctx, status, is_stream).await;
     }
 
     if is_stream || response.is_sse() {
@@ -1543,7 +1443,6 @@ async fn handle_codex_chat_to_responses_transform(
         return Ok((headers, body).into_response());
     }
 
-    let _connection_guard = connection_guard;
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
     } else {
@@ -1660,7 +1559,10 @@ async fn handle_codex_chat_to_responses_transform(
     })?;
 
     builder
-        .body(axum::body::Body::from(response_body))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            response_body,
+        ))
         .map_err(|e| {
             log::error!("[Codex] 构建 Responses 响应失败: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -1686,7 +1588,7 @@ async fn handle_codex_anthropic_to_responses_transform(
     let status = response.status();
 
     if !status.is_success() {
-        return handle_codex_chat_error_response(response, ctx, status).await;
+        return handle_codex_chat_error_response(response, ctx, status, is_stream).await;
     }
 
     // Preserve live streaming when the gateway marks SSE correctly or omits an
@@ -1752,7 +1654,6 @@ async fn handle_codex_anthropic_to_responses_transform(
         );
     }
 
-    let _connection_guard = connection_guard;
     let responses_response =
         transform_codex_anthropic::anthropic_response_to_responses_with_context(
             anthropic_response,
@@ -1825,7 +1726,10 @@ async fn handle_codex_anthropic_to_responses_transform(
     })?;
 
     builder
-        .body(axum::body::Body::from(response_body))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            response_body,
+        ))
         .map_err(|e| {
             log::error!("[Codex] Failed to build Responses response: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
@@ -1928,11 +1832,12 @@ fn build_codex_anthropic_sse_response(
 /// 与正常响应分支配套：正常响应已经被改写成 Responses 形式，错误响应若仍保留
 /// Chat 错误体（如 MiniMax 的 `{"base_resp": {"status_code": 2013}}`），Codex
 /// 客户端的错误处理就无法对齐字段。这里读取上游 body、规整成
-/// `{"error": {message, type, code, param}}` 并保留原始 HTTP 状态码。
+/// `{"error": {message, type, code, param}}`。输入超限的流式请求改为 failed SSE，以支持客户端压缩恢复；其余保留原始 HTTP 状态码。
 async fn handle_codex_chat_error_response(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     status: axum::http::StatusCode,
+    is_stream: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
         std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
@@ -1967,6 +1872,11 @@ async fn handle_codex_chat_error_response(
     };
 
     let responses_error = transform_codex_chat::chat_error_to_response_error(Some(&parsed_value));
+    if let Some(response) =
+        codex_context_window_sse_response(&ctx.request_model, &responses_error, status, is_stream)
+    {
+        return Ok(response);
+    }
 
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
@@ -2006,10 +1916,23 @@ fn build_codex_proxy_error_response(
     ctx: &RequestContext,
     endpoint: &str,
     error: &ProxyError,
+    is_stream: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let body = codex_proxy_error_json(&ctx.provider.name, &ctx.request_model, endpoint, error);
+    let responses_endpoint = matches!(
+        endpoint.split('?').next(),
+        Some("/responses" | "/v1/responses")
+    );
+    if let Some(response) = codex_context_window_sse_response(
+        &ctx.request_model,
+        &body,
+        status,
+        is_stream && responses_endpoint,
+    ) {
+        return Ok(response);
+    }
     let body = serde_json::to_vec(&body).map_err(|e| {
         log::error!("[Codex] 序列化代理错误体失败: {e}");
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
@@ -2026,6 +1949,44 @@ fn build_codex_proxy_error_response(
             log::error!("[Codex] 构建代理错误响应失败: {e}");
             ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
         })
+}
+
+/// Codex recognizes context-budget failures in `response.failed` SSE events.
+/// A bare HTTP 400 is an invalid request to the client, even when its JSON has
+/// the right code. Return a failed stream so local compaction can trim history
+/// and retry. Other HTTP errors and non-streaming callers keep their status.
+fn codex_context_window_sse_response(
+    model: &str,
+    body: &Value,
+    status: StatusCode,
+    is_stream: bool,
+) -> Option<axum::response::Response> {
+    if !is_stream
+        || status != StatusCode::BAD_REQUEST
+        || body.pointer("/error/code").and_then(Value::as_str) != Some("context_length_exceeded")
+    {
+        return None;
+    }
+    let response = json!({
+        "id": format!("resp_{}", uuid::Uuid::new_v4().simple()),
+        "object": "response",
+        "created_at": chrono::Utc::now().timestamp(),
+        "status": "failed",
+        "model": model,
+        "output": [],
+        "error": body["error"],
+    });
+    Some(
+        (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            super::providers::codex_responses_sse::response_failed(&response),
+        )
+            .into_response(),
+    )
 }
 
 fn codex_proxy_error_json(
@@ -3730,7 +3691,7 @@ async fn handle_budgeted_native_response(
     ctx: &RequestContext,
     state: &ProxyState,
     route: crate::paperclip::RouteBinding,
-    _connection_guard: Option<ActiveConnectionGuard>,
+    connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (mut headers, status, bytes) =
         read_decoded_body(response, ctx.tag, std::time::Duration::from_secs(30)).await?;
@@ -3752,43 +3713,63 @@ async fn handle_budgeted_native_response(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&evidence.model);
-            if model != evidence.model {
+            if route.requires_legacy_budget() && model != evidence.model {
                 return Err(ProxyError::ConfigError(
                     "paperclip.response_model_changed".into(),
                 ));
             }
-            let id = usage.dedup_request_id(super::usage::parser::dedup_scope_for_app(
-                ctx.app_type_str,
-                &ctx.provider.id,
-            ));
-            let logger = super::usage::logger::UsageLogger::new(&state.db);
-            // This is the only write for the bounded response; no generic async
-            // process_response is subsequently invoked for this branch.
-            match logger.log_with_calculation_confirmed(
-                id,
-                ctx.provider.id.clone(),
-                ctx.app_type_str.into(),
-                model.into(),
-                ctx.request_model.clone(),
-                evidence.model.clone(),
-                usage,
-                evidence.multiplier,
-                ctx.latency_ms(),
-                None,
-                status.as_u16(),
-                Some(ctx.session_id.clone()),
-                None,
-                false,
-                evidence.input_tokens,
-            ) {
-                Ok(row) => {
-                    if let Some(service) = state.service_owner.upgrade() {
-                        let _ = route.record_usage(&service, row);
+            if !route.requires_legacy_budget() {
+                // Preserve the normal proxy pricing source, multiplier and usage owner.
+                log_usage(
+                    state,
+                    &ctx.provider.id,
+                    ctx.app_type_str,
+                    model,
+                    &ctx.request_model,
+                    &evidence.model,
+                    usage,
+                    ctx.latency_ms(),
+                    None,
+                    false,
+                    status.as_u16(),
+                    Some(ctx.session_id.clone()),
+                    evidence.input_tokens,
+                )
+                .await;
+            } else {
+                let id = usage.dedup_request_id(super::usage::parser::dedup_scope_for_app(
+                    ctx.app_type_str,
+                    &ctx.provider.id,
+                ));
+                let logger = super::usage::logger::UsageLogger::new(&state.db);
+                // This is the only write for the bounded response; no generic async
+                // process_response is subsequently invoked for this branch.
+                match logger.log_with_calculation_confirmed(
+                    id,
+                    ctx.provider.id.clone(),
+                    ctx.app_type_str.into(),
+                    model.into(),
+                    ctx.request_model.clone(),
+                    evidence.model.clone(),
+                    usage,
+                    evidence.multiplier,
+                    ctx.latency_ms(),
+                    None,
+                    status.as_u16(),
+                    Some(ctx.session_id.clone()),
+                    None,
+                    false,
+                    evidence.input_tokens,
+                ) {
+                    Ok(row) => {
+                        if let Some(service) = state.service_owner.upgrade() {
+                            let _ = route.record_usage(&service, row);
+                        }
                     }
-                }
-                Err(error) => {
-                    log::warn!("[USG-001] Native usage confirmation unavailable");
-                    let _ = error;
+                    Err(error) => {
+                        log::warn!("[USG-001] Native usage confirmation unavailable");
+                        let _ = error;
+                    }
                 }
             }
         }
@@ -3810,7 +3791,10 @@ async fn handle_budgeted_native_response(
         builder = builder.header(name, value);
     }
     builder
-        .body(axum::body::Body::from(bytes))
+        .body(super::forwarder::final_buffered_body(
+            connection_guard,
+            bytes,
+        ))
         .map_err(|_| ProxyError::Internal("paperclip.response_unavailable".into()))
 }
 
@@ -3889,5 +3873,66 @@ mod paperclip_usage_boundary_tests {
         let mut v = good;
         v["id"] = serde_json::json!("private task echo");
         assert!(!budget_usage_is_lossless(&v));
+    }
+}
+
+#[cfg(test)]
+mod codex_overflow_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn input_overflow_failed_stream_preserves_error_and_model() {
+        let error = json!({"error": {"code": "context_length_exceeded", "message": "input too long", "param": null}});
+        let response =
+            codex_context_window_sse_response("model-alias", &error, StatusCode::BAD_REQUEST, true)
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let wire = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(wire.starts_with("event: response.failed\n"));
+        let data = wire
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let event: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["type"], "response.failed");
+        assert_eq!(event["response"]["status"], "failed");
+        assert_eq!(event["response"]["model"], "model-alias");
+        assert_eq!(event["response"]["error"], error["error"]);
+        assert!(!wire.contains("response.completed"));
+    }
+
+    #[test]
+    fn unrelated_errors_and_non_streaming_keep_http_semantics() {
+        for (code, status, stream) in [
+            (
+                json!("context_length_exceeded"),
+                StatusCode::BAD_REQUEST,
+                false,
+            ),
+            (
+                json!("context_length_exceeded"),
+                StatusCode::TOO_MANY_REQUESTS,
+                true,
+            ),
+            (
+                json!("context_length_exceeded"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                true,
+            ),
+            (json!(400), StatusCode::BAD_REQUEST, true),
+            (json!("invalid_api_key"), StatusCode::BAD_REQUEST, true),
+            (Value::Null, StatusCode::BAD_REQUEST, true),
+        ] {
+            assert!(codex_context_window_sse_response(
+                "alias",
+                &json!({"error":{"code":code}}),
+                status,
+                stream
+            )
+            .is_none());
+        }
     }
 }

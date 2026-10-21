@@ -35,6 +35,9 @@ impl Fixture {
         } else {
             crate::secrets::testing::initialize_source17_database().unwrap()
         });
+        let mut proxy_config = crate::rt::block_on(db.get_global_proxy_config()).unwrap();
+        proxy_config.listen_port = 0;
+        crate::rt::block_on(db.update_global_proxy_config(proxy_config)).unwrap();
         let mut settings = crate::settings::get_settings();
         settings.claude_config_dir =
             Some(home.path().join(".claude").to_string_lossy().into_owned());

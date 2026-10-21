@@ -1,5 +1,6 @@
 import {
   applicationRoutingApi,
+  isApplicationCommonConfigWritable,
   type ApplicationRouting,
 } from "@/lib/api/applicationRouting";
 import {
@@ -249,6 +250,7 @@ export interface ProviderFormProps {
   /** Observes the original draft; never owns another editable copy. */
   onDraftRevisionChange?: (revision: number) => void;
   preserveBlankCredential?: boolean;
+  initialPresetName?: string;
   initialData?: {
     name?: string;
     websiteUrl?: string;
@@ -289,6 +291,7 @@ function ProviderFormFull({
   onSubmittingChange,
   onDraftRevisionChange,
   preserveBlankCredential = false,
+  initialPresetName,
   initialData,
   showButtons = true,
   isProxyTakeover = false,
@@ -322,8 +325,7 @@ function ProviderFormFull({
   const commonConfigReadOnly =
     !snippetAdmission.data ||
     Boolean(snippetAdmission.error) ||
-    (snippetAdmission.data.modeState != null &&
-      snippetAdmission.data.modeState.legacyCommonConfigWritable !== true);
+    !isApplicationCommonConfigWritable(appId, snippetAdmission.data.modeState);
   const isCommonConfigWriteAllowed = () => {
     const current = queryClient.getQueryState<ApplicationRouting>([
       "applicationRouting",
@@ -333,8 +335,7 @@ function ProviderFormFull({
       commonSnippetApp &&
       Boolean(current?.data) &&
       !current?.error &&
-      (current?.data?.modeState == null ||
-        current.data.modeState.legacyCommonConfigWritable === true)
+      isApplicationCommonConfigWritable(appId, current?.data?.modeState)
     );
   };
   const { data: settingsData } = useSettingsQuery();
@@ -449,6 +450,16 @@ function ProviderFormFull({
     mode: "onSubmit",
   });
   const { isSubmitting } = form.formState;
+  const domSubmitEpoch = useRef(0);
+  const pendingDomSubmit = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      // Activity hide/unmount ends this form session, even when its values survive.
+      ++domSubmitEpoch.current;
+      pendingDomSubmit.current = null;
+    },
+    [appId, providerId],
+  );
 
   const handleSettingsConfigChange = useCallback(
     (config: string) => {
@@ -1067,67 +1078,87 @@ function ProviderFormFull({
 
   const watchedDraft = useWatch({
     control: form.control,
-    disabled: !onDraftRevisionChange,
   });
   // Include raw/invalid input and hidden catalog metadata, not loading or layout.
-  const draftSignature = onDraftRevisionChange
-    ? JSON.stringify([
-        watchedDraft,
-        category,
-        selectedPresetId,
-        activePreset,
-        endpointAutoSelect,
-        localIsFullUrl,
-        pricingConfig,
-        localApiKeyField,
-        localApiFormat,
-        templateValues,
-        apiKey,
-        baseUrl,
-        claudeModel,
-        defaultHaikuModel,
-        defaultHaikuModelName,
-        defaultSonnetModel,
-        defaultSonnetModelName,
-        defaultOpusModel,
-        defaultOpusModelName,
-        defaultFableModel,
-        defaultFableModelName,
-        subagentModel,
-        selectedGitHubAccountId,
-        selectedCodexAccountId,
-        selectedXaiAccountId,
-        hasValidCodexOfficialSelection,
-        codexFastMode,
-        codexChatReasoning,
-        promptCacheRouting,
-        customUserAgent,
-        localProxyHeadersOverride,
-        localProxyBodyOverride,
-        codexAuth,
-        codexConfig,
-        codexCompactDraft,
-        codexApiKey,
-        codexBaseUrl,
-        codexModel,
-        codexCatalogModels,
-        localCodexApiFormat,
-        localCodexAnthropicAuthField,
-        localCodexImpersonateClaudeCode,
-        localCodexMaxOutputTokens,
-        geminiEnv,
-        geminiConfig,
-        geminiApiKey,
-        geminiBaseUrl,
-        geminiModel,
-        useCommonConfig,
-        commonConfigSnippet,
-        useCodexCommonConfigFlag,
-        codexCommonConfigSnippet,
-        useGeminiCommonConfigFlag,
-        geminiCommonConfigSnippet,
-      ])
-    : "";
+  const draftSignature = JSON.stringify([
+    watchedDraft,
+    category,
+    selectedPresetId,
+    activePreset,
+    endpointAutoSelect,
+    draftCustomEndpoints,
+    opencodeForm.opencodeProviderKey,
+    opencodeForm.opencodeNpm,
+    opencodeForm.opencodeApiKey,
+    opencodeForm.opencodeBaseUrl,
+    opencodeForm.opencodeHeaders,
+    opencodeForm.opencodeModels,
+    opencodeForm.opencodeExtraOptions,
+    openclawForm.openclawProviderKey,
+    openclawForm.openclawBaseUrl,
+    openclawForm.openclawApiKey,
+    openclawForm.openclawApi,
+    openclawForm.openclawModels,
+    openclawForm.openclawUserAgent,
+    hermesForm.hermesProviderKey,
+    hermesForm.hermesBaseUrl,
+    hermesForm.hermesApiKey,
+    hermesForm.hermesApiMode,
+    hermesForm.hermesModels,
+    hermesForm.hermesRateLimitDelay,
+    omoDraft.omoAgents,
+    omoDraft.omoCategories,
+    omoDraft.omoOtherFieldsStr,
+    localIsFullUrl,
+    pricingConfig,
+    localApiKeyField,
+    localApiFormat,
+    templateValues,
+    apiKey,
+    baseUrl,
+    claudeModel,
+    defaultHaikuModel,
+    defaultHaikuModelName,
+    defaultSonnetModel,
+    defaultSonnetModelName,
+    defaultOpusModel,
+    defaultOpusModelName,
+    defaultFableModel,
+    defaultFableModelName,
+    subagentModel,
+    selectedGitHubAccountId,
+    selectedCodexAccountId,
+    selectedXaiAccountId,
+    hasValidCodexOfficialSelection,
+    codexFastMode,
+    codexChatReasoning,
+    promptCacheRouting,
+    customUserAgent,
+    localProxyHeadersOverride,
+    localProxyBodyOverride,
+    codexAuth,
+    codexConfig,
+    codexCompactDraft,
+    codexApiKey,
+    codexBaseUrl,
+    codexModel,
+    codexCatalogModels,
+    localCodexApiFormat,
+    localCodexAnthropicAuthField,
+    localCodexImpersonateClaudeCode,
+    localCodexMaxOutputTokens,
+    geminiEnv,
+    geminiConfig,
+    geminiApiKey,
+    geminiBaseUrl,
+    geminiModel,
+    useCommonConfig,
+    commonConfigSnippet,
+    useCodexCommonConfigFlag,
+    codexCommonConfigSnippet,
+    useGeminiCommonConfigFlag,
+    geminiCommonConfigSnippet,
+  ]);
   const draftRevision = useRef({ signature: draftSignature, value: 0 });
   const pendingSoftRevision = useRef<number | null>(null);
   const acceptedSoftRevision = useRef<number | null>(null);
@@ -2135,6 +2166,17 @@ function ProviderFormFull({
     });
   };
 
+  const initialPresetApplied = useRef(false);
+  useEffect(() => {
+    if (!initialPresetName || initialData || initialPresetApplied.current)
+      return;
+    initialPresetApplied.current = true;
+    const entry = presetEntries.find(
+      (item) => item.preset.name === initialPresetName,
+    );
+    if (entry) handlePresetChange(entry.id);
+  }, [initialPresetName, initialData, presetEntries]);
+
   const settingsConfigErrorField = (
     <FormField
       control={form.control}
@@ -2152,9 +2194,44 @@ function ProviderFormFull({
       <Form {...form}>
         <form
           id="provider-form"
-          onSubmit={form.handleSubmit(handleSubmit)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            // RHF's isSubmitting state alone does not exclude two same-tick submits.
+            if (pendingDomSubmit.current !== null) return;
+            const epoch = ++domSubmitEpoch.current;
+            pendingDomSubmit.current = epoch;
+            const submittedValues = JSON.stringify(form.getValues());
+            const submittedRevision = draftRevision.current.value;
+            form.clearErrors("root.submit");
+            void form
+              .handleSubmit(handleSubmit)(event)
+              .catch(() => {
+                // The mutation owns its detailed error toast. This DOM boundary
+                // consumes the rejected event Promise and keeps a retryable form
+                // error without changing the save callback's rejection contract.
+                if (
+                  epoch === domSubmitEpoch.current &&
+                  submittedRevision === draftRevision.current.value &&
+                  submittedValues === JSON.stringify(form.getValues())
+                ) {
+                  form.setError("root.submit", {
+                    type: "submit",
+                    message: t("notifications.saveFailedGeneric"),
+                  });
+                }
+              })
+              .finally(() => {
+                if (pendingDomSubmit.current === epoch)
+                  pendingDomSubmit.current = null;
+              });
+          }}
           className="space-y-6 glass rounded-xl p-6 border border-white/10"
         >
+          {form.formState.errors.root?.submit?.message && (
+            <p role="alert" className="text-sm text-destructive">
+              {form.formState.errors.root.submit.message}
+            </p>
+          )}
           {!initialData && (
             <ProviderPresetSelector
               selectedPresetId={selectedPresetId}
@@ -2374,9 +2451,9 @@ function ProviderFormFull({
 
           {isQoderProvider && (
             <p className="text-sm text-muted-foreground">
-              {t("qoderDaily.configNotice", {
+              {t("qoderHttpIdentity.configNotice", {
                 defaultValue:
-                  "Qoder 国际版类型用于保留原生路由与独立积分入口。积分操作需另行声明国际 PAT 来源；这不代表 PAT 已验证可用于 SDK 推理。模型请按实际可用配置填写。设备组件来源未验证时不能领取。",
+                  "Qoder 国际版类型保留原供应商路由与独立积分入口。保存配置不会自动交换凭据；推理身份需在供应商卡片中明确声明国际版 PAT 后主动建立，旧 SDK Token 不会自动转换为 PAT。当前版本尚未开放 HTTP 推理。积分领取仍需独立声明与已验证的设备组件。模型请按实际可用配置填写。",
               })}
             </p>
           )}

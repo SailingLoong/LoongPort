@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   applicationRoutingApi,
+  isApplicationRoutingWriteBlocked,
+  type ApplicationRoutingPreparedRequest,
   type ApplicationRoutingChange,
   type ApplicationRouting,
   type ApplicationModeState,
@@ -60,8 +62,9 @@ export function useApplicationRouting(appId: AppId) {
     useState<ApplicationRoutingRequestResult | null>(null);
   const original = useRef<{
     change: string;
-    request: ApplicationRoutingRequest;
+    prepared: ApplicationRoutingPreparedRequest;
   } | null>(null);
+  const applying = useRef(false);
   const [checkingRequest, setCheckingRequest] = useState(false);
   const queryOriginal = async (request: ApplicationRoutingRequest) => {
     try {
@@ -90,12 +93,8 @@ export function useApplicationRouting(appId: AppId) {
       throw new Error("mode.verification_required");
     setCheckingRequest(true);
     try {
-      const request = await applicationRoutingApi.prepareRequest(
-        appId,
-        change,
-        crypto.randomUUID(),
-      );
-      original.current = { change: routingChangeImage(change), request };
+      const prepared = await prepare(change);
+      original.current = { change: routingChangeImage(change), prepared };
       await Promise.all([
         refresh(),
         client.invalidateQueries({ queryKey: ["applicationOverview", appId] }),
@@ -124,14 +123,26 @@ export function useApplicationRouting(appId: AppId) {
         revision: result.catalog.revision,
       },
     };
-    const request = await applicationRoutingApi.prepareRequest(
-      appId,
+    const prepared = await prepare(
       reviewed,
-      current.request.id,
+      current.prepared.protocol === "native"
+        ? current.prepared.request.id
+        : undefined,
     );
-    if (request.revision !== current.request.revision)
+    const previousRevision =
+      current.prepared.protocol === "native"
+        ? current.prepared.request.revision
+        : current.prepared.review.revision;
+    const revision =
+      prepared.protocol === "native"
+        ? prepared.request.revision
+        : prepared.review.revision;
+    if (
+      prepared.protocol !== current.prepared.protocol ||
+      revision !== previousRevision
+    )
       throw new Error("mode.verification_required");
-    original.current = { change: routingChangeImage(reviewed), request };
+    original.current = { change: routingChangeImage(reviewed), prepared };
   };
   const refresh = () => client.invalidateQueries({ queryKey: key });
   useTauriEvent(PROVIDER_SWITCHED, refresh);
@@ -146,16 +157,38 @@ export function useApplicationRouting(appId: AppId) {
   });
   const modeState = errorModeState(query.error) ?? query.data?.modeState;
   const writeBlocked =
-    !query.data || Boolean(query.error) || modeState?.canWrite === false;
+    !query.data ||
+    Boolean(query.error) ||
+    isApplicationRoutingWriteBlocked(appId, modeState);
   // Read the existing cache at invocation time, including an already-open confirmation.
   const requireWritable = () => {
     const current = client.getQueryState<ApplicationRouting>(key);
     if (
       !current?.data ||
       current.error ||
-      current.data.modeState?.canWrite === false
+      isApplicationRoutingWriteBlocked(appId, current.data.modeState)
     )
       throw new Error("mode.verification_required");
+  };
+  const prepare = async (
+    change: ApplicationRoutingChange,
+    requestId: string = crypto.randomUUID(),
+  ) => {
+    requireWritable();
+    const prepared = await applicationRoutingApi.prepareRequest(
+      appId,
+      change,
+      requestId,
+    );
+    requireWritable();
+    const state = client.getQueryData<ApplicationRouting>(key)?.modeState;
+    if (
+      !prepared ||
+      (prepared.protocol !== "native" && prepared.protocol !== "legacy") ||
+      (state && prepared.protocol !== state.writeProtocol)
+    )
+      throw new Error("mode.verification_required");
+    return prepared;
   };
   const onError = (error: unknown) =>
     toast.error(t("applications.updateFailed"), {
@@ -185,14 +218,30 @@ export function useApplicationRouting(appId: AppId) {
       if (original.current && original.current.change !== image)
         throw new Error("mode.verification_required");
       if (!original.current) {
-        const request = await applicationRoutingApi.prepareRequest(
-          appId,
-          change,
-          crypto.randomUUID(),
-        );
-        original.current = { change: image, request };
+        const prepared = await prepare(change);
+        original.current = { change: image, prepared };
       }
-      const request = original.current.request;
+      const prepared = original.current.prepared;
+      if (prepared.protocol === "legacy") {
+        try {
+          const result = await applicationRoutingApi.apply(
+            appId,
+            change,
+            quitChatgpt,
+            undefined,
+            prepared.review,
+          );
+          await prepareCatalogConfirmation(change, result);
+          if (result.status !== "confirmationRequired") original.current = null;
+          return result;
+        } catch (error) {
+          // No durable receipt exists. Refresh in onSettled, retain the draft,
+          // and require a new explicit user action rather than replaying it.
+          original.current = null;
+          throw error;
+        }
+      }
+      const request = prepared.request;
       try {
         const result = await applicationRoutingApi.apply(
           appId,
@@ -350,7 +399,13 @@ export function useApplicationRouting(appId: AppId) {
       resetTierErrors.isPending,
     apply: async (change: ApplicationRoutingChange, quitChatgpt?: boolean) => {
       requireWritable();
-      return apply.mutateAsync({ change, quitChatgpt });
+      if (applying.current) throw new Error("mode.verification_required");
+      applying.current = true;
+      try {
+        return await apply.mutateAsync({ change, quitChatgpt });
+      } finally {
+        applying.current = false;
+      }
     },
     setOrder: async (ids: string[]) => {
       requireWritable();

@@ -1,3 +1,7 @@
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+} from "@/components/relay/accounts/AccountWorkspace";
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -31,6 +35,7 @@ import type { GitHubAccount } from "@/lib/api";
 
 interface CopilotAuthSectionProps {
   className?: string;
+  unified?: boolean;
   /** select 模式只展示账号选择和管理入口；manage 模式展示完整账号管理 */
   mode?: "manage" | "select";
   /** 当前选中的 GitHub 账号 ID */
@@ -48,6 +53,7 @@ interface CopilotAuthSectionProps {
  */
 export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
   className,
+  unified = false,
   mode = "manage",
   selectedAccountId,
   onAccountSelect,
@@ -318,58 +324,94 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
             {t("copilot.loggedInAccounts", "已登录账号")}
           </Label>
           <div className="space-y-1">
-            {accounts.map((account) => (
-              <div
-                key={account.id}
-                className="flex items-center justify-between p-2 rounded-md border bg-muted/30"
+            {
+              <AccountWorkspace
+                accounts={accounts}
+                label={(account) => account.login}
+                enabled={unified}
               >
-                <div className="flex items-center gap-2">
-                  {renderAvatar(account)}
-                  <span className="text-sm font-medium">{account.login}</span>
-                  {defaultAccountId === account.id && (
-                    <Badge variant="secondary" className="text-xs">
-                      {t("copilot.defaultAccount", "默认")}
-                    </Badge>
-                  )}
-                  {account.github_domain &&
-                    account.github_domain !== "github.com" && (
-                      <Badge variant="outline" className="text-xs">
-                        {account.github_domain}
-                      </Badge>
-                    )}
-                  {selectedAccountId === account.id && (
-                    <Badge variant="outline" className="text-xs">
-                      {t("copilot.selected", "已选中")}
-                    </Badge>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
-                  {defaultAccountId !== account.id && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-xs text-muted-foreground"
-                      onClick={() => setDefaultAccount(account.id)}
-                      disabled={isSettingDefaultAccount}
+                {(account) => {
+                  const nativeAuthorization = (
+                    <div
+                      key={account.id}
+                      className="flex items-center justify-between p-2 rounded-md border bg-muted/30"
                     >
-                      {t("copilot.setAsDefault", "设为默认")}
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-red-500"
-                    onClick={(e) => handleRemoveAccount(account.id, e)}
-                    disabled={isRemovingAccount}
-                    title={t("copilot.removeAccount", "移除账号")}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            ))}
+                      <div className="flex items-center gap-2">
+                        {renderAvatar(account)}
+                        <span className="text-sm font-medium">
+                          {account.login}
+                        </span>
+                        {defaultAccountId === account.id && (
+                          <Badge variant="secondary" className="text-xs">
+                            {t("copilot.defaultAccount", "默认")}
+                          </Badge>
+                        )}
+                        {account.github_domain &&
+                          account.github_domain !== "github.com" && (
+                            <Badge variant="outline" className="text-xs">
+                              {account.github_domain}
+                            </Badge>
+                          )}
+                        {selectedAccountId === account.id && (
+                          <Badge variant="outline" className="text-xs">
+                            {t("copilot.selected", "已选中")}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {defaultAccountId !== account.id && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs text-muted-foreground"
+                            onClick={() => setDefaultAccount(account.id)}
+                            disabled={isSettingDefaultAccount}
+                          >
+                            {t("copilot.setAsDefault", "设为默认")}
+                          </Button>
+                        )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-red-500"
+                          onClick={(e) => handleRemoveAccount(account.id, e)}
+                          disabled={isRemovingAccount}
+                          title={t("copilot.removeAccount", "移除账号")}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                  if (!unified) return nativeAuthorization;
+                  return (
+                    <AccountDetailSections
+                      authorization={
+                        <>
+                          {nativeAuthorization}
+                          <p className="text-xs text-muted-foreground">
+                            账号记录与默认选择不等于实际请求已通过。
+                          </p>
+                        </>
+                      }
+                      entitlements={
+                        <p className="text-xs text-muted-foreground">
+                          此账号页未提供GitHub
+                          Copilot的签到领取或完整权益查询能力。未知不会显示为零，也不会套用其他平台的奖励。
+                        </p>
+                      }
+                      inference={
+                        <p className="text-xs text-muted-foreground">
+                          真实推理消费尚未验收。模型与流式请求需通过原应用入口独立验证。
+                        </p>
+                      }
+                    />
+                  );
+                }}
+              </AccountWorkspace>
+            }
           </div>
         </div>
       )}

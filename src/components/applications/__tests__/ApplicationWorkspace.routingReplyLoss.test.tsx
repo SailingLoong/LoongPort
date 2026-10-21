@@ -9,6 +9,7 @@ import {
 } from "@/lib/api/applicationRouting";
 import { applicationOverviewApi } from "@/lib/api/applicationOverview";
 import { orderProfilesApi } from "@/lib/api/orderProfiles";
+import { startupUpgradeApi } from "@/lib/api/startupUpgrade";
 import { modelVerificationApi } from "@/lib/api/modelVerification";
 
 // Keep every production hook, QueryClient, Workspace and child component real.
@@ -42,6 +43,7 @@ const config = (id: string, current: boolean) => ({
   canSelect: true,
   selection: { kind: "relay" as const },
 });
+let modeOverride: ApplicationRouting["modeState"] | undefined;
 let client: QueryClient;
 let published: "A" | "B" | "C";
 let readFailure: boolean;
@@ -54,7 +56,7 @@ let queryRequest: ReturnType<typeof vi.spyOn>;
 let receiptStatus: "completed" | "unknown";
 
 const routingFacts = (): ApplicationRouting => ({
-  modeState: {
+  modeState: modeOverride ?? {
     status: "ready",
     mode: "proxy",
     attached: true,
@@ -62,6 +64,8 @@ const routingFacts = (): ApplicationRouting => ({
     directProviderId: "a",
     publicationStarted: false,
     canWrite: true,
+    writeProtocol: "native",
+    blockedReason: null,
     canRecheck: true,
   },
   autoFailoverEnabled: true,
@@ -109,6 +113,11 @@ const props = {
 };
 
 beforeEach(() => {
+  modeOverride = undefined;
+  vi.spyOn(startupUpgradeApi, "query").mockResolvedValue({
+    status: "runtime_active",
+    reviewToken: null,
+  } as any);
   published = "A";
   receiptStatus = "completed";
   readFailure = false;
@@ -137,10 +146,13 @@ beforeEach(() => {
   vi.spyOn(modelVerificationApi, "listSummaries").mockResolvedValue([]);
   vi.spyOn(applicationRoutingApi, "prepareRequest").mockImplementation(
     async (_app, _change, id) => ({
-      id,
-      scope: "applicationRouting",
-      draftDigest: "a".repeat(64),
-      revision: "b".repeat(64),
+      protocol: "native",
+      request: {
+        id,
+        scope: "applicationRouting",
+        draftDigest: "a".repeat(64),
+        revision: "b".repeat(64),
+      },
     }),
   );
   queryRequest = vi
@@ -166,7 +178,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function stageAndApply() {
+async function stageReview() {
   render(
     <QueryClientProvider client={client}>
       <ApplicationWorkspace {...props} />
@@ -187,6 +199,10 @@ async function stageAndApply() {
     name: /applications.applyOrder/,
   });
   await userEvent.click(button);
+  return button;
+}
+async function stageAndApply() {
+  const button = await stageReview();
   await userEvent.click(
     await screen.findByRole("button", { name: "common.confirm" }),
   );
@@ -316,4 +332,96 @@ describe("U01 real Workspace and routing hook after a lost apply reply", () => {
     await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
     expect(apply.mock.calls[1][3].id).not.toEqual(request.id);
   });
+});
+
+describe("real Workspace migration capability flow", () => {
+  it("retains a failed legacy draft, refreshes facts and waits for a new explicit review", async () => {
+    modeOverride = {
+      ...routingFacts().modeState!,
+      writeProtocol: "legacy",
+      mode: null,
+      attached: null,
+    };
+    vi.mocked(applicationRoutingApi.prepareRequest).mockResolvedValue({
+      protocol: "legacy",
+      review: { draftDigest: "legacy-draft", revision: "legacy-revision" },
+    });
+    apply
+      .mockRejectedValueOnce(new Error("legacy reply lost"))
+      .mockResolvedValue({
+        status: "switched",
+        providerName: "B",
+        warnings: [],
+        chatgptWasRunning: false,
+        chatgptRelaunched: false,
+      });
+    const button = await stageReview();
+    expect(
+      screen.queryByText("applications.routingModeProxy"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("applications.routingModeDetached"),
+    ).not.toBeInTheDocument();
+    const reads = get.mock.calls.length;
+    await userEvent.click(
+      await screen.findByRole("button", { name: "common.confirm" }),
+    );
+    await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(get.mock.calls.length).toBeGreaterThan(reads);
+    expect(screen.getByText("applications.pendingChanges")).toBeInTheDocument();
+    expect(queryRequest).not.toHaveBeenCalled();
+    await userEvent.click(button);
+    expect(apply).toHaveBeenCalledTimes(1);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "common.confirm" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText("applications.pendingChanges"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(applicationRoutingApi.prepareRequest).toHaveBeenCalledTimes(2);
+    expect(queryRequest).not.toHaveBeenCalled();
+  });
+  it.each(["runtime_active", "database_verified"])(
+    "only offers the verified checkpoint's original review entry: %s",
+    async (status) => {
+      modeOverride = {
+        ...routingFacts().modeState!,
+        status: "unknown",
+        canWrite: false,
+        writeProtocol: null,
+        blockedReason: "upgrade.checkpoint_pending",
+      };
+      vi.mocked(startupUpgradeApi.query).mockResolvedValue({
+        status,
+        reviewToken: status === "database_verified" ? "review-token" : null,
+      } as any);
+      render(
+        <QueryClientProvider client={client}>
+          <ApplicationWorkspace {...props} />
+        </QueryClientProvider>,
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("switch", { name: "applications.autoFailover" }),
+        ).toBeDisabled(),
+      );
+      await waitFor(() => expect(startupUpgradeApi.query).toHaveBeenCalled());
+      if (status === "database_verified")
+        expect(
+          await screen.findByRole("button", {
+            name: "startupUpgrade.reviewApps",
+          }),
+        ).toBeEnabled();
+      else
+        expect(
+          screen.queryByRole("button", { name: "startupUpgrade.reviewApps" }),
+        ).not.toBeInTheDocument();
+      expect(apply).not.toHaveBeenCalled();
+      expect(applicationRoutingApi.prepareRequest).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -5001,6 +5001,20 @@
     }
   },
   "minimaxCode": {
+    "entitlement": {
+      "quotaNotSubscribed": "Token Plan usage: Not subscribed",
+      "quotaUnlimited": "Unlimited",
+      "quotaPercent": "{{percent}}% remaining",
+      "quotaFiveHour": "5-hour quota: {{remaining}}",
+      "quotaWeekly": "Weekly quota: {{remaining}}",
+      "quotaReset": "Resets: {{time}}",
+      "remaining": "Remaining credits: {{amount}}",
+      "plan": "Token Plan: {{status}}",
+      "unknown": "Unknown (refresh to check)",
+      "active": "Active",
+      "inactive": "Not active",
+      "expires": "Token Plan expires: {{time}}"
+    },
     "description": "Sign in through the official MiniMax Code device authorization flow. Token Plan and API keys are not Code login credentials.",
     "region": "Account region",
     "regions": {

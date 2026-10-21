@@ -54,6 +54,7 @@ pub(crate) struct Operation {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountView {
+    pub entitlement: Option<super::entitlement::Entitlement>,
     pub id: String,
     pub label: String,
     pub region: Region,
@@ -179,6 +180,7 @@ impl Account {
             self.status
         };
         AccountView {
+            entitlement: None,
             id: self.id.clone(),
             label: self.label.clone(),
             region: self.region,

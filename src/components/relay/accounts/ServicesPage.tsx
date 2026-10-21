@@ -1,4 +1,15 @@
-import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
+import { AccountApplicationNavigation } from "./AccountWorkspace";
+import { AccountPlatformTabs } from "./AccountPlatformTabs";
+import {
+  serviceEntryIntent,
+  type ServiceEntryIntent,
+} from "./serviceEntryIntent";
+import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
+import {
+  accountPlatforms,
+  accountPlatformLabel,
+  type AccountPlatform,
+} from "./accountPlatforms";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -21,7 +32,7 @@ import {
 import type { AccountRoute } from "@/components/shell/navigation";
 import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
-import { RelaySection, type RelaySectionProps } from "../RelaySection";
+import { RelaySection } from "../RelaySection";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 import { formatResetAt } from "@/components/applications/tierMetrics";
 import { usageApi } from "@/lib/api/usage";
@@ -38,10 +49,16 @@ import {
 
 export interface ServicesPageProps {
   appId: AppId;
+  platform?: AccountPlatform;
+  onOpenPlatform?: (platform: AccountPlatform | undefined) => void;
+  onNavigationBlockedChange?: (blocked: boolean) => void;
   account?: AccountRoute;
   onBack?: () => void;
   onSelectAccount?: (account: AccountRoute | undefined, app: AppId) => void;
-  onOpenAddHub: RelaySectionProps["onOpenAddHub"];
+  onOpenAddHub: (
+    tab: import("../AddHubPage").AddHubTab,
+    opts?: { firstVisit?: boolean; intent?: ServiceEntryIntent },
+  ) => void;
   onOpenApp: (appId: AppId) => void;
 }
 
@@ -71,8 +88,45 @@ function useAccountActivity() {
   };
 }
 
-export function ServicesPage({
+export function ServicesPage(props: ServicesPageProps) {
+  const [localPlatform, setLocalPlatform] = useState<
+    AccountPlatform | undefined
+  >(props.platform);
+  const [blocked, setBlocked] = useState(false);
+  const active = props.onOpenPlatform ? props.platform : localPlatform;
+  const select = (platform: AccountPlatform | undefined) => {
+    if (blocked) return;
+    if (props.onOpenPlatform) props.onOpenPlatform(platform);
+    else setLocalPlatform(platform);
+  };
+  return (
+    <AccountApplicationNavigation.Provider
+      value={() => props.onOpenApp(props.appId)}
+    >
+      <div className="space-y-4">
+        <AccountPlatformTabs
+          active={active}
+          onSelect={select}
+          disabled={blocked}
+        />
+        <ServicesPageContent
+          {...props}
+          platform={active}
+          onOpenPlatform={select}
+          onNavigationBlockedChange={(value) => {
+            setBlocked(value);
+            props.onNavigationBlockedChange?.(value);
+          }}
+        />
+      </div>
+    </AccountApplicationNavigation.Provider>
+  );
+}
+
+function ServicesPageContent({
   appId,
+  platform,
+  onNavigationBlockedChange,
   account,
   onBack,
   onSelectAccount,
@@ -115,6 +169,49 @@ export function ServicesPage({
       (account) =>
         account.kind === selection.kind && account.id === selection.id,
     );
+
+  const sourceIntent = platform ? serviceEntryIntent(platform) : undefined;
+  if (platform && sourceIntent) {
+    return (
+      <section className="page-content space-y-4">
+        <h2 className="text-xl font-semibold">
+          {accountPlatformLabel(
+            accountPlatforms.find((item) => item.id === platform)!,
+          )}
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          {platform === "qoder"
+            ? "Qoder 账号接入待完善。不会以自定义 API 或 SDK 配置代替账号积分与签到。"
+            : platform === "openrouter"
+              ? "API Key 连接，不代表平台账号签到或积分接入。"
+              : "OpenCode 服务来源（Zen / Go / Free），与消费应用选择分开。"}
+        </p>
+        <Button
+          variant="outline"
+          onClick={() => onOpenAddHub("accounts", { intent: sourceIntent })}
+        >
+          {platform === "qoder" ? "查看接入说明" : "添加服务连接"}
+        </Button>
+      </section>
+    );
+  }
+  if (platform) {
+    return (
+      <section className="page-content space-y-6">
+        <h2 className="text-xl font-semibold">
+          {accountPlatformLabel(
+            accountPlatforms.find((item) => item.id === platform)!,
+          )}
+        </h2>
+        <AuthCenterPanel
+          key={platform}
+          platform={platform}
+          editionScoped
+          onNavigationBlockedChange={onNavigationBlockedChange}
+        />
+      </section>
+    );
+  }
 
   if (selection) {
     return (
@@ -230,15 +327,49 @@ export function ServicesPage({
           <header className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="max-w-xl text-sm leading-6 text-muted-foreground">
-                {t("loongport.accounts.description")}
+                {t("loongport.accounts.title")}
               </p>
             </div>
-            <Button onClick={() => onOpenAddHub("directory")}>
+            <Button onClick={() => onOpenAddHub("accounts")}>
               <Plus className="h-4 w-4" />
-              {t("loongport.accounts.add")}
+              {t("common.add")}
             </Button>
           </header>
-          <WorkBuddyAccounts />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={() =>
+                onOpenAddHub("accounts", {
+                  intent: { kind: "account-boundary", platform: "qoder" },
+                })
+              }
+            >
+              Qoder · {t("loongport.accounts.openApp")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                onOpenAddHub("accounts", {
+                  intent: { kind: "provider-preset", preset: "OpenRouter" },
+                })
+              }
+            >
+              OpenRouter · {t("loongport.accounts.openApp")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                onOpenAddHub("accounts", {
+                  intent: { kind: "vendor", vendorId: "opencode" },
+                })
+              }
+            >
+              OpenCode · {t("loongport.accounts.add")}
+            </Button>
+          </div>
+          <h2 className="text-sm font-medium">
+            {t("loongport.accounts.relay")} · {t("loongport.accounts.vendor")}
+          </h2>
           {isPending && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("common.loading")}

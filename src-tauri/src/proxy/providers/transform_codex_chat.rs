@@ -783,6 +783,45 @@ fn attach_pending_reasoning_to_assistant_unique(
     }
 }
 
+fn hoisted_system_message(item: &Value) -> Option<Value> {
+    let item_type = item.get("type").and_then(Value::as_str);
+    if matches!(
+        item_type,
+        Some(
+            "function_call"
+                | "custom_tool_call"
+                | "tool_search_call"
+                | "function_call_output"
+                | "custom_tool_call_output"
+                | "tool_search_output"
+                | "reasoning"
+                | "compaction_trigger"
+                | "compaction"
+                | "compaction_summary"
+                | "context_compaction"
+                | "additional_tools"
+        )
+    ) {
+        return None;
+    }
+    let role = item.get("role").and_then(Value::as_str)?;
+    if responses_role_to_chat_role(role) != "system" {
+        return None;
+    }
+    let content = match item_type {
+        Some("input_text" | "input_image" | "input_file" | "input_audio") => {
+            responses_content_to_chat_content("system", &Value::Array(vec![item.clone()]))
+        }
+        _ => responses_content_to_chat_content("system", item.get("content")?),
+    };
+    content.is_string().then(|| {
+        json!({
+            "role": "system",
+            "content": content
+        })
+    })
+}
+
 fn append_responses_item_as_chat_message(
     item: &Value,
     messages: &mut Vec<Value>,
@@ -792,6 +831,20 @@ fn append_responses_item_as_chat_message(
     last_assistant_index: &mut Option<usize>,
     tool_context: &CodexToolContext,
 ) -> Result<(), ProxyError> {
+    // Text system/developer notices are hoisted to the head after conversion.
+    // Preserve the pending media batch here; flushing it would split parallel
+    // results into `tool, user, tool` before that notice is hoisted away.
+    if let Some(system_message) = hoisted_system_message(item) {
+        flush_pending_tool_calls(
+            messages,
+            pending_tool_calls,
+            pending_media,
+            pending_reasoning,
+            last_assistant_index,
+        );
+        messages.push(system_message);
+        return Ok(());
+    }
     let item_type = item.get("type").and_then(|v| v.as_str());
     match item_type {
         Some("function_call") => {
@@ -2091,17 +2144,6 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
         });
     };
 
-    if let Some(text) = value.as_str() {
-        return json!({
-            "error": {
-                "message": text,
-                "type": "upstream_error",
-                "code": serde_json::Value::Null,
-                "param": serde_json::Value::Null,
-            }
-        });
-    }
-
     let source = value.get("error").unwrap_or(value);
 
     let message = source
@@ -2123,11 +2165,20 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
         .map(ToString::to_string)
         .unwrap_or_else(|| "upstream_error".to_string());
 
-    let code = source
+    let mut code = source
         .get("code")
         .cloned()
         .or_else(|| source.pointer("/base_resp/status_code").cloned())
         .unwrap_or(serde_json::Value::Null);
+
+    // Gemini's input overflow must use the code recognized by Codex's
+    // context-budget recovery. Do not classify output limits or quota errors.
+    if message
+        .to_ascii_lowercase()
+        .contains("input token count exceeds the maximum number of tokens allowed")
+    {
+        code = json!("context_length_exceeded");
+    }
 
     let param = source
         .get("param")
@@ -5945,5 +5996,132 @@ mod tests {
         assert_eq!(result["messages"][1]["content"], "first result");
         assert_eq!(result["messages"][2]["content"], "second result");
         assert_eq!(result["messages"][3]["content"], "third result");
+    }
+    #[test]
+    fn gemini_input_overflow_errors() {
+        let message = "The input token count exceeds the maximum number of tokens allowed 1048576.";
+        for input in [
+            json!({ "error": { "code": 400, "status": "INVALID_ARGUMENT", "message": message } }),
+            json!({ "error": { "type": "invalid_request_error", "message": message } }),
+            json!({ "detail": message }),
+            json!(message),
+        ] {
+            let result = chat_error_to_response_error(Some(&input));
+            assert_eq!(result["error"]["code"], "context_length_exceeded");
+            assert_eq!(result["error"]["message"], message);
+        }
+        let ordinary_error = json!({ "error": {
+            "code": 400, "status": "INVALID_ARGUMENT",
+            "message": "max_output_tokens exceeds the maximum number of tokens allowed 65536."
+        } });
+        assert_eq!(
+            chat_error_to_response_error(Some(&ordinary_error))["error"]["code"],
+            400
+        );
+    }
+
+    #[test]
+    fn hoisted_notices_preserve_parallel_tool_media_contiguity() {
+        for model in ["deepseek-flash", "generic-chat"] {
+            for role in ["developer", "system"] {
+                for shape in ["message", "input_text", "future_notice"] {
+                    let notice = if shape == "input_text" {
+                        json!({"type": shape, "role": role, "text": "image resized"})
+                    } else {
+                        json!({"type": shape, "role": role, "content": "image resized"})
+                    };
+                    let body = json!({"model": model, "input": [
+                        {"role":"user", "content":"inspect"},
+                        {"type":"function_call", "call_id":"a", "name":"view_image", "arguments":"{}"},
+                        {"type":"function_call", "call_id":"b", "name":"view_image", "arguments":"{}"},
+                        {"type":"function_call_output", "call_id":"a", "output":[{"type":"input_image", "image_url":"data:image/png;base64,aA=="}]},
+                        notice,
+                        {"type":"function_call_output", "call_id":"b", "output":[{"type":"input_image", "image_url":"data:image/png;base64,Yg=="}]}
+                    ]});
+                    let result = responses_to_chat_completions(body).unwrap();
+                    assert_eq!(
+                        message_roles(&result),
+                        vec!["system", "user", "assistant", "tool", "tool", "user"],
+                        "{model} {role} {shape}: {result}"
+                    );
+                    assert_eq!(result["messages"][3]["tool_call_id"], "a");
+                    assert_eq!(result["messages"][4]["tool_call_id"], "b");
+                    assert_eq!(result["messages"][0]["content"], "image resized");
+                    assert_eq!(
+                        result["messages"][5]["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|v| v["type"] == "image_url")
+                            .count(),
+                        2
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hoisted_notice_detection_does_not_reclassify_tool_or_media_items() {
+        for kind in [
+            "function_call",
+            "custom_tool_call",
+            "tool_search_call",
+            "function_call_output",
+            "custom_tool_call_output",
+            "tool_search_output",
+            "reasoning",
+            "additional_tools",
+        ] {
+            assert!(
+                hoisted_system_message(
+                    &json!({"type": kind, "role": "developer", "content": "not a notice"})
+                )
+                .is_none(),
+                "{kind}"
+            );
+        }
+        assert!(hoisted_system_message(&json!({"type":"message", "role":"developer", "content":[{"type":"input_image", "image_url":"data:image/png;base64,aA=="}]})).is_none());
+        for role in ["user", "assistant", "latest_reminder"] {
+            assert!(hoisted_system_message(
+                &json!({"type":"message", "role":role, "content":"real boundary"})
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn real_user_boundary_still_flushes_tool_media_before_next_turn() {
+        let result = responses_to_chat_completions(json!({"model":"generic", "input":[
+            {"type":"function_call", "call_id":"a", "name":"view_image", "arguments":"{}"},
+            {"type":"function_call_output", "call_id":"a", "output":[{"type":"input_image", "image_url":"data:image/png;base64,aA=="}]},
+            {"role":"user", "content":"new task"},
+            {"type":"function_call", "call_id":"b", "name":"exec", "arguments":"{}"},
+            {"type":"function_call_output", "call_id":"b", "output":"ok"}
+        ]})).unwrap();
+        assert_eq!(
+            message_roles(&result),
+            vec!["assistant", "tool", "user", "user", "assistant", "tool"]
+        );
+        assert_eq!(result["messages"][3]["content"], "new task");
+        assert_eq!(result["messages"][4]["tool_calls"][0]["id"], "b");
+    }
+
+    #[test]
+    fn overflow_normalization_preserves_unrelated_error_fields() {
+        let input = json!({"error":{"message":"THE INPUT TOKEN COUNT EXCEEDS THE MAXIMUM NUMBER OF TOKENS ALLOWED 42.","type":"invalid_request_error", "code":400, "param":"messages"}});
+        let result = chat_error_to_response_error(Some(&input));
+        assert_eq!(result["error"]["message"], input["error"]["message"]);
+        assert_eq!(result["error"]["type"], "invalid_request_error");
+        assert_eq!(result["error"]["param"], "messages");
+        assert_eq!(result["error"]["code"], "context_length_exceeded");
+        for message in [
+            "Quota exceeded",
+            "Invalid API key",
+            "max_output_tokens exceeds the maximum number of tokens allowed 42.",
+        ] {
+            let input = json!({"error":{"message":message, "type":"upstream_error", "code":429,"param":null}});
+            assert_eq!(chat_error_to_response_error(Some(&input)), input);
+        }
     }
 }
