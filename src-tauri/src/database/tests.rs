@@ -989,6 +989,39 @@ fn model_pricing_seed_repairs_known_outdated_builtin_prices() {
 }
 
 #[test]
+fn model_pricing_seed_covers_deepseek_v41_flash_aliases() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    // 官方定价页（2026-09-11）：deepseek-flash 是唯一推荐名，两个 legacy 名仍被接受
+    // 但均由 V4.1-Flash 承接并按 Flash 价计费 → 四行同价（本表统一录高峰档）。
+    // 查价前缀兜底是 LIKE '{id}-%'，只命中更长的行，任一行缺失都会静默按 0 计费。
+    //（适配：本仓 deepseek-v4-flash 系行保留 V4 旧价——V4 与 V4.1 Flash 是两个模型，
+    // 上游把四行统一到 Flash 价是其全家族同名承接的口径；此处只钉 Flash 两个别名行）
+    for model_id in ["deepseek-flash", "deepseek-v4.1-flash"] {
+        let price: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query DeepSeek V4.1 Flash family price");
+        assert_eq!(
+            price,
+            (
+                "0.3".to_string(),
+                "1.2".to_string(),
+                "0.006".to_string(),
+                "0".to_string()
+            ),
+            "{model_id}"
+        );
+    }
+}
+
+#[test]
 fn model_pricing_seed_includes_claude_5_1_and_standard_sonnet_5_prices() {
     let db = Database::memory().expect("create memory db");
     let conn = db.conn.lock().expect("lock conn");
