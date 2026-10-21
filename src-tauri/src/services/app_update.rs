@@ -180,6 +180,15 @@ fn channel_updater(
     if direct {
         builder = builder.no_proxy();
     }
+    // Windows 上 updater 以 `msiexec /passive /promptrestart` 安装 MSI。passive 没有模态框、
+    // 未指定重启选项时，安装目录里有文件被占用，Windows Installer 会不经确认直接重启系统
+    // （上游 #8534）。`/promptrestart` 只对应 REBOOTPROMPT，挡不住这一点，因此显式追加
+    // REBOOT=ReallySuppress（即 `/norestart`）。旧版本的 updater 不带这个参数，
+    // 由 MSI 模板自身的 REBOOT 属性兜底。
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.installer_arg("REBOOT=ReallySuppress");
+    }
     builder.build()
 }
 
