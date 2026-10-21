@@ -45,7 +45,7 @@ fn identity(
         let Some(vendor) = Vendor::from_id(&vendor_id) else {
             continue;
         };
-        for plan in vendor::plans(vendor) {
+        for plan in vendor::plans_for_account(vendor, Some(&account)) {
             if vendor::provision::provider_id_for(plan.id_segment, &account) == source {
                 return Ok((id, vendor, account, plan));
             }
@@ -737,6 +737,12 @@ mod tests {
                 "synthetic-multi-plan",
                 "SYNTHETIC_PLAN_KEY",
             ),
+            (
+                24,
+                Vendor::OpenCode,
+                "personal-key:synthetic-owned-credential",
+                "SYNTHETIC_PERSONAL_KEY",
+            ),
         ] {
             {
                 let vault = db.secret_session().read().unwrap();
@@ -748,7 +754,7 @@ mod tests {
                 .unwrap();
                 vendor::creds::set_api_key(&conn, &vault, row_id, key).unwrap();
             }
-            for plan in vendor::plans(vendor) {
+            for plan in vendor::plans_for_account(vendor, Some(account)) {
                 let source = template(vendor, account, plan, &AppType::Codex).unwrap();
                 db.save_provider("codex", &source).unwrap();
                 if vendor::is_free_plan(vendor, plan.id_segment) {

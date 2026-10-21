@@ -47,16 +47,7 @@ export function AuthCenterPanel({
       return <MiniMaxCodeSection unified={editionScoped} edition="global" />;
     case "trae_cn":
       return (
-        <div
-          role="status"
-          className="rounded-xl border border-dashed p-8 text-sm"
-        >
-          <h3 className="font-semibold">TRAE 中国版尚未接入</h3>
-          <p className="mt-2 text-muted-foreground">
-            优先推进中国版。国际版 SG / US
-            账号、模型与授权不会复用到此版本；当前不能签到或使用中国版积分。
-          </p>
-        </div>
+        <TraeAccounts key="trae-cn" unified={editionScoped} edition="cn" />
       );
     case "xai_oauth":
       return <XaiOAuthSection unified={editionScoped} />;

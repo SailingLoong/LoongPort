@@ -29,12 +29,14 @@ it("retires a hidden login result and unlocks the preserved destination on retur
   );
   const { rerender } = render(view(true));
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: /opencode.*connect/i }));
+  await user.click(
+    screen.getByRole("button", { name: /官网账户登录（不会自动获取密钥）/ }),
+  );
   rerender(view(false));
   await act(async () => resolve({ rowId: 1 }));
   rerender(view(true));
   expect(connected).not.toHaveBeenCalled();
   expect(
-    screen.getByRole("button", { name: /opencode.*connect/i }),
+    screen.getByRole("button", { name: /官网账户登录（不会自动获取密钥）/ }),
   ).toBeEnabled();
 });

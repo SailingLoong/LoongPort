@@ -46,7 +46,8 @@ export function QoderInferenceIdentity({
   });
   const statusMessages: Record<QoderHttpIdentityStatus, string> = {
     unavailable: t("qoderHttpIdentity.unavailable", {
-      defaultValue: "当前版本尚未开放 Qoder HTTP 推理身份，不会发送认证请求。",
+      defaultValue:
+        "当前 Qoder 推理身份不可用，请检查原配置与凭据保管状态后重试。",
     }),
     unestablished: t("qoderHttpIdentity.unestablished", {
       defaultValue: "尚未建立推理身份。",

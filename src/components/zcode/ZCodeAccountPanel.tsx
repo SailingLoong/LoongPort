@@ -19,6 +19,11 @@ import { useTranslation } from "react-i18next";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -927,89 +932,8 @@ export function ZCodeAccountPanel({
         return { title: "", message: "", confirm: "" };
     }
   };
-  const confirmation = actionCopy();
-  return (
-    <section
-      className="space-y-4 border-t pt-4"
-      aria-label={copy("title", "Saved ZCode accounts")}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h3 className="font-semibold">
-            {copy("title", "Saved ZCode accounts")}
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            {copy(
-              "libraryDescription",
-              "Manage personal BigModel and z.ai accounts in the encrypted local vault. Native capture and switching have separate source requirements.",
-            )}
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={locked || loading || !!action}
-          onClick={() => void refresh()}
-        >
-          {copy("refresh", "Refresh account status")}
-        </Button>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          disabled={
-            !libraryReady || library.data?.actions.canAdd !== true || !!action
-          }
-          onClick={() => {
-            setCodingAccount(undefined);
-            setLoginOpen(true);
-          }}
-        >
-          {copy("addAccount", "Add account")}
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!ordinaryReady || !!action}
-          onClick={() => review("capture")}
-        >
-          {copy("capture", "Save current account")}
-        </Button>
-        <Button
-          variant="outline"
-          disabled={
-            !libraryReady ||
-            library.data?.actions.canImport !== true ||
-            !!action
-          }
-          onClick={() => setImportOpen(true)}
-        >
-          {copy("importAccounts", "Import .zsb")}
-        </Button>
-        <Button
-          variant="outline"
-          disabled={
-            !libraryReady ||
-            library.data?.actions.canBackup !== true ||
-            !!action
-          }
-          onClick={() => setBackupOpen(true)}
-        >
-          {copy("backupAccounts", "Encrypted backup")}
-        </Button>
-      </div>
-      {library.data?.actions.blockedReason && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {errorText(library.data.actions.blockedReason)}
-        </p>
-      )}
-      {!context && (
-        <p className="text-xs text-muted-foreground">
-          {copy(
-            "nativeAdmissionRequired",
-            "Inspect a supported native source before saving its current login or switching accounts. Account library management remains separate.",
-          )}
-        </p>
-      )}
+  const nativeTools = (
+    <>
       <section
         aria-label={copy("installationStatus", "Installation and versions")}
         className="space-y-2 rounded-md border p-3"
@@ -1241,6 +1165,95 @@ export function ZCodeAccountPanel({
           {copy("openForLogin", "Open official ZCode for login")}
         </Button>
       </div>
+    </>
+  );
+  const accountFamilies: Array<"zai" | "bigmodel" | null> = unified
+    ? [null]
+    : ["zai", "bigmodel"];
+  const confirmation = actionCopy();
+  return (
+    <section
+      className="space-y-4 border-t pt-4"
+      aria-label={copy("title", "Saved ZCode accounts")}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="font-semibold">
+            {copy("title", "Saved ZCode accounts")}
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            {copy(
+              "libraryDescription",
+              "Manage personal BigModel and z.ai accounts in the encrypted local vault. Native capture and switching have separate source requirements.",
+            )}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={locked || loading || !!action}
+          onClick={() => void refresh()}
+        >
+          {copy("refresh", "Refresh account status")}
+        </Button>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          disabled={
+            !libraryReady || library.data?.actions.canAdd !== true || !!action
+          }
+          onClick={() => {
+            setCodingAccount(undefined);
+            setLoginOpen(true);
+          }}
+        >
+          {copy("addAccount", "Add account")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={!ordinaryReady || !!action}
+          onClick={() => review("capture")}
+        >
+          {copy("capture", "Save current account")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={
+            !libraryReady ||
+            library.data?.actions.canImport !== true ||
+            !!action
+          }
+          onClick={() => setImportOpen(true)}
+        >
+          {copy("importAccounts", "Import .zsb")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={
+            !libraryReady ||
+            library.data?.actions.canBackup !== true ||
+            !!action
+          }
+          onClick={() => setBackupOpen(true)}
+        >
+          {copy("backupAccounts", "Encrypted backup")}
+        </Button>
+      </div>
+      {library.data?.actions.blockedReason && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {errorText(library.data.actions.blockedReason)}
+        </p>
+      )}
+      {!context && (
+        <p className="text-xs text-muted-foreground">
+          {copy(
+            "nativeAdmissionRequired",
+            "Inspect a supported native source before saving its current login or switching accounts. Account library management remains separate.",
+          )}
+        </p>
+      )}
+      {!unified && nativeTools}
       {library.data && (
         <ZCodeBundleImport
           open={importOpen}
@@ -1354,25 +1367,32 @@ export function ZCodeAccountPanel({
         />
       )}
       {shownCatalog &&
-        (["zai", "bigmodel"] as const).map((family) => (
+        accountFamilies.map((family) => (
           <section
-            key={family}
+            key={family ?? "all"}
             aria-label={
-              family === "zai"
-                ? copy("zaiFamily", "Z.ai accounts")
-                : copy("bigmodelFamily", "BigModel accounts")
+              family === null
+                ? copy("title", "Saved ZCode accounts")
+                : family === "zai"
+                  ? copy("zaiFamily", "Z.ai accounts")
+                  : copy("bigmodelFamily", "BigModel accounts")
             }
             className="space-y-2"
           >
-            <h4 className="text-sm font-medium">
-              {family === "zai" ? "Z.ai" : "BigModel"}
-            </h4>
+            {family && (
+              <h4 className="text-sm font-medium">
+                {family === "zai" ? "Z.ai" : "BigModel"}
+              </h4>
+            )}
             {
               <AccountWorkspace
                 accounts={shownCatalog.profiles.filter(
-                  (profile) => profile.family === family,
+                  (profile) => family === null || profile.family === family,
                 )}
                 label={(profile) => profile.label ?? profile.id}
+                identityDetails={(profile) => (
+                  <span>{profile.family === "zai" ? "Z.ai" : "BigModel"}</span>
+                )}
                 enabled={unified}
               >
                 {(profile) => {
@@ -1587,15 +1607,28 @@ export function ZCodeAccountPanel({
                 }}
               </AccountWorkspace>
             }
-            {shownCatalog.profiles.every(
-              (profile) => profile.family !== family,
-            ) && (
-              <p className="text-sm text-muted-foreground">
-                {copy("empty", "No saved accounts in this family.")}
-              </p>
-            )}
+            {family &&
+              shownCatalog.profiles.every(
+                (profile) => profile.family !== family,
+              ) && (
+                <p className="text-sm text-muted-foreground">
+                  {copy("empty", "No saved accounts in this family.")}
+                </p>
+              )}
           </section>
         ))}
+      {unified && (
+        <Collapsible className="space-y-3 rounded-md border p-3">
+          <CollapsibleTrigger asChild>
+            <Button type="button" variant="outline" size="sm">
+              {copy("installationStatus", "Installation and versions")}
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="space-y-3">
+            {nativeTools}
+          </CollapsibleContent>
+        </Collapsible>
+      )}
       <section
         className="space-y-3"
         aria-label={copy("recoveryTitle", "Local account recovery")}

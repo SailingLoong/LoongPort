@@ -118,6 +118,9 @@ pub(super) fn refresh_request(s: &Snapshot, timeout: Duration) -> Result<Request
     let mut headers = http::HeaderMap::new();
     inference::header(&mut headers, "content-type", "application/json", false)?;
     inference::header(&mut headers, "accept-encoding", "identity", false)?;
+    // Native desktop renewal carries the current access token alongside the
+    // original device proof. Do not substitute a different auth scheme/client.
+    inference::header(&mut headers, "x-cloudide-token", &g.access, true)?;
     Ok(Request {
         url: format!("{}{PATH}", d.auth_host),
         headers,
@@ -229,7 +232,7 @@ pub(super) fn expiry(v: &Value) -> Result<i64, Failure> {
 }
 /// Reject unsupported desktop sources before persistence or token transmission.
 fn supported_desktop(a: &store::Account) -> Result<(), ProxyError> {
-    if a.realm == store::Realm::Cn {
+    if a.realm == store::Realm::Cn && a.device.native_package.as_deref() != Some("TRAE_CN") {
         return Err(ProxyError::AuthError(
             "trae.desktop_identity_unverified".into(),
         ));
@@ -258,7 +261,18 @@ pub(super) fn accepted(s: &Snapshot, body: &Value) -> Result<Grant, Failure> {
         return Err(Failure::NeedsLogin);
     }
     let r = body.get("Result").ok_or(Failure::Invalid)?;
-    if r.get("DeviceBindStatus").and_then(Value::as_str) != Some("BOUND")
+    if s.account.realm == store::Realm::Cn {
+        // Official CN Code 3.4.4 accepts Result without these receipt fields.
+        // Device binding is proved in the signed request; fresh UID/realm is
+        // checked before publication. Optional metadata must not contradict it.
+        if r.get("DeviceBindStatus")
+            .is_some_and(|v| v.as_str() != Some("BOUND"))
+            || r.get("BoundDeviceID")
+                .is_some_and(|v| v.as_str() != Some(s.account.device.id.as_str()))
+        {
+            return Err(Failure::Invalid);
+        }
+    } else if r.get("DeviceBindStatus").and_then(Value::as_str) != Some("BOUND")
         || r.get("BoundDeviceID").and_then(Value::as_str) != Some(s.account.device.id.as_str())
     {
         return Err(Failure::Invalid);

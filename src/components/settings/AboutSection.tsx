@@ -47,6 +47,8 @@ import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { DiagnosticsExportDialog } from "./DiagnosticsExportDialog";
+import { feedbackSubmission } from "./feedbackSubmission";
+import { FeedbackSubmissionIndicator } from "./FeedbackSubmissionStatus";
 import { FeedbackDialog } from "./FeedbackDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
 
@@ -1199,11 +1201,15 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setFeedbackDialogOpen(true)}
+                onClick={() => {
+                  feedbackSubmission.markRead();
+                  setFeedbackDialogOpen(true);
+                }}
                 className="h-8 gap-1.5 text-xs"
               >
                 <Bug className="h-3.5 w-3.5" />
                 {t("settings.feedback")}
+                <FeedbackSubmissionIndicator />
               </Button>
             )}
             {/* 更新按钮与进度竖排：进度只在下载期间出现在按钮正下方——
@@ -1400,10 +1406,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 size="sm"
                 variant="outline"
                 className="h-7 gap-1.5 text-xs"
-                onClick={() => setFeedbackDialogOpen(true)}
+                onClick={() => {
+                  feedbackSubmission.markRead();
+                  setFeedbackDialogOpen(true);
+                }}
               >
                 <Bug className="h-3.5 w-3.5" />
                 {t("settings.feedback")}
+                <FeedbackSubmissionIndicator />
               </Button>
             )}
             <Button
@@ -1701,6 +1711,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       />
       {feedbackConfigured && (
         <FeedbackDialog
+          backgroundSubmission
           open={feedbackDialogOpen}
           onClose={() => setFeedbackDialogOpen(false)}
         />

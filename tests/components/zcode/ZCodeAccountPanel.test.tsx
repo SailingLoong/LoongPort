@@ -2175,3 +2175,71 @@ describe("ZCode account command bindings", () => {
     ).toHaveTextContent("尚未验收");
   });
 });
+
+it("unifies both ZCode families in one account workspace with original per-account actions", async () => {
+  mount(vi.fn(), true);
+  await screen.findByRole("button", { name: "查看 Personal Z.ai" });
+  expect(
+    screen.getAllByRole("complementary", { name: "账号列表" }),
+  ).toHaveLength(1);
+  expect(screen.getAllByRole("region", { name: "账号详情" })).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "查看 opaque-bigmodel" }));
+  const detail = screen.getByRole("region", { name: "账号详情" });
+  expect(
+    within(detail).getByRole("heading", { name: "opaque-bigmodel" }),
+  ).toBeInTheDocument();
+  expect(within(detail).getByText("BigModel")).toBeInTheDocument();
+  expect(
+    within(detail).getByRole("region", { name: "授权状态" }),
+  ).toBeInTheDocument();
+  expect(
+    within(detail).getByRole("region", { name: "权益与签到" }),
+  ).toBeInTheDocument();
+  expect(
+    within(detail).getByRole("region", { name: "模型与推理" }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(detail).getByRole("button", { name: "Check connections and quota" }),
+  );
+  await waitFor(() =>
+    expect(zcodeAccountsApi.checkConnections).toHaveBeenCalled(),
+  );
+  expect(
+    vi.mocked(zcodeAccountsApi.checkConnections).mock.calls.at(-1)?.[0],
+  ).toMatchObject({ id: "opaque-bigmodel" });
+});
+
+it("keeps unified account management first and native installation tools explicitly expandable", async () => {
+  mount(vi.fn(), true);
+  await screen.findByRole("button", { name: "查看 Personal Z.ai" });
+  expect(screen.queryByLabelText("ZCode installation")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add account" })).toBeEnabled();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Installation and versions" }),
+  );
+  expect(screen.getByLabelText("ZCode installation")).toBeInTheDocument();
+  expect(screen.getByText(/Verified operation range:/)).toBeInTheDocument();
+  expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+  expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+});
+
+it("preserves native source edits across unified disclosure toggles without inspecting or switching", async () => {
+  mount(vi.fn(), true);
+  await screen.findByRole("button", { name: "查看 Personal Z.ai" });
+  const toggle = screen.getByRole("button", {
+    name: "Installation and versions",
+  });
+  fireEvent.click(toggle);
+  fireEvent.change(screen.getByLabelText("ZCode installation"), {
+    target: { value: "/Applications/ZCode-custom.app" },
+  });
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(screen.getByRole("button", { name: "查看 opaque-bigmodel" }));
+  fireEvent.click(toggle);
+  expect(screen.getByLabelText("ZCode installation")).toHaveValue(
+    "/Applications/ZCode-custom.app",
+  );
+  expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+  expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+});

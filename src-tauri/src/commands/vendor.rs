@@ -55,6 +55,8 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VendorAccountRow {
+    /// Authentication material kind, not proof of remote identity or inference.
+    pub auth_mode: &'static str,
     pub id: i64,
     pub vendor_id: String,
     /// 厂商家族展示名（`DeepSeek` / `opencode`）。认不出的 `vendor_id` 回落到它本身。
@@ -154,7 +156,7 @@ impl From<creds::VendorRow> for VendorAccountRow {
         let vendor = Vendor::from_id(&row.vendor_id);
         let plans: Vec<VendorPlanRow> = vendor
             .map(|vendor| {
-                crate::vendor::plans(vendor)
+                crate::vendor::plans_for_account(vendor, row.account_id.as_deref())
                     .iter()
                     .map(|plan| VendorPlanRow {
                         plan_id: plan.id_segment.to_string(),
@@ -177,10 +179,17 @@ impl From<creds::VendorRow> for VendorAccountRow {
         // 任何一个 plan 派生得出 id，就说明登录过（provision 资格判定用）。
         let any_provider_id = plans.iter().any(|plan| !plan.provider_id.is_empty());
 
+        let personal_key = row.vendor_id == "opencode"
+            && row
+                .account_id
+                .as_deref()
+                .is_some_and(crate::vendor::opencode_personal::is_account);
         let logged_in = !row.auth_token.is_empty();
         let session_expired = row.account_id.is_some() && row.auth_token.is_empty();
         let key_ready = !row.api_key.is_empty();
-        let status = if session_expired {
+        let status = if personal_key && key_ready {
+            VendorAccountStatus::Ready
+        } else if session_expired {
             if key_ready {
                 VendorAccountStatus::SessionExpiredUsable
             } else {
@@ -194,8 +203,13 @@ impl From<creds::VendorRow> for VendorAccountRow {
             VendorAccountStatus::NoKey
         };
         VendorAccountRow {
+            auth_mode: if personal_key {
+                "personal-key"
+            } else {
+                "web-session"
+            },
             status,
-            can_query_balance: logged_in || key_ready,
+            can_query_balance: !personal_key && (logged_in || key_ready),
             can_refresh: any_provider_id && (logged_in || key_ready),
             can_delete: false,
             account_label: row.account_label,
@@ -364,7 +378,13 @@ fn vendor_account_for_app(
         plan.is_current = provider_exists && is_current_for(state, plan, app_type);
     }
 
-    out.status = if session_expired {
+    out.status = if out.auth_mode == "personal-key" {
+        if key_ready && any_provider_exists {
+            VendorAccountStatus::Ready
+        } else {
+            VendorAccountStatus::NoKey
+        }
+    } else if session_expired {
         if key_ready && any_provider_exists {
             VendorAccountStatus::SessionExpiredUsable
         } else {
@@ -377,7 +397,7 @@ fn vendor_account_for_app(
     } else {
         VendorAccountStatus::NoKey
     };
-    out.can_query_balance = logged_in || key_ready;
+    out.can_query_balance = out.auth_mode != "personal-key" && (logged_in || key_ready);
     out.can_refresh = logged_in || (key_ready && any_provider_exists);
     out.can_delete = vendor_can_delete(state, &out);
     out
@@ -678,7 +698,7 @@ async fn login_via_browser(
     }
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<VendorSession>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<VendorSession, AppError>>(1);
     // 用户自己关窗的信号。没有它就只能干等满超时。
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -707,12 +727,18 @@ async fn login_via_browser(
             None => true,
             Some(Ok(creds)) => {
                 // try_send：这个回调不能 await，而我们只要第一份凭据。
-                let _ = tx.try_send(creds);
+                let _ = tx.try_send(Ok(creds));
                 false
             }
             Some(Err(e)) => {
-                log::warn!("官网凭据回传解析失败: {e}");
-                let _ = handle_for_nav.emit(VENDOR_LOGIN_ERROR, e.to_string());
+                if matches!(vendor, Vendor::OpenCode) {
+                    // Resolve the pending command too, so the UI clears its spinner.
+                    // The command caller presents the error; do not emit a duplicate toast.
+                    let _ = tx.try_send(Err(e));
+                } else {
+                    log::warn!("官网凭据回传解析失败: {e}");
+                    let _ = handle_for_nav.emit(VENDOR_LOGIN_ERROR, e.to_string());
+                }
                 false
             }
         }
@@ -736,9 +762,20 @@ async fn login_via_browser(
     })
     .await;
 
-    let Ok(Some(creds)) = outcome else {
-        // 用户关掉了窗口，或超时。都不是错误。
-        return Ok(None);
+    let creds = match outcome {
+        Ok(Some(Ok(creds))) => creds,
+        Ok(Some(Err(error))) => {
+            let _ = window.destroy();
+            return Err(error);
+        }
+        Err(_) if matches!(vendor, Vendor::OpenCode) => {
+            let _ = window.destroy();
+            return Err(AppError::Config(
+                "OpenCode 登录接入超时，未完成连接；请重试。".into(),
+            ));
+        }
+        // Closing the window remains an intentional cancellation, not success/error.
+        Ok(None) | Err(_) => return Ok(None),
     };
 
     // `account_id` 已经由 `parse_creds_navigation` 保证非空 —— 「账号身份拿不到就不存
@@ -1007,11 +1044,18 @@ async fn provision_impl(
                 .db
                 .set_tier_rate_multiplier(app_type.as_str(), &provider_id, Some(1.0))?;
 
-            let merged = provider_fingerprint::remove_unmanaged_duplicates(
-                state.db.as_ref(),
-                app_type,
-                &provider,
-            )?;
+            let merged = if vendor == Vendor::OpenCode
+                && crate::vendor::opencode_personal::is_account(&account_id)
+            {
+                // Explicit import adds a source only; never takes over custom providers.
+                Vec::new()
+            } else {
+                provider_fingerprint::remove_unmanaged_duplicates(
+                    state.db.as_ref(),
+                    app_type,
+                    &provider,
+                )?
+            };
             if !merged.is_empty() {
                 log::info!(
                     "收编 {} 个重复的 {} provider：{}",
@@ -1045,6 +1089,9 @@ async fn provision_impl(
     // （接管态下走 `hot_switch_provider_inner`）—— 那不是这里要的。
     // `commands::relay` 的两条同型路径也用它，三处一份写法。
     for app_type in provision::VENDOR_APPS {
+        if vendor == Vendor::OpenCode && crate::vendor::opencode_personal::is_account(&account_id) {
+            continue;
+        }
         let is_current = ProviderService::current(state, app_type.clone())
             .ok()
             .map(|current| written_provider_ids.contains(&current))
@@ -1068,6 +1115,31 @@ async fn provision_impl(
         key_created,
         merged_providers,
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeKeyImportResult {
+    pub row_id: i64,
+}
+
+/// Explicit user-entered key import; no network validation, no consumption, no selection.
+#[tauri::command]
+pub async fn vendor_import_opencode_key(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    api_key: String,
+    label: String,
+) -> Result<OpenCodeKeyImportResult, String> {
+    let row_id = with_conn(state.inner(), |conn, vault| {
+        crate::vendor::opencode_personal::save(conn, vault, &api_key, &label)
+    })
+    .map_err(|_| "保存失败，请确认输入完整 Personal API key 且本地密钥库已解锁".to_string())?;
+    provision_impl(state.inner(), row_id)
+        .await
+        .map_err(|_| "密钥已加密保存，但接入配置未完成；可重试，不会重复新建账号".to_string())?;
+    let _ = app_handle.emit(crate::events::VENDOR_ACCOUNTS_CHANGED, ());
+    Ok(OpenCodeKeyImportResult { row_id })
 }
 
 /// 把**一个平台**的配置恢复成 LoongPort 生成的默认值。**密钥保留不变。**
@@ -1253,6 +1325,24 @@ pub(crate) async fn vendor_balance_impl(
     let vendor = Vendor::from_id(&row.vendor_id)
         .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)))?;
 
+    if vendor == Vendor::OpenCode
+        && row
+            .account_id
+            .as_deref()
+            .is_some_and(crate::vendor::opencode_personal::is_account)
+    {
+        // Model Request keys need not have workspace/profile/billing rights.
+        // Never send them through the legacy Zen/Sub2API balance fallback.
+        return Ok(crate::relay::balance::row_balance_result(
+            crate::provider::UsageResult {
+                success: false,
+                data: None,
+                error: Some("Personal key 余额未验证；余额权限不代表模型调用权限".into()),
+            },
+            false,
+        ));
+    }
+
     let api_keys: Vec<String> = if row.api_key.trim().is_empty() {
         Vec::new()
     } else {
@@ -1318,7 +1408,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
     if let (Some(vendor), Some(account_id)) = (Vendor::from_id(&row.vendor_id), row.account_id) {
         // ⚠️ **逐 plan 清理**：一个账号展开出全部 plan 的 provider 记录（多 plan
         // 厂商一个账号两个 id），删账号要清的是「全部」。
-        let provider_ids: Vec<String> = crate::vendor::plans(vendor)
+        let provider_ids: Vec<String> = crate::vendor::plans_for_account(vendor, Some(&account_id))
             .iter()
             .map(|plan| provision::provider_id_for(plan.id_segment, &account_id))
             .collect();
@@ -1406,7 +1496,7 @@ fn vendor_plan_by_provider_id(
         let Some(account_id) = &row.account_id else {
             continue;
         };
-        for plan in crate::vendor::plans(vendor) {
+        for plan in crate::vendor::plans_for_account(vendor, Some(account_id)) {
             if provision::provider_id_for(plan.id_segment, account_id) == provider_id {
                 return Ok((vendor, *plan));
             }
@@ -2014,6 +2104,188 @@ mod tests {
             crate::database::Database::memory().expect("init db"),
         ))
         .unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn personal_key_storage_is_encrypted_idempotent_and_removable_without_profile() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let state = mem_state();
+        let key = "oc_sk_fixture_SyntheticPersonalOnly1234";
+        let id = with_conn(&state, |conn, vault| {
+            let id = crate::vendor::opencode_personal::save(conn, vault, key, "My account")?;
+            let again = crate::vendor::opencode_personal::save(conn, vault, key, "Renamed")?;
+            assert_eq!(id, again);
+            let raw: String = conn.query_row(
+                "SELECT api_key FROM loongport_vendor WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            assert_ne!(raw, key);
+            assert!(!raw.contains(key));
+            let row = creds::get(conn, vault, id)?.unwrap();
+            assert_eq!(row.api_key, key);
+            assert_eq!(row.account_label, "Renamed");
+            assert!(row.auth_token.is_empty());
+            let dto = VendorAccountRow::from(row);
+            assert_eq!(dto.auth_mode, "personal-key");
+            assert!(!dto.can_query_balance);
+            assert_eq!(dto.plans.len(), 2);
+            assert!(dto
+                .plans
+                .iter()
+                .all(|p| p.plan_id.starts_with("opencode-personal")));
+            let json = serde_json::to_string(&dto).unwrap();
+            assert!(!json.contains(key));
+            assert!(crate::vendor::opencode_personal::save(conn, vault, key, key).is_err());
+            assert_eq!(
+                creds::get(conn, vault, id)?.unwrap().account_label,
+                "Renamed"
+            );
+            Ok(id)
+        })
+        .unwrap();
+        remove_impl(&state, id).unwrap();
+        assert!(with_conn(&state, |conn, vault| creds::get(conn, vault, id))
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn personal_key_provision_uses_existing_key_without_browser_or_remote_creation() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let state = mem_state();
+        let row_id = with_conn(&state, |conn, vault| {
+            crate::vendor::opencode_personal::save(
+                conn,
+                vault,
+                "oc_sk_fixture_SyntheticProvisionOnly1234",
+                "Test",
+            )
+        })
+        .unwrap();
+        let imported = with_conn(&state, |conn, vault| creds::get(conn, vault, row_id))
+            .unwrap()
+            .unwrap();
+        let bundles = provision::plan_rows_for(
+            Vendor::OpenCode,
+            imported.account_id.as_deref().unwrap(),
+            &imported.api_key,
+        );
+        let settings = bundles[0]
+            .rows
+            .iter()
+            .find(|(app, _)| *app == AppType::Codex)
+            .unwrap()
+            .1
+            .clone();
+        let custom = Provider::with_id(
+            "existing-custom-personal".into(),
+            "Existing custom".into(),
+            settings,
+            Some("https://opencode.ai".into()),
+        );
+        state.db.save_provider("codex", &custom).unwrap();
+        state.db.set_current_provider("codex", &custom.id).unwrap();
+        let balance = vendor_balance_impl(&state, row_id).await.unwrap();
+        assert!(!balance.usage.success);
+        assert!(balance.usage.data.is_none());
+        assert!(!balance.should_prompt_top_up);
+        let result = provision_impl(&state, row_id).await.unwrap();
+        assert!(!result.key_created);
+        assert!(result.merged_providers.is_empty());
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&custom.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            custom.settings_config
+        );
+        assert_eq!(
+            state.db.get_current_provider("codex").unwrap().as_deref(),
+            Some(custom.id.as_str())
+        );
+        let repeated = provision_impl(&state, row_id).await.unwrap();
+        assert!(repeated.merged_providers.is_empty());
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&custom.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            custom.settings_config
+        );
+        assert_eq!(
+            state.db.get_current_provider("codex").unwrap().as_deref(),
+            Some(custom.id.as_str())
+        );
+        let row = with_conn(&state, |conn, vault| creds::get(conn, vault, row_id))
+            .unwrap()
+            .unwrap();
+        let output = vendor_account_for_app(&state, row, &AppType::Codex);
+        assert_eq!(output.auth_mode, "personal-key");
+        assert!(!output.can_query_balance);
+        assert_eq!(output.plans.len(), 2);
+        for plan in &output.plans {
+            assert!(plan.can_switch);
+            assert!(!plan.is_current);
+            let provider = state
+                .db
+                .get_provider_by_id(&plan.provider_id, "codex")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                provider.settings_config["opencodePersonalKeyPlan"],
+                plan.plan_id
+            );
+        }
+        remove_impl(&state, row_id).unwrap();
+        for plan in output.plans {
+            assert!(state
+                .db
+                .get_provider_by_id(&plan.provider_id, "codex")
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn personal_key_import_never_migrates_legacy_credentials_or_plans() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let state = mem_state();
+        let key = "oc_sk_fixture_SyntheticLegacyOnly1234";
+        with_conn(&state, |conn, vault| {
+            let legacy = creds::save_account(
+                conn,
+                vault,
+                Vendor::OpenCode,
+                "synthetic-browser-session",
+                &crate::vendor::VendorAccount {
+                    account_id: "wrk_fixture".into(),
+                    label: "Legacy".into(),
+                    login_identifier: String::new(),
+                },
+            )?;
+            creds::set_api_key(conn, vault, legacy, key)?;
+            assert!(crate::vendor::opencode_personal::save(conn, vault, key, "New").is_err());
+            let rows = creds::list(conn, vault)?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].account_id.as_deref(), Some("wrk_fixture"));
+            let dto = VendorAccountRow::from(rows[0].clone());
+            assert_eq!(dto.auth_mode, "web-session");
+            assert_eq!(dto.plans.len(), 3);
+            assert!(dto
+                .plans
+                .iter()
+                .all(|p| !p.plan_id.starts_with("opencode-personal")));
+            Ok(())
+        })
+        .unwrap();
     }
 
     fn seed_vendor_row(state: &AppState, account_id: Option<&str>) -> i64 {

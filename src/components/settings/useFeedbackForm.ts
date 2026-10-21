@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { APP_IDS } from "@/config/appConfig";
@@ -10,6 +16,10 @@ import type {
   FeedbackPreparedPreview,
   FeedbackRelatedApp,
 } from "@/lib/api/diagnostics";
+import {
+  feedbackSubmission,
+  useFeedbackSubmission,
+} from "./feedbackSubmission";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 /** 与后端闸同值（commands/feedback.rs）：前端预检，后端终检。 */
@@ -101,7 +111,15 @@ function feedbackFailureNotice(error: unknown, fallback: string): string {
 }
 
 /** Single owner for the feedback draft, frozen preview and native operation lifecycle. */
-export function useFeedbackForm(open: boolean, onClose: () => void) {
+export function useFeedbackForm(
+  open: boolean,
+  onClose: () => void,
+  backgroundSubmission = false,
+) {
+  const background = useFeedbackSubmission();
+  const backgroundBusy =
+    backgroundSubmission &&
+    (background.phase === "preparing" || background.phase === "submitting");
   const { t } = useTranslation();
   const [description, setDescription] = useState("");
   // null = a new untouched form; [] = an explicit empty selection.
@@ -113,6 +131,10 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
   const [contact, setContact] = useState("");
   const [appOrder, setAppOrder] = useState<AppId[]>(APP_IDS);
   const [extendedFields, setExtendedFields] = useState(false);
+  const [capabilityStatus, setCapabilityStatus] = useState<
+    "loading" | "ready" | "failed"
+  >("loading");
+  const capabilitySessionRef = useRef<number | null>(null);
   const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
   const [includeDiagnostics, setIncludeDiagnostics] = useState(true);
   const [includeSites, setIncludeSites] = useState(false);
@@ -191,6 +213,30 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     }
   }, []);
 
+  const loadCapabilities = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!openRef.current || capabilitySessionRef.current === session) return;
+    capabilitySessionRef.current = session;
+    setCapabilityStatus("loading");
+    const isCurrent = () =>
+      mountedRef.current && openRef.current && session === sessionRef.current;
+    try {
+      const capabilities = await feedbackApi.getFormCapabilities();
+      if (isCurrent()) {
+        setExtendedFields(capabilities.extendedFields === true);
+        setCapabilityStatus("ready");
+      }
+    } catch {
+      if (isCurrent()) {
+        setExtendedFields(false);
+        setCapabilityStatus("failed");
+      }
+    } finally {
+      if (capabilitySessionRef.current === session)
+        capabilitySessionRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     openRef.current = open;
     sessionRef.current += 1;
@@ -203,15 +249,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
       setExtendedFields(false);
       setAppOrder(APP_IDS);
       setRecommendedApp(null);
-      void feedbackApi.getFormCapabilities().then(
-        (capabilities) => {
-          if (isCurrent())
-            setExtendedFields(capabilities.extendedFields === true);
-        },
-        () => {
-          /* Unknown support stays disabled; basic feedback remains available. */
-        },
-      );
+      void loadCapabilities();
       void usageApi.getUsageSummaryByApp().then(
         (usage) => {
           if (!isCurrent()) return;
@@ -249,7 +287,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
       sessionRef.current += 1;
       invalidatePreview();
     };
-  }, [open, loadReceipt, invalidatePreview]);
+  }, [open, loadReceipt, loadCapabilities, invalidatePreview]);
 
   useEffect(() => {
     if (open && extendedFields && recommendedApp && relatedApps === null)
@@ -335,7 +373,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     }
   };
 
-  const handlePickFiles = async (files: FileList | null) => {
+  const handlePickFiles = async (files: FileList | File[] | null) => {
     if (!files || busyRef.current || attachmentSessionRef.current !== null)
       return;
     invalidatePreview();
@@ -345,6 +383,11 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     try {
       for (const file of Array.from(files)) {
         if (!isCurrentSession(session)) return;
+        if (!file.type.startsWith("image/")) continue;
+        if (file.size > MAX_SCREENSHOT_BYTES) {
+          toast.error(t("settings.feedbackScreenshotTooLarge"));
+          continue;
+        }
         try {
           const dataUrl = await readFileAsDataUrl(file);
           if (!isCurrentSession(session)) return;
@@ -359,10 +402,27 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     }
   };
 
+  const handlePaste = (event: ClipboardEvent<HTMLElement>) => {
+    // Read only the user-initiated event. Keep the native text paste behavior,
+    // including mixed text/image content; never read the global clipboard here.
+    const images = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const files =
+      images.length > 0
+        ? images
+        : Array.from(event.clipboardData.files).filter((file) =>
+            file.type.startsWith("image/"),
+          );
+    if (files.length > 0) void handlePickFiles(files);
+  };
+
   const handlePrepare = async () => {
     if (
       busyRef.current ||
       preparingRef.current ||
+      backgroundBusy ||
       attachmentSessionRef.current !== null
     )
       return;
@@ -397,7 +457,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     const session = sessionRef.current;
     const version = draftVersionRef.current;
     try {
-      const result = await feedbackApi.prepare({
+      const input = {
         description,
         relatedApps: [...APP_IDS, "other" as const].filter((app) =>
           selectedApps.includes(app),
@@ -409,7 +469,15 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
           name: shot.name,
           base64: shot.dataUrl,
         })),
-      });
+      };
+      if (backgroundSubmission) {
+        if (feedbackSubmission.start(input)) {
+          reset();
+          onClose();
+        }
+        return;
+      }
+      const result = await feedbackApi.prepare(input);
       if (!isCurrentSession(session) || version !== draftVersionRef.current) {
         cancelPreparedPreview(result.previewId);
         return;
@@ -559,6 +627,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
   const hasOptionalDraft = selectedApps.length > 0 || contact.length > 0;
   const showOptionalFields = extendedFields || hasOptionalDraft;
   const submitDisabled =
+    backgroundBusy ||
     preparing ||
     submitting ||
     receiptAction !== null ||
@@ -582,6 +651,8 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     contact,
     appOrder,
     extendedFields,
+    capabilityStatus,
+    loadCapabilities,
     screenshots,
     includeDiagnostics,
     includeSites,
@@ -601,6 +672,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     closeDialog,
     handlePasteFromClipboard,
     handlePickFiles,
+    handlePaste,
     handleReceiptAction,
     changeDescription,
     changeContact,

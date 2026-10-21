@@ -10,10 +10,10 @@
 //!   的哈希**，站点一重新构建就变）⇒ Rust 直连不可维护。对策是**登录窗页面上下文
 //!   代拉**：注入脚本钩住 `fetch` 记录页面自己的 `/_server` 响应，把窗口带到
 //!   `/workspace/{id}/keys`（该页挂载即拉列表，响应含**当前用户 key 的全量明文**），
-//!   需要新建时直接驱动页面自己的创建表单 —— hash 换了也照常工作，因为我们
+//!   需要新建时由用户在官网明确确认创建 —— hash 换了也照常工作，因为我们
 //!   借用的是页面自己的调用。
 //! - **key 生命周期在登录时一次完成**：列表 → 按名字认领（`LoongPort专用/a{wrk}`）
-//!   → 没有则建 → 明文随登录信号回传落库。之后的 provision 走「本地已有明文 ⇒
+//!   → 没有则提示，不自动创建 → 明文随登录信号回传落库。之后的 provision 走「本地已有明文 ⇒
 //!   零请求」的既有正常路径；`list_keys` / `create_key` / `delete_key` 在 Rust 侧
 //!   不可用，返回指路错误（重新登录即重新采集）。
 //!
@@ -144,6 +144,22 @@ pub struct HarvestedKey {
     pub key: String,
 }
 
+// Only complete, structurally valid keys may enter the credential store. A masked
+// prefix from the new Console is not a usable credential.
+fn is_complete_key(key: &str) -> bool {
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    };
+    if let Some(key) = key.strip_prefix("oc_sk_") {
+        return key
+            .split_once('_')
+            .is_some_and(|(prefix, secret)| valid(prefix) && valid(secret));
+    }
+    key.strip_prefix("sk-").is_some_and(valid)
+}
+
 /// 判断一次导航是不是 opencode 的登录信号回传。`None` = 普通导航（放行）。
 ///
 /// 返回的 [`crate::vendor::VendorSession`] 里 `auth_token` 暂存信号 JSON，
@@ -153,6 +169,14 @@ pub fn parse_creds_navigation(
 ) -> Option<Result<crate::vendor::VendorSession, AppError>> {
     if url.scheme() != CREDS_SCHEME {
         return None;
+    }
+    if let Some((_, code)) = url.query_pairs().find(|(key, _)| key == "error") {
+        let message = match code.as_ref() {
+            "console_key_required" => "OpenCode 已切换到新版 Console，当前自动获取密钥不支持此页面，尚未接通账号。已有完整 API key 可在「服务」的「自定义 API」入口手动配置；个人 key 在官网 Account → Personal API keys。官网只在创建时显示一次完整 key，不能从列表恢复。手动 API 配置不等于账号积分池已验收。",
+            "login_timeout" => "OpenCode 登录接入超时，未获取可用密钥。请关闭窗口后重试；如果已进入新版 Console，请使用已有 API key 手动配置，勿重复创建密钥。",
+            _ => "OpenCode 登录接入未完成，请重试。",
+        };
+        return Some(Err(AppError::Config(message.into())));
     }
     Some(decode_signal(url))
 }
@@ -181,7 +205,7 @@ fn decode_signal(url: &url::Url) -> Result<crate::vendor::VendorSession, AppErro
     // 只有名字没有明文的行（别人的 key / 采残了）对认领毫无用处，就地丢弃。
     signal
         .keys
-        .retain(|k| !k.name.is_empty() && !k.key.is_empty());
+        .retain(|k| !k.name.is_empty() && is_complete_key(&k.key));
 
     let label = if signal.email.trim().is_empty() {
         signal.workspace_id.clone()
@@ -234,7 +258,7 @@ pub fn compose_session(
     let claimed = signal
         .keys
         .iter()
-        .find(|k| k.name == wanted && !k.key.contains('*'))
+        .find(|k| k.name == wanted && is_complete_key(&k.key))
         .map(|k| k.key.clone());
     let token = serde_json::to_string(&session)
         .map_err(|e| AppError::Config(format!("opencode 会话编码失败: {e}")))?;
@@ -245,7 +269,7 @@ pub fn compose_session(
 
 fn in_window_only(what: &str) -> VendorError {
     VendorError::Transient(format!(
-        "{what}走的是登录窗页面采集，Rust 侧没有稳定接口：请在官方 API 页重新登录该账号，登录时会自动认领或创建密钥"
+        "{what}走的是登录窗页面采集，Rust 侧没有稳定接口：请在官方 API 页重新登录该账号，旧版页面可认领已有专用密钥；新版 Console 不支持自动采集，请使用已有完整 API key 手动配置"
     ))
 }
 
@@ -280,9 +304,10 @@ pub async fn balance() -> Result<Option<crate::provider::UsageResult>, VendorErr
 ///    ⇒ `location.assign` 到 `/workspace/{wrk}/keys`（该页挂载即拉 key 列表）。
 /// 2. keys 页上等 fetch 钩子记到含 `keyDisplay` 的 `/_server` 响应：
 ///    - 有 `LoongPort专用/a{wrk}` 那把（跨机认领）⇒ 立即回传；
-///    - 没有 ⇒ 驱动页面自己的创建表单（点创建、填名字、提交），等新捕获；
-///    - 自动化失败 ⇒ 页面浮条请用户手动创建（任意名字），新出现的 key 也收；
-///    - 两分钟兜底：按现状回传（可能没有 key，行以「未获取密钥」存在）。
+///    - 没有 ⇒ 提示用户，不自动创建任何凭据；
+///    - 两分钟仍没有完整专用 key ⇒ 明确超时，不虚报接通。
+/// 3. 新版 `/console` 不再提供列表明文：结束等待并提示已有 key 的手动入口。
+///    登录页与 OAuth 允许继续，SPA 路由变化也会重新判断。
 ///
 /// fetch 钩子只记录 `/_server` 响应文本 —— 明文 key 与 workspace 内的 email
 /// 都在列表响应里，解析优先 `JSON.parse`、退正则（solid-start 的序列化近似 JSON）。
@@ -296,6 +321,37 @@ pub fn login_script(_login_hint: &str) -> String {
   if (window.location.host !== 'opencode.ai') return;
 
   var S = (window.__loongport_oc = window.__loongport_oc || {{ log: [], sent: false }});
+  if (S.sent) return;
+  function fail(code) {{
+    if (S.sent) return;
+    S.sent = true;
+    window.location.href = '{CREDS_SCHEME}://t?error=' + code;
+  }}
+  function isNewConsole() {{
+    var path = window.location.pathname;
+    return /^\/console(?:\/|$)/.test(path) &&
+      !/^\/console\/(?:login|auth|oauth|callback)(?:\/|$)/.test(path);
+  }}
+  var m = window.location.pathname.match(/^\/workspace\/(wrk_[A-Za-z0-9]+)/);
+  if (!m) {{
+    if (isNewConsole()) {{ fail('console_key_required'); return; }}
+    // OAuth and SPA routing can change the path without a new document/script.
+    if (S.routeTimer) return;
+    var routeStarted = Date.now();
+    S.routeTimer = setInterval(function () {{
+      if (S.sent) {{ clearInterval(S.routeTimer); return; }}
+      if (isNewConsole()) {{ fail('console_key_required'); clearInterval(S.routeTimer); return; }}
+      var legacy = window.location.pathname.match(/^\/workspace\/(wrk_[A-Za-z0-9]+)/);
+      if (legacy) {{
+        clearInterval(S.routeTimer);
+        window.location.assign('/workspace/' + legacy[1] + '/keys');
+        return;
+      }}
+      if (Date.now() - routeStarted > 120000) {{ fail('login_timeout'); clearInterval(S.routeTimer); }}
+    }}, 700);
+    return;
+  }}
+  var wrk = m[1];
   if (!S.hooked) {{
     S.hooked = true;
     var orig = window.fetch;
@@ -310,11 +366,6 @@ pub fn login_script(_login_hint: &str) -> String {
       return p;
     }};
   }}
-  if (S.sent) return;
-
-  var m = window.location.pathname.match(/^\/workspace\/(wrk_[A-Za-z0-9]+)/);
-  if (!m) return;
-  var wrk = m[1];
   var KEY_NAME = 'LoongPort专用/a' + wrk;
 
   // ── 第一步：把窗口带到 keys 页（那里挂载即拉列表） ──
@@ -360,12 +411,12 @@ pub fn login_script(_login_hint: &str) -> String {
       for (var i = 0; i < rows.length; i++) {{
         var r = rows[i];
         if (!r || typeof r !== 'object' || !('keyDisplay' in r)) continue;
-        if (r.key) out.push({{ name: String(r.name || ''), key: String(r.key) }});
+        if (/^(?:sk-[A-Za-z0-9_-]+|oc_sk_[A-Za-z0-9]+_[A-Za-z0-9_-]+)$/.test(r.key || '')) out.push({{ name: String(r.name || ''), key: String(r.key) }});
         if (r.email && !email) email = String(r.email);
       }}
       return {{ keys: out, email: email, hit: true }};
     }}
-    var re = /"name":"((?:[^"\\]|\\.)*)"[^{{}}]*?"key":"(sk-[A-Za-z0-9]+)"/g;
+    var re = /"name":"((?:[^"\\]|\\.)*)"[^{{}}]*?"key":"((?:sk-[A-Za-z0-9_-]+|oc_sk_[A-Za-z0-9]+_[A-Za-z0-9_-]+))"/g;
     var mm;
     while ((mm = re.exec(body)) !== null) out.push({{ name: mm[1], key: mm[2] }});
     var em = body.match(/"email":"([^"]+@[^"]+)"/);
@@ -391,23 +442,6 @@ pub fn login_script(_login_hint: &str) -> String {
     return null;
   }}
 
-  function tryCreate() {{
-    try {{
-      var btn = document.querySelector('[data-slot="title-row"] button[data-color="primary"]');
-      if (!btn) return false;
-      btn.click();
-      var input = document.querySelector('form input[name="name"]');
-      if (!input) return false;
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(input, KEY_NAME);
-      input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-      var submit = document.querySelector('form button[type="submit"]');
-      if (!submit) return false;
-      submit.click();
-      return true;
-    }} catch (e) {{ return false; }}
-  }}
-
   function banner(text) {{
     try {{
       var el = document.createElement('div');
@@ -418,12 +452,13 @@ pub fn login_script(_login_hint: &str) -> String {
     }} catch (e) {{}}
   }}
 
+  if (S.keyTimer) return;
   var started = Date.now();
-  var firstNames = null;
-  var createTried = false;
+  var guidanceShown = false;
 
   var timer = setInterval(function () {{
     if (S.sent) {{ clearInterval(timer); return; }}
+    if (isNewConsole()) {{ fail('console_key_required'); clearInterval(timer); return; }}
     var cur = collected();
     var mine = ours(cur.keys);
 
@@ -435,38 +470,28 @@ pub fn login_script(_login_hint: &str) -> String {
       if (S.log[i].indexOf('keyDisplay') !== -1) {{ listArrived = true; break; }}
     }}
     if (!listArrived) {{
-      if (Date.now() - started > 120000) {{ send(cur.keys, cur.email); clearInterval(timer); }}
+      // Empty or changed RPC responses are not proof of a usable key. Still
+      // provide guidance promptly instead of silently waiting for the deadline.
+      if (!guidanceShown && Date.now() - started > 5000) {{
+        guidanceShown = true;
+        banner('LoongPort：尚未取得完整专用密钥，不会自动创建。可检查官网密钥状态，或使用已有完整密钥手动配置；未接通账号。');
+      }}
+      if (Date.now() - started > 120000) {{ fail('login_timeout'); clearInterval(timer); }}
       return;
     }}
-    if (!firstNames) {{
-      firstNames = cur.keys.map(function (k) {{ return k.name; }});
+    // B：只提示，不驱动创建。已有专用 key 的回传始终走 A。
+    if (!guidanceShown) {{
+      guidanceShown = true;
+      banner('LoongPort：未找到专用密钥，不会自动创建。若需要新密钥，请自行在官网确认创建；已有完整密钥可使用服务中的自定义 API 入口配置。');
     }}
 
-    // B：驱动页面自己的创建表单；失败就请用户手动建（任意名字都收）。
-    if (!createTried) {{
-      createTried = true;
-      if (!tryCreate()) {{
-        banner('LoongPort：自动创建密钥没有成功，请在页面上点 Create key 手动创建一把（名字随意），创建后会自动完成接入');
-      }}
-      return;
-    }}
-
-    // C：我们的那把，或快照之后新出现的任意一把（手动兜底路径）。
-    for (var i = 0; i < cur.keys.length; i++) {{
-      var k = cur.keys[i];
-      if (k.name === KEY_NAME || firstNames.indexOf(k.name) === -1) {{
-        send([k], cur.email);
-        clearInterval(timer);
-        return;
-      }}
-    }}
-
-    // D：两分钟兜底 —— 按现状回传（可能没有 key；行会以「未获取密钥」存在）。
+    // 两分钟兜底：明确失败，不把空凭据报告为接入成功。
     if (Date.now() - started > 120000) {{
-      send(cur.keys, cur.email);
+      fail('login_timeout');
       clearInterval(timer);
     }}
   }}, 700);
+  S.keyTimer = timer;
 }})();
 "#
     )
@@ -742,6 +767,41 @@ mod tests {
     }
 
     #[test]
+    fn console_handoff_and_timeout_are_errors_not_credentials() {
+        for code in ["console_key_required", "login_timeout", "unknown"] {
+            let url = url::Url::parse(&format!("{CREDS_SCHEME}://t?error={code}")).unwrap();
+            assert!(parse_creds_navigation(&url).unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn only_complete_legacy_and_console_keys_are_claimed() {
+        for (key, expected) in [
+            ("sk-synthetic-key", true),
+            ("oc_sk_synthetic_secret", true),
+            ("oc_sk_prefix", false),
+            ("oc_sk_prefix_", false),
+            ("oc_sk_prefix_***", false),
+            ("oc_sk_prefix_…", false),
+            ("sk-masked...", false),
+            ("", false),
+        ] {
+            let mut signal = sample_signal();
+            signal["keys"][0]["key"] = serde_json::json!(key);
+            let creds = parse_creds_navigation(&creds_url(&signal))
+                .unwrap()
+                .unwrap();
+            let (_, claimed) =
+                compose_session(Some("synthetic-cookie".into()), &creds.auth_token).unwrap();
+            assert_eq!(
+                claimed.is_some(),
+                expected,
+                "key completeness must agree at parsing and storage"
+            );
+        }
+    }
+
+    #[test]
     fn signal_round_trips_into_account_and_composable_session() {
         let crate::vendor::VendorSession {
             auth_token,
@@ -830,8 +890,8 @@ mod tests {
             "/workspace/' + wrk + '/keys",
             "'/_server'",
             "LoongPort专用/a' + wrk",
-            "input[name=\"name\"]",
-            "button[type=\"submit\"]",
+            "console_key_required",
+            "login_timeout",
         ] {
             assert!(
                 script.contains(needle),

@@ -10,6 +10,8 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
+import { feedbackSubmission } from "@/components/settings/feedbackSubmission";
+import { FeedbackSubmissionIndicator } from "@/components/settings/FeedbackSubmissionStatus";
 import { APP_IDS, getAppDisplayName } from "@/config/appConfig";
 
 const mocks = vi.hoisted(() => ({
@@ -1149,7 +1151,13 @@ describe("FeedbackDialog extended field capability gate", () => {
         }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
+        screen.getByText(
+          kind === "pending"
+            ? "settings.feedbackCapabilitiesLoading"
+            : kind === "failed"
+              ? "settings.feedbackCapabilitiesFailed"
+              : "settings.feedbackExtendedFieldsUnsupported",
+        ),
       ).toBeVisible();
       await submitDescription();
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
@@ -1162,6 +1170,56 @@ describe("FeedbackDialog extended field capability gate", () => {
         await act(async () => capability.resolve({ extendedFields: false }));
     },
   );
+
+  it("retries a failed capability read without losing the draft or submitting", async () => {
+    const retry = deferred<unknown>();
+    mocks.getFormCapabilities
+      .mockRejectedValueOnce(new Error("private failure"))
+      .mockReturnValueOnce(retry.promise);
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    const description = screen.getByRole("textbox", {
+      name: "settings.feedbackDescriptionLabel",
+    });
+    fireEvent.change(description, {
+      target: { value: "Synthetic retained draft" },
+    });
+    const button = await screen.findByRole("button", {
+      name: "settings.feedbackCapabilitiesRetry",
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByText("settings.feedbackCapabilitiesLoading"),
+    ).toBeVisible();
+    await act(async () => retry.resolve({ extendedFields: true }));
+    expect(contactInput()).toBeEnabled();
+    expect(description).toHaveValue("Synthetic retained draft");
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it("ignores a retry result after reopening into an unsupported session", async () => {
+    const retry = deferred<unknown>();
+    mocks.getFormCapabilities
+      .mockRejectedValueOnce(new Error("synthetic failure"))
+      .mockReturnValueOnce(retry.promise)
+      .mockResolvedValueOnce({ extendedFields: false });
+    const { rerender } = render(<FeedbackDialog open onClose={vi.fn()} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.feedbackCapabilitiesRetry",
+      }),
+    );
+    rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
+    rerender(<FeedbackDialog open onClose={vi.fn()} />);
+    await screen.findByText("settings.feedbackExtendedFieldsUnsupported");
+    await act(async () => retry.resolve({ extendedFields: true }));
+    expect(
+      screen.queryByRole("textbox", { name: "settings.feedbackContactLabel" }),
+    ).not.toBeInTheDocument();
+    expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(3);
+  });
 
   it("does not enable a new dialog session from an old capability response", async () => {
     const capability = deferred<unknown>();
@@ -1943,7 +2001,13 @@ describe("FeedbackDialog direct submission interaction", () => {
         }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
+        screen.getByText(
+          kind === "pending"
+            ? "settings.feedbackCapabilitiesLoading"
+            : kind === "failed"
+              ? "settings.feedbackCapabilitiesFailed"
+              : "settings.feedbackExtendedFieldsUnsupported",
+        ),
       ).toBeVisible();
     },
   );
@@ -2081,5 +2145,154 @@ describe("FeedbackDialog rendered confirmation boundary", () => {
     expect(
       within(preview).getByText("settings.feedbackPreviewContactNotice"),
     ).toBeVisible();
+  });
+});
+
+describe("FeedbackDialog local paste", () => {
+  const field = () =>
+    screen.getByRole("textbox", { name: "settings.feedbackDescriptionLabel" });
+  const paste = (files: File[], text = "") =>
+    fireEvent.paste(field(), {
+      clipboardData: {
+        files,
+        items: files.map((file) => ({
+          kind: "file",
+          type: file.type,
+          getAsFile: () => file,
+        })),
+        getData: () => text,
+      },
+    });
+  it("attaches pasted images, preserves mixed text default behavior and does not upload", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    expect(
+      paste(
+        [new File(["synthetic"], "paste.png", { type: "image/png" })],
+        "text",
+      ),
+    ).toBe(true);
+    expect(await screen.findByRole("img", { name: "paste.png" })).toBeVisible();
+    expect(mocks.readClipboardImage).not.toHaveBeenCalled();
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("leaves plain text and non-image file pastes untouched", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    expect(paste([], "text")).toBe(true);
+    expect(
+      paste([new File(["text"], "text.txt", { type: "text/plain" })]),
+    ).toBe(true);
+    expect(screen.queryAllByRole("img")).toHaveLength(0);
+    expect(mocks.readClipboardImage).not.toHaveBeenCalled();
+  });
+  it("uses the event files fallback and rejects oversized images before reading", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    const file = new File(["synthetic"], "fallback.png", { type: "image/png" });
+    fireEvent.paste(field(), { clipboardData: { items: [], files: [file] } });
+    expect(
+      await screen.findByRole("img", { name: "fallback.png" }),
+    ).toBeVisible();
+    const oversized = new File(["synthetic"], "large.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(oversized, "size", { value: 5 * 1024 * 1024 + 1 });
+    const read = vi.spyOn(FileReader.prototype, "readAsDataURL");
+    paste([oversized]);
+    expect(read).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("img", { name: "large.png" }),
+    ).not.toBeInTheDocument();
+    read.mockRestore();
+  });
+
+  it("bounds repeated pastes at six images", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    for (let i = 0; i < 7; i++) {
+      paste([new File(["synthetic"], `paste-${i}.png`, { type: "image/png" })]);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    }
+    expect(screen.getAllByRole("img")).toHaveLength(6);
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("ignores an in-flight paste after close and reopen and refuses duplicate reads", async () => {
+    let reader: FileReader | undefined;
+    const read = vi
+      .spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(function (this: FileReader) {
+        reader = this;
+      });
+    const { rerender } = render(<FeedbackDialog open onClose={vi.fn()} />);
+    const file = new File(["synthetic"], "old.png", { type: "image/png" });
+    paste([file]);
+    paste([file]);
+    expect(read).toHaveBeenCalledTimes(1);
+    rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
+    rerender(<FeedbackDialog open onClose={vi.fn()} />);
+    Object.defineProperty(reader!, "result", {
+      value: "data:image/png;base64,AAAA",
+    });
+    await act(async () =>
+      reader!.onload?.call(
+        reader!,
+        new ProgressEvent("load") as ProgressEvent<FileReader>,
+      ),
+    );
+    expect(
+      screen.queryByRole("img", { name: "old.png" }),
+    ).not.toBeInTheDocument();
+    read.mockRestore();
+  });
+});
+
+describe("FeedbackDialog background submission entry", () => {
+  it("closes immediately, survives unmount, records the actual attempt and clears the completion dot on view", async () => {
+    const pending = deferred<typeof prepared>();
+    mocks.prepare.mockReturnValueOnce(pending.promise);
+    const close = vi.fn();
+    const { unmount } = render(
+      <FeedbackDialog open backgroundSubmission onClose={close} />,
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+      { target: { value: "Synthetic background report" } },
+    );
+    const submit = screen.getByRole("button", {
+      name: "settings.feedbackSubmit",
+    });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("region", { name: "settings.feedbackPreviewTitle" }),
+    ).not.toBeInTheDocument();
+    unmount();
+    render(<FeedbackSubmissionIndicator />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "settings.feedbackSubmitting",
+    );
+    await act(async () => pending.resolve(prepared));
+    await waitFor(() =>
+      expect(mocks.submit).toHaveBeenCalledExactlyOnceWith({
+        previewId: prepared.previewId,
+      }),
+    );
+    await screen.findByRole("status", {
+      name: "settings.feedbackBackgroundUnread",
+    });
+    act(() => feedbackSubmission.markRead());
+    expect(
+      screen.queryByRole("status", {
+        name: "settings.feedbackBackgroundUnread",
+      }),
+    ).not.toBeInTheDocument();
+    render(<FeedbackDialog open backgroundSubmission onClose={vi.fn()} />);
+    expect(screen.getByText("Synthetic background report")).toBeInTheDocument();
+    expect(mocks.cancelPreview).not.toHaveBeenCalled();
   });
 });

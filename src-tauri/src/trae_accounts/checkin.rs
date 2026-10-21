@@ -24,6 +24,9 @@ pub(crate) async fn run(
     let lease = Lease::acquire(session, id, "checkin")
         .await
         .map_err(|_| unavailable())?;
+    if lease.snapshot.account.realm == Realm::Cn {
+        return Err(unavailable());
+    }
     run_with(lease, timeout, &OfficialHttp).await
 }
 fn unavailable() -> ProxyError {

@@ -47,6 +47,9 @@ pub(crate) enum Failure {
 pub(super) struct Device {
     // Original selected desktop host. No default or legacy token-host migration.
     pub auth_host: String,
+    // Only a newly validated native CN Code import may admit the CN consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_package: Option<String>,
     pub uid: String,
     pub id: String,
     pub machine: String,
@@ -306,6 +309,14 @@ pub(crate) struct AccountView {
     pub id: String,
     pub realm: Realm,
     pub status: AccountStatus,
+    /// Source adapter eligibility only; never a live inference acceptance claim.
+    #[serde(rename = "nativeSourceSupported")]
+    pub native_source_supported: bool,
+}
+pub(super) fn native_source_supported(a: &Account) -> bool {
+    a.device.auth_host == a.realm.auth()
+        && a.device.client == "ono9krqynydwx5"
+        && (a.realm != Realm::Cn || a.device.native_package.as_deref() == Some("TRAE_CN"))
 }
 pub(crate) async fn list(session: &SecretSession) -> Result<Vec<AccountView>, Failure> {
     access(session, None, |d, _| {
@@ -315,6 +326,7 @@ pub(crate) async fn list(session: &SecretSession) -> Result<Vec<AccountView>, Fa
             .map(|a| AccountView {
                 id: a.id.clone(),
                 realm: a.realm,
+                native_source_supported: native_source_supported(a),
                 status: if a.grant.is_none() {
                     AccountStatus::Retired
                 } else if a.refresh_pending {

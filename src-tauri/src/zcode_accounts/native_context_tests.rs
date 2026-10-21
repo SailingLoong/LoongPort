@@ -133,7 +133,7 @@ fn renderer_selection_contains_only_untrusted_paths_and_key_mode() {
 #[test]
 fn manifest_is_exact_and_native_gate_is_macos_only() {
     let contracts = supported_contracts();
-    assert_eq!(contracts.len(), 1);
+    assert_eq!(contracts.len(), 2);
     assert_eq!(contracts[0].fingerprint.version, "3.14.4");
     assert_eq!(contracts[0].fingerprint.build, "3.14.4.7912");
     assert_eq!(contracts[0].native_gate_passed, cfg!(target_os = "macos"));
@@ -620,7 +620,7 @@ fn metadata_discovery_reads_only_allowlisted_bootstrap_and_public_artifacts() {
     let report = discover_from_candidates(
         &f.user,
         std::slice::from_ref(&f.selection.install_path),
-        &f.manifest,
+        std::slice::from_ref(&f.manifest),
     )
     .unwrap();
     assert_eq!(report.data_root, f.selection.data_root);
@@ -646,7 +646,7 @@ fn metadata_discovery_defaults_only_when_bootstrap_is_absent_and_rejects_bad_bas
     let report = discover_from_candidates(
         &f.user,
         std::slice::from_ref(&f.selection.install_path),
-        &f.manifest,
+        std::slice::from_ref(&f.manifest),
     )
     .unwrap();
     assert_eq!(report.data_root, Path::new(&f.user.home).join(".zcode/v2"));
@@ -662,7 +662,7 @@ fn metadata_discovery_defaults_only_when_bootstrap_is_absent_and_rejects_bad_bas
             discover_from_candidates(
                 &f.user,
                 std::slice::from_ref(&f.selection.install_path),
-                &f.manifest
+                std::slice::from_ref(&f.manifest)
             ),
             Err(BlockedReason::SettingsInvalid)
         ));
@@ -677,7 +677,7 @@ fn metadata_discovery_rejects_symlink_or_unreadable_bootstrap_and_never_trusts_c
         discover_from_candidates(
             &f.user,
             std::slice::from_ref(&f.selection.install_path),
-            &f.manifest
+            std::slice::from_ref(&f.manifest)
         ),
         Err(BlockedReason::SettingsInvalid)
     ));
@@ -692,7 +692,7 @@ fn metadata_discovery_rejects_symlink_or_unreadable_bootstrap_and_never_trusts_c
     let report = discover_from_candidates(
         &f.user,
         std::slice::from_ref(&f.selection.install_path),
-        &f.manifest,
+        std::slice::from_ref(&f.manifest),
     )
     .unwrap();
     let selected = report
@@ -710,7 +710,7 @@ fn metadata_unknown_version_labels_do_not_admit_an_unknown_build() {
     let report = discover_from_candidates(
         &f.user,
         std::slice::from_ref(&f.selection.install_path),
-        &f.manifest,
+        std::slice::from_ref(&f.manifest),
     )
     .unwrap();
     assert_eq!(report.candidates[0].version.as_deref(), Some("99.0"));
@@ -720,4 +720,89 @@ fn metadata_unknown_version_labels_do_not_admit_an_unknown_build() {
         NativeContextProbe::from_parts(f.selection.clone(), f.user.clone(), &f.manifest),
         Err(BlockedReason::UnsupportedBuild)
     ));
+}
+
+#[test]
+fn newer_exact_contract_is_discovered_without_accepting_version_only() {
+    let mut f = Fixture::new();
+    f.manifest.version = "3.16.2";
+    f.manifest.build = "3.16.2.8769";
+    let contracts = [installed_contract(), f.manifest];
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &contracts,
+    )
+    .unwrap();
+    assert!(report.candidates[0].verified_build);
+    assert_eq!(report.candidates[0].build.as_deref(), Some("3.16.2.8769"));
+    let probe = NativeContextProbe::from_contracts(f.selection.clone(), f.user.clone(), &contracts)
+        .unwrap();
+    assert_eq!(probe.fingerprint.build, "3.16.2.8769");
+    // A matching build label cannot compensate for any changed public artifact.
+    fs::write(
+        f.selection.install_path.join("Contents/MacOS/ZCode"),
+        b"changed",
+    )
+    .unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        &contracts,
+    )
+    .unwrap();
+    assert!(!report.candidates[0].verified_build);
+}
+
+#[test]
+fn official_3162_contract_preserves_old_build_and_binds_all_three_artifacts() {
+    let manifests = installed_contracts();
+    assert_eq!(manifests.len(), 2);
+    assert_eq!(manifests[0].version, "3.14.4");
+    assert_eq!(manifests[1].version, "3.16.2");
+    assert_eq!(manifests[1].build, "3.16.2.8769");
+    assert_eq!(manifests[1].artifacts[0].exact_size, Some(341333085));
+    assert_eq!(manifests[1].artifacts[1].exact_size, Some(52944));
+    assert_eq!(manifests[1].artifacts[2].exact_size, Some(4392));
+    assert_ne!(
+        manifests[0].fingerprint().artifact_sha256,
+        manifests[1].fingerprint().artifact_sha256
+    );
+}
+
+// Explicit read-only public-artifact check; never opens a real account profile.
+#[test]
+#[ignore = "requires an explicitly supplied official 3.16.2 arm64 app bundle"]
+fn official_3162_public_artifacts_match_native_contract() {
+    let mut f = Fixture::new();
+    f.selection.install_path = fs::canonicalize(
+        std::env::var_os("ZCODE_PUBLIC_TEST_APP").expect("explicit public bundle path"),
+    )
+    .unwrap();
+    let probe = NativeContextProbe::from_contracts(
+        f.selection.clone(),
+        f.user.clone(),
+        &installed_contracts(),
+    )
+    .unwrap();
+    assert_eq!(probe.fingerprint.build, "3.16.2.8769");
+    *probe.test_facts.lock().unwrap() = Some(Ok(SystemFacts {
+        user: f.user.clone(),
+        writers: WriterState::Stopped,
+    }));
+    let mut contracts = supported_contracts();
+    // Fixture-only admission allows checking the format on Linux too. The
+    // production platform gate and real Mac acceptance are unchanged.
+    for contract in &mut contracts {
+        contract.native_gate_passed = true;
+    }
+    let context = VerifiedContext::assess(probe.observe().unwrap(), &contracts).unwrap();
+    let cipher = context.cipher().unwrap();
+    let encrypted = cipher
+        .encrypt("synthetic-3162-public-artifact-check")
+        .unwrap();
+    assert_eq!(
+        cipher.decrypt(&encrypted).unwrap().as_str(),
+        "synthetic-3162-public-artifact-check"
+    );
 }

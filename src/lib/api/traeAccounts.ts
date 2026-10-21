@@ -1,17 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 
 // Deliberately safe DTOs: credentials and upstream identity never enter the UI.
-export type TraeRealm = "sg" | "us";
+export type TraeRealm = "cn" | "sg" | "us";
 export interface TraeAccountView {
   id: string;
   realm: TraeRealm | "cn";
   status: "stored" | "refreshPending" | "retired";
+  // Source adapter eligibility, not live model/credit acceptance. Missing CN metadata fails closed.
+  nativeSourceSupported?: boolean;
 }
 export const TRAE_AUTH_HOST = "https://growsg-normal.trae.ai" as const;
+export const traeAuthHost = (realm: TraeRealm) =>
+  realm === "cn" ? "https://api.trae.cn" : TRAE_AUTH_HOST;
 export interface TraeFlowView {
   flowId: string;
   realm: TraeRealm;
-  authHost: typeof TRAE_AUTH_HOST;
+  authHost: string;
 }
 export interface TraeSelection {
   storagePath: string;

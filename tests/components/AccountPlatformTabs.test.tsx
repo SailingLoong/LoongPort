@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, expect, it } from "vitest";
@@ -84,4 +84,50 @@ it("temporarily reveals an explicitly opened hidden platform without changing sa
   expect(
     screen.queryByRole("tab", { name: "WorkBuddy" }),
   ).not.toBeInTheDocument();
+});
+
+it("uses compact icon tabs with region badges only for true editions", () => {
+  render(<Harness />);
+  const workbuddy = screen.getByRole("tab", { name: "WorkBuddy" });
+  expect(workbuddy.textContent).toBe("");
+  expect(workbuddy).toHaveClass("h-10", "w-10");
+  expect(workbuddy.querySelector("img")).toHaveClass("h-5", "w-5");
+  expect(screen.getByRole("tab", { name: "TRAE 中国版" })).toHaveTextContent(
+    /^CN$/,
+  );
+  expect(screen.getByRole("tab", { name: "TRAE 国际版" })).toHaveTextContent(
+    /^INTL$/,
+  );
+  expect(
+    screen.getByRole("tab", { name: "MiniMax Code 国内版" }),
+  ).toHaveTextContent(/^CN$/);
+  expect(
+    screen.getByRole("tab", { name: "MiniMax Code 国际版" }),
+  ).toHaveTextContent(/^INTL$/);
+  expect(screen.getByRole("tab", { name: "Qoder" }).textContent).toBe("");
+  expect(screen.getByRole("tablist")).toHaveClass("overflow-x-auto");
+  expect(
+    screen
+      .getByRole("button", { name: "添加平台标签" })
+      .closest('[role="tablist"]'),
+  ).toBeNull();
+});
+
+it("shows the full edition name on hover and keyboard focus without expanding the tab", async () => {
+  const user = userEvent.setup();
+  render(<Harness />);
+  const international = screen.getByRole("tab", { name: "TRAE 国际版" });
+  await user.hover(international);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("TRAE 国际版");
+  await user.unhover(international);
+  const workbuddy = screen.getByRole("tab", { name: "WorkBuddy" });
+  act(() => workbuddy.focus());
+  await waitFor(() =>
+    expect(screen.getByRole("tooltip")).toHaveTextContent("WorkBuddy"),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+  );
+  expect(workbuddy).toHaveAttribute("aria-selected", "true");
 });

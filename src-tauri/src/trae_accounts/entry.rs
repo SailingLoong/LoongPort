@@ -53,6 +53,7 @@ pub(crate) struct FlowView {
 pub(super) struct Selection {
     pub storage: PathBuf,
     pub product: PathBuf,
+    pub edition: import::Edition,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -144,12 +145,14 @@ pub(crate) async fn begin(
     product_path: String,
     realm: Realm,
 ) -> Result<FlowView, Error> {
-    if realm == Realm::Cn {
-        return Err(Error::Unsupported);
-    }
     let selection = Selection {
         storage: selected_path(&storage_path, "storage.json")?,
         product: selected_path(&product_path, "product.json")?,
+        edition: if realm == Realm::Cn {
+            import::Edition::Cn
+        } else {
+            import::Edition::Global
+        },
     };
     let id = uuid::Uuid::new_v4().to_string();
     store::access(session, None, |_, binding| {
@@ -204,11 +207,7 @@ pub(crate) async fn confirm(session: Arc<SecretSession>, id: &str) -> Result<Acc
         &inference::OfficialHttp,
         |selection| async move {
             tokio::task::spawn_blocking(move || {
-                import::read_selected(
-                    &selection.storage,
-                    &selection.product,
-                    import::Edition::Global,
-                )
+                import::read_selected(&selection.storage, &selection.product, selection.edition)
             })
             .await
             .map_err(|_| Failure::Storage)?
@@ -299,6 +298,7 @@ where
                 AccountView {
                     id: a.id.clone(),
                     realm: a.realm,
+                    native_source_supported: store::native_source_supported(a),
                     status: store::AccountStatus::Stored,
                 },
                 false,

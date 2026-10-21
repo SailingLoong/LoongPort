@@ -128,7 +128,7 @@ pub struct PlanRows {
 /// 8 个平台（`deeplink/provider.rs:147`）⇒ 我们要的六个都在里面，不需要新写分派。
 /// plan 的生成风格（鉴权字段 / wire）由 [`crate::vendor::plan_style`] 一并传下去。
 pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<PlanRows> {
-    crate::vendor::plans(vendor)
+    crate::vendor::plans_for_account(vendor, Some(account_id))
         .iter()
         .map(|plan| {
             // 模型目录与配置同源派生：没有目录的档位会被省心模式的偏好过滤静默排除。

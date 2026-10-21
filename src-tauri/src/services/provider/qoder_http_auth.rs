@@ -1,4 +1,5 @@
-//! Backend-only HTTP credential owner. No production transport or admission is enabled.
+//! Backend-owned HTTP credentials. Admission requires an explicit source declaration
+//! and a current identity in the original encrypted Provider owner.
 //! The configured PAT remains in Provider; only its derived state occupies the
 //! encrypted subordinate column. No credential type here implements Debug.
 use super::qoder_daily::{
@@ -12,7 +13,6 @@ use std::{future::Future, pin::Pin};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const ORIGIN: &str = "https://openapi.qoder.sh";
-pub(crate) const PRODUCTION_ADMISSION: bool = false;
 const FORMAT: u32 = 1;
 pub(crate) const REFRESH_MARGIN_MS: i64 = 300_000;
 
@@ -635,9 +635,6 @@ pub(crate) enum PreparedIdentityAction {
 }
 
 pub(crate) fn identity_context(db: &Database, provider_id: &str, now_ms: i64) -> IdentityContext {
-    if !PRODUCTION_ADMISSION {
-        return IdentityContext::unavailable(provider_id);
-    }
     identity_context_admitted(db, provider_id, now_ms)
         .unwrap_or_else(|_| IdentityContext::unavailable(provider_id))
 }
@@ -656,22 +653,6 @@ fn identity_context_admitted(
 }
 
 pub(crate) async fn perform_identity_action<F, C>(
-    db: &Database,
-    request: IdentityActionRequest,
-    transport: &dyn AuthTransport,
-    confirm: C,
-    now_ms: impl Fn() -> i64,
-) -> IdentityActionResult
-where
-    C: FnOnce(IdentityConfirmation) -> F,
-    F: Future<Output = bool>,
-{
-    if !PRODUCTION_ADMISSION {
-        return IdentityActionResult::unavailable();
-    }
-    perform_identity_action_admitted(db, request, transport, confirm, now_ms).await
-}
-async fn perform_identity_action_admitted<F, C>(
     db: &Database,
     request: IdentityActionRequest,
     transport: &dyn AuthTransport,

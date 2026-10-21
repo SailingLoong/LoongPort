@@ -769,7 +769,11 @@ impl Owner {
                 value["status"]=json!("completed"); value["reason"]=Value::Null;
             }
             let receipt=contract::durable_result(&value);
-            if contract::validate_receipt(&binding,&receipt).is_ok()&&owner.finish_execution(&s,&binding,&receipt).is_ok(){if let Ok(mut out)=output.lock(){*out=Some(value);}}
+            if contract::validate_receipt(&binding,&receipt).is_ok()&&owner.finish_execution(&s,&binding,&receipt).is_ok(){
+                if let Ok(mut out)=output.lock(){*out=Some(value.clone());}
+                #[cfg(unix)]
+                owner.finish_local_analysis(&s, &task, &value);
+            }
         });
         let worker = match worker {
             Ok(w) => w,

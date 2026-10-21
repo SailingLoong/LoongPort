@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 type AgentRun = {
   taskId: string;
   agentId: string;
+  dependsOnAnalysis?: boolean;
   result: {
     status: string;
     output?: string | null;
@@ -19,10 +20,21 @@ interface AgentsPanelProps {
 }
 const statuses: Record<string, string> = {
   accepted: "执行中",
+  waiting: "等待分析结果",
   completed: "完成",
   failed: "失败",
   unknown: "结果未确认",
   not_started: "未启动",
+};
+const reasons: Record<string, string> = {
+  waiting_for_analysis: "等待分析完成，再提交复核。",
+  analysis_not_completed: "分析未成功完成，没有启动复核。",
+  analysis_output_too_large: "分析与原任务超过单次文本上限，没有启动复核。",
+  analysis_output_unavailable: "分析正文不可用，没有启动复核。",
+  cancelled_before_review: "已取消后续复核，未提交新的复核请求。",
+  review_binding_failed: "账号链已变化或暂不可用，复核未启动。",
+  review_start_failed: "复核启动失败，不会自动重试。",
+  review_not_started_no_replay: "复核未启动，不会因刷新或重启自动补跑。",
 };
 export function AgentsPanel({}: AgentsPanelProps) {
   const [input, setInput] = useState("");
@@ -90,7 +102,7 @@ export function AgentsPanel({}: AgentsPanelProps) {
         setNotice(
           kind === "cancel"
             ? "已请求取消；不代表远端已停止，后续状态以结果为准。"
-            : "任务状态已更新；未启动项不会自动补跑。",
+            : "任务状态已更新；分析成功后把结果交给复核，失败或取消不会自动重跑。",
         );
       }
     } catch {
@@ -113,9 +125,9 @@ export function AgentsPanel({}: AgentsPanelProps) {
     <div className="page-content flex flex-col flex-1 min-h-0 gap-4 p-6">
       <h2 className="text-xl font-semibold">多 Agents</h2>
       <p className="text-sm text-muted-foreground">
-        仅支持 Codex 当前已应用账号链。独立分析与复核共用 LoongPort
-        入口，不需要安装 Paperclip。当前先验证两个独立
-        run，尚非完整协作流程；仅处理有限文本，不运行工具。
+        仅支持 Codex 当前已应用账号链。分析结果交给复核，复核给出最终答复， 共用
+        LoongPort 入口，不需要安装 Paperclip。仅处理有限文本，不运行工具。
+        应用重启后不会自动续跑或重放任务。
       </p>
       <label className="space-y-1">
         任务
@@ -167,7 +179,9 @@ export function AgentsPanel({}: AgentsPanelProps) {
                 !runs.some(
                   (r) =>
                     r.taskId === id &&
-                    ["accepted", "not_started"].includes(r.result.status),
+                    ["accepted", "not_started", "waiting"].includes(
+                      r.result.status,
+                    ),
                 )
               }
               onClick={() => void mutate("cancel", id)}
@@ -183,6 +197,18 @@ export function AgentsPanel({}: AgentsPanelProps) {
                   {run.agentId === "analysis" ? "分析 Agent" : "复核 Agent"} ·{" "}
                   {statuses[run.result.status] ?? "未知状态"}
                 </p>
+                {run.agentId === "review" &&
+                  run.dependsOnAnalysis &&
+                  run.result.status === "completed" &&
+                  run.result.output && (
+                    <h4 className="font-medium">最终结果</h4>
+                  )}
+                {run.agentId === "review" &&
+                  run.result.status !== "completed" && (
+                    <p className="text-sm text-muted-foreground">
+                      复核未完成，当前没有最终结果。
+                    </p>
+                  )}
                 {run.result.output && (
                   <p className="whitespace-pre-wrap break-words">
                     {run.result.output}
@@ -193,7 +219,7 @@ export function AgentsPanel({}: AgentsPanelProps) {
                 )}
                 {run.result.reason && (
                   <p className="text-sm text-muted-foreground">
-                    {run.result.reason}
+                    {reasons[run.result.reason] ?? run.result.reason}
                   </p>
                 )}
               </div>

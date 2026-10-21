@@ -1,8 +1,25 @@
-import { useState } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState, type ReactElement } from "react";
+import {
+  fireEvent,
+  render as renderView,
+  screen,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AddHubPage } from "../AddHubPage";
+
+vi.mock("@/lib/api/providers", () => ({
+  providersApi: { getAll: vi.fn(async () => ({})) },
+}));
+function render(view: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderView(
+    <QueryClientProvider client={client}>{view}</QueryClientProvider>,
+  );
+}
 
 /**
  * 广场开关的消费端在 `RelayDirectoryPage`（只藏推荐列表）。

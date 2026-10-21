@@ -38,6 +38,7 @@ fn account(id: &str, realm: Realm) -> Account {
         version: 1,
         device: Device {
             auth_host: realm.auth().into(),
+            native_package: None,
             uid: "synthetic-user".into(),
             id: "synthetic-device".into(),
             machine: "synthetic-machine".into(),
@@ -331,6 +332,35 @@ fn exchange_response(device: &str) -> ProxyResponse {
     )
 }
 #[tokio::test]
+async fn renewal_header_uses_only_original_access_token_and_keeps_realm_gate() {
+    let f = Fixture::new().await;
+    let id = keyed(&f, false).await;
+    let mut saved = snapshot(&f.session, &id).await.unwrap();
+    for realm in [Realm::Sg, Realm::Us] {
+        saved.account.realm = realm;
+        saved.account.device.auth_host = realm.auth().into();
+        let request = super::auth::refresh_request(&saved, Duration::from_secs(2)).unwrap();
+        assert_eq!(request.headers["x-cloudide-token"], "synthetic-access");
+        assert!(request.headers["x-cloudide-token"].is_sensitive());
+        assert!(!request.headers.contains_key("authorization"));
+        assert_eq!(request.body["ClientID"], "ono9krqynydwx5");
+        assert_eq!(request.body["DeviceInfo"]["DeviceID"], "1234567890123456");
+        assert_eq!(
+            request.url,
+            format!("{}{}", realm.auth(), super::auth::PATH)
+        );
+    }
+    saved.account.device.native_package = None;
+    saved.account.realm = Realm::Cn;
+    saved.account.device.auth_host = Realm::Cn.auth().into();
+    assert!(super::auth::refresh_request(&saved, Duration::from_secs(2)).is_err());
+    saved.account.realm = Realm::Sg;
+    saved.account.device.auth_host = Realm::Sg.auth().into();
+    saved.account.grant.as_mut().unwrap().access = "synthetic\r\nheader".into();
+    assert!(super::auth::refresh_request(&saved, Duration::from_secs(2)).is_err());
+}
+
+#[tokio::test]
 async fn expired_grant_refreshes_once_and_commits_before_inference() {
     let f = Fixture::new().await;
     let id = keyed(&f, true).await;
@@ -355,6 +385,9 @@ async fn expired_grant_refreshes_once_and_commits_before_inference() {
             "https://growsg-normal.trae.ai/trae/api/v3/oauth/ExchangeToken"
         );
         assert_eq!(calls[0].body["DeviceInfo"]["DeviceID"], "1234567890123456");
+        assert_eq!(calls[0].headers["x-cloudide-token"], "synthetic-access");
+        assert!(calls[0].headers["x-cloudide-token"].is_sensitive());
+        assert!(!calls[0].headers.contains_key("authorization"));
         assert_eq!(
             calls[2].headers["authorization"],
             format!("Cloud-IDE-JWT {}", token("synthetic-user"))
@@ -994,7 +1027,8 @@ async fn account_projection_exposes_only_opaque_id_realm_and_local_status() {
         vec![AccountView {
             id: id.clone(),
             realm: Realm::Cn,
-            status: AccountStatus::Stored
+            status: AccountStatus::Stored,
+            native_source_supported: false,
         }]
     );
     let encoded = serde_json::to_string(&views).unwrap();
@@ -1298,6 +1332,7 @@ async fn fresh_profile_unverified_realm_sends_zero_http_and_saves_no_grant() {
     for realm in [Realm::Cn] {
         let f = Fixture::new().await;
         let mut material = profile_material();
+        material.account.device.native_package = None;
         material.account.realm = realm;
         material.account.device.auth_host = realm.auth().into();
         let wire = Http::default();
@@ -1361,4 +1396,165 @@ async fn fresh_profile_missing_or_legacy_original_host_is_never_migrated() {
     );
     assert!(wire.calls.lock().unwrap().is_empty());
     assert!(list(&f.session).await.unwrap().is_empty());
+}
+
+// Only fields consumed by the official CN Code exchange/profile flow.
+fn cn_exchange_response() -> ProxyResponse {
+    checkin_reply(json!({"Result": {
+        "Token": "synthetic-cn-renewed",
+        "RefreshToken": "synthetic-cn-refresh-renewed",
+        "TokenExpireAt": now() + 3600000
+    }}))
+}
+
+// Offline contract only: this proves routing and fences, not live credit consumption.
+#[tokio::test]
+async fn cn_code_native_import_refresh_profile_then_text_request_stays_cn() {
+    let f = Fixture::new().await;
+    let material = super::import::synthetic_material();
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        cn_exchange_response(),
+        profile_response("synthetic-user", "CN"),
+        ok(),
+    ]);
+    let id = super::auth::activate_with(f.session.clone(), material, Duration::from_secs(2), &wire)
+        .await
+        .unwrap();
+    let response = Lease::acquire(f.session.clone(), &id, "cn-native-contract")
+        .await
+        .unwrap()
+        .dispatch_with(chat(), Duration::from_secs(2), &wire)
+        .await
+        .unwrap();
+    assert!(response.response.status().is_success());
+    let calls = wire.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[0].url,
+        "https://api.trae.cn/trae/api/v3/oauth/ExchangeToken"
+    );
+    assert_eq!(calls[0].headers["x-cloudide-token"], "synthetic-access");
+    assert_eq!(calls[0].body["ClientID"], "ono9krqynydwx5");
+    assert_eq!(calls[0].body["DeviceInfo"]["DeviceID"], "1234567890123456");
+    assert_eq!(calls[0].body["DeviceInfo"]["PlatformCode"], "IDE_PC");
+    assert!(calls[1].url.starts_with("https://api.trae.cn/"));
+    assert_eq!(
+        calls[2].url,
+        "https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat"
+    );
+}
+
+#[tokio::test]
+async fn cn_code_rejects_wrong_profile_region_and_global_host_without_fallback() {
+    for wrong_host in [false, true] {
+        let f = Fixture::new().await;
+        let mut material = super::import::synthetic_material();
+        if wrong_host {
+            material.account.device.auth_host = Realm::Sg.auth().into();
+        }
+        let wire = Http::default();
+        wire.responses.lock().unwrap().extend([
+            cn_exchange_response(),
+            profile_response("synthetic-user", "SG"),
+        ]);
+        assert!(super::auth::activate_with(
+            f.session.clone(),
+            material,
+            Duration::from_secs(2),
+            &wire
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            wire.calls.lock().unwrap().len(),
+            if wrong_host { 0 } else { 2 }
+        );
+        let views = list(&f.session).await.unwrap();
+        assert!(views.iter().all(|row| row.status != AccountStatus::Stored));
+    }
+}
+
+#[tokio::test]
+async fn cn_exchange_optional_receipts_cannot_contradict_original_identity() {
+    let f = Fixture::new().await;
+    let id = keyed(&f, false).await;
+    let mut current = snapshot(&f.session, &id).await.unwrap();
+    current.account.realm = Realm::Cn;
+    current.account.device.auth_host = Realm::Cn.auth().into();
+    current.account.device.native_package = Some("TRAE_CN".into());
+    let plain = json!({"Result": {"Token":"synthetic-cn-token", "RefreshToken":"synthetic-cn-refresh", "TokenExpireAt": now() + 3600000}});
+    assert!(super::auth::accepted(&current, &plain).is_ok());
+    for (field, value) in [
+        ("DeviceBindStatus", json!("UNBOUND")),
+        ("DeviceBindStatus", Value::Null),
+        ("BoundDeviceID", json!("other-device")),
+        ("ClientID", json!("en1oxy7wnw8j9n")),
+        ("UserInfo", json!({"UserID":"other-user", "AIRegion":"CN"})),
+        (
+            "UserInfo",
+            json!({"UserID":"synthetic-user", "AIRegion":"SG"}),
+        ),
+    ] {
+        let mut body = plain.clone();
+        body["Result"][field] = value;
+        assert!(super::auth::accepted(&current, &body).is_err(), "{field}");
+    }
+    current.account.realm = Realm::Sg;
+    assert!(
+        super::auth::accepted(&current, &plain).is_err(),
+        "Global contract unchanged"
+    );
+}
+
+#[tokio::test]
+async fn safe_view_distinguishes_native_cn_source_from_legacy_without_claiming_inference() {
+    let f = Fixture::new().await;
+    let id = f.seed(Realm::Cn).await;
+    assert!(!list(&f.session).await.unwrap()[0].native_source_supported);
+    for (package, host, client, expected) in [
+        ("TRAE_CN", Realm::Cn.auth(), "ono9krqynydwx5", true),
+        ("TRAE_I18N", Realm::Cn.auth(), "ono9krqynydwx5", false),
+        ("TRAE_CN", Realm::Cn.auth(), "en1oxy7wnw8j9n", false),
+    ] {
+        access(&f.session, None, |d, _| {
+            let a = d.accounts.iter_mut().find(|a| a.id == id).unwrap();
+            a.device.native_package = Some(package.into());
+            a.device.auth_host = host.into();
+            a.device.client = client.into();
+            Ok(((), true))
+        })
+        .await
+        .unwrap();
+        let view = &list(&f.session).await.unwrap()[0];
+        assert_eq!(view.native_source_supported, expected);
+        assert_eq!(view.status, AccountStatus::Stored);
+        assert_eq!(
+            serde_json::to_value(view).unwrap()["nativeSourceSupported"],
+            expected
+        );
+    }
+    // A cross-realm host cannot be persisted. Check the pure source predicate
+    // separately, then assert the original storage invariant rejects the write.
+    let mut mismatched = snapshot(&f.session, &id).await.unwrap().account;
+    mismatched.device.native_package = Some("TRAE_CN".into());
+    mismatched.device.client = "ono9krqynydwx5".into();
+    mismatched.device.auth_host = Realm::Sg.auth().into();
+    assert!(!native_source_supported(&mismatched));
+    let rejected = access(&f.session, None, |d, _| {
+        let a = d.accounts.iter_mut().find(|a| a.id == id).unwrap();
+        a.device.auth_host = Realm::Sg.auth().into();
+        Ok(((), true))
+    })
+    .await;
+    assert!(matches!(rejected, Err(Failure::Storage)));
+    assert_eq!(
+        snapshot(&f.session, &id)
+            .await
+            .unwrap()
+            .account
+            .device
+            .auth_host,
+        Realm::Cn.auth()
+    );
 }

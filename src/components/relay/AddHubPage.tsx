@@ -1,3 +1,4 @@
+import { QoderAccountPanel } from "./accounts/QoderAccountPanel";
 import {
   accountPlatforms,
   accountPlatformLabel,
@@ -114,14 +115,7 @@ export function AddHubPage({
             返回平台列表
           </Button>
           {sourceIntent.kind === "account-boundary" ? (
-            <div role="status" className="rounded-xl border p-6 space-y-3">
-              <h2 className="font-semibold">Qoder 账号接入待完善</h2>
-              <p>不会以自定义 API 或 SDK 配置代替账号接入。</p>
-              <p>
-                现有 Qoder 配置仍由原 Provider
-                记录管理。账号身份、领取权益与真实推理消费需要分别验证；本页不会创建另一份账号或凭据。
-              </p>
-            </div>
+            <QoderAccountPanel />
           ) : sourceIntent.kind === "vendor" ? (
             <OfficialApiPage
               key={`source-${sourceRevision}`}

@@ -17,6 +17,11 @@ vi.mock("@/lib/api/vendor", () => ({
       descriptionKey: "loongport.officialApi.deepseekDesc",
     },
     {
+      id: "opencode",
+      displayName: "OpenCode",
+      descriptionKey: "loongport.officialApi.opencodeDesc",
+    },
+    {
       id: "bigmodel",
       displayName: "智谱 BigModel",
       descriptionKey: "loongport.officialApi.bigmodelDesc",
@@ -104,5 +109,25 @@ describe("OfficialApiPage", () => {
     expect(openLogin).toHaveBeenCalledTimes(1);
 
     finish(null);
+  });
+  it("ends OpenCode handoff errors without success and permits retry/cancel", async () => {
+    const { toast } = await import("sonner");
+    openLogin.mockRejectedValueOnce(
+      new Error("新版 Console 尚未接通，请使用已有完整 API key"),
+    );
+    openLogin.mockResolvedValueOnce(null);
+    const { onBack } = renderPage();
+    fireEvent.click(screen.getByText("OpenCode"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getAllByText("loongport.officialApi.connect")).toHaveLength(
+        2,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("OpenCode"));
+    await waitFor(() => expect(openLogin).toHaveBeenCalledTimes(2));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

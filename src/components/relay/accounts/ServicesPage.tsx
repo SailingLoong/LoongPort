@@ -1,3 +1,4 @@
+import { QoderAccountPanel } from "./QoderAccountPanel";
 import { AccountApplicationNavigation } from "./AccountWorkspace";
 import { AccountPlatformTabs } from "./AccountPlatformTabs";
 import {
@@ -171,6 +172,16 @@ function ServicesPageContent({
     );
 
   const sourceIntent = platform ? serviceEntryIntent(platform) : undefined;
+  if (platform === "qoder") {
+    return (
+      <section className="page-content space-y-4">
+        <QoderAccountPanel />
+        <Button variant="outline" onClick={() => onOpenApp("codex")}>
+          管理原有 Qoder 配置
+        </Button>
+      </section>
+    );
+  }
   if (platform && sourceIntent) {
     return (
       <section className="page-content space-y-4">
@@ -180,17 +191,15 @@ function ServicesPageContent({
           )}
         </h2>
         <p className="text-sm text-muted-foreground">
-          {platform === "qoder"
-            ? "Qoder 账号接入待完善。不会以自定义 API 或 SDK 配置代替账号积分与签到。"
-            : platform === "openrouter"
-              ? "API Key 连接，不代表平台账号签到或积分接入。"
-              : "OpenCode 服务来源（Zen / Go / Free），与消费应用选择分开。"}
+          {platform === "openrouter"
+            ? "API Key 连接，不代表平台账号签到或积分接入。"
+            : "OpenCode 服务来源（Zen / Go / Free），与消费应用选择分开。"}
         </p>
         <Button
           variant="outline"
           onClick={() => onOpenAddHub("accounts", { intent: sourceIntent })}
         >
-          {platform === "qoder" ? "查看接入说明" : "添加服务连接"}
+          添加服务连接
         </Button>
       </section>
     );

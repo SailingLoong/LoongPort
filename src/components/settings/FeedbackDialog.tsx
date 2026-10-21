@@ -21,6 +21,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { getAppDisplayName } from "@/config/appConfig";
 import { copyText } from "@/lib/clipboard";
+import { FeedbackSubmissionDetails } from "./FeedbackSubmissionStatus";
+import { isMac } from "@/lib/platform";
 import type { FeedbackReportIdentity } from "@/lib/api/diagnostics";
 import {
   useFeedbackForm,
@@ -106,9 +108,14 @@ function ReportIdentityCopyButton({
 export interface FeedbackDialogProps {
   open: boolean;
   onClose: () => void;
+  backgroundSubmission?: boolean;
 }
 
-export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
+export function FeedbackDialog({
+  open,
+  onClose,
+  backgroundSubmission = false,
+}: FeedbackDialogProps) {
   const { t } = useTranslation();
   const {
     description,
@@ -116,6 +123,8 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     contact,
     appOrder,
     extendedFields,
+    capabilityStatus,
+    loadCapabilities,
     screenshots,
     includeDiagnostics,
     includeSites,
@@ -135,6 +144,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     closeDialog,
     handlePasteFromClipboard,
     handlePickFiles,
+    handlePaste,
     handleReceiptAction,
     changeDescription,
     changeContact,
@@ -148,7 +158,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     hasOptionalDraft,
     submitDisabled,
     handlePrimaryAction,
-  } = useFeedbackForm(open, onClose);
+  } = useFeedbackForm(open, onClose, backgroundSubmission);
   const identityText = (identity: FeedbackReportIdentity) =>
     identity.kind === "github_issue"
       ? t("settings.feedbackIssueNumber", { number: identity.number })
@@ -156,7 +166,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" onPaste={handlePaste}>
         <DialogHeader>
           <DialogTitle>{t("settings.feedbackTitle")}</DialogTitle>
           <DialogDescription>
@@ -165,6 +175,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
         </DialogHeader>
 
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-6 py-4">
+          {backgroundSubmission && <FeedbackSubmissionDetails />}
           <div className="flex flex-col gap-1.5">
             <Textarea
               disabled={submitting}
@@ -260,15 +271,38 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
             </div>
           )}
           {!extendedFields && (
-            <p className="text-xs text-muted-foreground">
-              {t("settings.feedbackExtendedFieldsUnsupported")}
-            </p>
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground" role="status">
+                {t(
+                  capabilityStatus === "loading"
+                    ? "settings.feedbackCapabilitiesLoading"
+                    : capabilityStatus === "failed"
+                      ? "settings.feedbackCapabilitiesFailed"
+                      : "settings.feedbackExtendedFieldsUnsupported",
+                )}
+              </p>
+              {capabilityStatus === "failed" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadCapabilities()}
+                >
+                  {t("settings.feedbackCapabilitiesRetry")}
+                </Button>
+              )}
+            </div>
           )}
 
           <p className="text-xs text-muted-foreground">
             {t("settings.feedbackUserContentNotice")}
           </p>
           <div className="flex flex-col gap-2">
+            <p className="text-xs text-muted-foreground">
+              {t("settings.feedbackPasteHint", {
+                shortcut: isMac() ? "⌘V" : "Ctrl+V",
+              })}
+            </p>
             <div className="flex items-center gap-2">
               <Button
                 type="button"

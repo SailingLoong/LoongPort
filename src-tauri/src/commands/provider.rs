@@ -2518,17 +2518,14 @@ pub async fn claim_qoder_daily_credits(
     .map_err(|_| "Qoder 领取任务失败，请重新打开后仅查询结果".to_owned())?
 }
 
-/// Safe original-Provider status only. Closed admission is enforced before even
-/// obtaining application state, including a direct IPC invocation.
+/// Safe original-Provider status only. Source and identity admission stays in
+/// the original credential owner, including direct IPC invocation.
 #[tauri::command]
 pub(crate) async fn qoder_http_identity_context<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     provider_id: String,
 ) -> crate::services::provider::qoder_http_auth::IdentityContext {
     use crate::services::provider::qoder_http_auth as owner;
-    if !owner::PRODUCTION_ADMISSION {
-        return owner::IdentityContext::unavailable(provider_id);
-    }
     let db = match app_handle.try_state::<AppState>() {
         Some(state) => state.db.clone(),
         None => return owner::IdentityContext::unavailable(provider_id),
@@ -2549,9 +2546,6 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
     request: crate::services::provider::qoder_http_auth::IdentityActionRequest,
 ) -> crate::services::provider::qoder_http_auth::IdentityActionResult {
     use crate::services::provider::qoder_http_auth as owner;
-    if !owner::PRODUCTION_ADMISSION {
-        return owner::IdentityActionResult::unavailable();
-    }
     let db = match app_handle.try_state::<AppState>() {
         Some(state) => state.db.clone(),
         None => return owner::IdentityActionResult::unavailable(),
@@ -2600,7 +2594,7 @@ mod qoder_identity_command_tests {
     };
 
     #[tokio::test]
-    async fn closed_backend_gate_returns_safe_context_without_app_state() {
+    async fn missing_app_state_returns_safe_context() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -2613,7 +2607,7 @@ mod qoder_identity_command_tests {
     }
 
     #[tokio::test]
-    async fn direct_invoke_cannot_bypass_closed_backend_gate_or_trigger_dialog() {
+    async fn direct_invoke_without_app_state_cannot_authenticate_or_trigger_dialog() {
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
