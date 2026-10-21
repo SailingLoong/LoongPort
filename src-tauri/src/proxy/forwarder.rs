@@ -3038,6 +3038,20 @@ impl RequestForwarder {
             is_copilot,
         );
 
+        if let Some(plan) = provider
+            .settings_config
+            .get("opencodePersonalKeyPlan")
+            .and_then(serde_json::Value::as_str)
+        {
+            crate::vendor::opencode_personal::request_headers(
+                plan,
+                &url,
+                &mut ordered_headers,
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            )?;
+        }
+
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
         // 日志目标 URL 的脱敏分两种情形：

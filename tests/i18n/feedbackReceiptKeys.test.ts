@@ -7,6 +7,10 @@ import zhTW from "@/i18n/locales/zh-TW.json";
 const keys = [
   "feedbackPrepare",
   "feedbackPasteHint",
+  "feedbackBackgroundUnread",
+  "feedbackBackgroundDetails",
+  "feedbackBackgroundContinue",
+  "feedbackBackgroundRetry",
   "feedbackCapabilitiesLoading",
   "feedbackCapabilitiesFailed",
   "feedbackCapabilitiesRetry",
@@ -81,6 +85,20 @@ describe("feedback receipt translations", () => {
       expect(settings.feedbackSummaryScreenshots).toContain("{{count}}");
       expect(settings.feedbackSummaryScreenshots).toContain("{{bytes}}");
       expect(settings.feedbackSummaryDiagnostics).toContain("{{bytes}}");
+    },
+  );
+  it.each([
+    [en, "After submission", "safe summary", "upload preview"],
+    [ja, "送信後", "安全な要約", "送信プレビュー"],
+    [zh, "提交后", "安全摘要", "上传预览"],
+    [zhTW, "提交後", "安全摘要", "上傳預覽"],
+  ] as const)(
+    "describes post-submit safe summaries without a mandatory preview",
+    (resource, afterSubmit, safeSummary, oldPreview) => {
+      const copy = resource.settings.feedbackDiagnosticsDetails;
+      expect(copy).toContain(afterSubmit);
+      expect(copy).toContain(safeSummary);
+      expect(copy).not.toContain(oldPreview);
     },
   );
 });

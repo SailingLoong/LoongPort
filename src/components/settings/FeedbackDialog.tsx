@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { getAppDisplayName } from "@/config/appConfig";
 import { copyText } from "@/lib/clipboard";
+import { FeedbackSubmissionDetails } from "./FeedbackSubmissionStatus";
 import { isMac } from "@/lib/platform";
 import type { FeedbackReportIdentity } from "@/lib/api/diagnostics";
 import {
@@ -107,9 +108,14 @@ function ReportIdentityCopyButton({
 export interface FeedbackDialogProps {
   open: boolean;
   onClose: () => void;
+  backgroundSubmission?: boolean;
 }
 
-export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
+export function FeedbackDialog({
+  open,
+  onClose,
+  backgroundSubmission = false,
+}: FeedbackDialogProps) {
   const { t } = useTranslation();
   const {
     description,
@@ -152,7 +158,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     hasOptionalDraft,
     submitDisabled,
     handlePrimaryAction,
-  } = useFeedbackForm(open, onClose);
+  } = useFeedbackForm(open, onClose, backgroundSubmission);
   const identityText = (identity: FeedbackReportIdentity) =>
     identity.kind === "github_issue"
       ? t("settings.feedbackIssueNumber", { number: identity.number })
@@ -169,6 +175,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
         </DialogHeader>
 
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-6 py-4">
+          {backgroundSubmission && <FeedbackSubmissionDetails />}
           <div className="flex flex-col gap-1.5">
             <Textarea
               disabled={submitting}

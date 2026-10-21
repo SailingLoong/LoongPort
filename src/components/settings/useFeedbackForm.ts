@@ -16,6 +16,10 @@ import type {
   FeedbackPreparedPreview,
   FeedbackRelatedApp,
 } from "@/lib/api/diagnostics";
+import {
+  feedbackSubmission,
+  useFeedbackSubmission,
+} from "./feedbackSubmission";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 /** 与后端闸同值（commands/feedback.rs）：前端预检，后端终检。 */
@@ -107,7 +111,15 @@ function feedbackFailureNotice(error: unknown, fallback: string): string {
 }
 
 /** Single owner for the feedback draft, frozen preview and native operation lifecycle. */
-export function useFeedbackForm(open: boolean, onClose: () => void) {
+export function useFeedbackForm(
+  open: boolean,
+  onClose: () => void,
+  backgroundSubmission = false,
+) {
+  const background = useFeedbackSubmission();
+  const backgroundBusy =
+    backgroundSubmission &&
+    (background.phase === "preparing" || background.phase === "submitting");
   const { t } = useTranslation();
   const [description, setDescription] = useState("");
   // null = a new untouched form; [] = an explicit empty selection.
@@ -410,6 +422,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     if (
       busyRef.current ||
       preparingRef.current ||
+      backgroundBusy ||
       attachmentSessionRef.current !== null
     )
       return;
@@ -444,7 +457,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     const session = sessionRef.current;
     const version = draftVersionRef.current;
     try {
-      const result = await feedbackApi.prepare({
+      const input = {
         description,
         relatedApps: [...APP_IDS, "other" as const].filter((app) =>
           selectedApps.includes(app),
@@ -456,7 +469,15 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
           name: shot.name,
           base64: shot.dataUrl,
         })),
-      });
+      };
+      if (backgroundSubmission) {
+        if (feedbackSubmission.start(input)) {
+          reset();
+          onClose();
+        }
+        return;
+      }
+      const result = await feedbackApi.prepare(input);
       if (!isCurrentSession(session) || version !== draftVersionRef.current) {
         cancelPreparedPreview(result.previewId);
         return;
@@ -606,6 +627,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
   const hasOptionalDraft = selectedApps.length > 0 || contact.length > 0;
   const showOptionalFields = extendedFields || hasOptionalDraft;
   const submitDisabled =
+    backgroundBusy ||
     preparing ||
     submitting ||
     receiptAction !== null ||

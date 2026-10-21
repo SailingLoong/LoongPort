@@ -17,6 +17,7 @@ import type {
  * 那把 key 出现在 devtools 的网络面板与前端状态里，而前端并不需要它。
  */
 export interface VendorAccountRow {
+  authMode?: "personal-key" | "web-session";
   id: number;
   /** 稳定标识（`"deepseek"`）。传给 `openLogin`。 */
   vendorId: string;
@@ -135,6 +136,11 @@ export const VENDOR_CATALOG: ReadonlyArray<{
 ];
 
 export const vendorApi = {
+  importOpenCodeKey: (
+    apiKey: string,
+    label: string,
+  ): Promise<{ rowId: number }> =>
+    invoke("vendor_import_opencode_key", { apiKey, label }),
   /**
    * 列出已添加的官网账号。
    *

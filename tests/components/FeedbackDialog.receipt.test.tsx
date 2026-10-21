@@ -10,6 +10,8 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
+import { feedbackSubmission } from "@/components/settings/feedbackSubmission";
+import { FeedbackSubmissionIndicator } from "@/components/settings/FeedbackSubmissionStatus";
 import { APP_IDS, getAppDisplayName } from "@/config/appConfig";
 
 const mocks = vi.hoisted(() => ({
@@ -2241,5 +2243,56 @@ describe("FeedbackDialog local paste", () => {
       screen.queryByRole("img", { name: "old.png" }),
     ).not.toBeInTheDocument();
     read.mockRestore();
+  });
+});
+
+describe("FeedbackDialog background submission entry", () => {
+  it("closes immediately, survives unmount, records the actual attempt and clears the completion dot on view", async () => {
+    const pending = deferred<typeof prepared>();
+    mocks.prepare.mockReturnValueOnce(pending.promise);
+    const close = vi.fn();
+    const { unmount } = render(
+      <FeedbackDialog open backgroundSubmission onClose={close} />,
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "settings.feedbackDescriptionLabel",
+      }),
+      { target: { value: "Synthetic background report" } },
+    );
+    const submit = screen.getByRole("button", {
+      name: "settings.feedbackSubmit",
+    });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("region", { name: "settings.feedbackPreviewTitle" }),
+    ).not.toBeInTheDocument();
+    unmount();
+    render(<FeedbackSubmissionIndicator />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "settings.feedbackSubmitting",
+    );
+    await act(async () => pending.resolve(prepared));
+    await waitFor(() =>
+      expect(mocks.submit).toHaveBeenCalledExactlyOnceWith({
+        previewId: prepared.previewId,
+      }),
+    );
+    await screen.findByRole("status", {
+      name: "settings.feedbackBackgroundUnread",
+    });
+    act(() => feedbackSubmission.markRead());
+    expect(
+      screen.queryByRole("status", {
+        name: "settings.feedbackBackgroundUnread",
+      }),
+    ).not.toBeInTheDocument();
+    render(<FeedbackDialog open backgroundSubmission onClose={vi.fn()} />);
+    expect(screen.getByText("Synthetic background report")).toBeInTheDocument();
+    expect(mocks.cancelPreview).not.toHaveBeenCalled();
   });
 });

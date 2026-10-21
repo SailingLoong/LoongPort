@@ -301,6 +301,11 @@ function AccountHeader({
       <span className="block truncate text-sm font-medium">
         {account.vendorName}
       </span>
+      {account.authMode === "personal-key" && (
+        <span className="text-xs text-muted-foreground">
+          Personal key · 配置已保存，调用及余额未验证
+        </span>
+      )}
       {account.accountLabel && (
         <span className="block truncate text-xs text-muted-foreground">
           {account.accountLabel}

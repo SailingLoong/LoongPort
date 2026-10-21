@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2 } from "lucide-react";
 
+import { OpenCodePersonalKeyForm } from "./OpenCodePersonalKeyForm";
 import { Button } from "@/components/ui/button";
 import type { AppId } from "@/lib/api";
 import { vendorApi, VENDOR_CATALOG } from "@/lib/api/vendor";
@@ -104,6 +105,13 @@ export function OfficialApiPage({
         </div>
       </div>
 
+      {(!vendorId || vendorId === "opencode") && (
+        <OpenCodePersonalKeyForm
+          onSaved={() => {
+            /* Backend event refreshes the shared account list. */
+          }}
+        />
+      )}
       <div className="grid gap-4 py-6 sm:grid-cols-2">
         {VENDOR_CATALOG.filter(
           (vendor) => !vendorId || vendor.id === vendorId,
@@ -125,7 +133,9 @@ export function OfficialApiPage({
               {loginningVendor === vendor.id && (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               )}
-              {t("loongport.officialApi.connect")}
+              {vendor.id === "opencode"
+                ? "官网账户登录（不会自动获取密钥）"
+                : t("loongport.officialApi.connect")}
             </span>
           </button>
         ))}

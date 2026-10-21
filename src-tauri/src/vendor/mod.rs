@@ -18,6 +18,7 @@ pub mod bigmodel;
 pub mod creds;
 pub mod deepseek;
 pub mod opencode;
+pub mod opencode_personal;
 pub mod provision;
 
 use crate::error::AppError;
@@ -101,13 +102,26 @@ pub fn plans(vendor: Vendor) -> &'static [PlanInfo] {
         Vendor::OpenCode => &opencode::Plan::PLAN_INFOS,
     }
 }
+/// Old browser accounts retain their exact old plans. New personal keys never migrate them.
+pub fn plans_for_account(vendor: Vendor, account: Option<&str>) -> &'static [PlanInfo] {
+    if vendor == Vendor::OpenCode {
+        return if account.is_some_and(opencode_personal::is_account) {
+            &opencode_personal::PLANS
+        } else {
+            &opencode::Plan::PLAN_INFOS
+        };
+    }
+    plans(vendor)
+}
 /// 按 id 段反查 plan（`vendor_switch` 的入参校验、provider id 反查都走它）。
 /// `None` = 这个厂商没有这个段。
 pub fn plan_by_segment(vendor: Vendor, segment: &str) -> Option<PlanInfo> {
-    plans(vendor)
-        .iter()
-        .find(|plan| plan.id_segment == segment)
-        .copied()
+    let all = if vendor == Vendor::OpenCode {
+        &opencode_personal::ALL_PLANS[..]
+    } else {
+        plans(vendor)
+    };
+    all.iter().find(|plan| plan.id_segment == segment).copied()
 }
 
 // ─────────────────────── 厂商分发（同 relay::backend 的形状） ───────────────────────
@@ -269,6 +283,9 @@ pub fn config_for(
     match vendor {
         Vendor::DeepSeek if id_segment == deepseek::VENDOR_ID => deepseek::config_for(app),
         Vendor::BigModel if id_segment == bigmodel::VENDOR_ID => bigmodel::config_for(app),
+        Vendor::OpenCode if opencode_personal::is_plan(id_segment) => {
+            opencode_personal::config_for(id_segment, app)
+        }
         Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)?.config_for(app),
         _ => None,
     }
@@ -284,6 +301,9 @@ pub fn claude_role_models(
         Vendor::DeepSeek => deepseek::claude_role_models(),
         Vendor::BigModel => bigmodel::claude_role_models(),
         // Zen 与 Go 的角色档不同（Go 目录没有 claude 系），必须按段分派。
+        Vendor::OpenCode if opencode_personal::is_plan(id_segment) => {
+            opencode_personal::roles(id_segment)
+        }
         Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)
             .unwrap_or(opencode::Plan::Zen)
             .claude_role_models(),
@@ -299,6 +319,9 @@ pub fn plan_style(
         Vendor::DeepSeek | Vendor::BigModel => {
             crate::relay::provider_config::ProvisionStyle::default()
         }
+        Vendor::OpenCode if opencode_personal::is_plan(id_segment) => {
+            opencode_personal::style(id_segment)
+        }
         Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)
             .unwrap_or(opencode::Plan::Zen)
             .style(),
@@ -311,6 +334,9 @@ pub(crate) fn is_free_plan(vendor: Vendor, segment: &str) -> bool {
 
 /// Apply a plan constraint at existing configuration-generation boundaries.
 pub(crate) fn apply_plan_policy(vendor: Vendor, segment: &str, settings: &mut serde_json::Value) {
+    if vendor == Vendor::OpenCode && opencode_personal::is_plan(segment) {
+        settings["opencodePersonalKeyPlan"] = serde_json::json!(segment);
+    }
     if is_free_plan(vendor, segment) {
         settings["freeOnly"] = serde_json::json!(true);
     }

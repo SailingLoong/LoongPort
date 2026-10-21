@@ -59,7 +59,7 @@ describe("OfficialApiPage", () => {
 
     expect(screen.getByText("DeepSeek")).toBeInTheDocument();
     expect(screen.getByText("智谱 BigModel")).toBeInTheDocument();
-    expect(screen.getAllByText("loongport.officialApi.connect").length).toBe(3);
+    expect(screen.getAllByText("loongport.officialApi.connect").length).toBe(2);
   });
 
   it("picking a vendor opens login with that vendor id and the source app", async () => {
@@ -121,7 +121,7 @@ describe("OfficialApiPage", () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(screen.getAllByText("loongport.officialApi.connect")).toHaveLength(
-        3,
+        2,
       ),
     );
     expect(toast.success).not.toHaveBeenCalled();

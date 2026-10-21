@@ -1854,6 +1854,7 @@ pub fn run() {
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,
+            commands::vendor_import_opencode_key,
             commands::vendor_refresh,
             commands::vendor_provision,
             commands::vendor_switch,
