@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { getAppDisplayName } from "@/config/appConfig";
 import { copyText } from "@/lib/clipboard";
+import { isMac } from "@/lib/platform";
 import type { FeedbackReportIdentity } from "@/lib/api/diagnostics";
 import {
   useFeedbackForm,
@@ -137,6 +138,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     closeDialog,
     handlePasteFromClipboard,
     handlePickFiles,
+    handlePaste,
     handleReceiptAction,
     changeDescription,
     changeContact,
@@ -158,7 +160,7 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" onPaste={handlePaste}>
         <DialogHeader>
           <DialogTitle>{t("settings.feedbackTitle")}</DialogTitle>
           <DialogDescription>
@@ -289,6 +291,11 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
             {t("settings.feedbackUserContentNotice")}
           </p>
           <div className="flex flex-col gap-2">
+            <p className="text-xs text-muted-foreground">
+              {t("settings.feedbackPasteHint", {
+                shortcut: isMac() ? "⌘V" : "Ctrl+V",
+              })}
+            </p>
             <div className="flex items-center gap-2">
               <Button
                 type="button"

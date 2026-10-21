@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createTestQueryClient } from "../utils/testQueryClient";
@@ -28,6 +28,21 @@ const list = vi.hoisted(() =>
   ]),
 );
 vi.mock("@/lib/api/minimaxCode", () => ({ minimaxCodeApi: { list } }));
+const trae = vi.hoisted(() => ({
+  list: vi.fn(async () => [
+    { id: "CN-only-account", realm: "cn", status: "stored" },
+    { id: "SG-only-account", realm: "sg", status: "stored" },
+    { id: "US-only-account", realm: "us", status: "stored" },
+  ]),
+  begin: vi.fn(),
+  confirm: vi.fn(),
+  cancel: vi.fn(),
+  retire: vi.fn(),
+}));
+vi.mock("@/lib/api/traeAccounts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/traeAccounts")>()),
+  traeAccountsApi: trae,
+}));
 it("keeps MiniMax domestic and global identities separate", async () => {
   render(
     <QueryClientProvider client={createTestQueryClient()}>
@@ -39,12 +54,25 @@ it("keeps MiniMax domestic and global identities separate", async () => {
   ).toBeInTheDocument();
   expect(screen.queryByText("CN account")).not.toBeInTheDocument();
 });
-it("does not mount international TRAE account access for the unconnected China edition", () => {
+it("mounts only CN Code source, accounts and authorization host for the China edition", async () => {
   render(<AuthCenterPanel platform="trae_cn" editionScoped />);
-  expect(screen.getByText(/中国版尚未接入/)).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: /导入/ }),
+    await screen.findByRole("heading", { name: "CN-only-account" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("SG-only-account")).not.toBeInTheDocument();
+  expect(screen.queryByText("US-only-account")).not.toBeInTheDocument();
+  expect(screen.getByText(/签到尚未接入/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /添加.*TRAE/ }));
+  expect(screen.getByText(/同一官方稳定版 Trae CN Code/)).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: "CN" })).toBeInTheDocument();
+  expect(screen.queryByRole("radio", { name: "SG" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("radio", { name: "US" })).not.toBeInTheDocument();
+  expect(screen.getByText(/https:\/\/api\.trae\.cn/)).toBeInTheDocument();
+  expect(
+    screen.queryByText(/https:\/\/growsg-normal\.trae\.ai/),
   ).not.toBeInTheDocument();
+  expect(trae.begin).not.toHaveBeenCalled();
+  expect(trae.confirm).not.toHaveBeenCalled();
 });
 it("shows MiniMax authorization separately from claim state and inference acceptance", async () => {
   render(

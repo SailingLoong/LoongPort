@@ -3,7 +3,6 @@
 use super::store::{Account, Failure};
 #[derive(Clone, Copy)]
 pub(crate) enum Edition {
-    #[cfg(test)]
     Cn,
     Global,
 }
@@ -24,7 +23,6 @@ pub(crate) fn read_selected(
     edition: Edition,
 ) -> Result<Material, Failure> {
     let expected = match edition {
-        #[cfg(test)]
         Edition::Cn => "Trae CN",
         Edition::Global => "Trae",
     };
@@ -206,6 +204,16 @@ pub(super) fn parse(
     {
         return Err(Failure::Unsupported);
     }
+    if matches!(edition, Edition::Cn)
+        && (product.get("packageType").and_then(Value::as_str) != Some("TRAE_CN")
+            || product.get("quality").and_then(Value::as_str) != Some("stable")
+            || product
+                .pointer("/iCubeApp/authConfig/TRAE/stable")
+                .and_then(Value::as_str)
+                != Some("ono9krqynydwx5"))
+    {
+        return Err(Failure::Unsupported);
+    }
     let auth = local_value(&doc["iCubeAuthInfo://icube.cloudide"])?;
     let uid = value(&auth, "userId", 256)?;
     if auth.pointer("/account/tenant_id").is_some()
@@ -221,7 +229,6 @@ pub(super) fn parse(
         .ok_or(Failure::Invalid)?
         .to_ascii_uppercase();
     let realm = match (edition, region.as_str(), host.as_str()) {
-        #[cfg(test)]
         (Edition::Cn, "CN", "https://api.trae.cn") => Realm::Cn,
         (Edition::Global, "SG", "https://growsg-normal.trae.ai") => Realm::Sg,
         (Edition::Global, "US", "https://growsg-normal.trae.ai") => Realm::Us,
@@ -264,6 +271,10 @@ pub(super) fn parse(
     };
     let device = Device {
         auth_host: host,
+        native_package: product
+            .get("packageType")
+            .and_then(Value::as_str)
+            .map(String::from),
         uid: uid.clone(),
         id: devices[0].1.into(),
         machine: value(&doc, "telemetry.machineId", 256)?,
@@ -338,8 +349,41 @@ mod tests {
         let doc = json!({"iCubeAuthInfo://icube.cloudide":json!({"token":"synthetic-access","refreshToken":"synthetic-refresh","userId":"synthetic-user","host":"https://api.trae.cn","userRegion":{"region":"CN"},"expiredAt":4102444800000_i64}).to_string(),"iCubeAuthInfo://icube-dc:1234567890123456":json!({"privateKeyPEM":pem("PRIVATE KEY",key.as_ref()),"publicKeyPEM":pem("PUBLIC KEY",&spki)}).to_string(),"telemetry.machineId":"f".repeat(64),"iCubeLastVersion":"20260917"});
         (
             serde_json::to_vec(&doc).unwrap(),
-            serde_json::to_vec(&json!({"appVersion":"3.4.2"})).unwrap(),
+            serde_json::to_vec(&json!({"appVersion":"3.4.4","packageType":"TRAE_CN","quality":"stable","iCubeApp":{"authConfig":{"TRAE":{"stable":"ono9krqynydwx5"}}}})).unwrap(),
         )
+    }
+    #[test]
+    fn cn_code_requires_native_package_stable_client_and_same_region() {
+        let (storage, product) = input();
+        let good: Value = serde_json::from_slice(&product).unwrap();
+        for package in ["TRAE_I18N", "SOLO_CN", "TRAE_ENTERPRISE", ""] {
+            let mut p = good.clone();
+            p["packageType"] = serde_json::json!(package);
+            assert!(parse(
+                &storage,
+                &serde_json::to_vec(&p).unwrap(),
+                Edition::Cn,
+                "linux",
+                ""
+            )
+            .is_err());
+        }
+        let mut p = good.clone();
+        p["iCubeApp"]["authConfig"]["TRAE"]["stable"] = serde_json::json!("en1oxy7wnw8j9n");
+        assert!(parse(
+            &storage,
+            &serde_json::to_vec(&p).unwrap(),
+            Edition::Cn,
+            "linux",
+            ""
+        )
+        .is_err());
+        assert!(parse(&storage, &product, Edition::Global, "linux", "").is_err());
+        let accepted = parse(&storage, &product, Edition::Cn, "linux", "").unwrap();
+        assert_eq!(
+            accepted.account.device.native_package.as_deref(),
+            Some("TRAE_CN")
+        );
     }
     #[test]
     fn complete_same_storage_device_import_retains_original_ids() {

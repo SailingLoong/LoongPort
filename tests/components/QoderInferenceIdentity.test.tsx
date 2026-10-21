@@ -110,7 +110,7 @@ describe("original Qoder Provider inference identity", () => {
     render(<QoderInferenceIdentity providerId="fixture" />);
     await open();
     expect(
-      await screen.findByText(/当前版本尚未开放 Qoder HTTP 推理身份/),
+      await screen.findByText(/当前 Qoder 推理身份不可用/),
     ).toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(

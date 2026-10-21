@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { APP_IDS } from "@/config/appConfig";
@@ -355,7 +361,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     }
   };
 
-  const handlePickFiles = async (files: FileList | null) => {
+  const handlePickFiles = async (files: FileList | File[] | null) => {
     if (!files || busyRef.current || attachmentSessionRef.current !== null)
       return;
     invalidatePreview();
@@ -365,6 +371,11 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     try {
       for (const file of Array.from(files)) {
         if (!isCurrentSession(session)) return;
+        if (!file.type.startsWith("image/")) continue;
+        if (file.size > MAX_SCREENSHOT_BYTES) {
+          toast.error(t("settings.feedbackScreenshotTooLarge"));
+          continue;
+        }
         try {
           const dataUrl = await readFileAsDataUrl(file);
           if (!isCurrentSession(session)) return;
@@ -377,6 +388,22 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     } finally {
       finishAttachmentRead(session);
     }
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLElement>) => {
+    // Read only the user-initiated event. Keep the native text paste behavior,
+    // including mixed text/image content; never read the global clipboard here.
+    const images = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const files =
+      images.length > 0
+        ? images
+        : Array.from(event.clipboardData.files).filter((file) =>
+            file.type.startsWith("image/"),
+          );
+    if (files.length > 0) void handlePickFiles(files);
   };
 
   const handlePrepare = async () => {
@@ -623,6 +650,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     closeDialog,
     handlePasteFromClipboard,
     handlePickFiles,
+    handlePaste,
     handleReceiptAction,
     changeDescription,
     changeContact,

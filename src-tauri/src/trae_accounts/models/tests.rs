@@ -74,7 +74,7 @@ fn catalog() -> Value {
 }
 #[tokio::test]
 async fn models_fixed_region_single_chat_v3_and_safe_dto() {
-    for realm in [Realm::Sg, Realm::Us] {
+    for realm in [Realm::Cn, Realm::Sg, Realm::Us] {
         let f = Fixture::new(realm, false).await;
         let id = f.begin().await;
         let wire = Wire::default();
@@ -130,6 +130,13 @@ async fn models_cancel_before_list_and_single_use_do_not_send_again() {
 #[tokio::test]
 async fn models_cn_missing_crossroot_and_changed_realm_send_zero_http() {
     let f = Fixture::new(Realm::Cn, false).await;
+    // Previously stored CN rows cannot acquire a consumer by upgrading alone.
+    store::access(&f.session, None, |d, _| {
+        d.accounts[0].device.native_package = None;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
     assert_eq!(
         begin(f.session.clone(), &f.id).await.unwrap_err(),
         Error::Unsupported

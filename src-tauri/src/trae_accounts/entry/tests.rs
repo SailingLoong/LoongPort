@@ -416,14 +416,18 @@ async fn foreign_vault_or_unsupported_selection_has_no_read_entry() {
         .is_err()
     );
     assert_eq!(reads.load(Ordering::SeqCst), 0);
-    assert!(begin(
+    let cn = begin(
         &f.session,
         f.selected_path("storage.json"),
         f.selected_path("product.json"),
-        Realm::Cn
+        Realm::Cn,
     )
     .await
-    .is_err());
+    .unwrap();
+    assert_eq!(cn.auth_host, "https://api.trae.cn");
+    assert_eq!(cn.realm, Realm::Cn);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    cancel(&f.session, &cn.flow_id).await.unwrap();
     assert!(begin(
         &f.session,
         "relative/storage.json".into(),

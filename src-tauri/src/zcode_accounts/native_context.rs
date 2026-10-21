@@ -46,6 +46,8 @@ struct ArtifactContract {
 }
 #[cfg(any(target_os = "macos", all(test, unix)))]
 struct InstalledContract {
+    version: &'static str,
+    build: &'static str,
     artifacts: [ArtifactContract; 3],
 }
 #[cfg(any(target_os = "macos", all(test, unix)))]
@@ -62,8 +64,8 @@ impl InstalledContract {
         }
         BuildFingerprint {
             platform: Platform::MacOs,
-            version: "3.14.4".into(),
-            build: "3.14.4.7912".into(),
+            version: self.version.into(),
+            build: self.build.into(),
             artifact_sha256: hash.finalize().into(),
         }
     }
@@ -73,6 +75,8 @@ fn installed_contract() -> InstalledContract {
     // Exact installed public artifacts reported 2026-10-03. Matching Info.plist
     // bytes bind version/build; no permissive plist or ASAR parser is involved.
     InstalledContract {
+        version: "3.14.4",
+        build: "3.14.4.7912",
         artifacts: [
             ArtifactContract {
                 relative_path: "Contents/Resources/app.asar",
@@ -105,13 +109,55 @@ fn installed_contract() -> InstalledContract {
     }
 }
 #[cfg(any(target_os = "macos", all(test, unix)))]
+fn installed_contracts() -> Vec<InstalledContract> {
+    // Official arm64 3.16.2 ZIP, verified against the release manifest SHA512.
+    // Admission remains exact for every artifact, not version-based.
+    vec![
+        installed_contract(),
+        InstalledContract {
+            version: "3.16.2",
+            build: "3.16.2.8769",
+            artifacts: [
+                ArtifactContract {
+                    relative_path: "Contents/Resources/app.asar",
+                    sha256: [
+                        0x50, 0x6a, 0x2d, 0x03, 0x27, 0x07, 0xa5, 0x84, 0x22, 0x9c, 0x8e, 0x2f,
+                        0x02, 0xf1, 0x2c, 0x20, 0x2f, 0xf3, 0xc1, 0x8f, 0xd1, 0x38, 0x77, 0x3d,
+                        0xd0, 0xcf, 0xe0, 0x0d, 0x46, 0x9f, 0x29, 0x64,
+                    ],
+                    exact_size: Some(341333085),
+                },
+                ArtifactContract {
+                    relative_path: "Contents/MacOS/ZCode",
+                    sha256: [
+                        0xbd, 0xc3, 0x55, 0x38, 0x71, 0xec, 0x8d, 0xe1, 0x02, 0x5b, 0x97, 0x58,
+                        0x77, 0x4e, 0x0f, 0x29, 0xdc, 0x92, 0x9d, 0x01, 0x19, 0x9d, 0x9a, 0x18,
+                        0x6e, 0x53, 0x5a, 0x4d, 0x7d, 0x83, 0xcf, 0xcb,
+                    ],
+                    exact_size: Some(52944),
+                },
+                ArtifactContract {
+                    relative_path: "Contents/Info.plist",
+                    sha256: [
+                        0x05, 0xd4, 0xfd, 0x66, 0x3b, 0x01, 0x2c, 0x39, 0x30, 0x4f, 0x36, 0xe0,
+                        0x60, 0xd3, 0x18, 0x34, 0xa4, 0xf0, 0xe1, 0x18, 0xf3, 0x27, 0xf7, 0xae,
+                        0x71, 0x0c, 0x29, 0x83, 0x0c, 0x66, 0xd9, 0xa4,
+                    ],
+                    exact_size: Some(4392),
+                },
+            ],
+        },
+    ]
+}
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(super) fn supported_contracts() -> Vec<ContractEntry> {
-    vec![ContractEntry {
-        fingerprint: installed_contract().fingerprint(),
-        // Exact macOS contract verified by the native/main/UI gate on 2026-10-04.
-        // Other platforms have no accepted native writer/probe implementation.
-        native_gate_passed: cfg!(target_os = "macos"),
-    }]
+    installed_contracts()
+        .into_iter()
+        .map(|manifest| ContractEntry {
+            fingerprint: manifest.fingerprint(),
+            native_gate_passed: cfg!(target_os = "macos"),
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
@@ -261,7 +307,7 @@ fn library_from_user(
 ) -> Result<super::library_context::LibraryContext, BlockedReason> {
     let data_root = match selected {
         Some(path) => path.to_owned(),
-        None => discover_from_candidates(user, &[], &installed_contract())?.data_root,
+        None => discover_from_candidates(user, &[], &installed_contracts())?.data_root,
     };
     super::library_context::LibraryContext::from_os_identity(&user.home, &user.username, &data_root)
 }
@@ -274,7 +320,7 @@ pub(super) fn discover_metadata(
     let candidates =
         super::discovery_paths::installation_candidates(Path::new(&user.home), selected)
             .map_err(|_| BlockedReason::RootUnverified)?;
-    discover_from_candidates(&user, &candidates, &installed_contract())
+    discover_from_candidates(&user, &candidates, &installed_contracts())
 }
 #[cfg(not(target_os = "macos"))]
 pub(super) fn discover_metadata(
@@ -286,7 +332,7 @@ pub(super) fn discover_metadata(
 fn discover_from_candidates(
     user: &OsUser,
     candidates: &[PathBuf],
-    manifest: &InstalledContract,
+    manifests: &[InstalledContract],
 ) -> Result<MetadataDiscovery, BlockedReason> {
     require_canonical(Path::new(&user.home)).map_err(|_| BlockedReason::RootUnverified)?;
     fn present_base<'de, D: serde::Deserializer<'de>>(
@@ -336,10 +382,12 @@ fn discover_from_candidates(
             Err(_) => return Err(BlockedReason::UnsupportedBuild),
             Ok(_) => {}
         }
-        let verified_build = verified_artifacts(path, manifest).is_ok();
-        let fingerprint = manifest.fingerprint();
-        let (version, build) = if verified_build {
-            (Some(fingerprint.version), Some(fingerprint.build))
+        let matched = manifests
+            .iter()
+            .find(|manifest| verified_artifacts(path, manifest).is_ok());
+        let verified_build = matched.is_some();
+        let (version, build) = if let Some(manifest) = matched {
+            (Some(manifest.version.into()), Some(manifest.build.into()))
         } else {
             public_version_hint(path).unwrap_or_default()
         };
@@ -522,7 +570,20 @@ pub(super) struct NativeContextProbe {
 impl NativeContextProbe {
     #[cfg(target_os = "macos")]
     pub(super) fn new(selection: ContextSelection) -> Result<Self, BlockedReason> {
-        Self::from_parts(selection, native_user()?, &installed_contract())
+        Self::from_contracts(selection, native_user()?, &installed_contracts())
+    }
+    fn from_contracts(
+        selection: ContextSelection,
+        user: OsUser,
+        manifests: &[InstalledContract],
+    ) -> Result<Self, BlockedReason> {
+        for manifest in manifests {
+            match Self::from_parts(selection.clone(), user.clone(), manifest) {
+                Err(BlockedReason::UnsupportedBuild) => continue,
+                result => return result,
+            }
+        }
+        Err(BlockedReason::UnsupportedBuild)
     }
     #[cfg(not(target_os = "macos"))]
     pub(super) fn new(_selection: ContextSelection) -> Result<Self, BlockedReason> {

@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  TRAE_AUTH_HOST,
+  traeAuthHost,
   traeAccountsApi,
   type TraeAccountView,
   type TraeFlowView,
@@ -27,7 +27,10 @@ function isSelectedFile(path: unknown, filename: string): path is string {
   return typeof path === "string" && path.split(/[\\/]/).pop() === filename;
 }
 
-export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
+export function TraeAccounts({
+  unified = false,
+  edition = "global",
+}: { unified?: boolean; edition?: "cn" | "global" } = {}) {
   const AccountsContainer = unified ? "div" : "ul";
   const AccountRow = unified ? "article" : "li";
   const { t } = useTranslation();
@@ -61,13 +64,20 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
     setListFailed(false);
     try {
       const rows = await traeAccountsApi.list();
-      if (isCurrent()) setAccounts(rows);
+      if (isCurrent())
+        setAccounts(
+          rows.filter((row) =>
+            edition === "cn"
+              ? row.realm === "cn"
+              : row.realm === "sg" || row.realm === "us",
+          ),
+        );
     } catch {
       if (isCurrent()) setListFailed(true);
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, []);
+  }, [edition]);
 
   const invalidateList = useCallback(() => {
     ++listGeneration.current;
@@ -193,7 +203,7 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
       if (
         !selected.flowId ||
         selected.realm !== realm ||
-        selected.authHost !== TRAE_AUTH_HOST
+        selected.authHost !== traeAuthHost(realm)
       ) {
         if (selected.flowId) void cancelFlow(selected.flowId);
         setFailed(true);
@@ -332,10 +342,12 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
         </div>
       </header>
       <p className="text-sm text-muted-foreground">
-        {t("trae.scope", {
-          defaultValue:
-            "仅支持 Global TRAE 的 SG / US 文字请求；不支持工具调用或图片等多模态，CN 暂不支持。",
-        })}
+        {edition === "cn"
+          ? "仅接入中国版 TRAE Code 的本机账号，用于文字模型目录和请求；不复用国际版身份，不支持 SOLO、企业版、工具或图片。签到尚未接入，保存账号不代表积分消费已验证。"
+          : t("trae.scope", {
+              defaultValue:
+                "仅支持 Global TRAE 的 SG / US 文字请求；不支持工具调用或图片等多模态，CN 暂不支持。",
+            })}
       </p>
       <p className="text-sm text-muted-foreground">
         {t("trae.localState", {
@@ -443,10 +455,12 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
               {t("trae.add", { defaultValue: "添加 TRAE 账号" })}
             </DialogTitle>
             <DialogDescription>
-              {t("trae.selectDescription", {
-                defaultValue:
-                  "请选择同一正常官方 Global TRAE 安装的 storage.json 和 product.json。选择仅记录路径，确认前不会读取凭据。",
-              })}
+              {edition === "cn"
+                ? "请选择同一官方稳定版 Trae CN Code 安装的 storage.json 和 product.json。只记录路径，明确确认前不会读取凭据；必须保留原设备密钥。"
+                : t("trae.selectDescription", {
+                    defaultValue:
+                      "请选择同一正常官方 Global TRAE 安装的 storage.json 和 product.json。选择仅记录路径，确认前不会读取凭据。",
+                  })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 overflow-y-auto px-6 py-4 text-sm">
@@ -456,7 +470,10 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
             >
               <legend>{t("trae.realm", { defaultValue: "账号区域" })}</legend>
               <div className="flex gap-4">
-                {(["sg", "us"] as const).map((value) => (
+                {(edition === "cn"
+                  ? (["cn"] as const)
+                  : (["sg", "us"] as const)
+                ).map((value) => (
                   <label key={value} className="flex items-center gap-2">
                     <input
                       type="radio"
@@ -472,7 +489,7 @@ export function TraeAccounts({ unified = false }: { unified?: boolean } = {}) {
             </fieldset>
             <p>
               {t("trae.authHost", { defaultValue: "授权服务地址" })}:{" "}
-              {TRAE_AUTH_HOST}
+              {traeAuthHost(realm ?? (edition === "cn" ? "cn" : "sg"))}
             </p>
             <Button
               variant="outline"

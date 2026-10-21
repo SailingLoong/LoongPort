@@ -210,7 +210,7 @@ async fn first_setup_is_one_action_without_a_second_confirmation() {
     let (db, request) = fixture();
     let transport = Transport::new();
     let context = completed(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -229,7 +229,7 @@ async fn ordinary_ready_and_refreshable_ready_are_noops() {
         let before = ready(&db, &request, true, expires);
         let transport = Transport::new();
         completed(
-            perform_identity_action_admitted(
+            perform_identity_action(
                 &db,
                 request,
                 &transport,
@@ -248,7 +248,7 @@ async fn access_only_expiry_reestablishes_without_extra_approval() {
     ready(&db, &request, false, NOW + 1);
     let transport = Transport::new();
     completed(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -265,7 +265,7 @@ async fn unknown_requires_recover_action_and_never_silently_escalates_establish(
     unknown(&db, &request);
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -294,7 +294,7 @@ async fn unknown_recovery_confirms_once_and_preserves_known_identity_and_machine
     let transport = Transport::new();
     let confirms = AtomicUsize::new(0);
     completed(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -323,8 +323,7 @@ async fn cancelled_or_closed_recovery_never_mutates_or_submits() {
         let transport = Transport::new();
         let before = identity_context_admitted(&db, ID, NOW).unwrap();
         assert!(matches!(
-            perform_identity_action_admitted(&db, request, &transport, |_| async { false }, || NOW)
-                .await,
+            perform_identity_action(&db, request, &transport, |_| async { false }, || NOW).await,
             IdentityActionResult::Cancelled
         ));
         assert_eq!(
@@ -340,8 +339,7 @@ async fn pending_ordinary_action_never_takes_over() {
     reserve_initial(&db, &request);
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { panic!() }, || NOW)
-            .await,
+        perform_identity_action(&db, request, &transport, |_| async { panic!() }, || NOW).await,
         IdentityActionResult::Changed { .. }
     ));
     assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
@@ -352,10 +350,7 @@ async fn pending_recovery_directly_reserves_and_late_old_response_is_rejected() 
     let old = reserve_initial(&db, &request);
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
-    completed(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { true }, || NOW)
-            .await,
-    );
+    completed(perform_identity_action(&db, request, &transport, |_| async { true }, || NOW).await);
     assert!(db
         .qoder_http_publish_establish(
             &old,
@@ -374,7 +369,7 @@ async fn late_confirmation_cannot_replace_new_ready() {
     let old = reserve_initial(&db, &request);
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
-    let result = perform_identity_action_admitted(
+    let result = perform_identity_action(
         &db,
         request,
         &transport,
@@ -407,7 +402,7 @@ async fn source_edit_during_confirmation_blocks_before_exchange() {
     unknown(&db, &request);
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
-    let result = perform_identity_action_admitted(
+    let result = perform_identity_action(
         &db,
         request,
         &transport,
@@ -435,10 +430,7 @@ async fn explicit_rebind_confirms_once_and_changes_machine() {
     request.action = IdentityAction::Rebind;
     let mut transport = Transport::new();
     transport.uid = "synthetic-new-uid";
-    completed(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { true }, || NOW)
-            .await,
-    );
+    completed(perform_identity_action(&db, request, &transport, |_| async { true }, || NOW).await);
     let source =
         SourceBinding::from_provider(&db.get_provider_by_id(ID, "codex").unwrap().unwrap())
             .unwrap()
@@ -458,8 +450,7 @@ async fn mismatched_uid_never_silently_rebinds() {
     let mut transport = Transport::new();
     transport.uid = "synthetic-new-uid";
     assert!(matches!(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { true }, || NOW)
-            .await,
+        perform_identity_action(&db, request, &transport, |_| async { true }, || NOW).await,
         IdentityActionResult::Failed {
             code: IdentityFailureCode::IdentityRebindRequired
         }
@@ -470,18 +461,19 @@ async fn mismatched_uid_never_silently_rebinds() {
     );
 }
 #[tokio::test]
-async fn production_service_gate_rejects_without_owner_or_confirmation() {
-    let (db, request) = fixture();
+async fn public_entry_rejects_missing_provider_before_authentication_or_confirmation() {
+    let (db, mut request) = fixture();
+    request.declaration.provider_id = "missing-provider".into();
     let transport = Transport::new();
     assert!(matches!(
         perform_identity_action(&db, request, &transport, |_| async { panic!() }, || NOW).await,
         IdentityActionResult::Failed {
-            code: IdentityFailureCode::Unavailable
+            code: IdentityFailureCode::SourceChanged
         }
     ));
     assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
     assert_eq!(
-        identity_context(&db, ID, NOW).status,
+        identity_context(&db, "missing-provider", NOW).status,
         IdentityStatus::Unavailable
     );
 }
@@ -489,7 +481,7 @@ async fn production_service_gate_rejects_without_owner_or_confirmation() {
 #[test]
 fn fresh_context_is_unestablished_without_authentication_or_daily_device() {
     let (db, _) = fixture();
-    let context = identity_context_admitted(&db, ID, NOW).unwrap();
+    let context = identity_context(&db, ID, NOW);
     assert_eq!(context.status, IdentityStatus::Unestablished);
     assert_eq!(context.allowed_actions, vec![IdentityAction::Establish]);
     assert!(context.expires_at_ms.is_none());
@@ -555,7 +547,7 @@ async fn deletion_during_approval_has_zero_authentication_calls() {
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -580,7 +572,7 @@ async fn vault_epoch_change_during_approval_has_zero_authentication_calls() {
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -605,8 +597,7 @@ async fn stale_source_generation_is_rejected_without_confirmation_or_authenticat
     request.declaration.credential_generation = "stale-generation".into();
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { panic!() }, || NOW)
-            .await,
+        perform_identity_action(&db, request, &transport, |_| async { panic!() }, || NOW).await,
         IdentityActionResult::Failed {
             code: IdentityFailureCode::SourceChanged
         }
@@ -620,8 +611,7 @@ async fn transport_failure_is_unknown_with_no_retry_and_no_pat_fallback() {
     let mut transport = Transport::new();
     transport.fail = true;
     assert!(matches!(
-        perform_identity_action_admitted(&db, request, &transport, |_| async { panic!() }, || NOW)
-            .await,
+        perform_identity_action(&db, request, &transport, |_| async { panic!() }, || NOW).await,
         IdentityActionResult::Failed {
             code: IdentityFailureCode::OutcomeUnknown
         }
@@ -683,8 +673,7 @@ async fn submitted_action_holds_no_locks_and_rejects_late_source_replacement() {
         release: tokio::sync::Notify::new(),
         calls: AtomicUsize::new(0),
     };
-    let action =
-        perform_identity_action_admitted(&db, request, &transport, |_| async { panic!() }, || NOW);
+    let action = perform_identity_action(&db, request, &transport, |_| async { panic!() }, || NOW);
     let edit = async {
         transport.entered.notified().await;
         drop(db.secrets.write().unwrap());
@@ -710,7 +699,7 @@ async fn lost_submitted_action_keeps_pending_and_does_not_replay() {
         release: tokio::sync::Notify::new(),
         calls: AtomicUsize::new(0),
     };
-    let mut future = Box::pin(perform_identity_action_admitted(
+    let mut future = Box::pin(perform_identity_action(
         &db,
         request,
         &transport,
@@ -738,7 +727,7 @@ async fn restored_ready_requires_fresh_explicit_setup_without_second_approval() 
     );
     let transport = Transport::new();
     completed(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,
@@ -757,7 +746,7 @@ async fn exceptional_confirmation_holds_neither_database_nor_vault_guard() {
     request.action = IdentityAction::Recover;
     let transport = Transport::new();
     assert!(matches!(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             request,
             &transport,

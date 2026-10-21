@@ -952,6 +952,7 @@
     "feedbackDescriptionRequired": "まず問題の内容を入力してください",
     "feedbackDescriptionTooLong": "説明が8000字の上限を超えています",
     "feedbackPasteScreenshot": "クリップボードから貼り付け",
+    "feedbackPasteHint": "{{shortcut}} で画像を貼り付けられます。添付後、確認してからアップロードされます。",
     "feedbackAddScreenshotFile": "画像を選択",
     "feedbackScreenshotCount": "{{count}}/{{max}}",
     "feedbackRemoveScreenshot": "スクリーンショットを削除",

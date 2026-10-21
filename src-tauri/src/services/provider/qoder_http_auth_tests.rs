@@ -122,8 +122,7 @@ fn has_non_retryable<T>(result: Result<T, AcquireError>) {
 }
 
 #[test]
-fn admission_stays_closed_and_source_is_explicit_international() {
-    const { assert!(!PRODUCTION_ADMISSION) };
+fn acquisition_requires_explicit_international_source() {
     let (db, mut declaration) = fixture();
     has_code(
         db.qoder_http_acquire(&source(&db), NOW),

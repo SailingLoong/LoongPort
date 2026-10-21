@@ -581,3 +581,50 @@ it("keeps international realm and local auth status without inventing check-in c
     "尚未验收",
   );
 });
+
+it("isolates CN Code accounts and consent from Global, without enabling check-in", async () => {
+  const cn = { ...account, id: "synthetic-cn", realm: "cn" as const };
+  mocks.list.mockResolvedValue([account, cn]);
+  mocks.begin.mockResolvedValue({
+    ...flow,
+    realm: "cn",
+    authHost: "https://api.trae.cn",
+  });
+  mocks.confirm.mockResolvedValue(cn);
+  render(<TraeAccounts edition="cn" />);
+  expect(await screen.findByText("synthetic-cn")).toBeVisible();
+  expect(screen.queryByText(account.id)).not.toBeInTheDocument();
+  expect(screen.getByText(/签到尚未接入/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "trae.add" }));
+  expect(screen.queryByRole("radio", { name: "SG" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("radio", { name: "US" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("radio", { name: "CN" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "trae.selectFiles" }),
+  );
+  expect(mocks.begin).toHaveBeenCalledExactlyOnceWith({
+    storagePath,
+    productPath,
+    realm: "cn",
+  });
+  expect(mocks.confirm).not.toHaveBeenCalled();
+  await userEvent.click(
+    await screen.findByRole("checkbox", { name: "trae.consent" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "trae.confirm" }));
+  await waitFor(() =>
+    expect(mocks.confirm).toHaveBeenCalledExactlyOnceWith(flow.flowId),
+  );
+});
+
+it("rejects Global authorization host returned to the CN entry without confirming", async () => {
+  mocks.begin.mockResolvedValue({ ...flow, realm: "cn" });
+  render(<TraeAccounts edition="cn" />);
+  await userEvent.click(screen.getByRole("button", { name: "trae.add" }));
+  await userEvent.click(screen.getByRole("radio", { name: "CN" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "trae.selectFiles" }),
+  );
+  await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(flow.flowId));
+  expect(mocks.confirm).not.toHaveBeenCalled();
+});

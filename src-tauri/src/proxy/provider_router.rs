@@ -97,11 +97,6 @@ impl ProviderRouter {
                 "unsupported_qoder_application".into(),
             ));
         }
-        if !cfg!(test) && !qoder_http_auth::PRODUCTION_ADMISSION {
-            return Err(super::ProxyError::ConfigError(
-                "qoder_http_admission_pending".into(),
-            ));
-        }
         let snapshot = Arc::new(
             qoder_http_auth::acquire(&self.db, provider, transport, || {
                 chrono::Utc::now().timestamp_millis()

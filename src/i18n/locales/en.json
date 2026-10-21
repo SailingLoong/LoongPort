@@ -952,6 +952,7 @@
     "feedbackDescriptionRequired": "Please describe the problem first",
     "feedbackDescriptionTooLong": "Description exceeds the 8,000-character limit",
     "feedbackPasteScreenshot": "Paste from clipboard",
+    "feedbackPasteHint": "Paste images with {{shortcut}}. They are attached first and uploaded only after confirmation.",
     "feedbackAddScreenshotFile": "Choose images",
     "feedbackScreenshotCount": "{{count}}/{{max}}",
     "feedbackRemoveScreenshot": "Remove screenshot",

@@ -952,6 +952,7 @@
     "feedbackDescriptionRequired": "请先描述问题",
     "feedbackDescriptionTooLong": "描述超过 8000 字上限",
     "feedbackPasteScreenshot": "从剪贴板粘贴",
+    "feedbackPasteHint": "可直接按 {{shortcut}} 粘贴图片，图片会先加入附件，确认后才上传。",
     "feedbackAddScreenshotFile": "选择图片",
     "feedbackScreenshotCount": "{{count}}/{{max}}",
     "feedbackRemoveScreenshot": "移除截图",

@@ -66,6 +66,7 @@ impl FixtureTransport {
                 version: 1,
                 device: store::Device {
                     auth_host: realm.auth().into(),
+                    native_package: None,
                     uid: format!("{id}-user"),
                     id: format!("{id}-device"),
                     machine: format!("{id}-machine"),

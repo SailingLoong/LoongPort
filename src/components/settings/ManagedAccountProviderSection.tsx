@@ -43,11 +43,14 @@ async function readAccounts(
     return (await traeAccountsApi.list()).map((row) => ({
       authProvider: platform,
       id: row.id,
-      label: `${row.realm === "sg" ? "SG" : row.realm === "us" ? "US" : "不支持的区域"} · ${row.id} · ${row.status === "stored" ? "已保存" : row.status === "refreshPending" ? "刷新结果待确认" : row.status === "retired" ? "已退役" : "状态未识别"}`,
+      label: `${row.realm === "sg" ? "SG" : row.realm === "us" ? "US" : row.realm === "cn" ? "CN" : "不支持的区域"} · ${row.id} · ${row.status === "stored" ? "已保存" : row.status === "refreshPending" ? "刷新结果待确认" : row.status === "retired" ? "已退役" : "状态未识别"}`,
       // Local stored status permits submitting a reference, not a claim that a
       // model is entitled or usable. The original backend owner admits requests.
       available:
-        (row.realm === "sg" || row.realm === "us") && row.status === "stored",
+        ((row.realm === "cn" && row.nativeSourceSupported === true) ||
+          row.realm === "sg" ||
+          row.realm === "us") &&
+        row.status === "stored",
     }));
   if (platform === "workbuddy") {
     const [rows, inference] = await Promise.all([

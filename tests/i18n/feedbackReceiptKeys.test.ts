@@ -6,6 +6,10 @@ import zhTW from "@/i18n/locales/zh-TW.json";
 
 const keys = [
   "feedbackPrepare",
+  "feedbackPasteHint",
+  "feedbackCapabilitiesLoading",
+  "feedbackCapabilitiesFailed",
+  "feedbackCapabilitiesRetry",
   "feedbackPreparing",
   "feedbackPrepareFailed",
   "feedbackPreviewTitle",
@@ -72,6 +76,7 @@ describe("feedback receipt translations", () => {
       const settings = resource.settings;
       for (const key of keys)
         expect(settings[key], key).toEqual(expect.any(String));
+      expect(settings.feedbackPasteHint).toContain("{{shortcut}}");
       expect(settings.feedbackIssueNumber).toContain("{{number}}");
       expect(settings.feedbackSummaryScreenshots).toContain("{{count}}");
       expect(settings.feedbackSummaryScreenshots).toContain("{{bytes}}");

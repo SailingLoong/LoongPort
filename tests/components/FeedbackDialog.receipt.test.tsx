@@ -2145,3 +2145,101 @@ describe("FeedbackDialog rendered confirmation boundary", () => {
     ).toBeVisible();
   });
 });
+
+describe("FeedbackDialog local paste", () => {
+  const field = () =>
+    screen.getByRole("textbox", { name: "settings.feedbackDescriptionLabel" });
+  const paste = (files: File[], text = "") =>
+    fireEvent.paste(field(), {
+      clipboardData: {
+        files,
+        items: files.map((file) => ({
+          kind: "file",
+          type: file.type,
+          getAsFile: () => file,
+        })),
+        getData: () => text,
+      },
+    });
+  it("attaches pasted images, preserves mixed text default behavior and does not upload", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    expect(
+      paste(
+        [new File(["synthetic"], "paste.png", { type: "image/png" })],
+        "text",
+      ),
+    ).toBe(true);
+    expect(await screen.findByRole("img", { name: "paste.png" })).toBeVisible();
+    expect(mocks.readClipboardImage).not.toHaveBeenCalled();
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("leaves plain text and non-image file pastes untouched", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    expect(paste([], "text")).toBe(true);
+    expect(
+      paste([new File(["text"], "text.txt", { type: "text/plain" })]),
+    ).toBe(true);
+    expect(screen.queryAllByRole("img")).toHaveLength(0);
+    expect(mocks.readClipboardImage).not.toHaveBeenCalled();
+  });
+  it("uses the event files fallback and rejects oversized images before reading", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    const file = new File(["synthetic"], "fallback.png", { type: "image/png" });
+    fireEvent.paste(field(), { clipboardData: { items: [], files: [file] } });
+    expect(
+      await screen.findByRole("img", { name: "fallback.png" }),
+    ).toBeVisible();
+    const oversized = new File(["synthetic"], "large.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(oversized, "size", { value: 5 * 1024 * 1024 + 1 });
+    const read = vi.spyOn(FileReader.prototype, "readAsDataURL");
+    paste([oversized]);
+    expect(read).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("img", { name: "large.png" }),
+    ).not.toBeInTheDocument();
+    read.mockRestore();
+  });
+
+  it("bounds repeated pastes at six images", async () => {
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    for (let i = 0; i < 7; i++) {
+      paste([new File(["synthetic"], `paste-${i}.png`, { type: "image/png" })]);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+    }
+    expect(screen.getAllByRole("img")).toHaveLength(6);
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("ignores an in-flight paste after close and reopen and refuses duplicate reads", async () => {
+    let reader: FileReader | undefined;
+    const read = vi
+      .spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(function (this: FileReader) {
+        reader = this;
+      });
+    const { rerender } = render(<FeedbackDialog open onClose={vi.fn()} />);
+    const file = new File(["synthetic"], "old.png", { type: "image/png" });
+    paste([file]);
+    paste([file]);
+    expect(read).toHaveBeenCalledTimes(1);
+    rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
+    rerender(<FeedbackDialog open onClose={vi.fn()} />);
+    Object.defineProperty(reader!, "result", {
+      value: "data:image/png;base64,AAAA",
+    });
+    await act(async () =>
+      reader!.onload?.call(
+        reader!,
+        new ProgressEvent("load") as ProgressEvent<FileReader>,
+      ),
+    );
+    expect(
+      screen.queryByRole("img", { name: "old.png" }),
+    ).not.toBeInTheDocument();
+    read.mockRestore();
+  });
+});

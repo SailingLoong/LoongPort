@@ -30,7 +30,9 @@ it("preserves explicit Qoder type in the actual ordinary Provider form save", as
   expect(
     screen.getByText(/旧 SDK Token 不会自动转换为 PAT/),
   ).toBeInTheDocument();
-  expect(screen.getByText(/当前版本尚未开放 HTTP 推理/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/HTTP 推理仍需按实际模型与账号权益验证/),
+  ).toBeInTheDocument();
   expect(screen.queryByText(/已验证可用于 SDK 推理/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "save-qoder-fixture" }));
   await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));

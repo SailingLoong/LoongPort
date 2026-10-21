@@ -853,6 +853,8 @@ describe("TRAE Global explicit text-only account entry", () => {
     expectNoProviderWrite();
   });
   it.each([
+    ["cn", "claude"],
+    ["cn", "codex"],
     ["sg", "claude"],
     ["sg", "codex"],
     ["us", "claude"],
@@ -860,7 +862,12 @@ describe("TRAE Global explicit text-only account entry", () => {
   ] as const)(
     "saves only the selected %s account/model for %s through original add(false)",
     async (realm, app) => {
-      const row = { ...trae, realm, id: `trae-${realm}-opaque` };
+      const row = {
+        ...trae,
+        realm,
+        id: `trae-${realm}-opaque`,
+        nativeSourceSupported: true,
+      };
       vi.mocked(traeAccountsApi.list).mockResolvedValue([row]);
       mount();
       await selectTrae(row.id, app);
@@ -903,6 +910,7 @@ describe("TRAE Global explicit text-only account entry", () => {
   );
   it.each([
     { ...trae, realm: "cn" },
+    { ...trae, realm: "cn", nativeSourceSupported: false },
     { ...trae, status: "retired" },
     { ...trae, status: "refreshPending" },
     { ...trae, realm: "unknown" },

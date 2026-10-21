@@ -352,7 +352,7 @@ async fn missing_uid_does_not_publish_an_unbound_token() {
     ]);
     let (db, declaration) = owner();
     assert!(matches!(
-        perform_identity_action_admitted(
+        perform_identity_action(
             &db,
             IdentityActionRequest {
                 declaration,

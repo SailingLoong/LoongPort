@@ -132,10 +132,11 @@ impl Lease {
         request_session: &str,
     ) -> Result<Self, Failure> {
         let snapshot = store::snapshot(&session, id).await?;
-        // Only the proven Global desktop contract may enter inference. A stored
-        // legacy/synthetic CN row is not permission to send to an unverified host.
-        if !matches!(snapshot.account.realm, store::Realm::Sg | store::Realm::Us)
-            || snapshot.account.device.auth_host != "https://growsg-normal.trae.ai"
+        // Legacy CN rows lack validated native product provenance. A newly
+        // selected CN Code installation is isolated from Global SG/US identity.
+        if (snapshot.account.realm == store::Realm::Cn
+            && snapshot.account.device.native_package.as_deref() != Some("TRAE_CN"))
+            || snapshot.account.device.auth_host != snapshot.account.realm.auth()
             || snapshot.account.device.client != "ono9krqynydwx5"
         {
             return Err(Failure::Unsupported);
