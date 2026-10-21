@@ -1467,11 +1467,53 @@ fn initialize_runtime(
     Ok(())
 }
 
+/// 本进程打开文件描述符的软上限目标。macOS 的 `setrlimit` 不接受超过 `OPEN_MAX`（10240）的值。
+#[cfg(unix)]
+const OPEN_FILE_SOFT_LIMIT_TARGET: libc::rlim_t = 10240;
+
+/// 从 Finder / 登录项启动的 macOS 应用继承 launchd 的软上限，默认只有 256 个文件描述符。
+/// 本地路由并发时客户端连接、上游连接、日志、数据库和配置文件都要占用描述符，突发请求下
+/// accept、上游连接和打开数据库会一起报 EMFILE（Too many open files）。启动时把软上限
+/// 提到硬上限（封顶 10240），硬上限更低或已经足够时不动。
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: 传入的是有效的 rlimit 指针，调用只读写这个结构体。
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        log::warn!(
+            "读取文件描述符上限失败: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+    let target = OPEN_FILE_SOFT_LIMIT_TARGET.min(limit.rlim_max);
+    if limit.rlim_cur >= target {
+        return;
+    }
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = target;
+    // SAFETY: 同上；软上限不超过硬上限，不需要特权。
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        log::warn!(
+            "提高文件描述符上限失败（当前 {previous}）: {}",
+            std::io::Error::last_os_error()
+        );
+    } else {
+        log::info!("文件描述符软上限 {previous} → {target}");
+    }
+}
+
 #[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.loongport/crash.log）
     panic_hook::setup_panic_hook();
+
+    #[cfg(unix)]
+    raise_open_file_limit();
 
     let mut builder = tauri::Builder::default();
 
@@ -2999,6 +3041,31 @@ mod tests {
         redact_url_for_log_with_secrets, redact_url_origin_for_log, runtime_log_level_allows,
         ExitRequestAction,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn raise_open_file_limit_lifts_soft_limit_to_target_or_hard_limit() {
+        fn current() -> libc::rlimit {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
+            limit
+        }
+
+        let before = current();
+        super::raise_open_file_limit();
+        let after = current();
+
+        let expected = super::OPEN_FILE_SOFT_LIMIT_TARGET.min(before.rlim_max);
+        assert!(after.rlim_cur >= expected);
+        assert!(after.rlim_cur >= before.rlim_cur);
+        assert_eq!(after.rlim_max, before.rlim_max);
+    }
     use crate::database::Database;
 
     #[test]
