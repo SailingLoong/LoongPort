@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-label="Star History chart for SailingLoong/LoongPort" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
 <rect width="960" height="480" fill="#ffffff"/>
 <text x="480" y="34" text-anchor="middle" font-size="17" font-weight="600" fill="#1F2937">Star History</text>
-<text x="480" y="54" text-anchor="middle" font-size="13" fill="#6B7280">SailingLoong/LoongPort · ★ 139</text>
+<text x="480" y="54" text-anchor="middle" font-size="13" fill="#6B7280">SailingLoong/LoongPort · ★ 140</text>
 <defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3B82F6" stop-opacity="0.22"/><stop offset="1" stop-color="#3B82F6" stop-opacity="0"/></linearGradient></defs>
 <line x1="64" x2="928" y1="436" y2="436" stroke="#E5E7EB" stroke-width="1"/><text x="54" y="440" text-anchor="end" font-size="11" fill="#6B7280">0</text>
 <line x1="64" x2="928" y1="314.67" y2="314.67" stroke="#E5E7EB" stroke-width="1"/><text x="54" y="318.67" text-anchor="end" font-size="11" fill="#6B7280">50</text>
 <line x1="64" x2="928" y1="193.33" y2="193.33" stroke="#E5E7EB" stroke-width="1"/><text x="54" y="197.33" text-anchor="end" font-size="11" fill="#6B7280">100</text>
 <line x1="64" x2="928" y1="72" y2="72" stroke="#E5E7EB" stroke-width="1"/><text x="54" y="76" text-anchor="end" font-size="11" fill="#6B7280">150</text>
 <line x1="64" x2="64" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="64" y="456" text-anchor="middle" font-size="11" fill="#6B7280">8/5</text>
-<line x1="228.05" x2="228.05" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="228.05" y="456" text-anchor="middle" font-size="11" fill="#6B7280">8/20</text>
-<line x1="392.1" x2="392.1" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="392.1" y="456" text-anchor="middle" font-size="11" fill="#6B7280">9/4</text>
-<line x1="567.09" x2="567.09" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="567.09" y="456" text-anchor="middle" font-size="11" fill="#6B7280">9/20</text>
-<line x1="731.14" x2="731.14" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="731.14" y="456" text-anchor="middle" font-size="11" fill="#6B7280">10/5</text>
-<line x1="895.19" x2="895.19" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="895.19" y="456" text-anchor="middle" font-size="11" fill="#6B7280">10/20</text>
-<polygon points="64,436 64,433.57 96.81,431.15 173.37,426.29 184.3,419.01 195.24,404.45 206.18,397.17 217.11,377.76 228.05,355.92 238.99,326.8 249.92,314.67 260.86,312.24 271.8,302.53 282.73,283.12 293.67,254 304.61,229.73 315.54,205.47 326.48,171.49 337.42,166.64 370.23,164.21 381.16,161.79 413.97,159.36 424.91,149.65 435.85,142.37 446.78,137.52 457.72,132.67 468.66,130.24 512.41,125.39 523.34,118.11 534.28,113.25 545.22,108.4 567.09,105.97 610.84,103.55 676.46,101.12 709.27,98.69 709.27,436" fill="url(#area)"/>
-<polyline points="64,433.57 96.81,431.15 173.37,426.29 184.3,419.01 195.24,404.45 206.18,397.17 217.11,377.76 228.05,355.92 238.99,326.8 249.92,314.67 260.86,312.24 271.8,302.53 282.73,283.12 293.67,254 304.61,229.73 315.54,205.47 326.48,171.49 337.42,166.64 370.23,164.21 381.16,161.79 413.97,159.36 424.91,149.65 435.85,142.37 446.78,137.52 457.72,132.67 468.66,130.24 512.41,125.39 523.34,118.11 534.28,113.25 545.22,108.4 567.09,105.97 610.84,103.55 676.46,101.12 709.27,98.69" fill="none" stroke="#3B82F6" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="709.27" cy="98.69" r="3.5" fill="#3B82F6" stroke="#ffffff" stroke-width="1.5"/>
-<text x="717.27" y="90.69" font-size="12" font-weight="600" fill="#1D4ED8">139</text>
+<line x1="226" x2="226" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="226" y="456" text-anchor="middle" font-size="11" fill="#6B7280">8/20</text>
+<line x1="398.8" x2="398.8" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="398.8" y="456" text-anchor="middle" font-size="11" fill="#6B7280">9/5</text>
+<line x1="560.8" x2="560.8" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="560.8" y="456" text-anchor="middle" font-size="11" fill="#6B7280">9/20</text>
+<line x1="733.6" x2="733.6" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="733.6" y="456" text-anchor="middle" font-size="11" fill="#6B7280">10/6</text>
+<line x1="895.6" x2="895.6" y1="72" y2="436" stroke="#F3F4F6" stroke-width="1"/><text x="895.6" y="456" text-anchor="middle" font-size="11" fill="#6B7280">10/21</text>
+<polygon points="64,436 64,433.57 96.4,431.15 172,426.29 182.8,419.01 193.6,404.45 204.4,397.17 215.2,377.76 226,355.92 236.8,326.8 247.6,314.67 258.4,312.24 269.2,302.53 280,283.12 290.8,254 301.6,229.73 312.4,205.47 323.2,171.49 334,166.64 366.4,164.21 377.2,161.79 409.6,159.36 420.4,149.65 431.2,142.37 442,137.52 452.8,132.67 463.6,130.24 506.8,125.39 517.6,118.11 528.4,113.25 539.2,108.4 560.8,105.97 604,103.55 668.8,101.12 701.2,98.69 895.6,96.27 895.6,436" fill="url(#area)"/>
+<polyline points="64,433.57 96.4,431.15 172,426.29 182.8,419.01 193.6,404.45 204.4,397.17 215.2,377.76 226,355.92 236.8,326.8 247.6,314.67 258.4,312.24 269.2,302.53 280,283.12 290.8,254 301.6,229.73 312.4,205.47 323.2,171.49 334,166.64 366.4,164.21 377.2,161.79 409.6,159.36 420.4,149.65 431.2,142.37 442,137.52 452.8,132.67 463.6,130.24 506.8,125.39 517.6,118.11 528.4,113.25 539.2,108.4 560.8,105.97 604,103.55 668.8,101.12 701.2,98.69 895.6,96.27" fill="none" stroke="#3B82F6" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="895.6" cy="96.27" r="3.5" fill="#3B82F6" stroke="#ffffff" stroke-width="1.5"/>
+<text x="903.6" y="88.27" font-size="12" font-weight="600" fill="#1D4ED8">140</text>
 </svg>

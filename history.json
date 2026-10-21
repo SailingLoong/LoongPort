@@ -1,6 +1,6 @@
 {
   "repository": "SailingLoong/LoongPort",
-  "totalStars": 139,
+  "totalStars": 140,
   "points": [
     {
       "date": "2026-08-05",
@@ -137,6 +137,10 @@
     {
       "date": "2026-10-03",
       "stars": 139
+    },
+    {
+      "date": "2026-10-21",
+      "stars": 140
     }
   ]
 }
