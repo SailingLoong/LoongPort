@@ -47,5 +47,12 @@
 		"crons": [
 			"*/10 * * * *"
 		]
+	},
+	// 旧版反馈客户端（无 installId）的兼容截止：到期后提交收到 503
+	// "feedback client update required"，需升级客户端。格式必须是带 Z 的 UTC ISO
+	// （feedback.ts 的 legacyFeedbackAllowed 用严格正则校验，写错=立即切断旧客户端）。
+	// 期限经维护者批准（2026-10-21 批准 7 天）；调整 = 改这里 + 重新 deploy。
+	"vars": {
+		"FEEDBACK_LEGACY_UNTIL": "2026-10-28T06:00:00Z"
 	}
 }
