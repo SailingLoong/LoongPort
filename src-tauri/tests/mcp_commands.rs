@@ -1507,7 +1507,16 @@ fn locked_toggle_reports_live_io_failure_and_allows_retry() {
     ))
     .unwrap();
     let live: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(live["mcpServers"]["retry"]["command"], "node");
+    #[cfg(windows)]
+    assert_eq!(
+        live["mcpServers"]["retry"],
+        json!({"type": "stdio", "command": "cmd", "args": ["/c", "node"]})
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        live["mcpServers"]["retry"],
+        json!({"type": "stdio", "command": "node"})
+    );
 }
 
 #[test]

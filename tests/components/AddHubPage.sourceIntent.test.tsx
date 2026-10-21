@@ -57,7 +57,7 @@ it("OpenCode entry limits the real vendor page and retains the consumer app", as
   const user = setup();
   await user.click(screen.getByRole("button", { name: "OpenCode" }));
   const vendor = await screen.findByRole("button", {
-    name: /opencode.*connect/i,
+    name: /官网账户登录（不会自动获取密钥）/,
   });
   await user.click(vendor);
   expect(vendorApi.openLogin).toHaveBeenCalledWith("opencode", "codex");
@@ -85,7 +85,9 @@ it("ignores a late vendor login after cancelling the source destination", async 
   );
   const user = setup();
   await user.click(screen.getByRole("button", { name: "OpenCode" }));
-  await user.click(screen.getByRole("button", { name: /opencode.*connect/i }));
+  await user.click(
+    screen.getByRole("button", { name: /官网账户登录（不会自动获取密钥）/ }),
+  );
   await user.click(screen.getByRole("button", { name: "返回平台列表" }));
   await user.click(screen.getByRole("button", { name: "Qoder" }));
   resolve({ rowId: 42 });

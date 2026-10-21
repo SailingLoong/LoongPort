@@ -335,12 +335,23 @@ try {
             });
             await destination.waitFor();
             if (name === "Qoder") {
-              await destination
+              const qoderAccounts = destination.getByRole("region", {
+                name: "Qoder 账号管理",
+                exact: true,
+              });
+              await qoderAccounts
                 .getByRole("heading", {
-                  name: "Qoder 账号接入待完善",
+                  name: "Qoder 国际版账号",
                   exact: true,
                 })
                 .waitFor();
+              assert.equal(
+                await qoderAccounts
+                  .getByText(/不会以自定义 API 或 SDK\s*配置代替账号接入/)
+                  .count(),
+                1,
+                "Qoder account entry must preserve the native-account boundary",
+              );
               assert.equal(
                 await destination.getByRole("textbox").count(),
                 0,
@@ -373,12 +384,28 @@ try {
                 })
                 .waitFor();
               await destination
-                .getByRole("button", { name: /opencode/i })
+                .getByRole("button", {
+                  name: /官网账户登录（不会自动获取密钥）/,
+                })
                 .waitFor();
+              const personalKey = destination.getByRole("region", {
+                name: "OpenCode 个人密钥接入",
+                exact: true,
+              });
+              assert.equal(
+                await personalKey
+                  .getByRole("button", {
+                    name: "同意加密保存并添加 OpenCode",
+                    exact: true,
+                  })
+                  .isDisabled(),
+                true,
+                "An empty personal key cannot be imported without explicit input",
+              );
               assert.equal(
                 await destination.getByRole("button").count(),
-                2,
-                "OpenCode destination contains only Back and the original vendor action",
+                3,
+                "OpenCode destination contains Back, explicit personal-key import and the original vendor action",
               );
             }
             await destination
