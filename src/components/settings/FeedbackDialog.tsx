@@ -116,6 +116,8 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
     contact,
     appOrder,
     extendedFields,
+    capabilityStatus,
+    loadCapabilities,
     screenshots,
     includeDiagnostics,
     includeSites,
@@ -260,9 +262,27 @@ export function FeedbackDialog({ open, onClose }: FeedbackDialogProps) {
             </div>
           )}
           {!extendedFields && (
-            <p className="text-xs text-muted-foreground">
-              {t("settings.feedbackExtendedFieldsUnsupported")}
-            </p>
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground" role="status">
+                {t(
+                  capabilityStatus === "loading"
+                    ? "settings.feedbackCapabilitiesLoading"
+                    : capabilityStatus === "failed"
+                      ? "settings.feedbackCapabilitiesFailed"
+                      : "settings.feedbackExtendedFieldsUnsupported",
+                )}
+              </p>
+              {capabilityStatus === "failed" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadCapabilities()}
+                >
+                  {t("settings.feedbackCapabilitiesRetry")}
+                </Button>
+              )}
+            </div>
           )}
 
           <p className="text-xs text-muted-foreground">

@@ -337,6 +337,9 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(1);
 struct Control {
     #[cfg(unix)]
     local_task_gate: Mutex<()>,
+    #[cfg(unix)]
+    // Ephemeral gap before the dependent binding exists: None is pending, Some is a stop reason.
+    local_followups: Mutex<std::collections::HashMap<String, Option<&'static str>>>,
     stop: AtomicBool,
     #[cfg(unix)]
     active: Mutex<Option<UnixStream>>,

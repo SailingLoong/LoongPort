@@ -107,3 +107,102 @@ it("blocks rapid duplicate create while the first submission is pending", async 
   view.unmount();
   finish([]);
 });
+
+it("surfaces only completed review as the final result", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "chain-1",
+      agentId: "analysis",
+      result: { status: "completed", output: "Initial analysis" },
+    },
+    {
+      taskId: "chain-1",
+      agentId: "review",
+      dependsOnAnalysis: true,
+      result: { status: "completed", output: "Reviewed answer" },
+    },
+  ]);
+  render(<AgentsPanel />);
+  expect(
+    await screen.findByRole("heading", { name: "最终结果" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Reviewed answer")).toBeInTheDocument();
+  expect(screen.getByText(/分析结果交给复核/)).toBeInTheDocument();
+});
+it("does not turn partial analysis success into a final answer", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "chain-2",
+      agentId: "analysis",
+      result: { status: "completed", output: "Draft only" },
+    },
+    {
+      taskId: "chain-2",
+      agentId: "review",
+      dependsOnAnalysis: true,
+      result: { status: "failed", reason: "analysis_output_too_large" },
+    },
+  ]);
+  render(<AgentsPanel />);
+  expect(await screen.findByText("Draft only")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "最终结果" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText(/复核未完成，当前没有最终结果/)).toBeInTheDocument();
+});
+it("keeps restart output loss explicit without automatically resubmitting", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "chain-3",
+      agentId: "review",
+      dependsOnAnalysis: true,
+      result: { status: "completed", outputUnavailable: true },
+    },
+  ]);
+  render(<AgentsPanel />);
+  expect(await screen.findByText(/正文不可恢复/)).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "最终结果" }),
+  ).not.toBeInTheDocument();
+  expect(
+    call.mock.calls.filter(([name]) => name === "create_agents_task"),
+  ).toHaveLength(0);
+});
+it("allows cancellation while review is waiting for analysis", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "chain-4",
+      agentId: "analysis",
+      result: { status: "completed", output: "Draft" },
+    },
+    {
+      taskId: "chain-4",
+      agentId: "review",
+      dependsOnAnalysis: true,
+      result: { status: "waiting", reason: "waiting_for_analysis" },
+    },
+  ]);
+  const user = userEvent.setup();
+  render(<AgentsPanel />);
+  const cancel = await screen.findByRole("button", { name: "取消任务" });
+  expect(cancel).toBeEnabled();
+  await user.click(cancel);
+  expect(call).toHaveBeenCalledWith("cancel_agents_task", {
+    taskId: "chain-4",
+  });
+});
+
+it("does not relabel a legacy independent review as a chained final result", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "legacy",
+      agentId: "review",
+      result: { status: "completed", output: "Independent review" },
+    },
+  ]);
+  render(<AgentsPanel />);
+  expect(await screen.findByText("Independent review")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "最终结果" }),
+  ).not.toBeInTheDocument();
+});

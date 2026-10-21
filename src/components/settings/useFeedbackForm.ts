@@ -113,6 +113,10 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
   const [contact, setContact] = useState("");
   const [appOrder, setAppOrder] = useState<AppId[]>(APP_IDS);
   const [extendedFields, setExtendedFields] = useState(false);
+  const [capabilityStatus, setCapabilityStatus] = useState<
+    "loading" | "ready" | "failed"
+  >("loading");
+  const capabilitySessionRef = useRef<number | null>(null);
   const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
   const [includeDiagnostics, setIncludeDiagnostics] = useState(true);
   const [includeSites, setIncludeSites] = useState(false);
@@ -191,6 +195,30 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     }
   }, []);
 
+  const loadCapabilities = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!openRef.current || capabilitySessionRef.current === session) return;
+    capabilitySessionRef.current = session;
+    setCapabilityStatus("loading");
+    const isCurrent = () =>
+      mountedRef.current && openRef.current && session === sessionRef.current;
+    try {
+      const capabilities = await feedbackApi.getFormCapabilities();
+      if (isCurrent()) {
+        setExtendedFields(capabilities.extendedFields === true);
+        setCapabilityStatus("ready");
+      }
+    } catch {
+      if (isCurrent()) {
+        setExtendedFields(false);
+        setCapabilityStatus("failed");
+      }
+    } finally {
+      if (capabilitySessionRef.current === session)
+        capabilitySessionRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     openRef.current = open;
     sessionRef.current += 1;
@@ -203,15 +231,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
       setExtendedFields(false);
       setAppOrder(APP_IDS);
       setRecommendedApp(null);
-      void feedbackApi.getFormCapabilities().then(
-        (capabilities) => {
-          if (isCurrent())
-            setExtendedFields(capabilities.extendedFields === true);
-        },
-        () => {
-          /* Unknown support stays disabled; basic feedback remains available. */
-        },
-      );
+      void loadCapabilities();
       void usageApi.getUsageSummaryByApp().then(
         (usage) => {
           if (!isCurrent()) return;
@@ -249,7 +269,7 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
       sessionRef.current += 1;
       invalidatePreview();
     };
-  }, [open, loadReceipt, invalidatePreview]);
+  }, [open, loadReceipt, loadCapabilities, invalidatePreview]);
 
   useEffect(() => {
     if (open && extendedFields && recommendedApp && relatedApps === null)
@@ -582,6 +602,8 @@ export function useFeedbackForm(open: boolean, onClose: () => void) {
     contact,
     appOrder,
     extendedFields,
+    capabilityStatus,
+    loadCapabilities,
     screenshots,
     includeDiagnostics,
     includeSites,

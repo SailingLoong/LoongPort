@@ -1149,7 +1149,13 @@ describe("FeedbackDialog extended field capability gate", () => {
         }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
+        screen.getByText(
+          kind === "pending"
+            ? "settings.feedbackCapabilitiesLoading"
+            : kind === "failed"
+              ? "settings.feedbackCapabilitiesFailed"
+              : "settings.feedbackExtendedFieldsUnsupported",
+        ),
       ).toBeVisible();
       await submitDescription();
       await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
@@ -1162,6 +1168,56 @@ describe("FeedbackDialog extended field capability gate", () => {
         await act(async () => capability.resolve({ extendedFields: false }));
     },
   );
+
+  it("retries a failed capability read without losing the draft or submitting", async () => {
+    const retry = deferred<unknown>();
+    mocks.getFormCapabilities
+      .mockRejectedValueOnce(new Error("private failure"))
+      .mockReturnValueOnce(retry.promise);
+    render(<FeedbackDialog open onClose={vi.fn()} />);
+    const description = screen.getByRole("textbox", {
+      name: "settings.feedbackDescriptionLabel",
+    });
+    fireEvent.change(description, {
+      target: { value: "Synthetic retained draft" },
+    });
+    const button = await screen.findByRole("button", {
+      name: "settings.feedbackCapabilitiesRetry",
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByText("settings.feedbackCapabilitiesLoading"),
+    ).toBeVisible();
+    await act(async () => retry.resolve({ extendedFields: true }));
+    expect(contactInput()).toBeEnabled();
+    expect(description).toHaveValue("Synthetic retained draft");
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+
+  it("ignores a retry result after reopening into an unsupported session", async () => {
+    const retry = deferred<unknown>();
+    mocks.getFormCapabilities
+      .mockRejectedValueOnce(new Error("synthetic failure"))
+      .mockReturnValueOnce(retry.promise)
+      .mockResolvedValueOnce({ extendedFields: false });
+    const { rerender } = render(<FeedbackDialog open onClose={vi.fn()} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.feedbackCapabilitiesRetry",
+      }),
+    );
+    rerender(<FeedbackDialog open={false} onClose={vi.fn()} />);
+    rerender(<FeedbackDialog open onClose={vi.fn()} />);
+    await screen.findByText("settings.feedbackExtendedFieldsUnsupported");
+    await act(async () => retry.resolve({ extendedFields: true }));
+    expect(
+      screen.queryByRole("textbox", { name: "settings.feedbackContactLabel" }),
+    ).not.toBeInTheDocument();
+    expect(mocks.getFormCapabilities).toHaveBeenCalledTimes(3);
+  });
 
   it("does not enable a new dialog session from an old capability response", async () => {
     const capability = deferred<unknown>();
@@ -1943,7 +1999,13 @@ describe("FeedbackDialog direct submission interaction", () => {
         }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByText("settings.feedbackExtendedFieldsUnsupported"),
+        screen.getByText(
+          kind === "pending"
+            ? "settings.feedbackCapabilitiesLoading"
+            : kind === "failed"
+              ? "settings.feedbackCapabilitiesFailed"
+              : "settings.feedbackExtendedFieldsUnsupported",
+        ),
       ).toBeVisible();
     },
   );

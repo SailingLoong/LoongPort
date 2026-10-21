@@ -678,7 +678,7 @@ async fn login_via_browser(
     }
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<VendorSession>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<VendorSession, AppError>>(1);
     // 用户自己关窗的信号。没有它就只能干等满超时。
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -707,12 +707,18 @@ async fn login_via_browser(
             None => true,
             Some(Ok(creds)) => {
                 // try_send：这个回调不能 await，而我们只要第一份凭据。
-                let _ = tx.try_send(creds);
+                let _ = tx.try_send(Ok(creds));
                 false
             }
             Some(Err(e)) => {
-                log::warn!("官网凭据回传解析失败: {e}");
-                let _ = handle_for_nav.emit(VENDOR_LOGIN_ERROR, e.to_string());
+                if matches!(vendor, Vendor::OpenCode) {
+                    // Resolve the pending command too, so the UI clears its spinner.
+                    // The command caller presents the error; do not emit a duplicate toast.
+                    let _ = tx.try_send(Err(e));
+                } else {
+                    log::warn!("官网凭据回传解析失败: {e}");
+                    let _ = handle_for_nav.emit(VENDOR_LOGIN_ERROR, e.to_string());
+                }
                 false
             }
         }
@@ -736,9 +742,20 @@ async fn login_via_browser(
     })
     .await;
 
-    let Ok(Some(creds)) = outcome else {
-        // 用户关掉了窗口，或超时。都不是错误。
-        return Ok(None);
+    let creds = match outcome {
+        Ok(Some(Ok(creds))) => creds,
+        Ok(Some(Err(error))) => {
+            let _ = window.destroy();
+            return Err(error);
+        }
+        Err(_) if matches!(vendor, Vendor::OpenCode) => {
+            let _ = window.destroy();
+            return Err(AppError::Config(
+                "OpenCode 登录接入超时，未完成连接；请重试。".into(),
+            ));
+        }
+        // Closing the window remains an intentional cancellation, not success/error.
+        Ok(None) | Err(_) => return Ok(None),
     };
 
     // `account_id` 已经由 `parse_creds_navigation` 保证非空 —— 「账号身份拿不到就不存
