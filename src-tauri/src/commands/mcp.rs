@@ -140,9 +140,8 @@ pub async fn delete_mcp_server_in_config(
     McpService::delete_server(&state, &id).map_err(|e| e.to_string())
 }
 
-/// 设置启用状态并同步到客户端配置
+/// 兼容旧入口，与 toggle_mcp_app 共用加锁的切换路径。
 #[tauri::command]
-#[allow(deprecated)] // 兼容层命令，内部调用已废弃的 Service 方法
 pub async fn set_mcp_enabled(
     state: State<'_, AppState>,
     app: String,
@@ -150,7 +149,10 @@ pub async fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<bool, String> {
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    McpService::set_enabled(&state, app_ty, &id, enabled).map_err(|e| e.to_string())
+    McpService::toggle_app_locked(&state, &id, app_ty, enabled)
+        .await
+        .map(|_| true)
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -191,11 +193,58 @@ pub async fn toggle_mcp_app(
     enabled: bool,
 ) -> Result<(), String> {
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    McpService::toggle_app(&state, &server_id, app_ty, enabled).map_err(|e| e.to_string())
+    McpService::toggle_app_locked(&state, &server_id, app_ty, enabled)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 从所有应用导入 MCP 服务器（复用已有的导入逻辑）
 #[tauri::command]
 pub async fn import_mcp_from_apps(state: State<'_, AppState>) -> Result<usize, String> {
     McpService::import_from_all_apps(&state).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tauri::Manager;
+
+    #[test]
+    fn both_toggle_commands_wait_for_the_app_switch_lock() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap())).unwrap();
+        app.manage(state);
+        let state = app.state::<AppState>();
+        let guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("claude"));
+        let mut legacy = Box::pin(set_mcp_enabled(
+            app.state::<AppState>(),
+            "claude".into(),
+            "missing".into(),
+            true,
+        ));
+        let mut current = Box::pin(toggle_mcp_app(
+            app.state::<AppState>(),
+            "missing".into(),
+            "claude".into(),
+            true,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(legacy.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(matches!(current.as_mut().poll(&mut cx), Poll::Pending));
+        drop(guard);
+        assert!(matches!(
+            legacy.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(true))
+        ));
+        assert!(matches!(
+            current.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
 }

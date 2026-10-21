@@ -68,7 +68,20 @@ impl McpService {
         }
     }
 
-    /// 切换指定应用的启用状态
+    /// 命令入口：与供应商切换共用 per-App 锁，保护整个 live 配置读改写。
+    ///
+    /// 已持有该锁的内部调用方直接使用 `toggle_app`，避免不可重入的锁嵌套。
+    pub async fn toggle_app_locked(
+        state: &AppState,
+        server_id: &str,
+        app: AppType,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
+        Self::toggle_app(state, server_id, app, enabled)
+    }
+
+    /// 切换指定应用的启用状态；调用方负责持有该应用的切换锁。
     pub fn toggle_app(
         state: &AppState,
         server_id: &str,
@@ -594,5 +607,59 @@ impl McpService {
                 failures.join("; ")
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod toggle_lock_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    #[test]
+    fn mcp_toggle_waits_for_same_app_switch_but_not_other_apps() {
+        // No server is stored: exercise lock admission without touching live files.
+        let state = AppState::new(Arc::new(crate::database::Database::memory().unwrap())).unwrap();
+        let switch_guard = futures::executor::block_on(
+            state
+                .proxy_service
+                .lock_switch_for_app(AppType::Claude.as_str()),
+        );
+        let mut toggle = Box::pin(McpService::toggle_app_locked(
+            &state,
+            "missing",
+            AppType::Claude,
+            true,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(toggle.as_mut().poll(&mut cx), Poll::Pending));
+
+        let mut other_app = Box::pin(McpService::toggle_app_locked(
+            &state,
+            "missing",
+            AppType::Codex,
+            true,
+        ));
+        assert!(matches!(
+            other_app.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        // A caller already holding the switch lock must use the synchronous core.
+        McpService::toggle_app(&state, "missing", AppType::Claude, false).unwrap();
+        drop(switch_guard);
+        assert!(matches!(toggle.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Box::pin(
+                state
+                    .proxy_service
+                    .lock_switch_for_app(AppType::Claude.as_str())
+            )
+            .as_mut()
+            .poll(&mut cx),
+            Poll::Ready(_)
+        ));
     }
 }

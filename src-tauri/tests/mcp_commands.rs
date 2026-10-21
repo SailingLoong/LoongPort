@@ -1411,3 +1411,166 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
         "live entries unknown to DB should be preserved"
     );
 }
+
+#[test]
+fn concurrent_locked_toggles_keep_every_server_and_unmanaged_fields() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    fs::create_dir_all(ensure_test_home().join(".claude")).unwrap();
+    let state = create_test_state().unwrap();
+    fs::write(
+        get_claude_mcp_path(),
+        serde_json::to_vec(&json!({
+            "unmanaged": {"keep": true},
+            "mcpServers": {"external-only": {"command": "external"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let ids: Vec<String> = (0..16).map(|i| format!("server-{i:02}")).collect();
+    for id in &ids {
+        let server: McpServer = serde_json::from_value(json!({
+            "id": id, "name": id,
+            "server": {"type": "stdio", "command": "node"}, "apps": {}
+        }))
+        .unwrap();
+        state.db.save_mcp_server(&server).unwrap();
+    }
+
+    // Enable together, then disable together; every completed batch must agree
+    // with DB flags and must preserve unrelated live configuration.
+    for enabled in [true, false] {
+        let barrier = std::sync::Barrier::new(ids.len());
+        std::thread::scope(|scope| {
+            for id in &ids {
+                let (state, barrier) = (&state, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    futures::executor::block_on(McpService::toggle_app_locked(
+                        state,
+                        id,
+                        AppType::Claude,
+                        enabled,
+                    ))
+                    .unwrap();
+                });
+            }
+        });
+        let live: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(get_claude_mcp_path()).unwrap()).unwrap();
+        let written = live["mcpServers"].as_object().unwrap();
+        let stored = state.db.get_all_mcp_servers().unwrap();
+        for id in &ids {
+            assert_eq!(written.contains_key(id), enabled, "live entry {id}");
+            assert_eq!(stored[id].apps.claude, enabled, "DB entry {id}");
+        }
+        assert!(written.contains_key("external-only"));
+        assert_eq!(live["unmanaged"]["keep"], true);
+    }
+}
+
+#[test]
+fn locked_toggle_reports_live_io_failure_and_allows_retry() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    fs::create_dir_all(ensure_test_home().join(".claude")).unwrap();
+    let state = create_test_state().unwrap();
+    let server: McpServer = serde_json::from_value(json!({
+        "id": "retry", "name": "Retry",
+        "server": {"type": "stdio", "command": "node"}, "apps": {}
+    }))
+    .unwrap();
+    state.db.save_mcp_server(&server).unwrap();
+    let path = get_claude_mcp_path();
+    // A directory at the file destination fails deterministically, even as root.
+    fs::create_dir(&path).unwrap();
+    let result = futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "retry",
+        AppType::Claude,
+        true,
+    ));
+    assert!(
+        result.is_err(),
+        "live I/O failure must not be reported as success"
+    );
+    assert!(path.is_dir());
+    // Existing behavior: DB intent precedes live I/O. This lock fix is not a
+    // DB/filesystem transaction and must not be advertised as rollback support.
+    assert!(state.db.get_all_mcp_servers().unwrap()["retry"].apps.claude);
+    fs::remove_dir(&path).unwrap();
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "retry",
+        AppType::Claude,
+        true,
+    ))
+    .unwrap();
+    let live: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(live["mcpServers"]["retry"]["command"], "node");
+}
+
+#[test]
+fn locked_toggles_interleave_with_real_provider_switch_and_mcp_resync() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    fs::create_dir_all(ensure_test_home().join(".claude")).unwrap();
+    let mut config = MultiAppConfig::default();
+    let manager = config.get_manager_mut(&AppType::Claude).unwrap();
+    for id in ["a", "b"] {
+        manager.providers.insert(
+            id.into(),
+            cc_switch_lib::Provider::with_id(
+                id.into(),
+                id.into(),
+                json!({"env": {"ANTHROPIC_API_KEY": format!("fixture-{id}")}}),
+                None,
+            ),
+        );
+    }
+    manager.current = "a".into();
+    // Existing legacy fixture exercises ProviderService::switch's MCP resync;
+    // this is not a claim about every schema20 or profile/sync entry point.
+    let state = support::create_source17_test_state_with_config(&config).unwrap();
+    ProviderService::switch(&state, AppType::Claude, "a").unwrap();
+    let server: McpServer = serde_json::from_value(json!({
+        "id": "interleaved", "name": "Interleaved",
+        "server": {"type": "stdio", "command": "node"}, "apps": {}
+    }))
+    .unwrap();
+    state.db.save_mcp_server(&server).unwrap();
+
+    for (target, enabled) in [("b", true), ("a", false), ("b", true), ("a", false)] {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let (state, barrier) = (&state, &barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                ProviderService::switch(state, AppType::Claude, target).unwrap();
+            });
+            scope.spawn(move || {
+                barrier.wait();
+                futures::executor::block_on(McpService::toggle_app_locked(
+                    state,
+                    "interleaved",
+                    AppType::Claude,
+                    enabled,
+                ))
+                .unwrap();
+            });
+        });
+        let live: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(get_claude_mcp_path()).unwrap()).unwrap();
+        assert_eq!(live["mcpServers"].get("interleaved").is_some(), enabled);
+        assert_eq!(
+            state.db.get_all_mcp_servers().unwrap()["interleaved"]
+                .apps
+                .claude,
+            enabled
+        );
+        assert_eq!(
+            state.db.get_current_provider("claude").unwrap().as_deref(),
+            Some(target)
+        );
+    }
+}
