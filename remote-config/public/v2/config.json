@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-09-16T13:13:39Z",
+  "issued_at": "2026-10-21T05:25:13Z",
   "feedback_url": "https://metrics.loongport.dev/v1/feedback",
   "announcements": [
     {
@@ -185,5 +185,6 @@
   "protected_hosts": [
     "790053500.com",
     "airelay.buzz"
-  ]
+  ],
+  "feedback_protocol_version": 2
 }
