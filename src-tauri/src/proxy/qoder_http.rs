@@ -10,11 +10,7 @@ use std::{sync::Arc, time::Duration};
 use zeroize::Zeroize;
 
 pub(crate) fn enabled(provider: &crate::provider::Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        == Some("qoder_sdk")
+    crate::services::provider::qoder_http_auth::SourceKind::from_provider(provider).is_ok()
 }
 
 pub(crate) fn chat_request(body: &Value, endpoint: &str) -> Result<Value, ProxyError> {

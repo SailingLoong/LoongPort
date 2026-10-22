@@ -23,7 +23,7 @@ const MODEL: &str = "fixture-model";
 const TOOL_ID: &str = "call_http_fixture";
 const PRIVATE_TAIL: &str = "REVOKED_PRIVATE_TAIL_MUST_NOT_ESCAPE";
 const WORKER_SHA256: &str = "7b25864711ede8e114721dfc7aed6aa327d1b92e79d21937b8a90fdb9da20fd6";
-const PROTOCOL_SHA256: &str = "c4710d1326c42a7f54f4834f9b6c66a1947cd251e39dd1ab4626beb5e3c57476";
+const PROTOCOL_SHA256: &str = "7cffc62269a4003af15ad36bc308fdfd81a19f632d4569a51cfbae10481e1a74";
 
 #[derive(Clone, Copy)]
 enum Reply {

@@ -88,3 +88,41 @@ it("refreshes changed original account rows without creating an alternate accoun
     screen.queryByRole("button", { name: "claim:a" }),
   ).not.toBeInTheDocument();
 });
+
+it("keeps CN original account IDs separate and never mounts the international claim consumer for CN", async () => {
+  vi.mocked(providersApi.getAll).mockResolvedValue({
+    global: {
+      id: "global",
+      name: "Global account",
+      settingsConfig: {},
+      meta: { providerType: "qoder_sdk" },
+    },
+    cn: {
+      id: "cn",
+      name: "CN account",
+      settingsConfig: { secret: "never-show-cn" },
+      meta: {
+        providerType: "qoder_cn",
+        qoderCampaignState: { generation: "cn-generation" },
+      },
+    },
+    legacy: { id: "legacy", name: "Unknown old source", settingsConfig: {} },
+  } as never);
+  setup();
+  await screen.findByText("CN account");
+  expect(
+    screen.getByRole("button", { name: "identity:cn:cn-generation" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Qoder CN · 独立 PAT")).toBeInTheDocument();
+  expect(
+    screen.getByText(/CN 原生浏览器登录与签到尚未接通/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "claim:cn" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "claim:global" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Unknown old source")).not.toBeInTheDocument();
+  expect(screen.queryByText("never-show-cn")).not.toBeInTheDocument();
+});

@@ -542,3 +542,98 @@ fn automatic_final_dispatch_rechecks_campaign_deadline_after_lock_wait() {
 fn automatic_final_dispatch_rechecks_date_freshness_after_lock_wait() {
     automatic_dispatch_after_lock_delay(true);
 }
+
+#[test]
+fn changing_to_cn_preserves_a_managed_source_generation_but_revokes_international_consent() {
+    let f = Fixture::new();
+    let db = f.open();
+    let g = Gateway::new();
+    let lease = automatic_enable(&f, &db, &g);
+    let original = state(&f, &db).generation;
+    let mut provider = f.load(&db);
+    let expected = digest(&provider);
+    provider.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    f.save(&db, &provider, &expected).unwrap();
+    let saved = f.load(&db);
+    let cn_state = saved
+        .meta
+        .as_ref()
+        .unwrap()
+        .qoder_campaign_state
+        .as_ref()
+        .expect("CN PAT accounts need an original-owner generation, not an unmanaged row");
+    assert_ne!(cn_state.generation, original);
+    assert!(!cn_state.automatic.enabled);
+    assert!(automatic::active(&saved).is_none());
+    assert!(automatic::run_with_adapter(&db, lease, &NoAutomaticNetwork).is_err());
+    assert!(daily::prepare_with_adapter(&db, &saved.id, &target(), &NoAutomaticNetwork).is_err());
+    assert!(daily::initialize_provider(&db, &saved.id).is_ok());
+}
+
+#[test]
+fn independently_saved_cn_pat_account_receives_owned_generation_without_campaign_consent() {
+    let f = Fixture::new();
+    let db = f.open();
+    let mut cn = provider("same-pat-fixture", None);
+    cn.id = "independent-cn".into();
+    cn.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    db.save_provider("codex", &cn).unwrap();
+    let saved = db.get_provider_by_id(&cn.id, "codex").unwrap().unwrap();
+    let state = saved
+        .meta
+        .as_ref()
+        .unwrap()
+        .qoder_campaign_state
+        .as_ref()
+        .expect("CN source generation must be initialized by the original Provider owner");
+    assert!(!state.generation.is_empty());
+    assert!(!state.automatic.enabled);
+    assert!(automatic::active(&saved).is_none());
+}
+
+#[test]
+fn cn_type_cannot_consume_or_reset_an_unresolved_international_receipt() {
+    let f = Fixture::new();
+    let db = f.open();
+    let mut gateway = Gateway::new();
+    gateway.lose_post = true;
+    gateway.lose_get = true;
+    let lease = automatic_enable(&f, &db, &gateway);
+    automatic::run_with_adapter(&db, lease, &gateway).unwrap();
+    let before = db
+        .qoder_operations(&identity("synthetic-provider"))
+        .unwrap();
+    let mut changed = f.load(&db);
+    let expected = digest(&changed);
+    changed.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    f.save(&db, &changed, &expected).unwrap();
+    assert!(daily::prepare_with_adapter(&db, &changed.id, &target(), &NoAutomaticNetwork).is_err());
+    assert!(
+        crate::services::provider::ProviderService::qoder_daily_claim_context(&db, &changed.id)
+            .is_err()
+    );
+    let view = automatic::context(&db, &changed.id).unwrap();
+    assert!(!view.enabled && !view.can_enable);
+    assert_eq!(view.reason.as_deref(), Some("SourceUnavailable"));
+    let still = db
+        .qoder_operations(&identity("synthetic-provider"))
+        .unwrap();
+    assert_eq!(before[0].binding, still[0].binding);
+    assert_eq!(before[0].id, still[0].id);
+    let mut restored = f.load(&db);
+    let expected = digest(&restored);
+    restored.meta.as_mut().unwrap().provider_type = Some("qoder_sdk".into());
+    f.save(&db, &restored, &expected).unwrap();
+    assert!(!state(&f, &db).automatic.enabled);
+    let result = daily::prepare_with_adapter(&db, &restored.id, &target(), &gateway).unwrap();
+    assert!(matches!(
+        result,
+        ClaimResult::Observed {
+            action: Action::Get,
+            outcome: Outcome::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.gets.load(Ordering::SeqCst), 1);
+}

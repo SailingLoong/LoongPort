@@ -33,19 +33,38 @@ pub(crate) struct SourceBinding {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SourceKind {
     InternationalQoderPat,
+    ChinaQoderPat,
+}
+impl SourceKind {
+    pub(crate) fn from_provider(provider: &Provider) -> Result<Self, AppError> {
+        match provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.provider_type.as_deref())
+        {
+            Some("qoder_sdk") => Ok(Self::InternationalQoderPat),
+            Some("qoder_cn") => Ok(Self::ChinaQoderPat),
+            _ => Err(denied("unsupported_source")),
+        }
+    }
+    pub(crate) fn origin(&self) -> &'static str {
+        match self {
+            Self::InternationalQoderPat => ORIGIN,
+            Self::ChinaQoderPat => "https://openapi.qoder.com.cn",
+        }
+    }
+    pub(crate) fn declaration(&self) -> CredentialSource {
+        match self {
+            Self::InternationalQoderPat => CredentialSource::InternationalQoderPat,
+            Self::ChinaQoderPat => CredentialSource::ChinaQoderPat,
+        }
+    }
 }
 impl SourceBinding {
     pub(crate) fn from_provider(
         provider: &Provider,
     ) -> Result<(Self, Zeroizing<String>), AppError> {
-        if provider
-            .meta
-            .as_ref()
-            .and_then(|m| m.provider_type.as_deref())
-            != Some("qoder_sdk")
-        {
-            return Err(denied("unsupported_source"));
-        }
+        let source = SourceKind::from_provider(provider)?;
         if crate::services::vendor_source_binding::is_reference(provider) {
             return Err(denied("external_source_untracked"));
         }
@@ -69,8 +88,8 @@ impl SourceBinding {
             Self {
                 provider_id: provider.id.clone(),
                 app_type: "codex".into(),
-                source: SourceKind::InternationalQoderPat,
-                origin: ORIGIN.into(),
+                origin: source.origin().into(),
+                source,
                 credential_generation: generation,
                 credential_digest: hex::encode(digest.finalize()),
             },
@@ -80,7 +99,7 @@ impl SourceBinding {
     pub(crate) fn admit(&self, declaration: &PatDeclaration) -> Result<(), AppError> {
         if declaration.provider_id != self.provider_id
             || declaration.credential_generation != self.credential_generation
-            || declaration.source != CredentialSource::InternationalQoderPat
+            || declaration.source != self.source.declaration()
         {
             return Err(denied("source_declaration_required"));
         }
@@ -88,7 +107,7 @@ impl SourceBinding {
     }
     fn validate(&self) -> bool {
         self.app_type == "codex"
-            && self.origin == ORIGIN
+            && self.origin == self.source.origin()
             && !self.provider_id.is_empty()
             && !self.credential_generation.is_empty()
             && self.credential_digest.len() == 64
@@ -294,7 +313,10 @@ impl RequestSnapshot {
         &self.identity.machine_id
     }
     pub(crate) fn region(&self) -> &'static str {
-        "international"
+        match self.stamp.source.source {
+            SourceKind::InternationalQoderPat => "international",
+            SourceKind::ChinaQoderPat => "cn",
+        }
     }
     pub(crate) fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
@@ -308,6 +330,9 @@ pub(crate) enum Acquisition {
 /// Implemented only by the original backend service's authenticated transport.
 /// The network worker used for inference must never implement this trait.
 pub(crate) trait AuthTransport: Send + Sync {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::InternationalQoderPat
+    }
     fn exchange_and_identify<'a>(
         &'a self,
         pat: &'a str,
@@ -357,6 +382,9 @@ pub(crate) async fn acquire(
     now_ms: impl Fn() -> i64,
 ) -> Result<RequestSnapshot, AcquireError> {
     let (expected, _) = SourceBinding::from_provider(selected).map_err(AcquireError::preflight)?;
+    if transport.source_kind() != expected.source {
+        return Err(AcquireError::NonRetryable);
+    }
     // Only these synchronous source/acquisition checks may classify a
     // zero-network preflight failure. Never reuse the classifier for
     // publication, cleanup or snapshot fences.
@@ -453,6 +481,7 @@ pub(crate) enum IdentityStatus {
 pub(crate) struct IdentityContext {
     pub(crate) provider_id: String,
     pub(crate) credential_generation: String,
+    pub(crate) source: Option<CredentialSource>,
     pub(crate) status: IdentityStatus,
     pub(crate) expires_at_ms: Option<i64>,
     pub(crate) allowed_actions: Vec<IdentityAction>,
@@ -462,6 +491,7 @@ impl IdentityContext {
         Self {
             provider_id: provider_id.into(),
             credential_generation: String::new(),
+            source: None,
             status: IdentityStatus::Unavailable,
             expires_at_ms: None,
             allowed_actions: Vec::new(),
@@ -484,6 +514,7 @@ impl IdentityContext {
         Self {
             provider_id: source.provider_id.clone(),
             credential_generation: source.credential_generation.clone(),
+            source: Some(source.source.declaration()),
             status,
             expires_at_ms: Some(expires_at_ms),
             allowed_actions,
@@ -521,6 +552,7 @@ impl IdentityContext {
         Self {
             provider_id: source.provider_id.clone(),
             credential_generation: source.credential_generation.clone(),
+            source: Some(source.source.declaration()),
             status,
             expires_at_ms,
             allowed_actions,
@@ -679,6 +711,11 @@ where
             confirmation,
         } => (receipt, confirmation),
     };
+    if transport.source_kind() != receipt.source.source {
+        return IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource,
+        };
+    }
     // Preparation released every guard. No refresh/PAT is in the confirmation.
     if let Some(summary) = confirmation {
         if !confirm(summary).await {

@@ -19,10 +19,11 @@ pub struct PatDeclaration {
     pub credential_generation: String,
     pub source: CredentialSource,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CredentialSource {
     InternationalQoderPat,
+    ChinaQoderPat,
 }
 
 pub(super) struct Session {

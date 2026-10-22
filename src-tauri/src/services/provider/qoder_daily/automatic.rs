@@ -101,7 +101,14 @@ fn view(provider: &Provider, device: Option<Dependency>) -> Result<Context, AppE
 pub(crate) fn context(db: &Database, provider_id: &str) -> Result<Context, AppError> {
     use device::DeviceSource;
     let provider = initialize_provider(db, provider_id)?;
-    view(&provider, device::InstalledApp.availability().err())
+    view(
+        &provider,
+        if source_supported(&provider) {
+            device::InstalledApp.availability().err()
+        } else {
+            None
+        },
+    )
 }
 
 /// This source declaration belongs to the explicit enrollment action only.
@@ -155,7 +162,14 @@ pub(crate) fn set_with_adapter(
     };
     let provider = db.save_qoder_automatic(&request, subject, epoch)?;
     use device::DeviceSource;
-    view(&provider, device::InstalledApp.availability().err())
+    view(
+        &provider,
+        if source_supported(&provider) {
+            device::InstalledApp.availability().err()
+        } else {
+            None
+        },
+    )
 }
 
 #[derive(Clone)]

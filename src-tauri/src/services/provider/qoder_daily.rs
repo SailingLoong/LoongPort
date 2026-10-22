@@ -454,12 +454,13 @@ fn prepare_selected_admitted(
 }
 pub(crate) fn initialize_provider(db: &Database, provider_id: &str) -> Result<Provider, AppError> {
     let mut provider = load(db, provider_id)?;
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|m| m.provider_type.as_deref())
-        != Some("qoder_sdk")
-    {
+    if !matches!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.provider_type.as_deref()),
+        Some("qoder_sdk" | "qoder_cn")
+    ) {
         return Err(unavailable());
     }
     if provider
@@ -586,6 +587,16 @@ impl crate::services::provider::ProviderService {
         provider_id: &str,
     ) -> Result<ClaimContext, AppError> {
         let provider = initialize_provider(db, provider_id)?;
+        // CN PAT account management is separate from the unverified CN campaign
+        // contract. Do not probe or execute the international device component.
+        if provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.provider_type.as_deref())
+            != Some("qoder_sdk")
+        {
+            return Err(unavailable());
+        }
         let generation = provider
             .meta
             .as_ref()
