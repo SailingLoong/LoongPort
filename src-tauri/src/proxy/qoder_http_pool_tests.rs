@@ -23,7 +23,7 @@ const MODEL: &str = "fixture-model";
 const TOOL_ID: &str = "call_http_fixture";
 const PRIVATE_TAIL: &str = "REVOKED_PRIVATE_TAIL_MUST_NOT_ESCAPE";
 const WORKER_SHA256: &str = "7b25864711ede8e114721dfc7aed6aa327d1b92e79d21937b8a90fdb9da20fd6";
-const PROTOCOL_SHA256: &str = "7cffc62269a4003af15ad36bc308fdfd81a19f632d4569a51cfbae10481e1a74";
+const PROTOCOL_SHA256: &str = "af35fc63e2b7b17fc9ee838b67a9ab76e5cb2e40f6aeda5d9ff30f99533aa284";
 
 #[derive(Clone, Copy)]
 enum Reply {
@@ -33,6 +33,8 @@ enum Reply {
     PartialFailure,
     Hold,
     RevocableTail,
+    AuthRejected,
+    BusinessRejected,
 }
 struct Upstream {
     posts: Mutex<Vec<String>>,
@@ -147,7 +149,11 @@ async fn serve_connection(mut socket: tokio::net::TcpStream, state: Arc<Upstream
         bytes.extend_from_slice(&part[..n]);
     }
     if method == "GET" {
-        assert_eq!(path, "/algo/api/v2/model/list?Encode=1");
+        if header_value("cosy-clienttype").as_deref() == Some("5") {
+            assert_eq!(path, "/algo/api/v2/model/list");
+        } else {
+            assert_eq!(path, "/algo/api/v2/model/list?Encode=1");
+        }
         let body = json!({"chat":[{"key":MODEL,"source":"fixture","enable":true,"max_input_tokens":100000}]}).to_string();
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
         let _ = socket.shutdown().await;
@@ -168,6 +174,32 @@ async fn serve_connection(mut socket: tokio::net::TcpStream, state: Arc<Upstream
     state.posted.notify_one();
     let _closed = ClosedPost(state.clone());
     if matches!(reply, Reply::Unknown) {
+        return;
+    }
+    if matches!(reply, Reply::BusinessRejected) {
+        let body = r#"{"code":110,"message":"synthetic quota refusal"}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let _ = socket.shutdown().await;
+        return;
+    }
+    if matches!(reply, Reply::AuthRejected) {
+        socket
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let _ = socket.shutdown().await;
         return;
     }
     socket
@@ -204,7 +236,7 @@ async fn serve_connection(mut socket: tokio::net::TcpStream, state: Arc<Upstream
             let _ = socket.shutdown().await;
             return;
         }
-        Reply::Unknown => unreachable!(),
+        Reply::Unknown | Reply::AuthRejected | Reply::BusinessRejected => unreachable!(),
     };
     let _ = socket.write_all(answer.as_bytes()).await;
     let _ = socket.shutdown().await;
@@ -227,6 +259,14 @@ impl HttpFixture {
         accounts: &[(&str, bool)],
         reply: Reply,
         terminal_fault: Option<&str>,
+    ) -> Self {
+        Self::new_with_source(accounts, reply, terminal_fault, "qoder_sdk").await
+    }
+    async fn new_with_source(
+        accounts: &[(&str, bool)],
+        reply: Reply,
+        terminal_fault: Option<&str>,
+        source: &str,
     ) -> Self {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(
@@ -266,9 +306,16 @@ impl HttpFixture {
                 }),
                 None,
             );
+            if source == "qoder_cn_device" {
+                provider
+                    .settings_config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("env");
+            }
             provider.sort_index = Some(position);
             provider.meta = Some(ProviderMeta {
-                provider_type: Some("qoder_sdk".into()),
+                provider_type: Some(source.into()),
                 local_proxy_request_overrides: (*id == "qoder-incompatible").then(|| {
                     crate::provider::LocalProxyRequestOverrides {
                         body: Some(json!({"tools":[{"type":"custom","name":"unsupported"}]})),
@@ -289,7 +336,11 @@ impl HttpFixture {
                         .qoder_campaign_state
                         .unwrap()
                         .generation,
-                    source: CredentialSource::InternationalQoderPat,
+                    source: match source {
+                        "qoder_cn_device" => CredentialSource::ChinaQoderDevice,
+                        "qoder_cn" => CredentialSource::ChinaQoderPat,
+                        _ => CredentialSource::InternationalQoderPat,
+                    },
                 };
                 let request = IdentityActionRequest {
                     declaration,
@@ -456,8 +507,15 @@ fn final_response(text: &str, streaming: bool) -> Value {
 #[tokio::test]
 #[serial_test::serial]
 async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
-    for streaming in [false, true] {
-        let f = HttpFixture::new(&[("qoder-a", true)], Reply::ToolsThenText).await;
+    for (streaming, source) in [
+        (false, "qoder_sdk"),
+        (true, "qoder_sdk"),
+        (false, "qoder_cn_device"),
+        (true, "qoder_cn_device"),
+    ] {
+        let f =
+            HttpFixture::new_with_source(&[("qoder-a", true)], Reply::ToolsThenText, None, source)
+                .await;
         let first=f.request("/v1/responses",json!({"model":MODEL,"stream":streaming,"tools":response_tools(),"input":"Read fixture"})).await;
         assert_eq!(first.status(), StatusCode::OK);
         let value = final_response(&text(first).await, streaming);
@@ -1213,4 +1271,114 @@ async fn http_nonstream_source_error_is_bad_gateway_without_completion_or_replay
         );
         f.idle().await;
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn http_cn_device_original_pool_selects_ready_account_without_pat_or_auth_exchange() {
+    for endpoint in ["/v1/responses", "/v1/chat/completions"] {
+        let f = HttpFixture::new_with_source(
+            &[("qoder-missing", false), ("qoder-b", true)],
+            Reply::Plain,
+            None,
+            "qoder_cn_device",
+        )
+        .await;
+        let body = if endpoint.ends_with("responses") {
+            json!({"model":MODEL,"input":"hello"})
+        } else {
+            json!({"model":MODEL,"messages":[{"role":"user","content":"hello"}]})
+        };
+        let response = f.request(endpoint, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(text(response).await.contains("ordered-history-and-auth-ok"));
+        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-b"]);
+        let sent = f.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["origin"], "https://gateway.qoder.com.cn");
+        assert_eq!(sent[0]["credentialKind"], "china_qoder_device");
+        assert_eq!(sent[0]["body"]["session_type"], "qodercli");
+        assert_eq!(sent[0]["body"]["business"]["product"], "cli");
+        f.idle().await;
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn http_cn_device_unknown_post_and_partial_output_never_replay_or_complete() {
+    for reply in [Reply::Unknown, Reply::PartialFailure] {
+        let f = HttpFixture::new_with_source(
+            &[("qoder-a", true), ("qoder-b", true)],
+            reply,
+            None,
+            "qoder_cn_device",
+        )
+        .await;
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":MODEL,"stream":true,"input":"hello"}),
+            )
+            .await;
+        let mut stream = response.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => bytes.extend_from_slice(&chunk),
+                Err(_) => break,
+            }
+        }
+        assert!(!String::from_utf8_lossy(&bytes).contains("response.completed"));
+        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+        f.idle().await;
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn http_cn_device_auth_refusal_retires_exact_owner_without_replaying_second_account() {
+    let f = HttpFixture::new_with_source(
+        &[("qoder-a", true), ("qoder-b", true)],
+        Reply::AuthRejected,
+        None,
+        "qoder_cn_device",
+    )
+    .await;
+    let response = f
+        .request("/v1/responses", json!({"model":MODEL,"input":"hello"}))
+        .await;
+    assert!(!response.status().is_success());
+    assert!(text(response).await.contains("reauthorization_required"));
+    assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+    let now = chrono::Utc::now().timestamp_millis();
+    for (id, expected) in [("qoder-a", "unknown"), ("qoder-b", "ready")] {
+        let context = f.db.qoder_http_identity_context(id, now).unwrap();
+        assert_eq!(serde_json::to_value(context).unwrap()["status"], expected);
+    }
+    f.idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn http_cn_device_business_403_keeps_ready_credentials_and_never_replays() {
+    let f = HttpFixture::new_with_source(
+        &[("qoder-a", true), ("qoder-b", true)],
+        Reply::BusinessRejected,
+        None,
+        "qoder_cn_device",
+    )
+    .await;
+    let response = f
+        .request("/v1/responses", json!({"model":MODEL,"input":"hello"}))
+        .await;
+    assert!(!response.status().is_success());
+    assert!(!text(response).await.contains("reauthorization_required"));
+    assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+    for id in ["qoder-a", "qoder-b"] {
+        let context =
+            f.db.qoder_http_identity_context(id, chrono::Utc::now().timestamp_millis())
+                .unwrap();
+        assert_eq!(serde_json::to_value(context).unwrap()["status"], "ready");
+    }
+    f.idle().await;
 }

@@ -100,3 +100,13 @@ it("refuses to invent a source declaration when backend context has no realm", a
   ).rejects.toThrow();
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it("keeps device-authorized identities out of the PAT exchange command", async () => {
+  await expect(
+    qoderHttpAuthApi.action(
+      { ...context, source: "chinaQoderDevice" },
+      "establish",
+    ),
+  ).rejects.toThrow();
+  expect(invoke).not.toHaveBeenCalled();
+});

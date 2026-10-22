@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -564,4 +565,51 @@ it("does not attach a late failure after only the Hermes provider key changes", 
   expect(
     screen.queryByText("notifications.saveFailedGeneric"),
   ).not.toBeInTheDocument();
+});
+
+it("exposes only the current OpenCode destination actions after leaving Qoder", async () => {
+  const user = setup();
+  await user.click(screen.getByRole("button", { name: "Qoder" }));
+  await user.click(screen.getByRole("button", { name: "返回平台列表" }));
+  await user.click(screen.getByRole("button", { name: "OpenCode" }));
+  const destination = screen.getByRole("region", {
+    name: "服务接入",
+  });
+  const scope = within(destination);
+  const buttons = scope.getAllByRole("button");
+  const local = within(
+    scope.getByRole("region", { name: "从本机 OpenCode 导入" }),
+  );
+  const personal = within(
+    scope.getByRole("region", { name: "OpenCode 个人密钥接入" }),
+  );
+  const back = scope.getByRole("button", { name: "返回平台列表" });
+  const preview = local.getByRole("button", {
+    name: "同意只读预览本机 OpenCode 凭据",
+  });
+  const save = personal.getByRole("button", {
+    name: "同意加密保存并添加 OpenCode",
+  });
+  const vendor = scope.getByRole("button", {
+    name: /官网账户登录（不会自动获取密钥）/,
+  });
+  expect(buttons).toEqual([back, preview, save, vendor]);
+  for (const button of buttons) expect(button).toBeVisible();
+  expect(preview).toBeEnabled();
+  expect(save).toBeDisabled();
+  expect(
+    scope.queryByRole("region", { name: "Qoder 账号管理" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("OpenCode Personal API key")).toHaveAttribute(
+    "type",
+    "password",
+  );
+  expect(screen.getByLabelText("OpenCode Personal API key")).toHaveValue("");
+  expect(vendorApi.openLogin).not.toHaveBeenCalled();
+  await user.click(back);
+  expect(
+    screen.queryByRole("region", { name: "服务接入" }),
+  ).not.toBeInTheDocument();
+  expect(destination).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Qoder" })).toBeVisible();
 });

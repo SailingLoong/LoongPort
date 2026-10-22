@@ -7,12 +7,39 @@ use crate::proxy::{
 };
 use futures::StreamExt;
 use serde_json::Value;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+pub(super) type DeviceRejection = Arc<dyn Fn() -> Result<(), ProxyError> + Send + Sync>;
+const REAUTHORIZE: &str = "qoder.http_auth.reauthorization_required";
 
 fn failed() -> ProxyError {
     // Includes a submitted request whose reply was lost. This is deliberately
     // outside the original pool's retryable Qoder preflight categories.
     ProxyError::ForwardFailed("qoder_http_outcome_unverified".into())
+}
+
+// This is a fixed producer error, never arbitrary upstream error text. Local
+// expiry uses a different code. Only exact device-source refusals may retire
+// the original owner, and only after the host confirms clean end and exit 0.
+fn device_rejection(bytes: &[u8], streaming: bool) -> bool {
+    let bytes = if streaming {
+        let Some(bytes) = bytes
+            .strip_prefix(b"data: ")
+            .and_then(|v| v.strip_suffix(b"\n\n"))
+        else {
+            return false;
+        };
+        bytes
+    } else {
+        bytes
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    value.as_object().is_some_and(|o| o.len() == 1)
+        && value["error"]["message"] == "QODER_DEVICE_REAUTHORIZATION_REQUIRED"
+        && (value["error"]["code"] == "QODER_DEVICE_REAUTHORIZATION_REQUIRED"
+            || matches!(value["error"]["code"].as_u64(), Some(401 | 403)))
 }
 
 // This is the bundled producer's wire contract, not an arbitrary SSE parser.
@@ -56,8 +83,10 @@ pub(super) async fn forward(
     first_byte_timeout: Duration,
     idle_timeout: Duration,
     non_streaming_timeout: Duration,
+    on_device_rejected: Option<DeviceRejection>,
 ) -> Result<ProxyResponse, ProxyError> {
-    let operation = async {
+    let device = private_request["snapshot"]["credentialKind"] == "china_qoder_device";
+    let operation = async move {
         let mut host = QoderHost::start(config, private_request)
             .await
             .map_err(|_| failed())?;
@@ -81,6 +110,23 @@ pub(super) async fn forward(
         // Once a task starts, even a valid upstream failure status must not
         // silently rotate accounts or replay a potentially charged operation.
         if !status.is_success() {
+            if device && matches!(status.as_u16(), 401 | 403) {
+                let rejected = match next(&mut host, first_deadline).await {
+                    Ok(Some(value)) => {
+                        matches!(decoder.event(&value), Ok(Frame::Data(bytes)) if device_rejection(&bytes, false))
+                    }
+                    _ => false,
+                };
+                if rejected
+                    && matches!(next(&mut host, first_deadline).await, Ok(None))
+                    && decoder.finish().is_ok()
+                {
+                    if let Some(reject) = &on_device_rejected {
+                        reject()?;
+                    }
+                    return Err(ProxyError::ForwardFailed(REAUTHORIZE.into()));
+                }
+            }
             let _ = host.close_and_reap().await;
             return Err(failed());
         }
@@ -103,7 +149,10 @@ pub(super) async fn forward(
             let mut terminal = None;
             let mut finish = None;
             let mut emitted = false;
-            if streaming && is_finish_frame(&first) {
+            let mut rejected = None;
+            if device && streaming && device_rejection(&first, true) {
+                rejected = Some(first);
+            } else if streaming && is_finish_frame(&first) {
                 finish = Some(first);
             } else if streaming && first.as_ref() == b"data: [DONE]\n\n" {
                 let _ = host.close_and_reap().await;
@@ -123,12 +172,14 @@ pub(super) async fn forward(
                     Ok(Some(value)) => match decoder.event(&value) {
                         Ok(Frame::Data(bytes)) => {
                             let done = streaming && bytes.as_ref() == b"data: [DONE]\n\n";
-                            if terminal.is_some() || (finish.is_some() && !done) {
+                            if rejected.is_some() || terminal.is_some() || (finish.is_some() && !done) {
                                 let _ = host.close_and_reap().await;
                                 yield Err(std::io::Error::other("qoder_http_data_after_terminal"));
                                 break;
                             }
-                            if done {
+                            if device && streaming && device_rejection(&bytes, true) {
+                                rejected = Some(bytes);
+                            } else if done {
                                 if finish.is_none() {
                                     let _ = host.close_and_reap().await;
                                     yield Err(std::io::Error::other("qoder_http_finish_missing"));
@@ -149,6 +200,17 @@ pub(super) async fn forward(
                         }
                     },
                     Ok(None) if decoder.finish().is_ok() => {
+                        if let Some(bytes) = rejected.take() {
+                            if let Some(reject) = &on_device_rejected {
+                                if reject().is_err() {
+                                    yield Err(std::io::Error::other("qoder.http_auth.authorization_changed"));
+                                    break;
+                                }
+                            }
+                            yield Ok(bytes);
+                            yield Err(std::io::Error::other(REAUTHORIZE));
+                            break;
+                        }
                         if streaming {
                             if let (Some(final_chunk), Some(done)) = (finish.take(), terminal.take()) {
                                 yield Ok(final_chunk);
@@ -184,5 +246,188 @@ pub(super) async fn forward(
         tokio::time::timeout(non_streaming_timeout, operation)
             .await
             .map_err(|_| failed())?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn host() -> HostConfig {
+        let root = std::env::var_os("QODER_HOST_PRODUCT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .to_owned()
+            });
+        HostConfig {
+            node: std::env::var_os("QODER_HOST_NODE")
+                .unwrap_or_else(|| "node".into())
+                .into(),
+            worker: root.join("tests/qoder-runtime/fixtures/http-auth-rejected.mjs"),
+        }
+    }
+    fn request(mode: &str, kind: &str) -> Value {
+        json!({"binding":{"accountId":"synthetic-account","sessionId":"synthetic-session","turnId":"synthetic-turn"},"snapshot":{"credentialKind":kind},"chat":{"model":mode}})
+    }
+    async fn failure(mode: &str, kind: &str) -> String {
+        match forward(
+            &host(),
+            &request(mode, kind),
+            false,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            None,
+        )
+        .await
+        {
+            Err(ProxyError::ForwardFailed(code)) => code,
+            _ => panic!("a rejected request must never succeed"),
+        }
+    }
+    #[tokio::test]
+    async fn clean_device_auth_rejection_has_explicit_nonretryable_reauthorization_error() {
+        assert_eq!(
+            failure("rejected", "china_qoder_device").await,
+            "qoder.http_auth.reauthorization_required"
+        );
+    }
+    #[tokio::test]
+    async fn local_expiry_pat_and_unverified_workers_cannot_claim_device_auth_rejection() {
+        for (mode, kind) in [
+            ("expired", "china_qoder_device"),
+            ("rejected", "china_qoder_pat"),
+            ("rejected", "international_qoder_pat"),
+            ("broken", "china_qoder_device"),
+            ("nonzero", "china_qoder_device"),
+            ("extra", "china_qoder_device"),
+        ] {
+            assert_eq!(
+                failure(mode, kind).await,
+                "qoder_http_outcome_unverified",
+                "mode={mode} kind={kind}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn rejection_callback_waits_for_verified_worker_end_including_streaming() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (mode, expected) in [
+            ("rejected", 1),
+            ("stream", 1),
+            ("expired", 0),
+            ("broken", 0),
+            ("nonzero", 0),
+            ("extra", 0),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let handler: DeviceRejection = Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let response = forward(
+                &host(),
+                &request(mode, "china_qoder_device"),
+                mode == "stream",
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Some(handler),
+            )
+            .await;
+            if let Ok(crate::proxy::hyper_client::ProxyResponse::Streamed { mut stream, .. }) =
+                response
+            {
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "not before clean end");
+                let mut bytes = Vec::new();
+                let mut failed = false;
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(chunk) => bytes.extend_from_slice(&chunk),
+                        Err(error) => {
+                            assert_eq!(error.to_string(), REAUTHORIZE);
+                            failed = true;
+                        }
+                    }
+                }
+                assert!(failed);
+                assert!(!String::from_utf8_lossy(&bytes).contains("[DONE]"));
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), expected, "mode={mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn production_cn_worker_classification_reaches_original_transport_without_false_retirement(
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (mode, streaming, retired) in [
+            ("ok", false, 0),
+            ("ok", true, 0),
+            ("auth", false, 1),
+            ("queue", false, 0),
+            ("quota", false, 0),
+            ("request", false, 0),
+            ("oversize", false, 0),
+            ("late-auth", true, 1),
+            ("late-quota", true, 0),
+        ] {
+            let mut config = host();
+            config.worker.set_file_name("http-cn-device-contract.mjs");
+            let mut input = request(mode, "china_qoder_device");
+            input["snapshot"] = json!({"access":"SYNTHETIC_CN_OWNER_ACCESS","uid":"SYNTHETIC_CN_OWNER_UID","machineId":"synthetic-machine","expiry":4102444800000_i64,"region":"cn","credentialKind":"china_qoder_device"});
+            input["chat"] = json!({"model":mode,"stream":streaming,"messages":[{"role":"user","content":"synthetic"}]});
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let handler: DeviceRejection = Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let result = forward(
+                &config,
+                &input,
+                streaming,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Some(handler),
+            )
+            .await;
+            match result {
+                Ok(crate::proxy::hyper_client::ProxyResponse::Streamed { mut stream, .. }) => {
+                    let mut bytes = Vec::new();
+                    let mut failed = false;
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(chunk) => bytes.extend_from_slice(&chunk),
+                            Err(_) => {
+                                failed = true;
+                            }
+                        }
+                    }
+                    assert_eq!(failed, mode != "ok", "mode={mode}");
+                    assert_eq!(
+                        String::from_utf8_lossy(&bytes).contains("[DONE]"),
+                        mode == "ok"
+                    );
+                }
+                Ok(crate::proxy::hyper_client::ProxyResponse::Buffered { body, .. }) => {
+                    assert_eq!(mode, "ok");
+                    assert!(String::from_utf8_lossy(&body).contains("synthetic CN success"));
+                }
+                Err(ProxyError::ForwardFailed(code)) => {
+                    assert_ne!(mode, "ok");
+                    assert_eq!(code == REAUTHORIZE, retired == 1, "mode={mode}");
+                }
+                _ => panic!("unexpected response for mode={mode}"),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), retired, "mode={mode}");
+        }
     }
 }

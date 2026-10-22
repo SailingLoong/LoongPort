@@ -2598,6 +2598,9 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
         crate::services::provider::qoder_daily::http::CredentialSource::ChinaQoderPat => {
             owner::SourceKind::ChinaQoderPat
         }
+        crate::services::provider::qoder_daily::http::CredentialSource::ChinaQoderDevice => {
+            return owner::IdentityActionResult::unavailable();
+        }
     };
     let transport = match owner::transport::FixedRegionTransport::for_source(source) {
         Ok(transport) => transport,
@@ -2633,6 +2636,69 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
         },
         || chrono::Utc::now().timestamp_millis(),
     ).await
+}
+
+/// Explicit independent CN grant. New records are DB-only: ProviderService::add
+/// may select/write live Codex config for the first account even with false.
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_start<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    request: crate::services::provider::qoder_cn_device_login::StartRequest,
+) -> crate::services::provider::qoder_cn_device_login::StartResult {
+    use crate::services::provider::{qoder_cn_device_login as login, qoder_http_auth as owner};
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return login::StartResult::Failed {
+                code: "unavailable",
+            }
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        login::sessions().start(db.clone(), request, |provider| {
+            db.save_provider("codex", &provider)?;
+            db.set_user_edited("codex", &provider.id, true)
+        }, |summary| {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+            let (message, accept) = match summary.kind {
+                owner::IdentityConfirmationKind::Recover => (
+                    format!("供应商“{}”上次独立授权尚未确认。继续会退役旧的本地尝试，使用新的 CN 授权流程登录同一账号；不会重发旧 refresh。", summary.provider_name), "重新授权"),
+                owner::IdentityConfirmationKind::Rebind => (
+                    format!("确定更换供应商“{}”绑定的 CN 账号吗？当前本地凭据将退役，随后以新的独立设备标识授权。服务器是否保留其他客户端会话由 Qoder 决定。", summary.provider_name), "更换账号"),
+            };
+            app_handle.dialog().message(message).title("Qoder CN 独立授权")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(accept.into(), "取消".into()))
+                .blocking_show()
+        }, chrono::Utc::now().timestamp_millis())
+    }).await.unwrap_or(login::StartResult::Failed { code: "unavailable" })
+}
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_poll<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    session_id: String,
+) -> crate::services::provider::qoder_cn_device_login::PollResult {
+    use crate::services::provider::qoder_cn_device_login as login;
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return login::PollResult::Failed {
+                code: "unavailable",
+            }
+        }
+    };
+    login::sessions().poll(&db, &session_id).await
+}
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_cancel<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    session_id: String,
+) -> crate::services::provider::qoder_cn_device_login::CancelResult {
+    use crate::services::provider::qoder_cn_device_login as login;
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return login::CancelResult::Cancelled;
+    };
+    login::sessions().cancel(&state.db, &session_id)
 }
 
 #[cfg(test)]

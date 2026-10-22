@@ -114,9 +114,7 @@ it("keeps CN original account IDs separate and never mounts the international cl
     screen.getByRole("button", { name: "identity:cn:cn-generation" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Qoder CN · 独立 PAT")).toBeInTheDocument();
-  expect(
-    screen.getByText(/CN 原生浏览器登录与签到尚未接通/),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/CN 签到仍未接通/)).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "claim:cn" }),
   ).not.toBeInTheDocument();

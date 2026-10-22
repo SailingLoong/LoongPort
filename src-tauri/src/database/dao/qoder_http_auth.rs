@@ -191,6 +191,22 @@ fn next_establishment(
     Ok((record, lease))
 }
 
+fn establish_phase_matches(record: &Record, lease: &EstablishLease) -> Result<(), AppError> {
+    match &record.phase {
+        Phase::Establishing {
+            attempt_id,
+            expected_uid,
+            machine_id,
+        } if *attempt_id == lease.attempt_id
+            && *expected_uid == lease.expected_uid
+            && *machine_id == lease.machine_id =>
+        {
+            Ok(())
+        }
+        _ => Err(denied("stale_owner")),
+    }
+}
+
 impl Database {
     /// All owner operations have the existing lock order: vault, connection,
     /// immediate transaction. The returned lease never contains a lock guard.
@@ -404,6 +420,23 @@ impl Database {
         })
     }
 
+    /// Final pre-GET admission for ephemeral device sessions. A cancelled,
+    /// replaced, locked, or cross-realm lease must not reach the poll transport.
+    pub(crate) fn check_qoder_http_establish(
+        &self,
+        lease: &EstablishLease,
+    ) -> Result<(), AppError> {
+        self.with_qoder_http(
+            &lease.stamp.source.provider_id,
+            |tx, vault, epoch, _, source, _| {
+                let (_, record) = read_on(tx, vault, &source.provider_id)?;
+                let record = record.ok_or_else(|| denied("stale_owner"))?;
+                stamp_matches(&record, &source, epoch, &lease.stamp)?;
+                establish_phase_matches(&record, lease)
+            },
+        )
+    }
+
     pub(crate) fn qoder_http_publish_establish(
         &self,
         lease: &EstablishLease,
@@ -425,16 +458,7 @@ impl Database {
                 let (raw, record) = read_on(tx, vault, &source.provider_id)?;
                 let record = record.ok_or_else(|| denied("stale_owner"))?;
                 stamp_matches(&record, &source, epoch, &lease.stamp)?;
-                match &record.phase {
-                    Phase::Establishing {
-                        attempt_id,
-                        expected_uid,
-                        machine_id,
-                    } if *attempt_id == lease.attempt_id
-                        && *expected_uid == lease.expected_uid
-                        && *machine_id == lease.machine_id => {}
-                    _ => return Err(denied("stale_owner")),
-                }
+                establish_phase_matches(&record, lease)?;
                 let ready = Record::new(
                     source,
                     record.next_generation()?,
@@ -512,6 +536,45 @@ impl Database {
                     machine_id,
                 };
                 publish_on(tx, vault, &source.provider_id, &raw, &record)
+            },
+        )
+    }
+
+    /// A proven device-auth rejection retires only the exact original request
+    /// owner. A late 401/403 cannot revoke a newer grant or in-flight refresh.
+    pub(crate) fn qoder_http_reject_device_snapshot(
+        &self,
+        snapshot: &RequestSnapshot,
+    ) -> Result<(), AppError> {
+        if snapshot.stamp.source.source != SourceKind::ChinaQoderDevice {
+            return Err(denied("unsupported_source"));
+        }
+        self.with_qoder_http(
+            &snapshot.stamp.source.provider_id,
+            |tx, vault, epoch, _, source, _| {
+                let (raw, record) = read_on(tx, vault, &source.provider_id)?;
+                let record = record.ok_or_else(|| denied("stale_owner"))?;
+                stamp_matches(&record, &source, epoch, &snapshot.stamp)?;
+                let identity = match &record.phase {
+                    Phase::Ready { identity, tokens }
+                        if identity.uid == snapshot.uid()
+                            && identity.machine_id == snapshot.machine_id()
+                            && tokens.access_token == snapshot.access_token() =>
+                    {
+                        identity.clone()
+                    }
+                    _ => return Err(denied("stale_owner")),
+                };
+                let unknown = Record::new(
+                    source,
+                    record.next_generation()?,
+                    Phase::Unknown {
+                        attempt_id: uuid::Uuid::new_v4().to_string(),
+                        machine_id: identity.machine_id.clone(),
+                        identity: Some(identity),
+                    },
+                );
+                publish_on(tx, vault, &unknown.source.provider_id, &raw, &unknown)
             },
         )
     }

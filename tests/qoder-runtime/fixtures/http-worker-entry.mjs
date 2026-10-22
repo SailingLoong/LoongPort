@@ -13,8 +13,8 @@ net.Socket.prototype.connect=function(...args){const a=Array.isArray(args[0])?ar
 tls.connect=deny;dgram.createSocket=deny;net.Server.prototype.listen=deny;
 for(const k of ['spawn','exec','execFile','fork','spawnSync','execSync','execFileSync'])cp[k]=deny;
 syncBuiltinESMExports();
-const allowed=new Set(['/algo/api/v2/model/list?Encode=1','/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1']);
-globalThis.fetch=(input,init)=>{const u=new URL(String(input));if(u.origin!=='https://api3.qoder.sh'||!allowed.has(u.pathname+u.search))return deny();return realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,init);};
+const allowed=new Set(['https://api3.qoder.sh/algo/api/v2/model/list?Encode=1','https://gateway.qoder.com.cn/algo/api/v2/model/list',...['https://api3.qoder.sh','https://gateway.qoder.com.cn'].map(origin=>origin+'/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1')]);
+globalThis.fetch=(input,init)=>{const u=new URL(String(input));if(!allowed.has(u.href)||init.redirect!=='error')return deny();return realFetch(`http://127.0.0.1:${port}${u.pathname}${u.search}`,{...init,headers:{...init.headers,'x-fixture-origin':u.origin}});};
 let pending='';
 const gate=new Transform({transform(chunk,encoding,cb){try{pending+=chunk.toString('utf8');if(Buffer.byteLength(pending)>1048576)throw Error('FIXTURE_LINE_LIMIT');let n;while((n=pending.indexOf('\n'))>=0){const line=pending.slice(0,n);pending=pending.slice(n+1);let v;try{v=JSON.parse(line);}catch{}const s=v?.request?.snapshot;if(s&&(s.access!=='SYNTHETIC_HTTP_WORKER_ACCESS'||s.uid!=='fixture-user'||s.machineId!=='fixture-machine'))throw Error('FIXTURE_CREDENTIALS_ONLY');this.push(line+'\n');}cb();}catch{cb(Error('FIXTURE_INPUT_DENIED'));}},flush(cb){if(pending)this.push(pending);cb();}});
 const {runWorker}=await import('../../../scripts/qoder/worker.mjs');
