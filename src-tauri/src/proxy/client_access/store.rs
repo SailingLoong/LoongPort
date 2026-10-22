@@ -91,6 +91,73 @@ impl Database {
         route_app: &str,
         allowed_models: &[String],
     ) -> Result<CredentialRef, AppError> {
+        self.issue_client_credential_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            client_id,
+            route_app,
+            allowed_models,
+        )
+    }
+
+    /// Lifecycle-owned issuance is idempotent and never revives a revoked grant.
+    pub(crate) fn ensure_builtin_client_credential(
+        &self,
+        client_id: &str,
+        route_app: &str,
+        models: &[String],
+    ) -> Result<CredentialRef, AppError> {
+        let reference = self.issue_client_credential_with_id(
+            format!("builtin:{client_id}:{route_app}"),
+            client_id,
+            route_app,
+            models,
+        )?;
+        if reference.revoked {
+            return Err(denied());
+        }
+        Ok(reference)
+    }
+
+    /// Called only by the managed configuration lifecycle, never by a read path.
+    pub(crate) fn provision_managed_client_credential(
+        &self,
+        route_app: &str,
+    ) -> Result<(), AppError> {
+        self.ensure_builtin_client_credential(&format!("managed-{route_app}"), route_app, &[])
+            .map(|_| ())
+    }
+
+    /// An absent credential identifies the pre-migration projection. Once admitted,
+    /// missing/revoked credentials are errors and never restore legacy access.
+    pub(crate) fn managed_client_key(&self, route_app: &str) -> Result<Option<String>, AppError> {
+        let client_id = format!("managed-{route_app}");
+        let identity = format!("builtin:{client_id}:{route_app}");
+        let present = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM loongport_client_credentials WHERE id=?1)",
+                [&identity],
+                |row| row.get::<_, bool>(0),
+            )?
+        };
+        if present {
+            return self
+                .resolve_client_credential(&identity, &client_id, route_app)
+                .map(Some);
+        }
+        if self.client_access_ready()? {
+            return Err(denied());
+        }
+        Ok(None)
+    }
+
+    fn issue_client_credential_with_id(
+        &self,
+        id: String,
+        client_id: &str,
+        route_app: &str,
+        allowed_models: &[String],
+    ) -> Result<CredentialRef, AppError> {
         if client_id.is_empty()
             || client_id.len() > 128
             || !client_id
@@ -102,7 +169,6 @@ impl Database {
             return Err(AppError::InvalidInput("client_access.invalid_scope".into()));
         }
         let vault = self.secrets.read()?;
-        let id = uuid::Uuid::new_v4().to_string();
         let mut random = Zeroizing::new([0u8; 32]);
         getrandom::fill(random.as_mut())
             .map_err(|_| AppError::Config("client_access.random_unavailable".into()))?;
@@ -112,14 +178,15 @@ impl Database {
         models.sort();
         models.dedup();
         let conn = lock_conn!(self.conn);
-        conn.execute("INSERT INTO loongport_client_credentials (id, client_id, route_app, allowed_models, secret) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, client_id, route_app, serde_json::to_string(&models).map_err(|error| AppError::Config(error.to_string()))?, sealed])?;
-        Ok(CredentialRef {
-            id,
-            client_id: client_id.into(),
-            route_app: route_app.into(),
-            allowed_models: models,
-            revoked: false,
-        })
+        conn.execute("INSERT OR IGNORE INTO loongport_client_credentials (id, client_id, route_app, allowed_models, secret) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, client_id, route_app, serde_json::to_string(&models).map_err(|error| AppError::Config(error.to_string()))?, sealed])?;
+        let (reference, _) = lookup(&conn, &id)?;
+        if reference.client_id != client_id
+            || reference.route_app != route_app
+            || reference.allowed_models != models
+        {
+            return Err(denied());
+        }
+        Ok(reference)
     }
 
     pub(crate) fn resolve_client_credential(
