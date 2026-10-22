@@ -25,6 +25,8 @@ pub(crate) struct CallerIdentity {
     pub client_id: String,
     pub credential_id: String,
     pub route_app: String,
+    /// Immutable model from the protocol parser, including URI-based APIs.
+    pub requested_model: Option<String>,
 }
 
 pub(crate) use store::{create_schema, validate_schema};

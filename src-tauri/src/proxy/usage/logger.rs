@@ -894,11 +894,13 @@ mod tests {
             client_id: "client-a".into(),
             credential_id: "credential-a".into(),
             route_app: "codex".into(),
+            requested_model: None,
         };
         let second = CallerIdentity {
             client_id: "client-b".into(),
             credential_id: "credential-b".into(),
             route_app: "codex".into(),
+            requested_model: None,
         };
         let mut log = request_log("shared-upstream-id", 10);
         log.app_type = "codex".into();

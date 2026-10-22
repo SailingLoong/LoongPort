@@ -93,7 +93,7 @@ fn forward_error_kind(error: &ProxyError) -> &'static str {
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "timeout",
         ProxyError::ForwardFailed(_) => "forwarding",
         ProxyError::UpstreamError { .. } => "upstream",
-        ProxyError::AuthError(_) => "authentication",
+        ProxyError::AuthError(_) | ProxyError::ClientAccessDenied => "authentication",
         ProxyError::ConfigError(_) => "configuration",
         ProxyError::TransformError(_) => "transform",
         ProxyError::InvalidRequest(_) => "invalid_request",
@@ -171,6 +171,7 @@ pub struct ForwardError {
 pub(crate) struct ActiveConnectionGuard {
     status: Arc<RwLock<ProxyStatus>>,
     response_lease: Option<ResponseLease>,
+    account_capacity: super::account_capacity::AccountCapacityLease,
 }
 
 impl ActiveConnectionGuard {
@@ -182,6 +183,7 @@ impl ActiveConnectionGuard {
         Self {
             status,
             response_lease: None,
+            account_capacity: Default::default(),
         }
     }
 
@@ -627,10 +629,28 @@ impl RequestForwarder {
         endpoint: &str,
         body: Value,
         headers: axum::http::HeaderMap,
-        extensions: Extensions,
+        mut extensions: Extensions,
         providers: Vec<Provider>,
     ) -> Result<ForwardResult, ForwardError> {
         let mut guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
+        extensions.insert(guard.account_capacity.clone());
+        let caller_lease = extensions
+            .get::<super::client_access::CallerIdentity>()
+            .cloned()
+            .map(|caller| {
+                let router = self.router.clone();
+                let route = app_type.as_str().to_owned();
+                let model = caller.requested_model.clone();
+                ResponseLease::new(move || {
+                    let router = router.clone();
+                    let caller = caller.clone();
+                    let route = route.clone();
+                    let model = model.clone();
+                    async move {
+                        router.authorize_client_request(&caller, &route, model.as_deref())
+                    }
+                })
+            });
         {
             let mut s = self.status.write().await;
             s.total_requests = s.total_requests.saturating_add(1);
@@ -645,7 +665,7 @@ impl RequestForwarder {
         // 在流式 body 的 future 内才真正 drop。
         // Err 路径：guard 在函数 scope 内随返回值落地时自动 drop。
         result.map(|mut fr| {
-            guard.response_lease = fr.response_lease.take();
+            guard.response_lease = ResponseLease::combine(fr.response_lease.take(), caller_lease);
             fr.connection_guard = Some(guard);
             fr
         })
@@ -694,6 +714,12 @@ impl RequestForwarder {
         }
 
         let budget_binding = extensions.get::<RouteBinding>();
+        let capacity = extensions
+            .get::<super::account_capacity::AccountCapacityLease>()
+            .ok_or_else(|| ForwardError {
+                error: ProxyError::Internal("account_capacity.request_owner_missing".into()),
+                provider: None,
+            })?;
         if let Some(binding) = budget_binding {
             let service = self.service_owner.upgrade().ok_or_else(|| ForwardError {
                 error: ProxyError::ConfigError("paperclip.request_owner_unavailable".into()),
@@ -722,6 +748,12 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商
         for provider in providers.iter() {
+            // Release the previous candidate before waiting for another
+            // account, so two requests cannot hold each other's capacity.
+            capacity.release().map_err(|error| ForwardError {
+                error,
+                provider: Some(provider.clone()),
+            })?;
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
@@ -770,6 +802,22 @@ impl RequestForwarder {
                 break;
             }
 
+            // Capacity admission precedes a half-open circuit permit. A
+            // cancelled queue waiter must not consume a circuit probe.
+            capacity
+                .hold(
+                    self.router
+                        .acquire_account_capacity(provider)
+                        .await
+                        .map_err(|error| ForwardError {
+                            error,
+                            provider: Some(provider.clone()),
+                        })?,
+                )
+                .map_err(|error| ForwardError {
+                    error,
+                    provider: Some(provider.clone()),
+                })?;
             // 发起请求前先获取熔断器放行许可（HalfOpen 会占用探测名额）
             // 单 Provider 场景下跳过此检查，避免熔断器阻塞所有请求
             let (allowed, used_half_open_permit) =
@@ -904,6 +952,7 @@ impl RequestForwarder {
                     // malformed success, or partial result establishes free failure.
                     // Stop before media/tool/signature rectification can resend.
                     if budget_binding.is_some()
+                        || matches!(e, ProxyError::ClientAccessDenied)
                         || super::providers::workbuddy_acp::enabled(provider)
                         || is_explicit_upstream_denial(&e)
                     {
@@ -1599,16 +1648,26 @@ impl RequestForwarder {
             DiagnosticEvent::new("proxy.forward.attempt", "started")
                 .field_display("diagnostic_id", self.diagnostic_id)
         );
-        let result = self
-            .forward_attempt(
+        let result = async {
+            if let Some(caller) = extensions.get::<super::client_access::CallerIdentity>() {
+                self.router.authorize_client_request(
+                    caller,
+                    app_type.as_str(),
+                    caller.requested_model.as_deref(),
+                )?;
+            }
+            self.forward_attempt(
                 app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
             )
-            .await;
+            .await
+        }
+        .await;
         // Pre-send budget admission is not a real provider attempt. Ordinary
         // requests retain the original accounting behavior.
-        if extensions
-            .get::<RouteBinding>()
-            .is_none_or(RouteBinding::has_sent)
+        if !matches!(result, Err(ProxyError::ClientAccessDenied))
+            && extensions
+                .get::<RouteBinding>()
+                .is_none_or(RouteBinding::has_sent)
         {
             self.router
                 .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
@@ -3737,6 +3796,7 @@ impl RequestForwarder {
 // status/usage error owners. Ordinary requests retain their existing diagnostics.
 fn budget_safe_error(error: ProxyError) -> ProxyError {
     match error {
+        ProxyError::ClientAccessDenied => ProxyError::ClientAccessDenied,
         ProxyError::UpstreamError { status, .. } => {
             ProxyError::UpstreamError { status, body: None }
         }
@@ -6286,6 +6346,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn revoked_caller_stops_before_upstream_attempts_or_account_fallback() {
+        let db = Arc::new(Database::memory().unwrap());
+        let grant = db
+            .issue_client_credential("synthetic", "codex", &["model-a".into()])
+            .unwrap();
+        let key = db
+            .resolve_client_credential(&grant.id, "synthetic", "codex")
+            .unwrap();
+        let caller = db
+            .authenticate_client(&key, "codex", Some("model-a"))
+            .unwrap();
+        db.revoke_client_credential(&grant.id).unwrap();
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.router = Arc::new(ProviderRouter::new(db.clone()));
+        forwarder.max_attempts = 2;
+        let first = test_provider_with_type(None);
+        let mut second = first.clone();
+        second.id = "provider-2".into();
+        let mut extensions = Extensions::new();
+        extensions.insert(caller);
+        let error = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                json!({"model":"model-a","input":"synthetic"}),
+                HeaderMap::new(),
+                extensions,
+                vec![first.clone(), second],
+            )
+            .await
+            .err()
+            .expect("revoked caller");
+        assert!(matches!(error.error, ProxyError::ClientAccessDenied));
+        assert_eq!(error.provider.unwrap().id, first.id);
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM provider_attempt_outcomes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(
+            super::super::error_mapper::map_proxy_error_to_status(&ProxyError::ClientAccessDenied),
+            401
+        );
+    }
+
     #[test]
     fn official_codex_failures_are_not_retryable() {
         let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
@@ -6996,6 +7109,37 @@ mod tests {
 mod managed_response_lease_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn final_downstream_body_owns_capacity_even_before_its_first_poll() {
+        use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+        let capacity = super::super::account_capacity::AccountCapacity::default();
+        let mut provider = Provider::with_id(
+            "synthetic".into(),
+            "Synthetic".into(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("synthetic".into()),
+                account_id: Some("shared".into()),
+            }),
+            ..Default::default()
+        });
+        let guard =
+            ActiveConnectionGuard::acquire(Arc::new(RwLock::new(ProxyStatus::default()))).await;
+        guard
+            .account_capacity
+            .hold(capacity.acquire(&provider).await.unwrap())
+            .unwrap();
+        let body = final_buffered_body(Some(guard), Bytes::from_static(b"result"));
+        let mut next = Box::pin(capacity.acquire(&provider));
+        assert!(futures::poll!(&mut next).is_pending());
+        drop(body);
+        assert!(next.await.unwrap().is_some());
+    }
 
     async fn guarded(valid: Arc<AtomicBool>) -> ActiveConnectionGuard {
         let mut guard =

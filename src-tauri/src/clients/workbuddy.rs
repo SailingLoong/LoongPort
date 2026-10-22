@@ -134,8 +134,10 @@ mod tests {
             json!({"models":[{"id":"personal","extra":42}],"availableModels":["personal"],"unknown":{"keep":true}}),
         ] {
             let bytes = serde_json::to_vec(&original).unwrap();
-            let result: Value =
-                serde_json::from_slice(&project(Some(&bytes), &[entry.clone()]).unwrap()).unwrap();
+            let result: Value = serde_json::from_slice(
+                &project(Some(&bytes), std::slice::from_ref(&entry)).unwrap(),
+            )
+            .unwrap();
             let models = if result.is_array() {
                 &result
             } else {
@@ -149,7 +151,7 @@ mod tests {
             }
             let again = project(
                 Some(&serde_json::to_vec(&result).unwrap()),
-                &[entry.clone()],
+                std::slice::from_ref(&entry),
             )
             .unwrap();
             assert_eq!(serde_json::from_slice::<Value>(&again).unwrap(), result);

@@ -7,13 +7,13 @@ mod code_access;
 pub(crate) mod code_runtime;
 #[cfg(unix)]
 mod codex_runner;
-#[cfg(unix)]
-mod workspace;
 pub(crate) mod contract;
 pub(crate) mod execution;
 pub(crate) mod snapshot;
 #[cfg(unix)]
 pub(crate) mod tasks;
+#[cfg(unix)]
+mod workspace;
 use crate::error::AppError;
 #[cfg(any(unix, test))]
 use crate::{app_config::AppType, store::AppState};

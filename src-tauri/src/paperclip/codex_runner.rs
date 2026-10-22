@@ -21,9 +21,11 @@ pub(super) struct RunnerResult {
     pub process_stopped: bool,
 }
 
+type PendingWrite = (Value, mpsc::Sender<Result<(), String>>);
+
 struct Session {
     child: Child,
-    input: Option<mpsc::SyncSender<(Value, mpsc::Sender<Result<(), String>>)>>,
+    input: Option<mpsc::SyncSender<PendingWrite>>,
     writer: Option<thread::JoinHandle<()>>,
     messages: Receiver<Result<Value, String>>,
     pending: Vec<Value>,
@@ -333,7 +335,7 @@ fn spawn(
         .stdin
         .take()
         .ok_or("agents.runtime_stdin_unavailable")?;
-    let (input, writes) = mpsc::sync_channel::<(Value, mpsc::Sender<Result<(), String>>)>(1);
+    let (input, writes) = mpsc::sync_channel::<PendingWrite>(1);
     let writer = thread::spawn(move || {
         while let Ok((value, acknowledge)) = writes.recv() {
             let result = serde_json::to_writer(&mut stdin, &value)

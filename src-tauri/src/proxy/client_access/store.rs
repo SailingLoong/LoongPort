@@ -305,6 +305,7 @@ impl Database {
             client_id: reference.client_id,
             credential_id: reference.id,
             route_app: reference.route_app,
+            requested_model: model.map(str::to_owned),
         })
     }
 

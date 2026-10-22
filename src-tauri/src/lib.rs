@@ -8,13 +8,13 @@ mod claude_plugin;
 /// `loongport-cli` 的一次性配置逻辑（无桌面服务器用户）。独立 bin 入口在
 /// `src/bin/loongport_cli.rs`，与 GUI 共享本库——唯源不分叉。
 pub mod cli;
+mod clients;
 mod codex_config;
 mod codex_history_migration;
 mod codex_reasoning;
 mod codex_state_db;
 #[cfg(feature = "gui")]
 mod commands;
-mod clients;
 mod config;
 mod config_file_io;
 mod crowd;
@@ -1345,6 +1345,10 @@ fn initialize_runtime(
             restore_proxy_state_on_startup(&state).await;
         }
 
+        if let Err(error) = state.proxy_service.complete_client_access_migration().await {
+            log::error!("客户端接入迁移未完成: {error}");
+        }
+
         // Periodic backup check (on startup)
         if let Err(e) = state.db.periodic_backup_if_needed() {
             log::warn!("Periodic backup failed on startup: {e}");
@@ -1798,6 +1802,10 @@ pub fn run() {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             commands::create_agents_task,
+            commands::code_agents_access,
+            commands::code_agents_models,
+            commands::create_code_agents_task,
+            commands::list_code_agents_tasks,
             commands::list_client_connections,
             commands::list_client_credentials,
             commands::create_client_credential,
