@@ -164,6 +164,18 @@ export function AgentsPanel({}: AgentsPanelProps) {
               )
             }
           />
+          {analyses.length > 1 && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              aria-label={`移除分析 ${index + 1}`}
+              onClick={() =>
+                setAnalyses(analyses.filter((_, i) => i !== index))
+              }
+            >
+              移除
+            </Button>
+          )}
         </label>
       ))}
       <Button

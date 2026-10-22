@@ -252,3 +252,19 @@ it("uses group state owned by the backend and renders every analysis", async () 
   expect(await screen.findByText("Two")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "取消任务" })).toBeDisabled();
 });
+
+it("removes an accidental empty analysis without discarding the draft", async () => {
+  const user = userEvent.setup();
+  render(<AgentsPanel />);
+  await user.type(screen.getByLabelText("任务"), "Keep this objective");
+  await user.type(screen.getByLabelText("模型"), "test-model");
+  await user.click(screen.getByRole("button", { name: "添加分析" }));
+  expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "移除分析 3" }));
+  expect(screen.getByLabelText("任务")).toHaveValue("Keep this objective");
+  expect(screen.getByRole("button", { name: "创建任务" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "移除分析 2" }));
+  expect(
+    screen.queryByRole("button", { name: "移除分析 1" }),
+  ).not.toBeInTheDocument();
+});
