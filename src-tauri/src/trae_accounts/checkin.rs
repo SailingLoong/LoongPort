@@ -1,5 +1,8 @@
-//! Synthetic-only CN check-in protocol research; no production consumer is wired.
-//! CN authorization and check-in remain unimplemented product requirements.
+//! CN check-in through the existing selected native account owner.
+//! Third-party wire evidence: autumnsentiment/Trae2api-cn@e5eb6d13,
+//! src/trae_client.py:686-750 (MIT; licenses/Trae2api-cn-MIT.txt).
+//! This is not an official stable API contract or proof of live credit delivery.
+//! No device rotation, identity synthesis, refusal retry, or balance inference.
 use super::{
     inference::{self, Lease, OfficialHttp, Transport},
     protocol,
@@ -8,11 +11,20 @@ use super::{
 use crate::{proxy::ProxyError, secrets::session::SecretSession};
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum Outcome {
     Inactive,
     Done,
-    Claimed,
+    /// The claim reply reported acceptance; only a later status query can
+    /// confirm this account's check-in. This is not a balance or credit delta.
+    Accepted {
+        reported_credits: f64,
+    },
     Ineligible,
     AlreadyAttempted,
 }
@@ -24,13 +36,25 @@ pub(crate) async fn run(
     let lease = Lease::acquire(session, id, "checkin")
         .await
         .map_err(|_| unavailable())?;
-    if lease.snapshot.account.realm == Realm::Cn {
-        return Err(unavailable());
-    }
     run_with(lease, timeout, &OfficialHttp).await
 }
 fn unavailable() -> ProxyError {
     ProxyError::AuthError("trae.checkin_unavailable".into())
+}
+
+fn business_code(value: &Value) -> Result<Option<i64>, ProxyError> {
+    let mut code = None;
+    for value in [value.get("code"), value.get("Code")].into_iter().flatten() {
+        let parsed = value
+            .as_i64()
+            .or_else(|| value.as_str()?.parse().ok())
+            .ok_or_else(unavailable)?;
+        if code.is_some_and(|old| old != parsed) {
+            return Err(unavailable());
+        }
+        code = Some(parsed);
+    }
+    Ok(code)
 }
 async fn page(
     lease: &Lease,
@@ -38,7 +62,7 @@ async fn page(
     timeout: Duration,
     transport: &impl Transport,
 ) -> Result<Value, ProxyError> {
-    let mut request = lease.wire(json!({"req_source":1}), timeout)?;
+    let mut request = lease.wire(json!({}), timeout)?;
     // Growth pages receive the original selected device, never synthesized
     // browser/OS/brand metadata or a client-impersonating User-Agent.
     request.url = format!(
@@ -82,9 +106,6 @@ pub(super) async fn run_with(
     // CN calendar day is only an at-most-once safety boundary. Eligibility is
     // ALWAYS read from the service; it never asserts a daily credit entitlement.
     let day = (store::now() / 1000 + 8 * 3600).div_euclid(86400);
-    if lease.snapshot.account.checkin_day.is_some_and(|d| d >= day) {
-        return Ok(Outcome::AlreadyAttempted);
-    }
     if lease
         .snapshot
         .account
@@ -97,16 +118,28 @@ pub(super) async fn run_with(
         super::auth::refresh(&lease.session, &mut lease.snapshot, timeout, transport).await?;
     }
     let status = page(&lease, "status", timeout, transport).await?;
-    if protocol::denial(&status).is_some() {
+    let _ = business_code(&status)?;
+    if status.get("error").is_some() || protocol::denial(&status).is_some() {
         return Err(unavailable());
     }
-    if status.get("checked_in").and_then(Value::as_bool) == Some(true) {
+    let enabled = status
+        .get("enable")
+        .and_then(Value::as_bool)
+        .ok_or_else(unavailable)?;
+    let checked_in = status
+        .get("checked_in")
+        .and_then(Value::as_bool)
+        .ok_or_else(unavailable)?;
+    if checked_in {
         return Ok(Outcome::Done);
     }
-    match status.get("enable").and_then(Value::as_bool) {
-        Some(false) => return Ok(Outcome::Inactive),
-        Some(true) if status.get("checked_in").and_then(Value::as_bool) == Some(false) => (),
-        _ => return Err(unavailable()),
+    if !enabled {
+        return Ok(Outcome::Inactive);
+    }
+    // Reads remain available after an uncertain claim, including after restart.
+    // This marker prevents another write; it never fabricates checked_in=true.
+    if lease.snapshot.account.checkin_day.is_some_and(|d| d >= day) {
+        return Ok(Outcome::AlreadyAttempted);
     }
     let admitted = store::access(&lease.session, Some(&lease.snapshot.binding), |d, _| {
         let current = store::matched(d, &lease.snapshot)?;
@@ -127,14 +160,14 @@ pub(super) async fn run_with(
     // Any uncertainty after this durable admission remains non-replayable today,
     // including cancellation, transport errors, 9074 and 9095. No retry loop.
     let answer = page(&lease, "claim", timeout, transport).await?;
-    let code = answer
-        .get("code")
-        .or_else(|| answer.get("Code"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+    let code = business_code(&answer)?;
     if matches!(code, Some(9074 | 9095)) {
         return Ok(Outcome::Ineligible);
     }
-    if protocol::denial(&answer).is_some() || code != Some(0) {
+    if answer.get("error").is_some()
+        || protocol::denial(&answer).is_some()
+        || code.is_some_and(|code| code != 0)
+    {
         return Err(unavailable());
     }
     let credits = answer
@@ -142,6 +175,7 @@ pub(super) async fn run_with(
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && *n >= 0.0)
         .ok_or_else(unavailable)?;
-    let _ = credits; // No quota balance is inferred or written to the pool.
-    Ok(Outcome::Claimed)
+    Ok(Outcome::Accepted {
+        reported_credits: credits,
+    })
 }

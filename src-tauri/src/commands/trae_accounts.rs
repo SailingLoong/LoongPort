@@ -43,3 +43,18 @@ pub(crate) async fn retire_trae_account(
 ) -> Result<(), Error> {
     entry::retire(state.db.secret_session(), &id).await
 }
+
+/// Explicit per-account action; no credentials, host, or device fields from IPC.
+#[tauri::command]
+pub(crate) async fn checkin_trae_account(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::trae_accounts::checkin::Outcome, String> {
+    crate::trae_accounts::checkin::run(
+        state.db.secrets.clone(),
+        &id,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|_| "trae.checkin_unavailable".to_string())
+}

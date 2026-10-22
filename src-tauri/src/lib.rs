@@ -2212,6 +2212,7 @@ pub fn run() {
             commands::trae_accounts::confirm_trae_authorization,
             commands::trae_accounts::cancel_trae_authorization,
             commands::trae_accounts::retire_trae_account,
+            commands::trae_accounts::checkin_trae_account,
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
