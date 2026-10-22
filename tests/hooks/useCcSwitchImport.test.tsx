@@ -63,7 +63,8 @@ async function afterWindowTeardown<T>(settle: () => Promise<T>): Promise<T> {
 beforeAll(() => {
   // A missing fixture must fail here instead of issuing a real DNS request.
   server.close();
-  server.listen({ onUnhandledRequest: "error" });
+  // MSW 3：onUnhandledRequest → onUnhandledFrame，语义不变。
+  server.listen({ onUnhandledFrame: "error" });
 });
 
 afterEach(() => {

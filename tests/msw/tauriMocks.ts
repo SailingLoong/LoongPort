@@ -1,17 +1,13 @@
-import crossFetch, {
-  Headers as CrossFetchHeaders,
-  Request as CrossFetchRequest,
-  Response as CrossFetchResponse,
-} from "cross-fetch";
 import { vi } from "vitest";
 import { server } from "./server";
 
 const TAURI_ENDPOINT = "http://tauri.local";
 
-globalThis.fetch = crossFetch as typeof fetch;
-globalThis.Headers = CrossFetchHeaders as typeof Headers;
-globalThis.Request = CrossFetchRequest as typeof Request;
-globalThis.Response = CrossFetchResponse as typeof Response;
+// 曾经这里用 cross-fetch 的 ponyfill 全局替换 fetch/Headers/Request/Response。
+// MSW 3 的 interceptors 克隆响应时要求原生 WHATWG Response（流式 body 有
+// getReader），ponyfill 的 Response 没有，会成片抛 "body.getReader is not a
+// function"。Node 22+ 原生自带全套 WHATWG fetch，MSW 3 直接拦原生 fetch，
+// 不再需要任何替换。
 
 vi.mock("@tauri-apps/api/core", () => ({
   // main.tsx 的 initializeWindowActivity（上游）会探测宿主环境；测试里恒为非 Tauri。

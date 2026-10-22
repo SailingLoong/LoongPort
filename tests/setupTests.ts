@@ -11,7 +11,9 @@ import "./msw/tauriMocks";
 Element.prototype.scrollIntoView = vi.fn();
 
 beforeAll(async () => {
-  server.listen({ onUnhandledRequest: "warn" });
+  // MSW 3 把 onUnhandledRequest 改名为 onUnhandledFrame（请求与 WebSocket 帧统一），
+  // 默认行为仍是 warn，这里保持显式 warn 不变。
+  server.listen({ onUnhandledFrame: "warn" });
   await i18n.use(initReactI18next).init({
     lng: "zh",
     fallbackLng: "zh",
