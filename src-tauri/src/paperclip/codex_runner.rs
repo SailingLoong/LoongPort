@@ -1,4 +1,5 @@
 //! Codex app-server protocol adapter. It owns no task persistence or workspace allocation.
+use super::code_runtime::RunnerResult;
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -12,14 +13,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-#[derive(Debug)]
-pub(super) struct RunnerResult {
-    pub status: String,
-    pub output: Option<String>,
-    pub error: Option<String>,
-    pub process_stopped: bool,
-}
 
 type PendingWrite = (Value, mpsc::Sender<Result<(), String>>);
 

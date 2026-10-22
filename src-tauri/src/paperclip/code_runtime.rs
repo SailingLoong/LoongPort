@@ -1,5 +1,5 @@
 //! Code-task lifecycle. Protocol details stay in the runner; checkout allocation stays in Workspace.
-use super::{codex_runner::RunnerResult, workspace::Workspace};
+use super::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -10,6 +10,14 @@ use std::{
     },
     thread,
 };
+
+#[derive(Debug)]
+pub(super) struct RunnerResult {
+    pub status: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub process_stopped: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
