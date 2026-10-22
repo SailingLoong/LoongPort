@@ -5131,6 +5131,8 @@
     "completed": "Completed",
     "cancelled": "Cancelled",
     "failed": "Failed",
-    "unknownStatus": "Unknown status"
+    "unknownStatus": "Unknown status",
+    "routeUnsupported": "Code tasks require an API key connection. Select an API key connection in Codex and enter a model, then try again.",
+    "accessDenied": "Code access is unavailable. Refresh the access status or authorize again, then try again."
   }
 }

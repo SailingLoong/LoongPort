@@ -58,7 +58,8 @@ it("retains the request id after uncertain submission and exposes result and can
     if (command === "code_agents_access")
       return [{ id: "grant", allowedModels: [] }];
     if (command === "code_agents_models") return ["test-model"];
-    if (command === "create_code_agents_task") throw new Error("uncertain");
+    if (command === "create_code_agents_task")
+      throw new Error("private network context agents.access_denied");
     return [
       {
         taskId: "task",
@@ -76,7 +77,8 @@ it("retains the request id after uncertain submission and exposes result and can
   await user.type(screen.getByLabelText("代码任务"), "Fix");
   await user.type(await screen.findByLabelText("代码模型"), "test-model");
   await user.click(screen.getByRole("button", { name: "运行代码任务" }));
-  await screen.findByRole("alert");
+  expect(await screen.findByRole("alert")).toHaveTextContent("读取已有任务");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("private network");
   await user.click(screen.getByRole("button", { name: "运行代码任务" }));
   const submissions = call.mock.calls.filter(
     ([command]) => command === "create_code_agents_task",
@@ -88,4 +90,59 @@ it("retains the request id after uncertain submission and exposes result and can
     cancelTaskId: "task",
   });
   expect(screen.getByText("result.txt")).toBeInTheDocument();
+});
+
+it.each([
+  ["agents.code_route_unsupported", "API Key"],
+  ["agents.access_denied", "重新授权"],
+])(
+  "shows actionable rejection for %s without claiming a task exists",
+  async (code, advice) => {
+    call.mockImplementation(async (command) => {
+      if (command === "code_agents_access")
+        return [{ id: "grant", allowedModels: [] }];
+      if (command === "code_agents_models") return ["test-model"];
+      if (command === "create_code_agents_task") throw new Error(code);
+      return [];
+    });
+    const user = userEvent.setup();
+    render(<CodeAgentsPanel />);
+    await user.type(screen.getByLabelText("代码仓库"), "/tmp/example");
+    await user.type(screen.getByLabelText("代码任务"), "Fix");
+    await user.type(screen.getByLabelText("代码模型"), "test-model");
+    await user.click(screen.getByRole("button", { name: "运行代码任务" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(advice);
+    expect(alert).not.toHaveTextContent("读取已有任务");
+    expect(alert).not.toHaveTextContent(code);
+  },
+);
+it("maps known task reasons without showing backend codes or arbitrary error details", async () => {
+  call.mockImplementation(async (command) => {
+    if (command === "code_agents_access") return [];
+    if (command === "code_agents_models") return [];
+    return [
+      {
+        taskId: "unsupported",
+        status: "failed",
+        canCancel: false,
+        processStopped: true,
+        error: "agents.code_route_unsupported",
+      },
+      {
+        taskId: "unrecognized",
+        status: "failed",
+        canCancel: false,
+        processStopped: true,
+        error: "private upstream detail agents.access_denied",
+      },
+    ];
+  });
+  render(<CodeAgentsPanel />);
+  expect(await screen.findByText(/API Key/)).toBeInTheDocument();
+  expect(
+    screen.getByText("任务未完成，请检查工作区与执行状态。"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/private upstream/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/agents\./)).not.toBeInTheDocument();
 });

@@ -5131,6 +5131,8 @@
     "completed": "完了",
     "cancelled": "キャンセル済み",
     "failed": "失敗",
-    "unknownStatus": "不明な状態"
+    "unknownStatus": "不明な状態",
+    "routeUnsupported": "コードタスクには API キー接続が必要です。Codex で API キー接続を選び、モデルを入力して再試行してください。",
+    "accessDenied": "コードへのアクセスが利用できません。アクセス状態を更新するか、再度承認してから再試行してください。"
   }
 }

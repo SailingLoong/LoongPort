@@ -1,3 +1,4 @@
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -8,6 +9,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+
+function codeTaskErrorKey(error: unknown): string | undefined {
+  switch (extractErrorMessage(error)) {
+    case "agents.code_route_unsupported":
+      return "codeAgents.routeUnsupported";
+    case "agents.access_denied":
+      return "codeAgents.accessDenied";
+    case "agents.runtime_requires_interaction":
+      return "codeAgents.interaction";
+    default:
+      return undefined;
+  }
+}
 
 export function CodeAgentsPanel() {
   const { t } = useTranslation();
@@ -115,13 +129,18 @@ export function CodeAgentsPanel() {
           draft.current = { fingerprint, id: crypto.randomUUID() };
         await codeAgentsApi.create({ ...request, requestId: draft.current.id });
       }
-    } catch {
-      if (active.current)
+    } catch (cause) {
+      if (active.current) {
+        const knownReason = codeTaskErrorKey(cause);
         setError(
-          action === "create"
-            ? t("codeAgents.createUncertain")
-            : t("codeAgents.operationFailed"),
+          t(
+            knownReason ??
+              (action === "create"
+                ? "codeAgents.createUncertain"
+                : "codeAgents.operationFailed"),
+          ),
         );
+      }
     } finally {
       operation.current = false;
       if (active.current) {
@@ -277,11 +296,7 @@ export function CodeAgentsPanel() {
           )}
           {task.outputUnavailable && <p>{t("codeAgents.lostOutput")}</p>}
           {task.error && (
-            <p>
-              {task.error === "agents.runtime_requires_interaction"
-                ? t("codeAgents.interaction")
-                : t("codeAgents.unfinished")}
-            </p>
+            <p>{t(codeTaskErrorKey(task.error) ?? "codeAgents.unfinished")}</p>
           )}
           {!task.canCancel && !task.processStopped && (
             <p>{t("codeAgents.processUnknown")}</p>

@@ -5131,6 +5131,8 @@
     "completed": "完成",
     "cancelled": "已取消",
     "failed": "失败",
-    "unknownStatus": "未知状态"
+    "unknownStatus": "未知状态",
+    "routeUnsupported": "代码任务需要 API Key 连接。请在 Codex 中选择 API Key 连接并填写模型后重试。",
+    "accessDenied": "代码访问授权不可用。请刷新授权状态或重新授权后重试。"
   }
 }
