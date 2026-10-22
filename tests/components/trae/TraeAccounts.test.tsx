@@ -1113,3 +1113,136 @@ it("a newer account generation from reload is not overwritten by an older policy
   );
   expect(screen.getByRole("button", { name: "开启自动签到" })).toBeVisible();
 });
+
+const automaticCnRow = () => ({
+  ...account,
+  realm: "cn",
+  nativeSourceSupported: true,
+  generation: 2,
+  autoCheckinRevision: 0,
+  autoCheckinEnabled: false,
+  canSetAutomatic: true,
+  checkinAttemptStatus: null,
+});
+
+it("reconciles a lost automatic policy reply without repeating the setter", async () => {
+  const row = automaticCnRow();
+  mocks.list
+    .mockResolvedValueOnce([row])
+    .mockResolvedValueOnce([
+      { ...row, autoCheckinRevision: 1, autoCheckinEnabled: true },
+    ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.reject(new Error("synthetic lost reply"))
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "开启自动签到" }));
+  expect(
+    await screen.findByRole("button", { name: "关闭自动签到" }),
+  ).toBeEnabled();
+  expect(mocks.list).toHaveBeenCalledTimes(2);
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "set_trae_automatic_checkin",
+    ),
+  ).toHaveLength(1);
+});
+
+it("keeps failed policy readback unknown and disabled until a fresh reload", async () => {
+  const row = automaticCnRow();
+  mocks.list
+    .mockResolvedValueOnce([row])
+    .mockRejectedValueOnce(new Error("synthetic readback failure"))
+    .mockResolvedValueOnce([
+      { ...row, autoCheckinRevision: 1, autoCheckinEnabled: true },
+    ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.reject(new Error("synthetic lost reply"))
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "开启自动签到" }));
+  const unknown = await screen.findByRole("button", {
+    name: "自动签到状态未知",
+  });
+  expect(unknown).toBeDisabled();
+  expect(screen.queryByText(/自动签到已关闭/)).not.toBeInTheDocument();
+  fireEvent.click(unknown);
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "set_trae_automatic_checkin",
+    ),
+  ).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  expect(
+    await screen.findByRole("button", { name: "关闭自动签到" }),
+  ).toBeEnabled();
+  expect(mocks.list).toHaveBeenCalledTimes(3);
+});
+
+it("a list started before policy uncertainty cannot clear its unknown state", async () => {
+  const row = automaticCnRow();
+  const stale = deferred<unknown[]>();
+  mocks.list
+    .mockResolvedValueOnce([row])
+    .mockReturnValueOnce(stale.promise)
+    .mockRejectedValueOnce(new Error("synthetic readback failure"));
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.reject(new Error("synthetic lost reply"))
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  const enable = await screen.findByRole("button", { name: "开启自动签到" });
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  fireEvent.click(enable);
+  expect(
+    await screen.findByRole("button", { name: "自动签到状态未知" }),
+  ).toBeDisabled();
+  await act(async () => stale.resolve([row]));
+  expect(
+    screen.getByRole("button", { name: "自动签到状态未知" }),
+  ).toBeDisabled();
+  expect(screen.queryByText(/自动签到已关闭/)).not.toBeInTheDocument();
+});
+
+it("late uncertain-policy readback cannot overwrite a newer account identity", async () => {
+  const row = automaticCnRow();
+  const readback = deferred<unknown[]>();
+  const newer = { ...row, generation: 3, autoCheckinRevision: 2 };
+  mocks.list
+    .mockResolvedValueOnce([row])
+    .mockReturnValueOnce(readback.promise)
+    .mockResolvedValueOnce([newer]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.reject(new Error("synthetic lost reply"))
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "开启自动签到" }));
+  await screen.findByRole("button", { name: "自动签到状态未知" });
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  await screen.findByRole("button", { name: "开启自动签到" });
+  await act(async () =>
+    readback.resolve([
+      { ...row, autoCheckinRevision: 1, autoCheckinEnabled: true },
+    ]),
+  );
+  expect(screen.getByRole("button", { name: "开启自动签到" })).toBeEnabled();
+  expect(
+    screen.queryByRole("button", { name: "关闭自动签到" }),
+  ).not.toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "set_trae_automatic_checkin",
+    ),
+  ).toHaveLength(1);
+});

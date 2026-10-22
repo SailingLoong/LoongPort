@@ -2549,3 +2549,50 @@ async fn cn_automatic_dispatch_fences_credential_version_and_reenabled_policy() 
             .any(|r| r.url.ends_with("/claim")));
     }
 }
+
+#[test]
+fn lease_snapshot_has_bounded_inline_size_for_managed_account_enum() {
+    assert!(
+        std::mem::size_of::<super::inference::Lease>() <= 128,
+        "TRAE Lease must not inline the growing account document: {} bytes",
+        std::mem::size_of::<super::inference::Lease>()
+    );
+}
+
+#[tokio::test]
+async fn lease_snapshot_clone_fence_and_mutable_refresh_keep_owned_identity() {
+    let f = Fixture::new().await;
+    let id = f.seed(Realm::Sg).await;
+    let mut lease = super::inference::Lease::acquire(f.session.clone(), &id, "snapshot-test")
+        .await
+        .unwrap();
+    let saved = lease.snapshot.clone();
+    let fence = lease.fence();
+    lease.snapshot.account.grant.as_mut().unwrap().access = "local-only-change".into();
+    assert_eq!(
+        saved.account.grant.as_ref().unwrap().access,
+        "synthetic-access"
+    );
+    assert!(fence.check().await.is_ok());
+    super::auth::synchronize(&f.session, &mut lease.snapshot)
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.snapshot.account.grant.as_ref().unwrap().access,
+        "synthetic-access"
+    );
+    access(&f.session, None, |d, _| {
+        d.accounts[0].version += 1;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    assert!(fence.check().await.is_err());
+    super::auth::synchronize(&f.session, &mut lease.snapshot)
+        .await
+        .unwrap();
+    assert_eq!(lease.snapshot.account.version, 2);
+    assert_eq!(saved.account.version, 1);
+    assert_eq!(lease.snapshot.account.id, saved.account.id);
+    assert_eq!(lease.snapshot.account.generation, saved.account.generation);
+}

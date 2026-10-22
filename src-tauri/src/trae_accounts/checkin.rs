@@ -222,7 +222,7 @@ async fn run_with_policy(
     let Some((prepared, before)) = prepared else {
         return Ok(Outcome::AlreadyAttempted);
     };
-    lease.snapshot = prepared;
+    *lease.snapshot = prepared;
     #[cfg(test)]
     super::tests::before_checkin_dispatch(&lease.session).await;
     let response = page(&lease, "claim", timeout, transport, policy).await;

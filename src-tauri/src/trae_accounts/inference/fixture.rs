@@ -251,7 +251,7 @@ impl Lease {
         }
         Ok(Self {
             session,
-            snapshot,
+            snapshot: Box::new(snapshot),
             request_session: "synthetic-checkin".into(),
         })
     }

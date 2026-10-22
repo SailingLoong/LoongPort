@@ -57,7 +57,8 @@ impl Transport for OfficialHttp {
 }
 pub(crate) struct Lease {
     pub(super) session: Arc<SecretSession>,
-    pub(super) snapshot: Snapshot,
+    // Keep growing encrypted account state out of the shared managed-account enum.
+    pub(super) snapshot: Box<Snapshot>,
     request_session: String,
 }
 #[derive(Clone)]
@@ -146,7 +147,7 @@ impl Lease {
         }
         Ok(Self {
             session,
-            snapshot,
+            snapshot: Box::new(snapshot),
             request_session: request_session.into(),
         })
     }
@@ -163,7 +164,7 @@ impl Lease {
     pub(super) fn fence(&self) -> ResponseFence {
         ResponseFence {
             session: self.session.clone(),
-            snapshot: self.snapshot.clone(),
+            snapshot: self.snapshot.as_ref().clone(),
         }
     }
     pub(super) fn wire(&self, body: Value, timeout: Duration) -> Result<Request, ProxyError> {

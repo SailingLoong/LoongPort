@@ -70,9 +70,52 @@ export function TraeAccounts({
   const [automaticBusy, setAutomaticBusy] = useState(false);
   const automaticActive = useRef(false);
   const policyLifecycle = useRef(0);
+  type UncertainPolicy = { generation: number; revision: number };
+  const [uncertainPolicies, setUncertainPolicies] = useState<
+    Record<string, UncertainPolicy>
+  >({});
+  const uncertainPoliciesRef = useRef<Record<string, UncertainPolicy>>({});
+  const policyIsUnknown = (
+    account: TraeAccountView,
+    uncertain = uncertainPolicies,
+  ) => {
+    const pending = uncertain[account.id];
+    return (
+      pending !== undefined &&
+      (account.generation === undefined ||
+        account.generation < pending.generation ||
+        (account.generation === pending.generation &&
+          (account.autoCheckinRevision === undefined ||
+            account.autoCheckinRevision <= pending.revision)))
+    );
+  };
+  const reconcilePolicies = useCallback((rows: TraeAccountView[]) => {
+    const next = { ...uncertainPoliciesRef.current };
+    let changed = false;
+    for (const row of rows) {
+      const pending = next[row.id];
+      if (
+        pending &&
+        row.generation !== undefined &&
+        row.autoCheckinRevision !== undefined &&
+        typeof row.autoCheckinEnabled === "boolean" &&
+        (row.generation > pending.generation ||
+          (row.generation === pending.generation &&
+            row.autoCheckinRevision >= pending.revision))
+      ) {
+        delete next[row.id];
+        changed = true;
+      }
+    }
+    if (changed) {
+      uncertainPoliciesRef.current = next;
+      setUncertainPolicies(next);
+    }
+  }, []);
   const setAutomatic = async (account: TraeAccountView) => {
     if (
       automaticActive.current ||
+      policyIsUnknown(account, uncertainPoliciesRef.current) ||
       retireActive.current ||
       dialogActive.current ||
       account.generation === undefined ||
@@ -89,12 +132,13 @@ export function TraeAccounts({
         account,
         !account.autoCheckinEnabled,
       );
+      if (!current()) return;
       if (
-        !current() ||
         updated.id !== account.id ||
         updated.generation !== account.generation
       )
-        return;
+        throw new Error("Unconfirmed policy identity");
+      reconcilePolicies([updated]);
       setAccounts((rows) =>
         rows.map((row) =>
           row.id === account.id &&
@@ -105,11 +149,21 @@ export function TraeAccounts({
         ),
       );
     } catch {
-      if (current())
-        setCheckinResults((rows) => ({
-          ...rows,
-          [account.id]: "无法确认自动签到设置，请重新载入列表核对。",
-        }));
+      if (current()) {
+        const next = {
+          ...uncertainPoliciesRef.current,
+          [account.id]: {
+            generation: account.generation,
+            revision: account.autoCheckinRevision,
+          },
+        };
+        uncertainPoliciesRef.current = next;
+        setUncertainPolicies(next);
+        // A rejected IPC reply does not prove that durable consent was unchanged.
+        // Read once, never resend the setter. This new list request also fences
+        // every list that started before the uncertain mutation completed.
+        await loadAccounts();
+      }
     } finally {
       automaticActive.current = false;
       if (alive.current) setAutomaticBusy(false);
@@ -178,7 +232,8 @@ export function TraeAccounts({
     setListFailed(false);
     try {
       const rows = await traeAccountsApi.list();
-      if (isCurrent())
+      if (isCurrent()) {
+        reconcilePolicies(rows);
         setAccounts((current) =>
           rows
             .filter((row) =>
@@ -203,12 +258,13 @@ export function TraeAccounts({
               return row;
             }),
         );
+      }
     } catch {
       if (isCurrent()) setListFailed(true);
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [edition, clearCheckin]);
+  }, [edition, clearCheckin, reconcilePolicies]);
 
   const invalidateList = useCallback(() => {
     clearCheckin();
@@ -623,6 +679,7 @@ export function TraeAccounts({
                           variant="outline"
                           disabled={
                             automaticBusy ||
+                            policyIsUnknown(account) ||
                             retiring !== null ||
                             dialogOpen ||
                             account.generation === undefined ||
@@ -632,14 +689,18 @@ export function TraeAccounts({
                           }
                           onClick={() => void setAutomatic(account)}
                         >
-                          {account.autoCheckinEnabled
-                            ? "关闭自动签到"
-                            : "开启自动签到"}
+                          {policyIsUnknown(account)
+                            ? "自动签到状态未知"
+                            : account.autoCheckinEnabled
+                              ? "关闭自动签到"
+                              : "开启自动签到"}
                         </Button>
                         <p className="text-xs text-muted-foreground">
-                          {account.autoCheckinEnabled
-                            ? "自动签到已开启"
-                            : "自动签到已关闭"}
+                          {policyIsUnknown(account)
+                            ? "自动签到状态未知，请重新载入列表核对；不会自动重试设置"
+                            : account.autoCheckinEnabled
+                              ? "自动签到已开启"
+                              : "自动签到已关闭"}
                           ： 应用运行且凭据保管库解锁时，每 15
                           分钟检查服务端资格。
                           结果未确认时只查询，不重复领取；关闭不会撤销已提交的领取。
