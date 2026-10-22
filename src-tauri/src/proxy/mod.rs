@@ -7,6 +7,7 @@ pub mod auto_strategy;
 pub mod body_filter;
 pub mod cache_injector;
 pub mod circuit_breaker;
+pub(crate) mod client_access;
 pub(crate) mod content_encoding;
 pub mod copilot_optimizer;
 pub mod error;

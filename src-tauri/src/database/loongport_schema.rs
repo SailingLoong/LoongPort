@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 27;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 28;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -377,6 +377,10 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 }
                 conn.execute_batch("RELEASE qoder_http_auth_migration")?;
             }
+            27 => {
+                crate::proxy::client_access::create_schema(conn)?;
+                set_version(conn, 28)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -386,6 +390,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    crate::proxy::client_access::validate_schema(conn)?;
     crate::database::dao::qoder_http_auth::validate_column(conn)?;
     crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     // Installed v25 is evidence to validate, never permission to recreate a ledger.

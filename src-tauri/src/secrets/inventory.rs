@@ -32,6 +32,12 @@ enum ResetPolicy {
 
 pub(crate) const TABLES: &[ProtectedTable] = &[
     ProtectedTable {
+        name: "loongport_client_credentials",
+        identity_columns: &["id"],
+        columns: &["secret"],
+        reset: ResetPolicy::RemoveRows,
+    },
+    ProtectedTable {
         name: "provider_endpoints",
         identity_columns: &["id", "provider_id", "app_type"],
         columns: &["url"],
