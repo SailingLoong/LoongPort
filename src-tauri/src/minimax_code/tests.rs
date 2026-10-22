@@ -57,7 +57,9 @@ fn account() -> Account {
         credential_version: 1,
         credentials: Some(Credentials {
             access_token: "synthetic-access".into(),
-            refresh_token: "synthetic-refresh".into(),
+            refresh_token: Some("synthetic-refresh".into()),
+            kind: CredentialKind::DeviceOAuth,
+            native_source: None,
             expires_at: i64::MAX,
         }),
         status: Status::Claimable,
@@ -498,6 +500,281 @@ struct LoginHttp {
     refresh_uid: Option<String>,
     status_401: Mutex<bool>,
     claim_401: bool,
+}
+
+/// A profile-only transport: no refresh credential, source-file writer or
+/// persistence callback is available to the shared identity verifier.
+struct IdentityHttp {
+    calls: Mutex<Vec<Request>>,
+    reply: Mutex<Option<Result<Response, Failure>>>,
+    invalidate: Option<Arc<SecretSession>>,
+}
+impl IdentityHttp {
+    fn new(reply: Result<Response, Failure>) -> Self {
+        Self {
+            calls: Mutex::new(vec![]),
+            reply: Mutex::new(Some(reply)),
+            invalidate: None,
+        }
+    }
+}
+impl Transport for IdentityHttp {
+    fn request(
+        &self,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(request);
+            if let Some(session) = &self.invalidate {
+                session.set_blocked(true);
+                session.set_blocked(false);
+            }
+            self.reply.lock().unwrap().take().unwrap()
+        })
+    }
+}
+async fn identity_binding(f: &Fixture) -> Binding {
+    super::catalog::access(&f.session, None, |_, b| Ok((b.clone(), false)))
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn identity_verifier_uses_exact_access_token_profile_and_existing_owner_without_saving() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let before = f.raw();
+    let binding = identity_binding(&f).await;
+    // The synthetic JWT subject differs from the server's authoritative ID.
+    // It is neither decoded nor used as an identity fallback.
+    let access = "synthetic.eyJzdWIiOiJub3QtdGhlLXByb2ZpbGUtaWQifQ.signature";
+    for region in [Region::Cn, Region::Global] {
+        let t = IdentityHttp::new(Ok(response(json!({
+            "userInfo":{"realUserID":"profile-user","name":"Profile Name"}
+        }))));
+        let identity =
+            super::auth::verify_access_token(&f.session, &t, region, access, &binding, |_, _| {
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(identity, ("profile-user".into(), "Profile Name".into()));
+        let calls = t.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].endpoint, Endpoint::Profile);
+        assert_eq!(calls[0].region, region);
+        assert_eq!(calls[0].access_token.as_deref(), Some(access));
+        assert!(calls[0].real_user_id.is_none());
+        assert!(calls[0].body.is_none());
+        assert_eq!(before, f.raw());
+    }
+}
+#[tokio::test]
+async fn identity_verifier_rejects_invalid_tokens_before_transport_or_save() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let before = f.raw();
+    let binding = identity_binding(&f).await;
+    for access in [
+        "",
+        " ",
+        "bad\nheader",
+        "bad\u{7f}header",
+        &"x".repeat(16385),
+    ] {
+        let t = IdentityHttp::new(Err(Failure::NetworkUnavailable));
+        assert_eq!(
+            super::auth::verify_access_token(
+                &f.session,
+                &t,
+                Region::Cn,
+                access,
+                &binding,
+                |_, _| Ok(()),
+            )
+            .await,
+            Err(Failure::InvalidResponse)
+        );
+        assert!(t.calls.lock().unwrap().is_empty());
+        assert_eq!(before, f.raw());
+    }
+}
+#[tokio::test]
+async fn identity_verifier_rejects_missing_profile_and_transport_failures_without_save() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let before = f.raw();
+    let binding = identity_binding(&f).await;
+    let replies = [
+        (
+            Err(Failure::NetworkUnavailable),
+            Failure::NetworkUnavailable,
+        ),
+        (
+            Ok(Response {
+                status: 401,
+                body: json!({}),
+            }),
+            Failure::NeedsLogin,
+        ),
+        (
+            Ok(response(
+                json!({"userInfo":{"sub":"not-a-profile-id","accountId":"not-a-profile-id"}}),
+            )),
+            Failure::InvalidResponse,
+        ),
+        (
+            Ok(response(json!({"userInfo":{"realUserID":""}}))),
+            Failure::InvalidResponse,
+        ),
+        (
+            Ok(Response {
+                status: 200,
+                body: json!({"statusInfo":{"code":1000048},"data":{"userInfo":{"realUserID":"stale-user"}}}),
+            }),
+            Failure::NeedsLogin,
+        ),
+    ];
+    for (reply, failure) in replies {
+        let t = IdentityHttp::new(reply);
+        assert_eq!(
+            super::auth::verify_access_token(
+                &f.session,
+                &t,
+                Region::Cn,
+                "synthetic.eyJzdWIiOiJub3QtdGhlLXByb2ZpbGUtaWQifQ.signature",
+                &binding,
+                |_, _| Ok(()),
+            )
+            .await,
+            Err(failure)
+        );
+        assert_eq!(t.calls.lock().unwrap().len(), 1);
+        assert_eq!(before, f.raw());
+    }
+}
+#[tokio::test]
+async fn identity_verifier_rejects_stale_context_before_transport_without_save() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let before = f.raw();
+    let binding = identity_binding(&f).await;
+    let t = IdentityHttp::new(Err(Failure::NetworkUnavailable));
+    assert_eq!(
+        super::auth::verify_access_token(
+            &f.session,
+            &t,
+            Region::Cn,
+            "synthetic-access",
+            &binding,
+            |_, _| Err(Failure::StaleIdentity),
+        )
+        .await,
+        Err(Failure::StaleIdentity)
+    );
+    assert!(t.calls.lock().unwrap().is_empty());
+    assert_eq!(before, f.raw());
+}
+#[tokio::test]
+async fn identity_verifier_rejects_failed_catalog_read_before_transport_without_replacing_it() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let binding = identity_binding(&f).await;
+    std::fs::write(f.root.path().join(FILE), b"synthetic-corrupt-vault").unwrap();
+    let before = f.raw();
+    let t = IdentityHttp::new(Err(Failure::NetworkUnavailable));
+    assert_eq!(
+        super::auth::verify_access_token(
+            &f.session,
+            &t,
+            Region::Cn,
+            "synthetic-access",
+            &binding,
+            |_, _| Ok(()),
+        )
+        .await,
+        Err(Failure::StorageUnavailable)
+    );
+    assert!(t.calls.lock().unwrap().is_empty());
+    assert_eq!(before, f.raw());
+}
+#[tokio::test]
+async fn identity_verifier_rejects_lifecycle_change_during_profile_without_save() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let before = f.raw();
+    let binding = identity_binding(&f).await;
+    let mut t = IdentityHttp::new(Ok(response(
+        json!({"userInfo":{"realUserID":"profile-user"}}),
+    )));
+    t.invalidate = Some(f.session.clone());
+    assert_eq!(
+        super::auth::verify_access_token(
+            &f.session,
+            &t,
+            Region::Cn,
+            "synthetic-access",
+            &binding,
+            |_, _| Ok(()),
+        )
+        .await,
+        Err(Failure::StaleIdentity)
+    );
+    assert_eq!(t.calls.lock().unwrap().len(), 1);
+    assert_eq!(before, f.raw());
+}
+
+#[tokio::test]
+async fn identity_verifier_rejects_pending_profile_after_recovery_or_shutdown_without_save() {
+    struct PendingIdentityHttp {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl Transport for PendingIdentityHttp {
+        fn request(
+            &self,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            assert_eq!(request.endpoint, Endpoint::Profile);
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(response(json!({"userInfo":{"realUserID":"profile-user"}})))
+            })
+        }
+    }
+    for shutdown in [false, true] {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let before = f.raw();
+        let binding = identity_binding(&f).await;
+        let t = Arc::new(PendingIdentityHttp {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let session = f.session.clone();
+        let request_transport = t.clone();
+        let pending = tokio::spawn(async move {
+            super::auth::verify_access_token(
+                &session,
+                request_transport.as_ref(),
+                Region::Cn,
+                "synthetic-access",
+                &binding,
+                |_, _| Ok(()),
+            )
+            .await
+        });
+        t.entered.notified().await;
+        if shutdown {
+            super::shutdown();
+        } else {
+            f.session.set_blocked(true);
+            f.session.set_blocked(false);
+        }
+        t.release.notify_one();
+        assert_eq!(pending.await.unwrap(), Err(Failure::StaleIdentity));
+        assert_eq!(before, f.raw());
+    }
 }
 impl LoginHttp {
     fn new(uid: &str) -> Self {
@@ -2213,4 +2490,198 @@ async fn dispatched_unknown_survives_policy_toggle_and_owner_recreation_without_
             .count(),
         1
     );
+}
+
+#[test]
+fn native_access_only_credentials_are_explicit_and_have_no_refresh_secret() {
+    let credentials: Credentials = serde_json::from_value(json!({
+        "kind":"nativeAccessOnly", "accessToken":"synthetic-access",
+        "expiresAt":2000000000000_i64,
+        "nativeSource":{"format":"publicCliOAuthV1","generation":2,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    })).expect("a native capability does not require a refresh token");
+    validate_credentials(&credentials).unwrap();
+    let serialized = serde_json::to_value(&credentials).unwrap();
+    assert!(serialized.get("refreshToken").is_none_or(Value::is_null));
+    assert_eq!(serialized["expiresAt"], 2000000000000_i64);
+}
+#[test]
+fn legacy_owned_credentials_keep_their_refresh_contract() {
+    let credentials: Credentials=serde_json::from_value(json!({"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresAt":2000000000000_i64})).unwrap();
+    validate_credentials(&credentials).unwrap();
+    assert!(
+        serde_json::from_value::<Credentials>(
+            json!({"accessToken":"synthetic-access","expiresAt":2000000000000_i64})
+        )
+        .is_err()
+            || {
+                let c: Credentials = serde_json::from_value(
+                    json!({"accessToken":"synthetic-access","expiresAt":2000000000000_i64}),
+                )
+                .unwrap();
+                validate_credentials(&c).is_err()
+            }
+    );
+}
+
+fn native_credentials(expires_at: i64) -> Credentials {
+    serde_json::from_value(json!({"kind":"nativeAccessOnly","accessToken":"synthetic-native-access","expiresAt":expires_at,"nativeSource":{"format":"publicCliOAuthV1","generation":3,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})).unwrap()
+}
+struct NativeCheckin {
+    calls: Mutex<Vec<Endpoint>>,
+    status_http: u16,
+    claim_http: u16,
+}
+impl Transport for NativeCheckin {
+    fn request(
+        &self,
+        r: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(r.endpoint);
+            let mut result = response(panel(2));
+            result.status = if r.endpoint == Endpoint::Claim {
+                self.claim_http
+            } else {
+                self.status_http
+            };
+            Ok(result)
+        })
+    }
+}
+#[tokio::test]
+async fn native_expiry_blocks_checkin_optional_entitlement_and_auto_without_refresh() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        d.accounts[0].credentials = Some(native_credentials(now_ms() - 1));
+        d.accounts[0].auto_claim_enabled = true;
+    });
+    let t = Fake::default();
+    let e = Engine {
+        session: &f.session,
+        transport: &t,
+    };
+    let view = e.list().await.unwrap().remove(0);
+    assert!(view.requires_reimport && !view.authorized && !view.can_refresh && view.can_retire);
+    assert_eq!(e.refresh(&view.id).await.unwrap_err(), Failure::NeedsLogin);
+    assert_eq!(e.claim(&view.id).await.unwrap_err(), Failure::NeedsLogin);
+    assert!(super::entitlement::read(&f.session, &t, &view)
+        .await
+        .is_err());
+    assert_eq!(
+        e.set_automatic(
+            &view.id,
+            view.auth_generation,
+            view.auto_claim_revision,
+            true
+        )
+        .await
+        .unwrap_err(),
+        Failure::NeedsLogin
+    );
+    e.automatic_tick().await.unwrap();
+    assert!(t.calls.lock().unwrap().is_empty());
+    e.retire(&view.id).await.unwrap();
+    assert!(!e.list().await.unwrap()[0].authorized);
+}
+#[tokio::test]
+async fn native_checkin_401_requires_reimport_but_403_business_response_does_not_invalidate() {
+    for code in [401, 403] {
+        let f = Fixture::new().await;
+        f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+        let t = NativeCheckin {
+            calls: Mutex::default(),
+            status_http: code,
+            claim_http: 200,
+        };
+        let e = Engine {
+            session: &f.session,
+            transport: &t,
+        };
+        assert!(e.refresh("synthetic-account").await.is_err());
+        let view = e.list().await.unwrap().remove(0);
+        assert_eq!(view.requires_reimport, code == 401);
+        assert_eq!(*t.calls.lock().unwrap(), vec![Endpoint::Status]);
+    }
+}
+#[tokio::test]
+async fn native_claim_401_preserves_unknown_and_reimport_requirement_without_replay() {
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+    let t = NativeCheckin {
+        calls: Mutex::default(),
+        status_http: 200,
+        claim_http: 401,
+    };
+    let e = Engine {
+        session: &f.session,
+        transport: &t,
+    };
+    let view = e.claim("synthetic-account").await.unwrap();
+    assert_eq!(
+        view.operation.as_ref().unwrap().status,
+        AttemptStatus::Unknown
+    );
+    assert!(view.requires_reimport);
+    assert_eq!(
+        *t.calls.lock().unwrap(),
+        vec![Endpoint::Status, Endpoint::Claim]
+    );
+    e.retire(&view.id).await.unwrap();
+    assert_eq!(
+        e.list().await.unwrap()[0]
+            .operation
+            .as_ref()
+            .unwrap()
+            .status,
+        AttemptStatus::Unknown
+    );
+}
+#[tokio::test]
+async fn native_grants_are_not_automatic_until_each_account_opts_in() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000));
+        let mut second = d.accounts[0].clone();
+        second.id = "synthetic-other".into();
+        second.real_user_id = "synthetic-other-user".into();
+        second.region = Region::Global;
+        d.accounts.push(second);
+    });
+    let t = Fake::default();
+    let e = Engine {
+        session: &f.session,
+        transport: &t,
+    };
+    e.automatic_tick().await.unwrap();
+    assert!(t.calls.lock().unwrap().is_empty());
+    e.set_automatic("synthetic-account", 1, 0, true)
+        .await
+        .unwrap();
+    e.automatic_tick().await.unwrap();
+    let views = e.list().await.unwrap();
+    assert!(views[0].operation.is_some());
+    assert!(views[1].operation.is_none());
+    assert!(!t.calls.lock().unwrap().contains(&Endpoint::Refresh));
+}
+
+#[test]
+fn native_and_owned_credential_capabilities_cannot_be_mixed() {
+    let valid = serde_json::to_value(native_credentials(now_ms() + 3600000)).unwrap();
+    for change in ["refresh", "source", "kind", "access"] {
+        let mut value = valid.clone();
+        match change {
+            "refresh" => value["refreshToken"] = json!("synthetic-source-refresh"),
+            "source" => value["nativeSource"] = Value::Null,
+            "kind" => value["kind"] = json!("deviceOAuth"),
+            "access" => value["accessToken"] = json!(""),
+            _ => unreachable!(),
+        }
+        let parsed: Credentials = serde_json::from_value(value).unwrap();
+        assert!(validate_credentials(&parsed).is_err(), "{change}");
+    }
+    assert_eq!(
+        serde_json::to_string(&NativeSourceFormat::PublicCliOAuthV1).unwrap(),
+        "\"publicCliOAuthV1\""
+    );
+    assert!(serde_json::from_str::<NativeSourceFormat>("\"desktopOAuth\"").is_err());
 }

@@ -116,3 +116,51 @@ pub(crate) async fn set_minimax_code_automatic_claim(
     .set_automatic(&id, auth_generation, policy_revision, enabled)
     .await
 }
+
+#[tauri::command]
+pub(crate) async fn preview_minimax_native_file(
+    state: State<'_, AppState>,
+    path: String,
+    region: Region,
+    source: crate::minimax_code::catalog::NativeSourceFormat,
+    confirmed: bool,
+) -> Result<crate::minimax_code::native_import::Preview, Failure> {
+    crate::minimax_code::native_import::preview(
+        state.db.secret_session(),
+        std::path::Path::new(&path),
+        region,
+        source,
+        confirmed,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn verify_minimax_native_import(
+    state: State<'_, AppState>,
+    preview_id: String,
+    confirmed: bool,
+) -> Result<crate::minimax_code::native_import::Preview, Failure> {
+    crate::minimax_code::native_import::verify(
+        state.db.secret_session(),
+        &OfficialHttp,
+        &preview_id,
+        confirmed,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn save_minimax_native_import(
+    state: State<'_, AppState>,
+    preview_id: String,
+    confirmed: bool,
+) -> Result<AccountView, Failure> {
+    crate::minimax_code::native_import::save(state.db.secret_session(), &preview_id, confirmed)
+        .await
+}
+#[tauri::command]
+pub(crate) async fn cancel_minimax_native_import(
+    state: State<'_, AppState>,
+    preview_id: String,
+) -> Result<(), Failure> {
+    crate::minimax_code::native_import::cancel(state.db.secret_session(), &preview_id).await
+}

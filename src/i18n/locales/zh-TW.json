@@ -5104,6 +5104,32 @@
       "expiredAuthorization": "裝置授權已過期，請取消後重新登入。",
       "notClaimable": "該帳號目前不允許領取，請重新整理狀態。",
       "authorizationCompleted": "授權已完成，帳號已儲存；本次取消未生效。請查看帳號清單。"
+    },
+    "nativeImport": {
+      "open": "匯入本機 MiniMax CLI 帳號",
+      "title": "匯入公共 CLI 工作階段",
+      "description": "選擇公共 MiniMax CLI OAuth v1 的 auth.json：中國區為 CLI 認證目錄下的 prod/cn/mcode-public/auth.json，國際區為 prod/en/mcode-public/auth.json。選擇檔案不會讀取內容；本機讀取、連線驗證帳號資料和加密儲存都需要分別確認。暫不支援 MiniMax Desktop 工作階段。",
+      "choose": "選擇 auth.json",
+      "fileFilter": "MiniMax CLI OAuth 檔案",
+      "source": "已選來源檔案",
+      "readConsent": "允許在本機讀取所選檔案",
+      "read": "讀取本機預覽",
+      "unverified": "未經驗證的本機身分聲明",
+      "expires": "原始存取憑證到期時間",
+      "verified": "已驗證的帳號 ID",
+      "verifyConsent": "允許將此帳號的存取權杖傳送至所選地區的 MiniMax 官方服務以驗證帳號資料",
+      "verify": "連線驗證帳號",
+      "accessOnly": "僅匯入存取權杖，保留原始有效期；不會匯入 refresh token，也不會自動續期憑證。到期後需在 CLI 重新登入並明確重新匯入。儲存帳號不會開啟自動簽到。",
+      "expired": "存取權杖已過期，請在 CLI 重新登入後再次匯入。",
+      "saveConsent": "將此存取權杖的副本儲存至 LoongPort 加密帳號保管庫",
+      "save": "加密儲存僅存取帳號",
+      "error": "無法完成此步驟，請檢查來源、地區、有效期、網路和保管庫存取權限。若需確認是否已儲存，請重新讀取帳號。",
+      "cancel": "取消匯入"
+    },
+    "credentials": {
+      "accessOnly": "僅存取憑證，不會自動續期；到期後請在 CLI 重新登入並明確重新匯入。",
+      "expires": "存取憑證到期：{{time}}",
+      "reimport": "請在 CLI 重新登入，再明確重新匯入此帳號。"
     }
   }
 }

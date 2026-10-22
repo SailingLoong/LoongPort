@@ -134,7 +134,9 @@ fn successful(response: &Response) -> Result<(), Failure> {
     Ok(())
 }
 fn current(d: &mut catalog::Document, snapshot: &Snapshot) -> Result<(), Failure> {
-    if catalog::matched(d, snapshot)?.credential_version != snapshot.account.credential_version {
+    let account = catalog::matched(d, snapshot)?;
+    account.usable()?;
+    if account.credential_version != snapshot.account.credential_version {
         return Err(Failure::StaleIdentity);
     }
     Ok(())

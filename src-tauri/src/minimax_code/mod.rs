@@ -5,6 +5,8 @@ pub(crate) mod checkin;
 pub(crate) mod entitlement;
 pub(crate) mod http;
 pub(crate) mod inference;
+mod native_format;
+pub(crate) mod native_import;
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +40,7 @@ pub(crate) fn shutdown() {
         guard.stopped = true;
         guard.epoch = guard.epoch.saturating_add(1);
         auth::clear_flows();
+        native_import::clear_flows();
     }
     // A poisoned Runtime remains poisoned: all future admission fails closed.
 }
@@ -61,6 +64,7 @@ fn reset_for_isolated_fixture() {
     guard.epoch += 1;
     guard.stopped = false;
     auth::clear_flows();
+    native_import::clear_flows();
 }
 
 #[cfg(test)]

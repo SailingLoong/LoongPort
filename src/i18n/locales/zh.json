@@ -5107,6 +5107,32 @@
       "expiredAuthorization": "设备授权已过期，请取消后重新登录。",
       "notClaimable": "该账号当前不允许领取，请刷新状态。",
       "authorizationCompleted": "授权已完成，账号已保存；本次取消未生效。请查看账号列表。"
+    },
+    "nativeImport": {
+      "open": "导入本机 MiniMax CLI 账号",
+      "title": "导入公共 CLI 会话",
+      "description": "选择公共 MiniMax CLI OAuth v1 的 auth.json：中国区为 CLI 认证目录下的 prod/cn/mcode-public/auth.json，国际区为 prod/en/mcode-public/auth.json。选择文件不会读取内容；本地读取、联网验证账号资料和加密保存都需要分别确认。暂不支持 MiniMax Desktop 会话。",
+      "choose": "选择 auth.json",
+      "fileFilter": "MiniMax CLI OAuth 文件",
+      "source": "已选来源文件",
+      "readConsent": "允许在本地读取所选文件",
+      "read": "读取本地预览",
+      "unverified": "未经验证的本地身份声明",
+      "expires": "原始访问凭据到期时间",
+      "verified": "已验证的账号 ID",
+      "verifyConsent": "允许将此账号的访问令牌发送至所选地区的 MiniMax 官方服务以验证账号资料",
+      "verify": "联网验证账号",
+      "accessOnly": "仅导入访问令牌，保留原始有效期；不会导入 refresh token，也不会自动续期凭据。到期后需在 CLI 重新登录并明确重新导入。保存账号不会开启自动签到。",
+      "expired": "访问令牌已过期，请在 CLI 重新登录后再次导入。",
+      "saveConsent": "将此访问令牌的副本保存至 LoongPort 加密账号保管库",
+      "save": "加密保存仅访问账号",
+      "error": "无法完成此步骤，请检查来源、地区、有效期、网络和保管库访问权限。若需确认是否已保存，请重新读取账号。",
+      "cancel": "取消导入"
+    },
+    "credentials": {
+      "accessOnly": "仅访问凭据，不会自动续期；到期后请在 CLI 重新登录并明确重新导入。",
+      "expires": "访问凭据到期：{{time}}",
+      "reimport": "请在 CLI 重新登录，再明确重新导入此账号。"
     }
   }
 }

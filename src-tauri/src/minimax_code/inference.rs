@@ -185,6 +185,7 @@ fn owner_error(_: Failure) -> ProxyError {
 
 fn check_snapshot(document: &mut catalog::Document, snapshot: &Snapshot) -> Result<(), Failure> {
     let account = catalog::matched(document, snapshot)?;
+    account.usable()?;
     if account.credential_version != snapshot.account.credential_version {
         return Err(Failure::StaleIdentity);
     }
@@ -272,13 +273,10 @@ impl Lease {
             ));
         }
         let mut refreshed = false;
-        if self
-            .snapshot
-            .account
-            .credentials
-            .as_ref()
-            .is_none_or(|c| c.expires_at <= catalog::now_ms().saturating_add(60_000))
-        {
+        if self.snapshot.account.credentials.as_ref().is_none_or(|c| {
+            c.kind == catalog::CredentialKind::DeviceOAuth
+                && c.expires_at <= catalog::now_ms().saturating_add(60_000)
+        }) {
             self.snapshot = auth::refresh_snapshot(&self.session, auth_transport, &self.snapshot)
                 .await
                 .map_err(owner_error)?;
@@ -474,11 +472,12 @@ impl Lease {
             .credentials
             .as_ref()
             .ok_or_else(|| owner_error(Failure::NeedsLogin))?;
-        let guard = KnownSecretGuard::new(&[
-            credentials.access_token.as_bytes(),
-            credentials.refresh_token.as_bytes(),
-        ])
-        .map_err(|_| owner_error(Failure::InvalidResponse))?;
+        let mut secrets = vec![credentials.access_token.as_bytes()];
+        if let Some(refresh) = &credentials.refresh_token {
+            secrets.push(refresh.as_bytes());
+        }
+        let guard =
+            KnownSecretGuard::new(&secrets).map_err(|_| owner_error(Failure::InvalidResponse))?;
         let status = response.status();
         let headers = safe_success_headers(response.headers());
         let observed = inference_sse::observe_completion(
@@ -697,7 +696,10 @@ impl FixtureTransport {
                 .as_ref()
                 .is_some_and(|credentials| {
                     credentials.access_token.starts_with("synthetic-")
-                        && credentials.refresh_token.starts_with("synthetic-")
+                        && credentials
+                            .refresh_token
+                            .as_deref()
+                            .is_some_and(|r| r.starts_with("synthetic-"))
                 })
             && self.binding == lease.snapshot.binding
             && lease
@@ -744,7 +746,9 @@ impl FixtureTransport {
                     credential_version: 1,
                     credentials: Some(catalog::Credentials {
                         access_token: format!("{id}-access"),
-                        refresh_token: format!("{id}-refresh"),
+                        refresh_token: Some(format!("{id}-refresh")),
+                        kind: catalog::CredentialKind::DeviceOAuth,
+                        native_source: None,
                         expires_at: i64::MAX,
                     }),
                     status: catalog::Status::Claimable,
