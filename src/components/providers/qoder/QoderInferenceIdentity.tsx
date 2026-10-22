@@ -230,10 +230,12 @@ export function QoderInferenceIdentity({
             {t("qoderHttpIdentity.title", { defaultValue: "Qoder 推理身份" })}
           </DialogTitle>
           <DialogDescription>
-            {t("qoderHttpIdentity.description", {
-              defaultValue:
-                "使用此供应商已保存的对应区域 Qoder PAT 主动建立推理身份。打开窗口不会交换凭据；旧 SDK Token 不会自动转换为 PAT。",
-            })}
+            {context?.source === "chinaQoderDevice"
+              ? "这是本应用独立授权身份。授权已保存不代表真实推理已验证；登录或更换账号请使用独立授权入口。"
+              : t("qoderHttpIdentity.description", {
+                  defaultValue:
+                    "使用此供应商已保存的对应区域 Qoder PAT 主动建立推理身份。打开窗口不会交换凭据；旧 SDK Token 不会自动转换为 PAT。",
+                })}
           </DialogDescription>
         </DialogHeader>
         {visibleContext && (
@@ -268,9 +270,11 @@ export function QoderInferenceIdentity({
         )}
         {context?.source && (
           <p className="text-sm">
-            {context.source === "chinaQoderPat"
-              ? "凭据区域：Qoder CN（独立 PAT 模式）"
-              : "凭据区域：Qoder 国际版"}
+            {context.source === "chinaQoderDevice"
+              ? "凭据区域：Qoder CN（本应用独立授权）"
+              : context.source === "chinaQoderPat"
+                ? "凭据区域：Qoder CN（独立 PAT 模式）"
+                : "凭据区域：Qoder 国际版"}
           </p>
         )}
         {feedback && <p role={feedback.role}>{feedback.message}</p>}

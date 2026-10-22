@@ -24,6 +24,7 @@ pub struct PatDeclaration {
 pub enum CredentialSource {
     InternationalQoderPat,
     ChinaQoderPat,
+    ChinaQoderDevice,
 }
 
 pub(super) struct Session {

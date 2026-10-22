@@ -763,3 +763,25 @@ async fn exceptional_confirmation_holds_neither_database_nor_vault_guard() {
     ));
     assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn cn_device_source_is_rejected_before_pat_identity_action_preparation() {
+    let (db, mut request) = fixture();
+    request.declaration.source = CredentialSource::ChinaQoderDevice;
+    let transport = Transport::new();
+    let result = perform_identity_action(
+        &db,
+        request,
+        &transport,
+        |_| async { panic!("device login must not enter PAT confirmation") },
+        || NOW,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource
+        }
+    ));
+    assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
+}

@@ -1,7 +1,8 @@
-//! Fixed region-bound PAT HTTP authentication. Protocol source: Magpie cdf45137,
+//! Fixed region-bound PAT/device HTTP authentication. Protocol source: Magpie cdf45137,
 //! openapi 167-180, PAT exchange/userinfo 308-365, refreshJob 383-395.
 //! CN endpoint facts: minglu6/dsh-provider-qoder src/pat.ts and src/cosy.ts (MIT).
-//! No caller host, VPC, native browser flow, fallback, retry, or logging.
+//! No caller host, VPC, fallback, automatic retry, or logging. Device grants are
+//! owned by an independent session; poll success requires authenticated UID matching.
 use super::*;
 use crate::services::provider::qoder_auth_http;
 use reqwest::{header, Method, Url};
@@ -21,6 +22,8 @@ enum Endpoint {
     Exchange,
     Userinfo,
     Refresh,
+    DevicePoll,
+    DeviceRefresh,
 }
 impl Endpoint {
     fn path(self) -> &'static str {
@@ -28,10 +31,12 @@ impl Endpoint {
             Self::Exchange => qoder_auth_http::PAT_EXCHANGE_PATH,
             Self::Userinfo => "/api/v1/userinfo",
             Self::Refresh => "/api/v1/jobToken/refresh",
+            Self::DevicePoll => "/api/v1/deviceToken/poll",
+            Self::DeviceRefresh => "/api/v1/deviceToken/refresh",
         }
     }
     fn method(self) -> Method {
-        if matches!(self, Self::Userinfo) {
+        if matches!(self, Self::Userinfo | Self::DevicePoll) {
             Method::GET
         } else {
             Method::POST
@@ -66,6 +71,51 @@ impl FixedRegionTransport {
             test_origin: None,
         })
     }
+    fn device_poll_request(&self, nonce: &str, verifier: &str) -> Result<reqwest::Request, ()> {
+        if self.source != SourceKind::ChinaQoderDevice
+            || uuid::Uuid::parse_str(nonce).is_err()
+            || !(43..=128).contains(&verifier.len())
+            || !verifier
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        {
+            return Err(());
+        }
+        self.build_request(Endpoint::DevicePoll, None, None)?
+            .query(&[
+                ("nonce", nonce),
+                ("verifier", verifier),
+                ("challenge_method", "S256"),
+            ])
+            .build()
+            .map_err(|_| ())
+    }
+    fn refresh_request(&self, refresh: &str, identity: &Identity) -> Result<reqwest::Request, ()> {
+        if refresh.trim().is_empty()
+            || identity.uid.trim().is_empty()
+            || uuid::Uuid::parse_str(&identity.machine_id).is_err()
+        {
+            return Err(());
+        }
+        let native = self.source == SourceKind::ChinaQoderDevice;
+        let body = if native {
+            // Same independently owned machine ID as login. Never invent machine_token.
+            serde_json::json!({"refresh_token":refresh,"machine_id":identity.machine_id})
+        } else {
+            serde_json::json!({"refresh_token":refresh})
+        };
+        self.build_request(
+            if native {
+                Endpoint::DeviceRefresh
+            } else {
+                Endpoint::Refresh
+            },
+            None,
+            Some(SensitiveJson(body)),
+        )?
+        .build()
+        .map_err(|_| ())
+    }
     fn origin(&self) -> Result<Url, ()> {
         #[cfg(test)]
         if let Some(origin) = &self.test_origin {
@@ -97,19 +147,21 @@ impl FixedRegionTransport {
             test_origin: Some(origin),
         })
     }
-    async fn request(
+    fn build_request(
         &self,
         endpoint: Endpoint,
         bearer: Option<&str>,
         body: Option<SensitiveJson>,
-    ) -> Result<(SensitiveJson, i64), ()> {
-        let origin = self.origin()?;
-        let url = origin.join(endpoint.path()).map_err(|_| ())?;
+    ) -> Result<reqwest::RequestBuilder, ()> {
+        let url = self.origin()?.join(endpoint.path()).map_err(|_| ())?;
         let mut request = self
             .client
-            .request(endpoint.method(), url.clone())
+            .request(endpoint.method(), url)
             .header(header::ACCEPT, "application/json");
-        if self.source == SourceKind::ChinaQoderPat {
+        if matches!(
+            self.source,
+            SourceKind::ChinaQoderPat | SourceKind::ChinaQoderDevice
+        ) {
             request = request
                 .header("Cosy-Version", "1.0.1")
                 .header("Cosy-ClientType", "5")
@@ -121,23 +173,31 @@ impl FixedRegionTransport {
         if let Some(body) = &body {
             request = request.json(&body.0);
         }
-        drop(body);
-        let mut response = request.send().await.map_err(|_| ())?;
+        Ok(request)
+    }
+    async fn send_request(
+        &self,
+        endpoint: Endpoint,
+        request: reqwest::Request,
+    ) -> Result<Option<(SensitiveJson, i64)>, ()> {
+        let url = request.url().clone();
+        let origin = self.origin()?;
+        if url.origin() != origin.origin() || url.path() != endpoint.path() {
+            return Err(());
+        }
+        let mut response = self.client.execute(request).await.map_err(|_| ())?;
         if response.url() != &url
             || response.url().origin() != origin.origin()
             || response.status().is_redirection()
         {
             return Err(());
         }
-        let accepted = if matches!(endpoint, Endpoint::Userinfo) {
-            response.status().is_success()
-        } else {
-            response.status() == reqwest::StatusCode::OK
-        };
-        if !accepted
-            || response
-                .content_length()
-                .is_some_and(|n| n > MAX_BYTES as u64)
+        if response_status(endpoint, response.status())? {
+            return Ok(None);
+        }
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_BYTES as u64)
         {
             return Err(());
         }
@@ -152,10 +212,43 @@ impl FixedRegionTransport {
         if !json.0.is_object() {
             return Err(());
         }
-        Ok((json, chrono::Utc::now().timestamp_millis()))
+        Ok(Some((json, chrono::Utc::now().timestamp_millis())))
+    }
+    async fn request(
+        &self,
+        endpoint: Endpoint,
+        bearer: Option<&str>,
+        body: Option<SensitiveJson>,
+    ) -> Result<(SensitiveJson, i64), ()> {
+        let request = self
+            .build_request(endpoint, bearer, body)?
+            .build()
+            .map_err(|_| ())?;
+        self.send_request(endpoint, request).await?.ok_or(())
+    }
+    pub(crate) async fn poll_device_login(
+        &self,
+        nonce: &str,
+        verifier: &str,
+    ) -> Result<Option<Established>, ()> {
+        let request = self.device_poll_request(nonce, verifier)?;
+        let Some((poll, received_at)) = self.send_request(Endpoint::DevicePoll, request).await?
+        else {
+            return Ok(None);
+        };
+        let (expected_uid, tokens) = parse_device_poll(&poll.0, received_at)?;
+        // Official mandatory auth-status resolves via authenticated /userinfo.
+        // A poll token/UID alone never establishes a publishable account identity.
+        let (userinfo, _) = self
+            .request(Endpoint::Userinfo, Some(&tokens.access_token), None)
+            .await?;
+        verify_device_identity(&expected_uid, tokens, &userinfo.0).map(Some)
     }
     async fn establish_inner(&self, pat: &str, machine_id: &str) -> Result<Established, ()> {
-        if pat.trim().is_empty() || uuid::Uuid::parse_str(machine_id).is_err() {
+        if self.source == SourceKind::ChinaQoderDevice
+            || pat.trim().is_empty()
+            || uuid::Uuid::parse_str(machine_id).is_err()
+        {
             return Err(());
         }
         let (exchange, received_at) = self
@@ -173,20 +266,24 @@ impl FixedRegionTransport {
         Ok(Established { uid, tokens })
     }
     async fn refresh_inner(&self, refresh: &str, identity: &Identity) -> Result<TokenPair, ()> {
-        if refresh.trim().is_empty()
-            || identity.uid.trim().is_empty()
-            || uuid::Uuid::parse_str(&identity.machine_id).is_err()
-        {
-            return Err(());
-        }
+        let native = self.source == SourceKind::ChinaQoderDevice;
+        let request = self.refresh_request(refresh, identity)?;
         let (response, received_at) = self
-            .request(
-                Endpoint::Refresh,
-                None,
-                Some(SensitiveJson(serde_json::json!({"refresh_token":refresh}))),
+            .send_request(
+                if native {
+                    Endpoint::DeviceRefresh
+                } else {
+                    Endpoint::Refresh
+                },
+                request,
             )
-            .await?;
-        parse_refresh(&response.0, received_at)
+            .await?
+            .ok_or(())?;
+        if native {
+            parse_device_refresh(&response.0, received_at)
+        } else {
+            parse_refresh(&response.0, received_at)
+        }
     }
 }
 impl AuthTransport for FixedRegionTransport {
@@ -302,3 +399,82 @@ fn parse_uid(body: &Value) -> Result<String, ()> {
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 mod tests;
+
+// The official CLI treats poll expires_in as seconds, unlike PAT exchange.
+// Refresh uses explicit expires_at only, never PAT's guessed default lifetime.
+fn device_expiry(body: &Value, now: i64, allow_relative: bool) -> Result<i64, ()> {
+    let expires_at_ms = match body.get("expires_at") {
+        Some(Value::String(value)) => chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|_| ())?
+            .timestamp_millis(),
+        Some(Value::Number(value)) if !allow_relative => {
+            let value = value.as_i64().filter(|v| *v > 0).ok_or(())?;
+            // Verified official refresh EU(): > 1e12 is milliseconds, otherwise seconds.
+            let millis = if value > 1_000_000_000_000 {
+                value
+            } else {
+                value.checked_mul(1000).ok_or(())?
+            };
+            chrono::DateTime::from_timestamp_millis(millis).ok_or(())?;
+            millis
+        }
+        None if allow_relative => {
+            let seconds = body
+                .get("expires_in")
+                .and_then(Value::as_i64)
+                .filter(|v| *v > 0)
+                .ok_or(())?;
+            now.checked_add(seconds.checked_mul(1000).ok_or(())?)
+                .ok_or(())?
+        }
+        _ => return Err(()),
+    };
+    if now < 0 || expires_at_ms <= now {
+        return Err(());
+    }
+    Ok(expires_at_ms)
+}
+fn parse_device_poll(body: &Value, now: i64) -> Result<(String, TokenPair), ()> {
+    let uid = parse_uid(&serde_json::json!({"user_id": body.get("user_id")}))?;
+    let tokens = TokenPair {
+        access_token: token(body.get("token"), false)?,
+        refresh_token: token(body.get("refresh_token"), true)?,
+        expires_at_ms: device_expiry(body, now, true)?,
+    };
+    validate_tokens(&tokens, now).map_err(|_| ())?;
+    Ok((uid, tokens))
+}
+fn parse_device_refresh(body: &Value, now: i64) -> Result<TokenPair, ()> {
+    let tokens = TokenPair {
+        access_token: token(first_non_null(body, &["device_token", "token"]), false)?,
+        refresh_token: token(body.get("refresh_token"), false)?,
+        expires_at_ms: device_expiry(body, now, false)?,
+    };
+    validate_tokens(&tokens, now).map_err(|_| ())?;
+    Ok(tokens)
+}
+fn verify_device_identity(
+    expected: &str,
+    tokens: TokenPair,
+    userinfo: &Value,
+) -> Result<Established, ()> {
+    let uid = parse_uid(userinfo)?;
+    if uid != expected {
+        return Err(());
+    }
+    Ok(Established { uid, tokens })
+}
+
+/// True means a device grant is still pending, not an authenticated response.
+fn response_status(endpoint: Endpoint, status: reqwest::StatusCode) -> Result<bool, ()> {
+    if matches!(endpoint, Endpoint::DevicePoll) && status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(true);
+    }
+    if status == reqwest::StatusCode::OK
+        || (matches!(endpoint, Endpoint::Userinfo) && status.is_success())
+    {
+        Ok(false)
+    } else {
+        Err(())
+    }
+}

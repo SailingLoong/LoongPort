@@ -459,7 +459,7 @@ pub(crate) fn initialize_provider(db: &Database, provider_id: &str) -> Result<Pr
             .meta
             .as_ref()
             .and_then(|m| m.provider_type.as_deref()),
-        Some("qoder_sdk" | "qoder_cn")
+        Some("qoder_sdk" | "qoder_cn" | "qoder_cn_device")
     ) {
         return Err(unavailable());
     }

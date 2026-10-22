@@ -14,10 +14,12 @@ export type QoderHttpIdentityStatus =
 export interface QoderHttpIdentityContext {
   providerId: string;
   credentialGeneration: string;
-  source?: "internationalQoderPat" | "chinaQoderPat" | null;
+  source?:
+    "internationalQoderPat" | "chinaQoderPat" | "chinaQoderDevice" | null;
   status: QoderHttpIdentityStatus;
   expiresAtMs: number | null;
   allowedActions: QoderHttpIdentityAction[];
+  allowedDeviceActions?: Array<"login" | "rebind">;
 }
 
 export interface QoderHttpIdentityRequest {

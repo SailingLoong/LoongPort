@@ -1,6 +1,10 @@
 // Derived from magpie-community/plugins cdf45137, @magpie-community/opencode-qoder-auth 0.2.18.
 // Protocol ancestry: CLIProxyAPI Qoder support (MIT). See both bundled licenses.
-// Extracted from reviewed rev3; auth/store/refresh/device/campaign/SDK code is absent.
+// Extracted from reviewed rev3; auth/store/refresh/campaign/SDK code is absent.
+// CN device-chat credential semantics verified against Magpie 0.2.27 index.mjs
+// (SHA-256 f5add3379aa9ffaa1c245b4daeb18e6e52352a07e51c8f71d89c0b9c8652fa0f):
+// a backend-owned device token signs the existing CN CLI envelope directly.
+// No device/jobToken exchange, refresh, or alternate-host fallback lives here.
 import {createCipheriv,createHash,publicEncrypt,randomBytes,randomUUID,constants} from "node:crypto";
 import {STATUS_CODES} from "node:http";
 
@@ -711,7 +715,7 @@ function validTools(calls, policy) {
 
 // events reads the original Qoder envelope. Native fragments are keyed by their
 // original index; text-form calls continue to use the upstream Splitter.
-async function* events(body, chat = {}) {
+async function* events(body, chat = {}, credentialKind) {
   const policy = toolPolicy(chat)
   if (policy.error) { yield protocolError(policy.error, 400); return }
   const a = new Splitter()
@@ -742,7 +746,7 @@ async function* events(body, chat = {}) {
       if (!env || typeof env !== "object" || Array.isArray(env) || typeof env.body !== "string") { yield protocolError("invalid SSE envelope"); return }
       const inner = env.body.trim()
       if (env.statusCodeValue != null && env.statusCodeValue !== 200) {
-        yield { error: failure(Number(env.statusCodeValue), inner || payload) }
+        yield { error: failure(Number(env.statusCodeValue), inner || payload, credentialKind) }
         return
       }
       if (inner === "[DONE]") { terminal = true; break }
@@ -835,10 +839,10 @@ async function* events(body, chat = {}) {
 // answer turns Qoder's reply into the chat completion OpenAI's API gives.
 // A failure before the answer keeps its status; one after it ends the
 // stream with an error.
-async function answer(res, chat, { abortUpstream = () => {}, releaseListener = () => {} } = {}) {
+async function answer(res, chat, { abortUpstream = () => {}, releaseListener = () => {}, credentialKind } = {}) {
   const id = "chatcmpl-" + hexID()
   const created = Math.floor(Date.now() / 1000)
-  const it = events(res.body, chat)
+  const it = events(res.body, chat, credentialKind)
   let handedToStream = false
   let released = false
   const release = () => {
@@ -956,10 +960,11 @@ async function answer(res, chat, { abortUpstream = () => {}, releaseListener = (
 }
 
 
-function failure(status, text) { const result = classifyFailure(status, text); return {status: result.status, message: "QODER_UPSTREAM_REJECTED"}; }
+function failure(status, text, credentialKind) { const result = classifyFailure(status, text); return {status: result.status, message: credentialKind === "china_qoder_device" && [401,403].includes(status) && result.status === 401 ? "QODER_DEVICE_REAUTHORIZATION_REQUIRED" : "QODER_UPSTREAM_REJECTED"}; }
 
 // New local admission/transport boundary. No auth lifecycle or endpoint override.
 const GATEWAYS = Object.freeze({international:'https://api3.qoder.sh',cn:'https://gateway.qoder.com.cn'});
+const CREDENTIAL_REGIONS = Object.freeze({international_qoder_pat:'international',china_qoder_pat:'cn',china_qoder_device:'cn'});
 export const MAX_RESPONSE_BODY_BYTES = 128 * 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_MODEL_BYTES = 1024 * 1024;
@@ -971,7 +976,7 @@ const fixedResponse = (status, code) => Response.json({error:{type:'qoder_error'
 const fixedError = code => Object.assign(new Error(code),{code});
 
 export function admit(snapshot, chat) {
-  if (!only(snapshot,['access','uid','machineId','expiry','region']) || !Object.hasOwn(GATEWAYS,snapshot.region)) return 'QODER_INVALID_SNAPSHOT';
+  if (!only(snapshot,['access','uid','machineId','expiry','region','credentialKind']) || !Object.hasOwn(CREDENTIAL_REGIONS,snapshot.credentialKind) || CREDENTIAL_REGIONS[snapshot.credentialKind] !== snapshot.region) return 'QODER_INVALID_SNAPSHOT';
   if (!boundedString(snapshot.access,16384) || !boundedString(snapshot.uid,1024) || !boundedString(snapshot.machineId,1024)) return 'QODER_INVALID_SNAPSHOT';
   if (!Number.isSafeInteger(snapshot.expiry) || snapshot.expiry <= Date.now()) return 'QODER_SNAPSHOT_EXPIRED';
   if (!only(chat,['model','messages','tools','tool_choice','parallel_tool_calls','stream','max_tokens','max_completion_tokens','reasoning_effort']) || !boundedString(chat.model,256)) return 'QODER_INVALID_REQUEST';
@@ -1036,9 +1041,17 @@ function boundedBody(body, limit, abort, onFailure = () => {}) {
   });
 }
 
+// 403 also carries queue/quota/request refusals. Bound and classify the body
+// before treating a device token as rejected; an unreadable body stays unknown.
+async function deviceFailure(response, abort, fallbackCode) {
+  const text=response.body?await new Response(boundedBody(response.body,64*1024,abort)).text():'';
+  const classified=classifyFailure(response.status,text);
+  return fixedResponse(classified.status,classified.status===401?'QODER_DEVICE_REAUTHORIZATION_REQUIRED':fallbackCode);
+}
+
 export async function complete(snapshot, chat, {signal}={}) {
   const invalid=admit(snapshot,chat);
-  if(invalid)return fixedResponse(invalid==='QODER_SNAPSHOT_EXPIRED'?401:400,invalid);
+  if(invalid)return fixedResponse(invalid==='QODER_SNAPSHOT_EXPIRED'?401:400,invalid==='QODER_SNAPSHOT_EXPIRED'&&snapshot.credentialKind==='china_qoder_device'?'QODER_REAUTHORIZATION_REQUIRED':invalid);
   const controller=new AbortController();let linked=false,handed=false,submitted=false,transportBroken=false;
   const abort=()=>{if(!controller.signal.aborted)controller.abort(fixedError('QODER_REQUEST_ABORTED'));};
   const release=()=>{clearTimeout(timer);if(linked){linked=false;signal.removeEventListener('abort',abort);}};
@@ -1050,7 +1063,7 @@ export async function complete(snapshot, chat, {signal}={}) {
     const gateway=GATEWAYS[snapshot.region];
     const catalogURL=gateway+(snapshot.region==='cn'?'/algo/api/v2/model/list':MODELS_PATH);
     const listing=await fetch(catalogURL,{headers:cosyHeaders(catalogURL,snapshot,''),signal:controller.signal,redirect:'error'});
-    if(!listing.ok){await listing.body?.cancel();return fixedResponse(502,'QODER_MODEL_DIRECTORY_UNAVAILABLE');}
+    if(!listing.ok){if(snapshot.credentialKind==='china_qoder_device'&&[401,403].includes(listing.status))return await deviceFailure(listing,abort,'QODER_MODEL_DIRECTORY_UNAVAILABLE');await listing.body?.cancel();return fixedResponse(502,'QODER_MODEL_DIRECTORY_UNAVAILABLE');}
     const limited=new Response(boundedBody(listing.body,MAX_MODEL_BYTES,abort));
     const listingBody=await limited.json();
     const models=modelInfos(snapshot.region==='cn'?{chat:listingBody.chat}:listingBody);
@@ -1062,9 +1075,9 @@ export async function complete(snapshot, chat, {signal}={}) {
     const headers={...cosyHeaders(url,snapshot,wire),Accept:'text/event-stream','Cache-Control':'no-cache','X-Model-Key':m.key,'X-Model-Source':m.source};
     submitted=true;
     const upstream=await fetch(url,{method:'POST',headers,body:wire,signal:controller.signal,redirect:'error'});
-    if(!upstream.ok){await upstream.body?.cancel();return fixedResponse(upstream.status>=400&&upstream.status<=599?upstream.status:502,'QODER_UPSTREAM_REJECTED');}
+    if(!upstream.ok){if(snapshot.credentialKind==='china_qoder_device'&&[401,403].includes(upstream.status))return await deviceFailure(upstream,abort,'QODER_UPSTREAM_REJECTED');await upstream.body?.cancel();return fixedResponse(upstream.status>=400&&upstream.status<=599?upstream.status:502,'QODER_UPSTREAM_REJECTED');}
     const bounded=new Response(boundedBody(upstream.body,MAX_RESPONSE_BODY_BYTES,abort,()=>{transportBroken=true;}),{status:200});
-    const response=await answer(bounded,chat,{abortUpstream:abort,releaseListener:release});
+    const response=await answer(bounded,chat,{abortUpstream:abort,releaseListener:release,credentialKind:snapshot.credentialKind});
     if(controller.signal.aborted && signal?.aborted)throw fixedError('QODER_REQUEST_ABORTED');
     if(transportBroken)throw fixedError('QODER_OUTCOME_UNKNOWN');
     handed=true;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {admit,complete,_internal} from '../../scripts/qoder/http-protocol.mjs';
-const snapshot=region=>({access:'synthetic-access',uid:'synthetic-user',machineId:'synthetic-machine',expiry:Date.now()+60000,region});
+const snapshot=region=>({access:'synthetic-access',uid:'synthetic-user',machineId:'synthetic-machine',expiry:Date.now()+60000,region,credentialKind:region==='cn'?'china_qoder_pat':'international_qoder_pat'});
 const chat={model:'fixture',messages:[{role:'user',content:'synthetic'}]};
 test('CN is admitted without permitting caller-supplied hosts or unknown regions',()=>{
  assert.equal(admit(snapshot('cn'),chat),'');
