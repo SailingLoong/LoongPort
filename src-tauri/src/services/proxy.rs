@@ -7955,7 +7955,7 @@ experimental_bearer_token = "PROXY_MANAGED"
 
     #[test]
     #[serial]
-    fn codex_custom_provider_live_write_can_overwrite_auth_when_preserve_disabled() {
+    fn codex_takeover_preserves_oauth_while_direct_switch_honors_disabled_preservation() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
@@ -8029,18 +8029,44 @@ wire_api = "responses"
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
-            live_auth,
-            json!({
-                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
-            }),
-            "disabled preservation should let third-party switches overwrite auth.json"
+            live_auth, oauth_auth,
+            "takeover credentials must never replace the upstream OAuth login"
+        );
+        let client_key = service
+            .db
+            .managed_client_key("codex")
+            .expect("resolve managed credential")
+            .expect("managed credential exists");
+        let caller = service
+            .db
+            .authenticate_client(&client_key, "codex", Some("gpt-5-codex"))
+            .expect("managed credential authenticates");
+        assert_eq!(caller.client_id, "managed-codex");
+        assert_eq!(caller.route_app, "codex");
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read takeover config");
+        let doc: toml_edit::DocumentMut = live_config.parse().expect("valid takeover config");
+        let route = doc["model_provider"]
+            .as_str()
+            .expect("selected takeover provider");
+        assert_eq!(
+            doc["model_providers"][route]["experimental_bearer_token"].as_str(),
+            Some(client_key.as_str()),
+            "the calling credential belongs in the local provider config"
         );
 
-        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
-            .expect("read live config");
+        service
+            .write_codex_live_for_provider(&provider.settings_config, Some(&provider))
+            .expect("write ordinary direct provider switch");
+        let direct_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read direct provider auth");
+        assert_eq!(direct_auth, provider.settings_config["auth"], "disabled preservation must still let ordinary direct switches select the provider's upstream credentials");
+        let direct_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read direct provider config");
         assert!(
-            !live_config.contains("experimental_bearer_token"),
-            "provider token should stay in auth.json when preservation is disabled"
+            !direct_config.contains(&client_key),
+            "direct provider config must not retain the local calling credential"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
@@ -8685,11 +8711,35 @@ model = "gpt-5.1-codex"
             }))
             .expect("seed taken-over live file");
 
+        let client_key_before = db
+            .managed_client_key("claude")
+            .expect("resolve managed credential")
+            .expect("managed credential exists");
+        assert_eq!(
+            service.read_claude_live().unwrap()["env"]["ANTHROPIC_API_KEY"].as_str(),
+            Some(client_key_before.as_str())
+        );
+        db.authenticate_client(&client_key_before, "claude", Some("stale-model"))
+            .expect("credential authenticates before switch");
+
         service
             .hot_switch_provider("claude", "b")
             .await
             .expect("hot switch provider");
 
+        let client_key_after = db
+            .managed_client_key("claude")
+            .expect("resolve managed credential after switch")
+            .expect("managed credential still exists");
+        assert_eq!(
+            client_key_after, client_key_before,
+            "provider hot switch must preserve the managed client identity"
+        );
+        let caller = db
+            .authenticate_client(&client_key_after, "claude", Some("claude-new"))
+            .expect("credential authenticates after switch");
+        assert_eq!(caller.client_id, "managed-claude");
+        assert_eq!(caller.route_app, "claude");
         let live = service.read_claude_live().expect("read live config");
         assert_eq!(
             live.get("permissions"),
@@ -8700,8 +8750,8 @@ model = "gpt-5.1-codex"
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_API_KEY"))
                 .and_then(|v| v.as_str()),
-            Some(PROXY_TOKEN_PLACEHOLDER),
-            "takeover token placeholder should be preserved"
+            Some(client_key_after.as_str()),
+            "takeover must preserve the exact credential supplied by its owner"
         );
         assert_eq!(
             live.get("env")
