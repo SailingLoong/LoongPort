@@ -243,7 +243,7 @@ export function AgentsPanel({}: AgentsPanelProps) {
               )}
               {run.result.reason && (
                 <p className="text-sm text-muted-foreground">
-                  {reasons[run.result.reason] ?? run.result.reason}
+                  {reasons[run.result.reason] ?? "任务未完成，请查看状态。"}
                 </p>
               )}
             </div>

@@ -67,7 +67,8 @@ pub(crate) fn task_groups(rows: Value) -> Value {
         let status = match summary.map(|run| run["result"]["status"].as_str().unwrap_or("unknown"))
         {
             Some("completed") => "completed",
-            Some("failed" | "unknown") => "failed",
+            Some("failed") => "failed",
+            Some("unknown") => "unknown",
             _ if can_cancel => "accepted",
             _ => "failed",
         };
