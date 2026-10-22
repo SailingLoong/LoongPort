@@ -84,6 +84,7 @@ pub fn restore(
     current: &[u8],
     original: Option<&[u8]>,
     installed: &[Value],
+    added_available: &[Value],
 ) -> Result<Vec<u8>, String> {
     let mut document = parse(Some(current))?;
     let original_doc = parse(original)?;
@@ -111,13 +112,7 @@ pub fn restore(
             .get_mut("availableModels")
             .and_then(Value::as_array_mut)
         {
-            let old = original_doc
-                .get("availableModels")
-                .and_then(Value::as_array);
-            available.retain(|value| {
-                !installed.iter().any(|entry| &entry["id"] == value)
-                    || old.is_some_and(|items| items.contains(value))
-            });
+            available.retain(|value| !added_available.contains(value));
         }
         document["models"] = Value::Array(output);
     } else {
@@ -162,6 +157,53 @@ mod tests {
     }
 
     #[test]
+    fn changing_models_preserves_available_entries_added_by_the_user() {
+        use super::super::registry::Adapter;
+        let original =
+            json!({"models":[{"id":"personal","vendor":"Custom"}],"availableModels":["personal"]});
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let desired_a = WorkBuddy.desired(
+            "http://127.0.0.1:1234/v1/chat/completions",
+            "fixture-key",
+            &["model-a".into()],
+        );
+        let first = WorkBuddy
+            .apply(Some(&original_bytes), None, &desired_a)
+            .unwrap();
+        let mut edited: Value = serde_json::from_slice(&first.bytes).unwrap();
+        edited["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"model-b","vendor":"Custom","userField":true}));
+        edited["availableModels"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("model-b"));
+        let desired_b = WorkBuddy.desired(
+            "http://127.0.0.1:1234/v1/chat/completions",
+            "fixture-key",
+            &["model-b".into()],
+        );
+        let second = WorkBuddy
+            .apply(
+                Some(&serde_json::to_vec(&edited).unwrap()),
+                Some(&first.ownership),
+                &desired_b,
+            )
+            .unwrap();
+        let disconnected = WorkBuddy
+            .disconnect(Some(&second.bytes), &second.ownership)
+            .unwrap()
+            .unwrap();
+        let result: Value = serde_json::from_slice(&disconnected).unwrap();
+        assert_eq!(result["availableModels"], json!(["personal", "model-b"]));
+        assert_eq!(
+            result["models"],
+            json!([{"id":"personal","vendor":"Custom"},{"id":"model-b","vendor":"Custom","userField":true}])
+        );
+    }
+
+    #[test]
     fn refuses_broken_json_and_incompatible_shapes() {
         for bytes in [
             b"{broken".as_slice(),
@@ -178,6 +220,7 @@ mod tests {
 struct Ownership {
     original: Option<Vec<u8>>,
     installed: Vec<Value>,
+    added_available: Vec<Value>,
 }
 
 pub struct WorkBuddy;
@@ -209,11 +252,24 @@ impl super::registry::Adapter for WorkBuddy {
                 current.ok_or("clients.configuration_changed")?,
                 prior.original.as_deref(),
                 &prior.installed,
+                &prior.added_available,
             )?),
             None => current.map(ToOwned::to_owned),
         };
+        let before = parse(base.as_deref())?;
         let bytes = project(base.as_deref(), desired)?;
         let document = parse(Some(&bytes))?;
+        // Own only list entries this projection actually introduced. User
+        // additions between connections are part of this operation's baseline.
+        let previous_available = before.get("availableModels").and_then(Value::as_array);
+        let added_available = document
+            .get("availableModels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|value| !previous_available.is_some_and(|items| items.contains(value)))
+            .cloned()
+            .collect();
         let installed = models(&document)?
             .iter()
             .filter(|entry| {
@@ -231,6 +287,7 @@ impl super::registry::Adapter for WorkBuddy {
             ownership: serde_json::to_value(Ownership {
                 original,
                 installed,
+                added_available,
             })
             .map_err(|_| "clients.invalid_state")?,
             model_count: desired.len(),
@@ -247,6 +304,7 @@ impl super::registry::Adapter for WorkBuddy {
             current.ok_or("clients.configuration_changed")?,
             ownership.original.as_deref(),
             &ownership.installed,
+            &ownership.added_available,
         )?;
         if ownership.original.is_none() && parse(Some(&restored))? == serde_json::json!([]) {
             Ok(None)
