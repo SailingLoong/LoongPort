@@ -83,6 +83,8 @@ mod protection_tests {
     #[test]
     fn client_secrets_follow_vault_export_and_reset_inventory() {
         let db = Database::memory().unwrap();
+        db.set_setting("client_access_migration_version", "1")
+            .unwrap();
         let reference = db
             .issue_client_credential("workbuddy", "codex", &["model-a".into()])
             .unwrap();
@@ -119,6 +121,14 @@ mod protection_tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+        let ready_marker_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM settings WHERE key='client_access_migration_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ready_marker_count, 0);
     }
 }
 
