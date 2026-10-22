@@ -470,6 +470,7 @@ impl Owner {
     }
     pub(crate) fn stop_local_tasks(&self) -> Result<(), AppError> {
         self.control.stop.store(true, Ordering::Release);
+        self.control.code_tasks.stop().map_err(|_| unavailable())?;
         self.control.executions.stop()
     }
 }
@@ -569,8 +570,8 @@ mod tests {
             )
             .unwrap();
         owner.stop_local_tasks().unwrap();
-        assert_eq!(owner.local_bindings().unwrap().len(), 2);
         let reopened = Owner::new(state, AppType::Codex, owner.owner.clone()).unwrap();
+        assert_eq!(reopened.local_bindings().unwrap().len(), 2);
         let rows = reopened
             .create_local_task_with(
                 "parallel".into(),
@@ -599,7 +600,7 @@ mod tests {
     #[serial_test::serial]
     fn partially_started_group_closes_unstarted_members_and_cancels_running_member() {
         let _home = crate::secrets::testing::TestHome::new().unwrap();
-        let (_rt, _state, owner) = super::super::tests::fixture();
+        let (_rt, state, owner) = super::super::tests::fixture();
         let mut starts = 0;
         let rows = owner
             .create_local_task_with(
@@ -629,8 +630,9 @@ mod tests {
             .any(|row| row["agentId"] == "review"
                 && row["result"]["reason"] == "analysis_start_failed"));
         owner.stop_local_tasks().unwrap();
-        assert_eq!(owner.local_bindings().unwrap().len(), 2);
-        assert!(owner
+        let reopened = Owner::new(state, AppType::Codex, owner.owner.clone()).unwrap();
+        assert_eq!(reopened.local_bindings().unwrap().len(), 2);
+        assert!(reopened
             .local_tasks()
             .unwrap()
             .as_array()

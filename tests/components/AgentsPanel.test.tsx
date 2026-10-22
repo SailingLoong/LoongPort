@@ -4,6 +4,9 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentRun } from "@/lib/api/agents";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
+vi.mock("@/components/agents/CodeAgentsPanel", () => ({
+  CodeAgentsPanel: () => null,
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const call = vi.mocked(invoke);
 function groups(runs: AgentRun[], canCancel = true) {

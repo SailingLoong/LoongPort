@@ -1,6 +1,14 @@
 //! Original native task owner and local IPC boundary. No prompt or output persistence.
 //! Reuses the existing Database, Vault, request router and usage log.
 pub(crate) mod bindings;
+#[cfg(unix)]
+mod code_access;
+#[cfg(unix)]
+pub(crate) mod code_runtime;
+#[cfg(unix)]
+mod codex_runner;
+#[cfg(unix)]
+mod workspace;
 pub(crate) mod contract;
 pub(crate) mod execution;
 pub(crate) mod snapshot;
@@ -335,6 +343,8 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(1);
 #[cfg(any(unix, test))]
 #[derive(Default)]
 struct Control {
+    #[cfg(unix)]
+    code_tasks: code_runtime::CodeRuntime,
     #[cfg(unix)]
     local_task_gate: Mutex<()>,
     #[cfg(unix)]

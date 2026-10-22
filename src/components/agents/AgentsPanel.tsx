@@ -1,3 +1,4 @@
+import { CodeAgentsPanel } from "./CodeAgentsPanel";
 import { useEffect, useRef, useState } from "react";
 import {
   agentsApi,
@@ -127,6 +128,7 @@ export function AgentsPanel({}: AgentsPanelProps) {
   return (
     <div className="page-content flex flex-col flex-1 min-h-0 gap-4 p-6">
       <h2 className="text-xl font-semibold">多 Agents</h2>
+      <CodeAgentsPanel />
       <p className="text-sm text-muted-foreground">
         仅支持 Codex
         当前已应用账号链。多个分析并行执行，全部完成后汇总为最终答复。仅处理文本，不运行工具。
