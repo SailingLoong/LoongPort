@@ -23,6 +23,7 @@ import {
   type MiniMaxCodeRegion,
 } from "@/lib/api/minimaxCode";
 import { settingsApi } from "@/lib/api/settings";
+import { MiniMaxNativeImport } from "./MiniMaxNativeImport";
 
 const failures: MiniMaxCodeFailure[] = [
   "storageUnavailable",
@@ -295,6 +296,14 @@ export function MiniMaxCodeSection({
           )}
           {t("minimaxCode.add")}
         </Button>
+        <MiniMaxNativeImport
+          region={region}
+          disabled={!loaded || loading || loginBusy || login !== null}
+          onSaved={() => {
+            setError(null);
+            void loadAccounts();
+          }}
+        />
         <Button
           type="button"
           variant="ghost"
@@ -401,6 +410,27 @@ export function MiniMaxCodeSection({
                     {t(`minimaxCode.regions.${account.region}`)} ·{" "}
                     {account.realUserId}
                   </p>
+                </>
+              );
+              const credentials = (
+                <>
+                  {account.credentialKind === "nativeAccessOnly" && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("minimaxCode.credentials.accessOnly")}
+                    </p>
+                  )}
+                  {account.credentialExpiresAt != null && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("minimaxCode.credentials.expires", {
+                        time: date(account.credentialExpiresAt),
+                      })}
+                    </p>
+                  )}
+                  {account.requiresReimport && (
+                    <p role="status" className="text-xs text-amber-600">
+                      {t("minimaxCode.credentials.reimport")}
+                    </p>
+                  )}
                 </>
               );
               const credits = (
@@ -602,6 +632,7 @@ export function MiniMaxCodeSection({
                             ? "账号授权已保存；不代表推理消费已验收"
                             : "需要重新授权"}
                         </p>
+                        {credentials}
                         {retireAction}
                       </>
                     }
@@ -627,6 +658,7 @@ export function MiniMaxCodeSection({
                   className="space-y-3 rounded-md border bg-muted/30 p-3"
                 >
                   {identity}
+                  {credentials}
                   {credits}
                   {creditActions}
                   {retireAction}

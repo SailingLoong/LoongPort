@@ -125,6 +125,7 @@ fn receipt(response: Response) -> Result<(AttemptStatus, f64, String), Failure> 
     ))
 }
 pub(super) fn request(snapshot: &Snapshot, endpoint: Endpoint) -> Result<Request, Failure> {
+    snapshot.account.usable()?;
     let credentials = snapshot
         .account
         .credentials
@@ -173,6 +174,7 @@ impl<T: Transport> Engine<'_, T> {
             request(snapshot, endpoint).map_err(catalog::DispatchFailure::NotDispatched)?,
             |d, _| {
                 let current = catalog::matched(d, snapshot)?;
+                current.usable()?;
                 if current.credential_version != snapshot.account.credential_version {
                     return Err(Failure::StaleIdentity);
                 }
@@ -393,8 +395,8 @@ impl<T: Transport> Engine<'_, T> {
             if a.auth_generation != auth_generation || a.auto_claim_revision != revision {
                 return Err(Failure::StaleIdentity);
             }
-            if enabled && a.credentials.is_none() {
-                return Err(Failure::NeedsLogin);
+            if enabled {
+                a.usable()?;
             }
             a.auto_claim_revision = a
                 .auto_claim_revision

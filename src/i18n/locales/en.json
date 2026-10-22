@@ -5107,6 +5107,32 @@
       "expiredAuthorization": "Device authorization expired. Cancel and sign in again.",
       "notClaimable": "This account cannot claim now. Refresh its status.",
       "authorizationCompleted": "Authorization completed and the account was saved before cancellation. Check the account list."
+    },
+    "nativeImport": {
+      "open": "Import local MiniMax CLI account",
+      "title": "Import a public CLI session",
+      "description": "Choose the public MiniMax CLI OAuth v1 auth.json: prod/cn/mcode-public/auth.json for China, or prod/en/mcode-public/auth.json for Global, under the CLI auth directory. Selection does not read it. Local reading, online profile verification and encrypted saving each require separate confirmation. MiniMax Desktop sessions are not supported.",
+      "choose": "Choose auth.json",
+      "fileFilter": "MiniMax CLI OAuth file",
+      "source": "Selected source file",
+      "readConsent": "Allow a local read of the selected file",
+      "read": "Read local preview",
+      "unverified": "Unverified local identity claim",
+      "expires": "Stored access expiry",
+      "verified": "Verified account ID",
+      "verifyConsent": "Send this account’s access token to official MiniMax in the selected region to verify its profile",
+      "verify": "Verify account online",
+      "accessOnly": "Access-only import keeps the original expiry and never imports a refresh token or renews credentials. Sign in again in the CLI and explicitly reimport after expiry. Saving does not enable automatic claims.",
+      "expired": "This access token has expired. Sign in again in the CLI and reimport.",
+      "saveConsent": "Save a copy of this access token in LoongPort’s encrypted account vault",
+      "save": "Save encrypted access-only account",
+      "error": "Could not complete this step. Check the source, region, expiry, network and vault access. Reload accounts to confirm any saved result.",
+      "cancel": "Cancel import"
+    },
+    "credentials": {
+      "accessOnly": "Access-only credentials. No automatic credential renewal; explicitly reimport after CLI sign-in when they expire.",
+      "expires": "Access credentials expire: {{time}}",
+      "reimport": "Sign in again in the CLI, then explicitly reimport this account."
     }
   }
 }

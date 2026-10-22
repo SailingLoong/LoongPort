@@ -1,5 +1,6 @@
 //! These tests use synthetic encrypted accounts and the real MiniMax owner.
 //! They are module/transport tests, not ProxyServer/pool integration evidence.
+use super::super::catalog;
 use super::super::inference::{Lease, StreamRequest, StreamTransport};
 use super::*;
 use crate::proxy::{hyper_client::ProxyResponse, ProxyError};
@@ -62,7 +63,8 @@ fn two_accounts(f: &Fixture) {
         second.real_user_id = "synthetic-user-second".into();
         second.region = Region::Global;
         second.credentials.as_mut().unwrap().access_token = "synthetic-access-second".into();
-        second.credentials.as_mut().unwrap().refresh_token = "synthetic-refresh-second".into();
+        second.credentials.as_mut().unwrap().refresh_token =
+            Some("synthetic-refresh-second".into());
         d.accounts.push(second);
     });
 }
@@ -1038,4 +1040,141 @@ async fn minimax_native_terminal_keeps_comments_whitespace_ping_and_unknown_exte
             format!("{stop}{tail}").as_bytes()
         );
     }
+}
+
+#[tokio::test]
+async fn native_inference_near_expiry_uses_access_only_without_proactive_refresh() {
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 30_000)));
+    let t = StreamFixture::default();
+    t.responses.lock().unwrap().push_back(success());
+    let auth = RefreshFixture::default();
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+        .await
+        .unwrap();
+    let response = lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+        .await
+        .unwrap();
+    assert!(!response
+        .response
+        .bytes_with_limit(4096)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(t.calls.lock().unwrap().len(), 1);
+    assert!(auth.calls.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn native_inference_401_never_refreshes_or_replays_and_403_does_not_revoke() {
+    for status in [401, 403] {
+        let f = Fixture::new().await;
+        f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+        let t = StreamFixture::default();
+        t.responses
+            .lock()
+            .unwrap()
+            .push_back(stream_response(status, vec![]));
+        let auth = RefreshFixture::default();
+        let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+            .await
+            .unwrap();
+        let result = lease
+            .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+            .await;
+        if status == 401 {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().response.status().as_u16(), 403);
+        }
+        assert_eq!(t.calls.lock().unwrap().len(), 1);
+        assert!(auth.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            catalog::list(&f.session).await.unwrap()[0].requires_reimport,
+            status == 401
+        );
+    }
+}
+#[tokio::test]
+async fn native_inference_expiry_between_lease_and_dispatch_never_sends() {
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+        .await
+        .unwrap();
+    catalog::access(&f.session, None, |d, _| {
+        d.accounts[0].credentials.as_mut().unwrap().expires_at = now_ms() - 1;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    let t = StreamFixture::default();
+    let auth = RefreshFixture::default();
+    assert!(lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+        .await
+        .is_err());
+    assert!(t.calls.lock().unwrap().is_empty() && auth.calls.lock().unwrap().is_empty());
+    assert!(
+        Lease::acquire(f.session.clone(), "synthetic-account", "native-next")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn native_late_status_success_cannot_resurrect_401_rejected_access() {
+    struct DelayedStatus {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl Transport for DelayedStatus {
+        fn request(
+            &self,
+            r: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                assert_eq!(r.endpoint, Endpoint::Status);
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(response(panel(2)))
+            })
+        }
+    }
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+    let status = Arc::new(DelayedStatus {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let s = f.session.clone();
+    let t = status.clone();
+    let task = tokio::spawn(async move {
+        Engine {
+            session: &s,
+            transport: &*t,
+        }
+        .refresh("synthetic-account")
+        .await
+    });
+    status.started.notified().await;
+    let stream = StreamFixture::default();
+    stream
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(stream_response(401, vec![]));
+    let auth = RefreshFixture::default();
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-401")
+        .await
+        .unwrap();
+    assert!(lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &stream)
+        .await
+        .is_err());
+    status.release.notify_one();
+    let view = task.await.unwrap().unwrap();
+    assert!(view.requires_reimport && !view.authorized);
+    assert!(catalog::list(&f.session).await.unwrap()[0].requires_reimport);
+    assert!(auth.calls.lock().unwrap().is_empty());
 }
