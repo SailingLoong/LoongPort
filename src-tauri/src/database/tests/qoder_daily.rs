@@ -79,6 +79,7 @@ include!("qoder_daily/service.rs");
 include!("qoder_daily/receipts.rs");
 include!("qoder_daily/http_clock.rs");
 include!("qoder_daily/http_adapter.rs");
+include!("qoder_daily/automatic.rs");
 
 #[test]
 fn unknown_wire_outcome_keeps_its_existing_contract() {

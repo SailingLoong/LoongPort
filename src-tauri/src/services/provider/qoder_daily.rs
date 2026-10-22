@@ -8,6 +8,8 @@ use std::time::Instant;
 #[path = "qoder_daily/contract.rs"]
 pub(crate) mod contract;
 use contract::{BoundCampaign, Identity, Outcome, Region, Target};
+#[path = "qoder_daily/automatic.rs"]
+pub(crate) mod automatic;
 #[path = "qoder_daily/clock.rs"]
 pub(crate) mod clock;
 #[path = "qoder_daily/device.rs"]
@@ -20,6 +22,8 @@ pub(crate) mod http;
 pub struct State {
     pub generation: String,
     pub pending: Option<Attempt>,
+    #[serde(default)]
+    pub(crate) automatic: automatic::Policy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,6 +43,7 @@ impl State {
         Self {
             generation: uuid::Uuid::new_v4().to_string(),
             pending: None,
+            automatic: automatic::Policy::default(),
         }
     }
 }
@@ -162,6 +167,19 @@ pub(crate) trait CampaignAdapter: Send + Sync {
         context: &VerifiedContext,
         binding: &BoundCampaign,
     ) -> Result<Response, AppError>;
+    /// Synthetic adapters complete immediately under admission. The production
+    /// HTTP adapter overrides this to release all guards after the first poll.
+    fn post_admitted(
+        &self,
+        context: &VerifiedContext,
+        binding: &BoundCampaign,
+        observation: &clock::Observation,
+        admission: &automatic::Admission<'_>,
+    ) -> Result<Response, AppError> {
+        admission.dispatch_claim(context, binding, observation, || {
+            self.post(context, binding)
+        })
+    }
     fn get_reward(
         &self,
         context: &VerifiedContext,
@@ -235,6 +253,18 @@ pub(crate) fn prepare_selected(
     target: Option<&Target>,
     adapter: &dyn CampaignAdapter,
 ) -> Result<ClaimResult, AppError> {
+    prepare_selected_admitted(db, provider_id, target, adapter, None)
+}
+fn prepare_selected_admitted(
+    db: &Database,
+    provider_id: &str,
+    target: Option<&Target>,
+    adapter: &dyn CampaignAdapter,
+    admission: Option<&automatic::Admission<'_>>,
+) -> Result<ClaimResult, AppError> {
+    if let Some(admission) = admission {
+        admission.dispatch(|| Ok(()))?;
+    }
     let mut provider = initialize_provider(db, provider_id)?;
     if provider
         .meta
@@ -269,6 +299,9 @@ pub(crate) fn prepare_selected(
         return Ok(ClaimResult::Unavailable(
             Dependency::OfficialDeviceUnavailable,
         ));
+    }
+    if admission.is_some_and(|admission| !admission.matches(&context)) {
+        return Ok(ClaimResult::Unavailable(Dependency::IdentityMismatch));
     }
     let operations = match db.qoder_operations(&context.identity) {
         Ok(value) => value,
@@ -408,7 +441,15 @@ pub(crate) fn prepare_selected(
         // Durable unknown intent is retained. Reopening may only GET, never POST.
         return Ok(ClaimResult::Unavailable(Dependency::CampaignWindowClosed));
     }
-    let response = adapter.post(&context, &operation.binding);
+    let response = match admission {
+        Some(admission) => adapter.post_admitted(
+            &context,
+            &operation.binding,
+            observation.as_ref().ok_or_else(unavailable)?,
+            admission,
+        ),
+        None => adapter.post(&context, &operation.binding),
+    };
     complete_response(db, &context, &operation, response, Action::Post)
 }
 pub(crate) fn initialize_provider(db: &Database, provider_id: &str) -> Result<Provider, AppError> {

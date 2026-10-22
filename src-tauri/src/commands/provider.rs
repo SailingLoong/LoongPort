@@ -2525,6 +2525,40 @@ pub async fn claim_qoder_daily_credits(
     .map_err(|_| "Qoder 领取任务失败，请重新打开后仅查询结果".to_owned())?
 }
 
+/// Local policy/device context only; reading never authenticates or claims.
+#[tauri::command]
+pub(crate) async fn qoder_daily_automatic_context(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+) -> Result<crate::services::provider::qoder_daily::automatic::Context, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        crate::services::provider::qoder_daily::automatic::context(&state.db, &provider_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 自动领取状态任务失败".to_owned())?
+}
+
+/// Explicit continuous-consent mutation; never replay on an uncertain IPC result.
+#[tauri::command]
+pub(crate) async fn set_qoder_daily_automatic(
+    app_handle: tauri::AppHandle,
+    request: crate::services::provider::qoder_daily::automatic::Request,
+) -> Result<crate::services::provider::qoder_daily::automatic::Context, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        crate::services::provider::qoder_daily::automatic::set(&state.db, request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 自动领取设置结果未确认，请仅查询状态".to_owned())?
+}
+
 /// Safe original-Provider status only. Source and identity admission stays in
 /// the original credential owner, including direct IPC invocation.
 #[tauri::command]

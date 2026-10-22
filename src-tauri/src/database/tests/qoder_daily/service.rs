@@ -4,6 +4,21 @@ use crate::services::provider::qoder_daily::{
     Action, CampaignAdapter, ClaimResult, Dependency, Listing, Response, VerifiedContext,
 };
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+
+#[test]
+fn automatic_policy_is_explicitly_off_for_new_and_legacy_state() {
+    let fresh = daily::State::fresh();
+    let encoded = serde_json::to_value(&fresh).unwrap();
+    assert_eq!(encoded["automatic"]["enabled"], serde_json::json!(false));
+    let old: daily::State = serde_json::from_value(serde_json::json!({
+        "generation": "synthetic-old-generation", "pending": null
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(old).unwrap()["automatic"]["enabled"],
+        serde_json::json!(false)
+    );
+}
 #[derive(Default)]
 struct ListingRendezvous {
     arrived: Mutex<usize>,
@@ -411,6 +426,7 @@ fn forged_frontend_state_cannot_rollback_generation_or_pending() {
     p.meta.as_mut().unwrap().qoder_campaign_state = Some(daily::State {
         generation: "forged".into(),
         pending: None,
+        automatic: Default::default(),
     });
     db.save_provider("codex", &p).unwrap();
     assert_eq!(state(&f, &db), expected);

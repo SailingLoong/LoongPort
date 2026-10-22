@@ -2,7 +2,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import type { QoderClaimContext, QoderClaimResult } from "@/lib/api/qoderDaily";
-const api = vi.hoisted(() => ({ context: vi.fn(), claim: vi.fn() }));
+const api = vi.hoisted(() => ({
+  context: vi.fn(),
+  claim: vi.fn(),
+  automaticContext: vi.fn(),
+  setAutomatic: vi.fn(),
+}));
 vi.mock("@/lib/api/qoderDaily", () => ({ qoderDailyApi: api }));
 const context: QoderClaimContext = {
   providerId: "fixture",
@@ -30,6 +35,17 @@ async function open() {
 beforeEach(() => {
   api.context.mockReset().mockResolvedValue(context);
   api.claim.mockReset().mockResolvedValue(unknown);
+  api.automaticContext.mockReset().mockResolvedValue({
+    providerId: "fixture",
+    credentialGeneration: "generation-a",
+    revision: 0,
+    policyVersion: 1,
+    enabled: false,
+    canEnable: false,
+    reason: null,
+    subject: null,
+  });
+  api.setAutomatic.mockReset();
 });
 describe("explicit Qoder daily claim", () => {
   it("does not fetch or claim during ordinary card rendering", () => {
@@ -41,7 +57,11 @@ describe("explicit Qoder daily claim", () => {
     render(<QoderDailyClaim providerId="fixture" />);
     await open();
     expect(screen.getByRole("button", { name: "查询并领取" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "查询并领取" })).toBeEnabled(),
     );
@@ -65,7 +85,11 @@ describe("explicit Qoder daily claim", () => {
     });
     render(<QoderDailyClaim providerId="fixture" />);
     await open();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    );
     await screen.findByText(
       dependency === "OfficialDeviceUnsupported"
         ? /目前仅支持已安装的 Qoder Desktop 0.4.8/
@@ -84,7 +108,11 @@ describe("explicit Qoder daily claim", () => {
     );
     render(<QoderDailyClaim providerId="fixture" />);
     await open();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    );
     const button = screen.getByRole("button", { name: "查询并领取" });
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
@@ -101,7 +129,11 @@ describe("explicit Qoder daily claim", () => {
     });
     render(<QoderDailyClaim providerId="fixture" />);
     await open();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "查询并领取" })).toBeEnabled(),
     );
@@ -114,13 +146,25 @@ describe("explicit Qoder daily claim", () => {
   it("clears declaration on close and reopen", async () => {
     render(<QoderDailyClaim providerId="fixture" />);
     await open();
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    );
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() =>
-      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("checkbox", {
+          name: "确认当前凭据来源为国际版 Qoder PAT",
+        }),
+      ).not.toBeInTheDocument(),
     );
     await open();
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "确认当前凭据来源为国际版 Qoder PAT",
+      }),
+    ).not.toBeChecked();
     expect(api.claim).not.toHaveBeenCalled();
   });
 });

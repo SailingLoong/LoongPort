@@ -218,7 +218,11 @@ fn restore_same_candidate_keeps_current_state_not_foreign_metadata() {
         &target_vault,
     )
     .unwrap();
-    assert_eq!(state(&incoming, &target), current);
+    let restored = state(&incoming, &target);
+    assert_eq!(restored.generation, current.generation);
+    assert_eq!(restored.pending, current.pending);
+    assert!(!restored.automatic.enabled);
+    assert!(restored.automatic.revision > current.automatic.revision);
 }
 #[test]
 fn existing_mode_saved_row_digest_accepts_backend_generation_normalization() {

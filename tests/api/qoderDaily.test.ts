@@ -21,3 +21,42 @@ it("passes only explicit source and the previously read generation to the real c
     },
   });
 });
+
+it("reads local automatic context and binds enable consent to its exact revision", async () => {
+  const context = {
+    providerId: "provider-a",
+    credentialGeneration: "generation-before-click",
+    revision: 4,
+    policyVersion: 1,
+    enabled: false,
+    canEnable: true,
+    reason: null,
+    subject: null,
+  };
+  await qoderDailyApi.automaticContext("provider-a");
+  expect(invoke).toHaveBeenCalledWith("qoder_daily_automatic_context", {
+    providerId: "provider-a",
+  });
+  await qoderDailyApi.setAutomatic(context, true);
+  expect(invoke).toHaveBeenCalledWith("set_qoder_daily_automatic", {
+    request: {
+      providerId: "provider-a",
+      credentialGeneration: "generation-before-click",
+      expectedRevision: 4,
+      policyVersion: 1,
+      enabled: true,
+      source: "internationalQoderPat",
+    },
+  });
+  await qoderDailyApi.setAutomatic(context, false);
+  expect(invoke).toHaveBeenCalledWith("set_qoder_daily_automatic", {
+    request: {
+      providerId: "provider-a",
+      credentialGeneration: "generation-before-click",
+      expectedRevision: 4,
+      policyVersion: 1,
+      enabled: false,
+      source: null,
+    },
+  });
+});
