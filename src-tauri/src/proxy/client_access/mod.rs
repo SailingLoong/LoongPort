@@ -16,7 +16,8 @@ mod tests {
 use serde::Serialize;
 mod policy;
 mod store;
-pub(crate) const CLIENT_KEY_HEADER: &str = "x-loongport-client-key";
+mod transport;
+pub(crate) use transport::CLIENT_KEY_HEADER;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallerIdentity {
@@ -119,4 +120,19 @@ mod protection_tests {
             .unwrap();
         assert_eq!(count, 0);
     }
+}
+
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
+pub(crate) fn authenticate_request(
+    db: &crate::database::Database,
+    headers: &mut axum::http::HeaderMap,
+    route_app: &str,
+    model: Option<&str>,
+) -> Result<CallerIdentity, super::ProxyError> {
+    let key = zeroize::Zeroizing::new(
+        transport::take_key(headers)
+            .map_err(|_| super::ProxyError::AuthError("Client credential required".into()))?,
+    );
+    db.authenticate_client(&key, route_app, model)
+        .map_err(|_| super::ProxyError::AuthError("Client credential rejected".into()))
 }

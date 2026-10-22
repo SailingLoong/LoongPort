@@ -173,8 +173,8 @@ async fn handle_messages_for_app(
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri;
-    let headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut headers = parts.headers;
+    let mut extensions = parts.extensions;
     let body_bytes = body
         .collect()
         .await
@@ -185,6 +185,7 @@ async fn handle_messages_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
 
     let raw_endpoint = uri
         .path_and_query()
@@ -774,7 +775,7 @@ pub async fn handle_chat_completions(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -786,6 +787,7 @@ pub async fn handle_chat_completions(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -865,7 +867,7 @@ async fn handle_responses_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -877,6 +879,7 @@ async fn handle_responses_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/responses");
 
     let is_stream = body
@@ -1002,7 +1005,7 @@ pub async fn handle_alpha_search(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -1014,6 +1017,7 @@ pub async fn handle_alpha_search(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/alpha/search");
 
     let forwarder = ctx.create_forwarder(&state);
@@ -1079,7 +1083,7 @@ async fn handle_responses_compact_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -1091,6 +1095,7 @@ async fn handle_responses_compact_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
 
     let is_stream = body
@@ -2156,8 +2161,8 @@ pub async fn handle_gemini(
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
-    let headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut headers = parts.headers;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -2176,6 +2181,7 @@ pub async fn handle_gemini(
     let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini")
         .await?
         .with_model_from_uri(&uri);
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
 
     // 提取完整的路径和查询参数
     let endpoint = uri

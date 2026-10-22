@@ -55,6 +55,15 @@ fn lookup(conn: &Connection, id: &str) -> Result<(CredentialRef, String), AppErr
 }
 
 impl Database {
+    /// Published only after every managed CLI projection has been migrated.
+    /// New client configuration must remain unavailable until this admission succeeds.
+    pub(crate) fn client_access_ready(&self) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting("client_access_migration_version")?
+            .as_deref()
+            == Some("1"))
+    }
+
     pub(crate) fn list_client_credentials(&self) -> Result<Vec<CredentialRef>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare("SELECT id, client_id, route_app, allowed_models, revoked FROM loongport_client_credentials ORDER BY client_id, id")?;
