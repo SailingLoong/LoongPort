@@ -643,17 +643,25 @@ export function ProviderCard({
               内部（主按钮在上、图标组自带 hover 组），这里不再整组包一层。 */}
           <div className="flex-shrink-0">
             {appId === "codex" &&
-              provider.meta?.providerType === "qoder_sdk" && (
+              ["qoder_sdk", "qoder_cn"].includes(
+                provider.meta?.providerType ?? "",
+              ) && (
                 <div className="flex flex-wrap gap-2">
                   <QoderInferenceIdentity
                     providerId={provider.id}
                     sourceGeneration={readQoderSourceGeneration(provider)}
                     disabled={mutationsDisabled}
                   />
-                  <QoderDailyClaim
-                    providerId={provider.id}
-                    disabled={mutationsDisabled}
-                  />
+                  {provider.meta?.providerType === "qoder_sdk" ? (
+                    <QoderDailyClaim
+                      providerId={provider.id}
+                      disabled={mutationsDisabled}
+                    />
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      CN 签到接口尚未验证
+                    </span>
+                  )}
                 </div>
               )}
             <ProviderActions

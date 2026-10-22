@@ -2591,7 +2591,15 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
         Some(state) => state.db.clone(),
         None => return owner::IdentityActionResult::unavailable(),
     };
-    let transport = match owner::transport::FixedInternationalTransport::new() {
+    let source = match request.declaration.source {
+        crate::services::provider::qoder_daily::http::CredentialSource::InternationalQoderPat => {
+            owner::SourceKind::InternationalQoderPat
+        }
+        crate::services::provider::qoder_daily::http::CredentialSource::ChinaQoderPat => {
+            owner::SourceKind::ChinaQoderPat
+        }
+    };
+    let transport = match owner::transport::FixedRegionTransport::for_source(source) {
         Ok(transport) => transport,
         Err(_) => return owner::IdentityActionResult::unavailable(),
     };
@@ -2608,11 +2616,11 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
                     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
                     let (message, accept) = match summary.kind {
                         owner::IdentityConfirmationKind::Recover => (
-                            format!("供应商“{}”上次身份请求的结果尚未确认。继续将放弃这一次本地尝试，并用当前已声明的国际版 PAT 重新建立身份。不会重发旧刷新请求。", summary.provider_name),
+                            format!("供应商“{}”上次身份请求的结果尚未确认。继续将放弃这一次本地尝试，并用当前已声明区域的 PAT 重新建立身份。不会重发旧刷新请求。", summary.provider_name),
                             "重新建立身份",
                         ),
                         owner::IdentityConfirmationKind::Rebind => (
-                            format!("确定更换供应商“{}”绑定的推理身份吗？这会退役当前派生凭据，使用当前已声明的国际版 PAT 验证新身份，并生成新的推理设备标识。", summary.provider_name),
+                            format!("确定更换供应商“{}”绑定的推理身份吗？这会退役当前派生凭据，使用当前已声明区域的 PAT 验证新身份，并生成新的推理设备标识。", summary.provider_name),
                             "更换身份",
                         ),
                     };

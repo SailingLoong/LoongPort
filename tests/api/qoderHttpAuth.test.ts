@@ -8,6 +8,7 @@ const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 const context: QoderHttpIdentityContext = {
+  source: "internationalQoderPat",
   providerId: "provider-a",
   credentialGeneration: "displayed-source-generation",
   status: "unestablished",
@@ -79,4 +80,23 @@ it("preserves the safe closed-gate unavailable context without invoking an actio
     unavailable,
   );
   expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it("carries the backend CN source declaration without substituting international", async () => {
+  invoke.mockResolvedValue({ status: "cancelled" });
+  await qoderHttpAuthApi.action(
+    { ...context, source: "chinaQoderPat" },
+    "establish",
+  );
+  expect(invoke.mock.calls[0][1].request.declaration.source).toBe(
+    "chinaQoderPat",
+  );
+});
+
+it("refuses to invent a source declaration when backend context has no realm", async () => {
+  invoke.mockResolvedValue({ status: "cancelled" });
+  await expect(
+    qoderHttpAuthApi.action({ ...context, source: null }, "establish"),
+  ).rejects.toThrow();
+  expect(invoke).not.toHaveBeenCalled();
 });

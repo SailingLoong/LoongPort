@@ -1743,7 +1743,10 @@ impl RequestForwarder {
                 .map_err(|_| ProxyError::ConfigError("qoder_runtime_admission_failed".into()))?
         };
         let outbound_model = chat["model"].as_str().map(str::to_owned);
-        let transport = crate::services::provider::qoder_http_auth::transport::FixedInternationalTransport::new()
+        let transport = crate::services::provider::qoder_http_auth::transport::FixedRegionTransport::for_source(
+            crate::services::provider::qoder_http_auth::SourceKind::from_provider(provider)
+                .map_err(|_| ProxyError::ConfigError("qoder_http_source_unavailable".into()))?
+        )
             .map_err(|_| ProxyError::ConfigError("qoder_http_transport_unavailable".into()))?;
         let (dispatch, response_lease) = self
             .router

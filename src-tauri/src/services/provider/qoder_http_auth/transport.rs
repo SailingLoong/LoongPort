@@ -1,6 +1,7 @@
-//! Fixed International HTTP authentication. Protocol source: Magpie cdf45137,
+//! Fixed region-bound PAT HTTP authentication. Protocol source: Magpie cdf45137,
 //! openapi 167-180, PAT exchange/userinfo 308-365, refreshJob 383-395.
-//! No alternate host, CN/VPC, device flow, PAT fallback, retry, or logging.
+//! CN endpoint facts: minglu6/dsh-provider-qoder src/pat.ts and src/cosy.ts (MIT).
+//! No caller host, VPC, native browser flow, fallback, retry, or logging.
 use super::*;
 use crate::services::provider::qoder_auth_http;
 use reqwest::{header, Method, Url};
@@ -9,8 +10,9 @@ use std::time::Duration;
 const MAX_BYTES: usize = 1024 * 1024;
 const DAY_MS: i64 = 86_400_000;
 
-pub(crate) struct FixedInternationalTransport {
+pub(crate) struct FixedRegionTransport {
     client: reqwest::Client,
+    source: SourceKind,
     #[cfg(test)]
     test_origin: Option<Url>,
 }
@@ -51,14 +53,15 @@ impl Drop for SensitiveJson {
         clear(&mut self.0);
     }
 }
-impl FixedInternationalTransport {
-    pub(crate) fn new() -> Result<Self, AppError> {
+impl FixedRegionTransport {
+    pub(crate) fn for_source(source: SourceKind) -> Result<Self, AppError> {
         let client = qoder_auth_http::client_builder()
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|_| denied("transport_unavailable"))?;
         Ok(Self {
             client,
+            source,
             #[cfg(test)]
             test_origin: None,
         })
@@ -68,7 +71,7 @@ impl FixedInternationalTransport {
         if let Some(origin) = &self.test_origin {
             return Ok(origin.clone());
         }
-        Url::parse(ORIGIN).map_err(|_| ())
+        Url::parse(self.source.origin()).map_err(|_| ())
     }
     /// The only alternate-origin factory is absent from production builds.
     #[cfg(test)]
@@ -90,6 +93,7 @@ impl FixedInternationalTransport {
             .map_err(|_| ())?;
         Ok(Self {
             client,
+            source: SourceKind::InternationalQoderPat,
             test_origin: Some(origin),
         })
     }
@@ -105,6 +109,12 @@ impl FixedInternationalTransport {
             .client
             .request(endpoint.method(), url.clone())
             .header(header::ACCEPT, "application/json");
+        if self.source == SourceKind::ChinaQoderPat {
+            request = request
+                .header("Cosy-Version", "1.0.1")
+                .header("Cosy-ClientType", "5")
+                .header(header::USER_AGENT, "LoongPort");
+        }
         if let Some(bearer) = bearer {
             request = request.bearer_auth(bearer);
         }
@@ -155,7 +165,7 @@ impl FixedInternationalTransport {
                 Some(SensitiveJson(qoder_auth_http::pat_exchange_body(pat))),
             )
             .await?;
-        let tokens = parse_exchange(&exchange.0, received_at)?;
+        let tokens = parse_exchange_for_source(&self.source, &exchange.0, received_at)?;
         let (userinfo, _) = self
             .request(Endpoint::Userinfo, Some(&tokens.access_token), None)
             .await?;
@@ -179,7 +189,10 @@ impl FixedInternationalTransport {
         parse_refresh(&response.0, received_at)
     }
 }
-impl AuthTransport for FixedInternationalTransport {
+impl AuthTransport for FixedRegionTransport {
+    fn source_kind(&self) -> SourceKind {
+        self.source.clone()
+    }
     fn exchange_and_identify<'a>(
         &'a self,
         pat: &'a str,
@@ -233,6 +246,21 @@ fn exchange_expiry(body: &Value, now: i64) -> Result<i64, ()> {
         }
     }
     relative_expiry(body, now)
+}
+fn parse_exchange_for_source(source: &SourceKind, body: &Value, now: i64) -> Result<TokenPair, ()> {
+    if *source == SourceKind::InternationalQoderPat {
+        return parse_exchange(body, now);
+    }
+    // Deliberately narrower than the official CLI's mixed-family aliases.
+    // This owner handles only independently supplied CN PAT job credentials,
+    // never imported device/login tokens or their refresh ownership.
+    let tokens = TokenPair {
+        access_token: token(body.get("token"), false)?,
+        refresh_token: token(body.get("refresh_token"), true)?,
+        expires_at_ms: exchange_expiry(body, now)?,
+    };
+    validate_tokens(&tokens, now).map_err(|_| ())?;
+    Ok(tokens)
 }
 fn parse_exchange(body: &Value, now: i64) -> Result<TokenPair, ()> {
     let tokens = TokenPair {

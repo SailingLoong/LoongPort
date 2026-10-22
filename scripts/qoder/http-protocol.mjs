@@ -43,9 +43,11 @@ function userBlob(u) {
 // cosyHeaders signs a call to url whose body, in its wire form, is body.
 function cosyHeaders(url, u, body, ts = Math.floor(Date.now() / 1000)) {
   if (!u?.machineId) throw new Error("Qoder: the account has no machine id; sign in again")
+  const cn = u.region === "cn"
+  const version = cn ? "1.0.0" : COSY_VERSION
   const blob = userBlob(u)
   const payload = Buffer.from(
-    JSON.stringify({ version: "v1", requestId: hexID(), info: blob.info, cosyVersion: COSY_VERSION, ideVersion: "" }),
+    JSON.stringify({ version: "v1", requestId: hexID(), info: blob.info, cosyVersion: version, ideVersion: "" }),
   ).toString("base64")
   let path = new URL(url).pathname
   if (path.startsWith("/algo")) path = path.slice(5)
@@ -56,10 +58,10 @@ function cosyHeaders(url, u, body, ts = Math.floor(Date.now() / 1000)) {
     "Accept-Encoding": "identity",
     "Content-Type": "application/json",
     Authorization: `Bearer COSY.${payload}.${sig}`,
-    "Cosy-Business-Product": "app",
+    "Cosy-Business-Product": cn ? "cli" : "app",
     "Cosy-Business-Type": "agent",
     "Cosy-ClientIp": m,
-    "Cosy-ClientType": "10",
+    "Cosy-ClientType": cn ? "5" : "10",
     "Cosy-Data-Policy": "disagree",
     "Cosy-Date": String(ts),
     "Cosy-Key": blob.key,
@@ -69,8 +71,9 @@ function cosyHeaders(url, u, body, ts = Math.floor(Date.now() / 1000)) {
     "Cosy-MachineOS": machineOS(),
     "Cosy-Scene": "app",
     "Cosy-User": u.uid,
-    "Cosy-Version": COSY_VERSION,
+    "Cosy-Version": version,
     "Login-Version": "v2",
+    ...(cn ? {"Cosy-Bodyhash": createHash("md5").update(body).digest("hex"), "Cosy-Bodylength": String(Buffer.byteLength(body)), "Cosy-Sigpath": path, "Cosy-Organization-Id": "", "Cosy-Organization-Tags": "", "X-Request-Id": randomUUID()} : {}),
   }
 }
 
@@ -393,7 +396,7 @@ function windowFor(chat, m, reply = 0) {
 
 // qoderBody is the plaintext agent_chat_generation takes for a chat
 // completion request, for model m.
-function qoderBody(chat, m) {
+function qoderBody(chat, m, region = "international") {
   const system = (chat.messages ?? []).filter((x) => x.role === "system" || x.role === "developer").map((x) => textOf(x.content)).filter(Boolean).join("\n\n")
   const tools = chat.tool_choice !== "none" ? (chat.tools ?? []).filter((t) => t?.type === "function" && t.function?.name) : []
   let sysText = system ? QODER_SYS + "\n\n" + system : QODER_SYS
@@ -413,6 +416,19 @@ function qoderBody(chat, m) {
     model_config: m.config,
     system: [sys],
     messages: [{ role: "system", content: [sys] }, ...qoderMessages(chat.messages ?? [])],
+  }
+  if (region === "cn") {
+    // CN CLI wire fields; independently mapped onto the existing request serializer.
+    // Protocol facts: dsh-provider-qoder src/adapter.ts (MIT), no credential/cache reuse.
+    const lastUser = [...(chat.messages ?? [])].reverse().find(x => x.role === "user");
+    const prompt = textOf(lastUser?.content);
+    Object.assign(body, {
+      request_id: randomUUID(), request_set_id: randomUUID(), chat_record_id: randomUUID(), session_id: randomUUID(),
+      stream: true, chat_task: "FREE_INPUT", is_reply: true, is_retry: false, source: 1, version: "3",
+      session_type: "qodercli", code_language: "", chat_prompt: "", image_urls: null, aliyun_user_type: "",
+      business: {...body.business, product: "cli", version: "1.0.0"},
+      chat_context: {chatPrompt: "", imageUrls: null, extra: {context: [], modelConfig: m.config, originalContent: prompt}, features: [], text: prompt},
+    });
   }
   if (tools.length)
     body.tools = tools.map((t) => ({
@@ -943,7 +959,7 @@ async function answer(res, chat, { abortUpstream = () => {}, releaseListener = (
 function failure(status, text) { const result = classifyFailure(status, text); return {status: result.status, message: "QODER_UPSTREAM_REJECTED"}; }
 
 // New local admission/transport boundary. No auth lifecycle or endpoint override.
-const INTERNATIONAL_API = 'https://api3.qoder.sh';
+const GATEWAYS = Object.freeze({international:'https://api3.qoder.sh',cn:'https://gateway.qoder.com.cn'});
 export const MAX_RESPONSE_BODY_BYTES = 128 * 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_MODEL_BYTES = 1024 * 1024;
@@ -955,7 +971,7 @@ const fixedResponse = (status, code) => Response.json({error:{type:'qoder_error'
 const fixedError = code => Object.assign(new Error(code),{code});
 
 export function admit(snapshot, chat) {
-  if (!only(snapshot,['access','uid','machineId','expiry','region']) || snapshot.region !== 'international') return 'QODER_INVALID_SNAPSHOT';
+  if (!only(snapshot,['access','uid','machineId','expiry','region']) || !Object.hasOwn(GATEWAYS,snapshot.region)) return 'QODER_INVALID_SNAPSHOT';
   if (!boundedString(snapshot.access,16384) || !boundedString(snapshot.uid,1024) || !boundedString(snapshot.machineId,1024)) return 'QODER_INVALID_SNAPSHOT';
   if (!Number.isSafeInteger(snapshot.expiry) || snapshot.expiry <= Date.now()) return 'QODER_SNAPSHOT_EXPIRED';
   if (!only(chat,['model','messages','tools','tool_choice','parallel_tool_calls','stream','max_tokens','max_completion_tokens','reasoning_effort']) || !boundedString(chat.model,256)) return 'QODER_INVALID_REQUEST';
@@ -1031,16 +1047,18 @@ export async function complete(snapshot, chat, {signal}={}) {
   try {
     if(controller.signal.aborted)throw fixedError('QODER_REQUEST_ABORTED');
     // One listing, one POST at most. No stale-catalog retry and no cross-request cache.
-    const catalogURL=INTERNATIONAL_API+MODELS_PATH;
+    const gateway=GATEWAYS[snapshot.region];
+    const catalogURL=gateway+(snapshot.region==='cn'?'/algo/api/v2/model/list':MODELS_PATH);
     const listing=await fetch(catalogURL,{headers:cosyHeaders(catalogURL,snapshot,''),signal:controller.signal,redirect:'error'});
     if(!listing.ok){await listing.body?.cancel();return fixedResponse(502,'QODER_MODEL_DIRECTORY_UNAVAILABLE');}
     const limited=new Response(boundedBody(listing.body,MAX_MODEL_BYTES,abort));
-    const models=modelInfos(await limited.json());
+    const listingBody=await limited.json();
+    const models=modelInfos(snapshot.region==='cn'?{chat:listingBody.chat}:listingBody);
     const m=models.find(m=>m.key===chat.model);
     if(!m)return fixedResponse(400,'QODER_MODEL_UNAVAILABLE');
     if(controller.signal.aborted)throw fixedError('QODER_REQUEST_ABORTED');
-    const url=INTERNATIONAL_API+CHAT_PATH;
-    const wire=encodeBody(JSON.stringify(qoderBody(chat,m)));
+    const url=gateway+CHAT_PATH;
+    const wire=encodeBody(JSON.stringify(qoderBody(chat,m,snapshot.region)));
     const headers={...cosyHeaders(url,snapshot,wire),Accept:'text/event-stream','Cache-Control':'no-cache','X-Model-Key':m.key,'X-Model-Source':m.source};
     submitted=true;
     const upstream=await fetch(url,{method:'POST',headers,body:wire,signal:controller.signal,redirect:'error'});

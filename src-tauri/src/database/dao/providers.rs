@@ -720,7 +720,10 @@ impl Database {
     ) {
         use crate::services::provider::qoder_daily::{self, State};
         let is_qoder = app_type == "codex"
-            && next.meta.as_ref().and_then(|m| m.provider_type.as_deref()) == Some("qoder_sdk");
+            && matches!(
+                next.meta.as_ref().and_then(|m| m.provider_type.as_deref()),
+                Some("qoder_sdk" | "qoder_cn")
+            );
         let owned = current
             .and_then(|p| p.meta.as_ref())
             .and_then(|m| m.qoder_campaign_state.clone());

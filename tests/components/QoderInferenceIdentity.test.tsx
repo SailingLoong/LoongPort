@@ -18,6 +18,7 @@ vi.mock("@/lib/api/qoderHttpAuth", () => ({ qoderHttpAuthApi: api }));
 vi.mock("@tauri-apps/plugin-dialog", () => nativeDialog);
 
 const unestablished: QoderHttpIdentityContext = {
+  source: "internationalQoderPat",
   providerId: "fixture",
   credentialGeneration: "generation-a",
   status: "unestablished",
@@ -31,7 +32,7 @@ const ready: QoderHttpIdentityContext = {
   allowedActions: ["rebind"],
 };
 const labels = {
-  establish: "声明国际版 PAT 并建立",
+  establish: "声明对应区域 PAT 并建立",
   recover: "恢复推理身份",
   rebind: "重新绑定账号",
 };
@@ -602,4 +603,30 @@ describe("original Qoder Provider inference identity", () => {
       "establish",
     );
   });
+});
+
+it("requires explicit independent CN PAT consent and carries only the backend CN source", async () => {
+  const cn: QoderHttpIdentityContext = {
+    ...unestablished,
+    source: "chinaQoderPat",
+  };
+  api.context.mockResolvedValue(cn);
+  render(<QoderInferenceIdentity providerId="fixture" />);
+  await open();
+  expect(
+    await screen.findByText(/本人独立授权用于 LoongPort 的 Qoder CN PAT/),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: labels.establish })).toBeDisabled();
+  expect(api.action).not.toHaveBeenCalled();
+  await declare();
+  await submit();
+  expect(api.action).toHaveBeenCalledExactlyOnceWith(cn, "establish");
+});
+it("cannot act on missing source context even when a legacy response claims actions are allowed", async () => {
+  api.context.mockResolvedValue({ ...unestablished, source: null });
+  render(<QoderInferenceIdentity providerId="fixture" />);
+  await open();
+  await declare();
+  expect(screen.getByRole("button", { name: labels.establish })).toBeDisabled();
+  expect(api.action).not.toHaveBeenCalled();
 });

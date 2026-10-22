@@ -23,12 +23,13 @@ export function QoderAccountPanel() {
     queryFn: async () => ({ providers: await providersApi.getAll("codex") }),
   });
   const accounts = Object.values(query.data?.providers ?? {}).filter(
-    (provider) => provider.meta?.providerType === "qoder_sdk",
+    (provider) =>
+      ["qoder_sdk", "qoder_cn"].includes(provider.meta?.providerType ?? ""),
   );
   return (
     <section className="space-y-4" aria-label="Qoder 账号管理">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="font-semibold">Qoder 国际版账号</h2>
+        <h2 className="font-semibold">Qoder 账号（国际版 / CN）</h2>
         <Button
           variant="outline"
           disabled={!active || query.isFetching}
@@ -57,8 +58,8 @@ export function QoderAccountPanel() {
         </div>
       ) : accounts.length === 0 ? (
         <p>
-          尚无已保存的 Qoder 配置。原配置由 Codex 应用的 Qoder
-          国际版供应商入口管理。
+          尚无已保存的 Qoder 配置。原配置由 Codex 应用的 Qoder 国际版或 CN
+          供应商入口管理。
         </p>
       ) : (
         <div className="space-y-3">
@@ -70,16 +71,27 @@ export function QoderAccountPanel() {
                 className="rounded-xl border p-4 space-y-3"
               >
                 <h3 className="font-medium">{provider.name}</h3>
+                <p className="text-sm text-muted-foreground">
+                  {provider.meta?.providerType === "qoder_cn"
+                    ? "Qoder CN · 独立 PAT"
+                    : "Qoder 国际版"}
+                </p>
                 <div className="flex flex-wrap gap-2">
                   <QoderInferenceIdentity
                     providerId={provider.id}
                     sourceGeneration={generation}
                     disabled={!active || query.isFetching}
                   />
-                  <QoderDailyClaim
-                    providerId={provider.id}
-                    disabled={!active || query.isFetching}
-                  />
+                  {provider.meta?.providerType === "qoder_sdk" ? (
+                    <QoderDailyClaim
+                      providerId={provider.id}
+                      disabled={!active || query.isFetching}
+                    />
+                  ) : (
+                    <span>
+                      CN 原生浏览器登录与签到尚未接通；当前为独立 CN PAT 模式。
+                    </span>
+                  )}
                 </div>
               </article>
             );

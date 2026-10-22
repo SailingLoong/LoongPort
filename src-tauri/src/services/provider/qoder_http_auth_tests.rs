@@ -825,3 +825,125 @@ fn source_digest_remains_stable_lowercase_hex_with_sha2_011() {
         "0ae30de816667fc04ebbe678b2420287e177cb80d8f119ca5a51eb81d758eb8d"
     );
 }
+
+#[test]
+fn cn_provider_is_a_distinct_original_source_and_cross_region_changes_retire_snapshot() {
+    let (db, international) = fixture();
+    let old = establish_ready(&db, &international, NOW + 900_000);
+    let mut cn = selected_provider(&db);
+    cn.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    db.save_provider("codex", &cn).unwrap();
+    let cn = selected_provider(&db);
+    let source = SourceBinding::from_provider(&cn);
+    assert!(source.is_ok(), "CN must be admitted as its own source");
+    let (source, _) = source.unwrap();
+    assert_eq!(source.origin, "https://openapi.qoder.com.cn");
+    assert!(source.admit(&international).is_err());
+    assert!(db.check_qoder_http_snapshot(&old, NOW).is_err());
+}
+
+struct CnWaitingTransport(WaitingTransport);
+impl AuthTransport for CnWaitingTransport {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::ChinaQoderPat
+    }
+    fn exchange_and_identify<'a>(
+        &'a self,
+        pat: &'a str,
+        machine: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Established, ()>> + Send + 'a>> {
+        self.0.exchange_and_identify(pat, machine)
+    }
+    fn refresh<'a>(
+        &'a self,
+        token: &'a str,
+        identity: &'a Identity,
+    ) -> Pin<Box<dyn Future<Output = Result<TokenPair, ()>> + Send + 'a>> {
+        self.0.refresh(token, identity)
+    }
+}
+#[tokio::test]
+async fn cn_refresh_reuses_one_owner_lock_and_never_submits_to_international_transport() {
+    let (db, _) = fixture();
+    let mut provider = selected_provider(&db);
+    provider.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    db.save_provider("codex", &provider).unwrap();
+    let mut declaration = declaration(&db);
+    declaration.source = CredentialSource::ChinaQoderPat;
+    let snapshot = establish_ready(&db, &declaration, NOW + 1);
+    assert_eq!(snapshot.region(), "cn");
+    let wrong = WaitingTransport {
+        calls: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+    };
+    has_non_retryable(acquire(&db, &selected_provider(&db), &wrong, || NOW).await);
+    assert_eq!(wrong.calls.load(Ordering::SeqCst), 0);
+    let transport = CnWaitingTransport(wrong);
+    let selected = selected_provider(&db);
+    let first = acquire(&db, &selected, &transport, || NOW);
+    let second = async {
+        transport.0.entered.notified().await;
+        has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
+        assert_eq!(transport.0.calls.load(Ordering::SeqCst), 1);
+        transport.0.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(first, second);
+    let refreshed = result.unwrap();
+    assert_eq!(refreshed.region(), "cn");
+    assert!(db.check_qoder_http_snapshot(&refreshed, NOW).is_ok());
+}
+
+#[test]
+fn same_pat_and_uid_in_two_realms_keep_distinct_original_account_owners() {
+    let (db, international) = fixture();
+    let international_snapshot = establish_ready(&db, &international, NOW + 900_000);
+    let mut cn = selected_provider(&db);
+    cn.id = "separate-cn-account".into();
+    cn.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    // Deliberately identical synthetic PAT and returned UID in both realms.
+    db.save_provider("codex", &cn).unwrap();
+    let cn = db.get_provider_by_id(&cn.id, "codex").unwrap().unwrap();
+    let (cn_source, _) = SourceBinding::from_provider(&cn).unwrap();
+    let mut cn_declaration = PatDeclaration {
+        provider_id: cn.id.clone(),
+        credential_generation: cn_source.credential_generation.clone(),
+        source: CredentialSource::InternationalQoderPat,
+    };
+    assert!(reserve_action(&db, &cn_declaration, IdentityAction::Establish).is_err());
+    cn_declaration.source = CredentialSource::ChinaQoderPat;
+    let cn_snapshot = establish_ready(&db, &cn_declaration, NOW + 900_000);
+    assert_eq!(cn_snapshot.uid(), international_snapshot.uid());
+    assert_ne!(
+        cn_snapshot.machine_id(),
+        international_snapshot.machine_id()
+    );
+    assert_eq!(cn_snapshot.region(), "cn");
+    assert_eq!(international_snapshot.region(), "international");
+    assert_eq!(cn_source.origin, "https://openapi.qoder.com.cn");
+    assert!(db.check_qoder_http_snapshot(&cn_snapshot, NOW).is_ok());
+    assert!(db
+        .check_qoder_http_snapshot(&international_snapshot, NOW)
+        .is_ok());
+    assert!(check_selected_provider(&cn, &international_snapshot).is_err());
+    assert!(check_selected_provider(&selected_provider(&db), &cn_snapshot).is_err());
+    let mut forged = cn_source;
+    forged.origin = ORIGIN.into();
+    assert!(!forged.validate());
+}
+
+#[test]
+fn saved_legacy_international_source_never_defaults_to_cn() {
+    let (db, declaration) = fixture();
+    let binding = source(&db);
+    let encoded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(encoded["source"], "InternationalQoderPat");
+    let old: SourceBinding = serde_json::from_value(encoded.clone()).unwrap();
+    assert!(old.source == SourceKind::InternationalQoderPat);
+    assert_eq!(old.origin, ORIGIN);
+    assert!(old.admit(&declaration).is_ok());
+    let mut missing = encoded;
+    missing.as_object_mut().unwrap().remove("source");
+    assert!(serde_json::from_value::<SourceBinding>(missing).is_err());
+}

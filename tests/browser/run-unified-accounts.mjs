@@ -341,7 +341,7 @@ try {
               });
               await qoderAccounts
                 .getByRole("heading", {
-                  name: "Qoder 国际版账号",
+                  name: "Qoder 账号（国际版 / CN）",
                   exact: true,
                 })
                 .waitFor();

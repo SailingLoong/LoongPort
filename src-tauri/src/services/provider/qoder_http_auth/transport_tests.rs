@@ -103,8 +103,8 @@ impl LocalServer {
             thread: Some(thread),
         }
     }
-    fn transport(&self) -> FixedInternationalTransport {
-        FixedInternationalTransport::synthetic_server(self.url.clone()).unwrap()
+    fn transport(&self) -> FixedRegionTransport {
+        FixedRegionTransport::synthetic_server(self.url.clone()).unwrap()
     }
     async fn finish(mut self) -> Vec<Seen> {
         // Let the current-thread runtime finish dropping rejected HTTP responses.
@@ -444,6 +444,27 @@ fn test_origin_factory_cannot_target_an_external_host_or_url_credentials() {
         "http://127.0.0.1/path",
         "http://127.0.0.1/?query=1",
     ] {
-        assert!(FixedInternationalTransport::synthetic_server(Url::parse(url).unwrap()).is_err());
+        assert!(FixedRegionTransport::synthetic_server(Url::parse(url).unwrap()).is_err());
     }
+}
+
+#[test]
+fn cn_exchange_rejects_native_aliases_without_changing_international_compatibility() {
+    let now = 1_000_000;
+    for field in ["device_token", "access_token"] {
+        let mut body = serde_json::json!({ "expires_in": 600000 });
+        body[field] = serde_json::json!("synthetic-alias");
+        assert!(
+            parse_exchange_for_source(&SourceKind::ChinaQoderPat, &body, now).is_err(),
+            "CN PAT exchange must not infer a native credential family from {field}"
+        );
+        assert!(parse_exchange_for_source(&SourceKind::InternationalQoderPat, &body, now).is_ok());
+    }
+    let body = serde_json::json!({"token":"synthetic-job", "refresh_token":"synthetic-job-refresh", "expires_in":600000});
+    let cn = parse_exchange_for_source(&SourceKind::ChinaQoderPat, &body, now).unwrap();
+    assert_eq!(cn.access_token, "synthetic-job");
+    assert_eq!(cn.refresh_token, "synthetic-job-refresh");
+    let alias_refresh = serde_json::json!({"token":"synthetic-job", "refreshToken":"native-alias", "expires_in":600000});
+    let cn = parse_exchange_for_source(&SourceKind::ChinaQoderPat, &alias_refresh, now).unwrap();
+    assert!(cn.refresh_token.is_empty());
 }
