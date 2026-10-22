@@ -512,3 +512,29 @@ it("ignores an old app-specific save after opening a universal draft", async () 
     "keep universal draft",
   );
 });
+
+it("passes the MiniMax Code native key and does not offer universal providers", async () => {
+  mockFormReady = true;
+  mockFormValues = {
+    name: "MiniMax custom",
+    websiteUrl: "",
+    providerKey: "native-key",
+    settingsConfig: JSON.stringify({
+      kind: "custom",
+      enabled: true,
+      api: "openai-completions",
+      options: {},
+      models: {},
+    }),
+  };
+  const onSubmit = vi.fn();
+  render(
+    <AddProviderForm appId="mcode" onSubmit={onSubmit} onDone={vi.fn()} />,
+  );
+  expect(
+    screen.queryByRole("tab", { name: "provider.tabUniversal" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "common.add" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][0].providerKey).toBe("native-key");
+});

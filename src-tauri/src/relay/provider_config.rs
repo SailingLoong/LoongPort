@@ -369,7 +369,7 @@ fn api_key_locations(app_type: &AppType) -> Option<&'static [&'static [&'static 
         // 开头的 TOML 专用分支，这里归 None。
         AppType::GrokBuild => None,
         // Pi 的 provider 形态与中转站链路无关：归 None，不参与 sk 提取/判等。
-        AppType::Pi => None,
+        AppType::Pi | AppType::Mcode => None,
     }
 }
 
@@ -1252,10 +1252,10 @@ mod tests {
             // Pi（上游 3.19.x 新增）还没接入中转站链路：在验证过它的配置形状前，
             // settings_config_for 对它返回 None —— do_provision 的闸会明确拦截，
             // 而不是静默生成一份没验证过的配置。这正是上面注释说的那个表达位。
-            if matches!(app_type, AppType::Pi) {
+            if matches!(app_type, AppType::Pi | AppType::Mcode) {
                 assert!(
                     settings_config_for(&app_type, "k", "n", "https://x.example", "m").is_none(),
-                    "Pi 还没验证过中转站配置形状，应该显式返回 None"
+                    "{app_type:?} 未接入中转站配置，应该显式返回 None"
                 );
                 continue;
             }

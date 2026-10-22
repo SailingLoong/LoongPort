@@ -1134,7 +1134,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "zcode": "ZCode"
+    "zcode": "ZCode",
+    "mcode": "MiniMax Code"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -1646,7 +1647,9 @@
     "removeHeader": "ヘッダーを削除",
     "noHeaders": "カスタムヘッダーはありません",
     "extraOptions": "追加オプション",
-    "extraOptionsHint": "timeout、setCacheKey などの SDK オプションを設定。値は自動的に適切な型（数値、真偽値など）に変換されます。",
+    "extraOptionsHint": "JSON で型を指定します。false と 123 は真偽値と数値、\"false\" と \"123\" は文字列です。その他の通常のテキストは文字列のままです。",
+    "reservedOptionKey": "baseURL、apiKey、headers は専用フィールドを使用してください。追加オプションで上書きできません。",
+    "duplicateOptionKey": "同名の追加オプションがすでに存在します。別の名前を使用してください。",
     "addExtraOption": "追加",
     "extraOptionKey": "キー名",
     "extraOptionValue": "値",
@@ -4386,6 +4389,14 @@
     "keep": "{{selected}} を維持",
     "adopt": "{{requested}} に切り替える",
     "switchFailed": "モデルの切り替えに失敗しました"
+  },
+  "mcode": {
+    "restore": "前の設定に復元",
+    "restoreConfirm": "最後に LoongPort が書き込む前の config.yaml に復元しますか？復元後は MiniMax Code で確認してください。外部での変更は上書きしません。",
+    "restoreFailed": "設定を復元できませんでした。",
+    "restored": "設定を復元しました。MiniMax Code で確認してください。",
+    "rereadHint": "キャンセルして再読み込みしてください。外部での変更は上書きできません。",
+    "nativeDefaultsHint": "カスタムプロバイダーを管理します。既定・軽量モデルは MiniMax Code で選択してください。インポートは既存のカスタムプロバイダーのみを読み込みます。"
   },
   "zcode": {
     "description": "個人用プロバイダーとモデルを設定し、保存済みの個人 ZCode アカウントを管理します。既定モデルは ZCode で選択してください。",

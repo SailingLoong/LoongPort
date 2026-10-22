@@ -151,7 +151,15 @@ export function toOpencodeExtraOptions(
   const extra: Record<string, string> = {};
   for (const [k, v] of Object.entries(options || {})) {
     if (!isKnownOpencodeOptionKey(k)) {
-      extra[k] = typeof v === "string" ? v : JSON.stringify(v);
+      extra[k] = JSON.stringify(v);
+      if (typeof v === "string") {
+        try {
+          // Quote JSON-looking strings so a later row edit cannot coerce them.
+          JSON.parse(v);
+        } catch {
+          extra[k] = v;
+        }
+      }
     }
   }
   return extra;
@@ -163,3 +171,27 @@ export const normalizePricingSource = (
   value?: string,
 ): PricingModelSourceOption =>
   value === "request" || value === "response" ? value : "inherit";
+
+/** Shared by native MCode and OpenCode forms; unfinished row keys stay UI-only. */
+export function mergeOpencodeExtraOptionRows(
+  options: OpenCodeProviderConfig["options"],
+  rows: Record<string, string>,
+): void {
+  for (const key of Object.keys(options)) {
+    if (!isKnownOpencodeOptionKey(key)) delete options[key];
+  }
+  for (const [key, value] of Object.entries(rows)) {
+    const trimmedKey = key.trim();
+    if (
+      !trimmedKey ||
+      isKnownOpencodeOptionKey(trimmedKey) ||
+      key.startsWith(OPENCODE_EXTRA_OPTION_DRAFT_PREFIX)
+    )
+      continue;
+    try {
+      options[trimmedKey] = JSON.parse(value);
+    } catch {
+      options[trimmedKey] = value;
+    }
+  }
+}

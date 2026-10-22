@@ -359,4 +359,35 @@ describe("OpenCodeFormFields", () => {
       },
     });
   });
+  it.each(["apiKey", "baseURL", "headers"])(
+    "rejects reserved extra-option name %s and restores the original row key",
+    (key) => {
+      const onExtraOptionsChange = vi.fn();
+      renderOpenCodeForm({
+        extraOptions: { timeout: "123" },
+        onExtraOptionsChange,
+      });
+      const input = screen.getByDisplayValue("timeout");
+      fireEvent.change(input, { target: { value: key } });
+      fireEvent.blur(input);
+      expect(onExtraOptionsChange).not.toHaveBeenCalled();
+      expect(input).toHaveValue("timeout");
+    },
+  );
+  it.each(["second", " second "])(
+    "rejects duplicate extra-option key %s and preserves both rows",
+    (key) => {
+      const onExtraOptionsChange = vi.fn();
+      renderOpenCodeForm({
+        extraOptions: { first: "one", second: "two" },
+        onExtraOptionsChange,
+      });
+      const input = screen.getByDisplayValue("first");
+      fireEvent.change(input, { target: { value: key } });
+      fireEvent.blur(input);
+      expect(onExtraOptionsChange).not.toHaveBeenCalled();
+      expect(input).toHaveValue("first");
+      expect(screen.getByDisplayValue("second")).toBeInTheDocument();
+    },
+  );
 });

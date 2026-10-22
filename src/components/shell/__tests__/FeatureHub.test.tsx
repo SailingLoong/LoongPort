@@ -96,3 +96,11 @@ describe("FeatureHub", () => {
     expect(onUsage).toHaveBeenCalledOnce();
   });
 });
+
+it.each(["records", "resources"] as const)(
+  "does not expose unsupported MiniMax Code %s features",
+  (kind) => {
+    setup("mcode", kind);
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+  },
+);

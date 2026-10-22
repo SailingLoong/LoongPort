@@ -5,6 +5,7 @@ import type { ReactElement } from "react";
 import { http, HttpResponse } from "msw";
 import type { Provider } from "@/types";
 import { ProviderList } from "@/components/providers/ProviderList";
+import { providersApi } from "@/lib/api/providers";
 import { server } from "../msw/server";
 
 const TAURI_ENDPOINT = "http://tauri.local";
@@ -693,5 +694,63 @@ describe("ProviderList Component", () => {
     expect(useSortableMock).toHaveBeenCalledWith(
       expect.objectContaining({ disabled: true }),
     );
+  });
+});
+
+it("imports MiniMax Code explicitly even with existing rows and does not import on read", async () => {
+  const imported = vi
+    .spyOn(providersApi, "importDefault")
+    .mockResolvedValue(true);
+  const provider = createProvider({ id: "native-custom" });
+  useDragSortMock.mockReturnValue({
+    sortedProviders: [provider],
+    sensors: [],
+    handleDragEnd: vi.fn(),
+  });
+  renderWithQueryClient(
+    <ProviderList
+      providers={{ [provider.id]: provider }}
+      appId="mcode"
+      onSwitch={vi.fn()}
+      onEdit={vi.fn()}
+      onDelete={vi.fn()}
+      onDuplicate={vi.fn()}
+      onOpenWebsite={vi.fn()}
+    />,
+  );
+  expect(imported).not.toHaveBeenCalled();
+  fireEvent.click(
+    screen.getByRole("button", { name: "provider.importCurrent" }),
+  );
+  await waitFor(() => expect(imported).toHaveBeenCalledWith("mcode"));
+  imported.mockRestore();
+});
+
+it("uses MiniMax Code backend default-model ownership to protect live removal", () => {
+  const provider = createProvider({
+    id: "native-default",
+    presentation: createPresentation({
+      isDefaultModel: true,
+      canDelete: false,
+    }),
+  });
+  useDragSortMock.mockReturnValue({
+    sortedProviders: [provider],
+    sensors: [],
+    handleDragEnd: vi.fn(),
+  });
+  renderWithQueryClient(
+    <ProviderList
+      providers={{ [provider.id]: provider }}
+      appId="mcode"
+      onSwitch={vi.fn()}
+      onEdit={vi.fn()}
+      onDelete={vi.fn()}
+      onDuplicate={vi.fn()}
+      onOpenWebsite={vi.fn()}
+    />,
+  );
+  expect(providerCardRenderSpy.mock.lastCall?.[0]).toMatchObject({
+    isRemovalProtected: true,
   });
 });

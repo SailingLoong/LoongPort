@@ -1134,7 +1134,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "zcode": "ZCode"
+    "zcode": "ZCode",
+    "mcode": "MiniMax Code"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -1646,7 +1647,9 @@
     "removeHeader": "删除请求头",
     "noHeaders": "暂无自定义请求头",
     "extraOptions": "额外选项",
-    "extraOptionsHint": "配置额外的 SDK 选项，如 timeout、setCacheKey 等。值会自动解析类型（数字、布尔值等）。",
+    "extraOptionsHint": "按 JSON 明确类型：false、123 是布尔值和数字；字符串请填写 \"false\"、\"123\"。其他普通文本保留为字符串。",
+    "reservedOptionKey": "baseURL、apiKey 和 headers 请使用对应的专用字段，不可作为额外选项覆盖。",
+    "duplicateOptionKey": "已存在同名额外选项，请使用不同名称。",
     "addExtraOption": "添加",
     "extraOptionKey": "键名",
     "extraOptionValue": "值",
@@ -4386,6 +4389,14 @@
     "keep": "保持 {{selected}}",
     "adopt": "改用 {{requested}}",
     "switchFailed": "切换模型失败"
+  },
+  "mcode": {
+    "restore": "恢复上次配置",
+    "restoreConfirm": "恢复到上次 LoongPort 写入前的原生 config.yaml？恢复后请在 MiniMax Code 中检查。不会强制覆盖外部改动。",
+    "restoreFailed": "无法恢复配置。",
+    "restored": "已恢复配置，请在 MiniMax Code 中检查。",
+    "rereadHint": "请取消并重新读取后再试；不会强制覆盖外部变化。",
+    "nativeDefaultsHint": "这里管理自定义供应商；默认模型和轻量模型请在 MiniMax Code 中选择。导入只读取已有的自定义供应商。"
   },
   "zcode": {
     "description": "配置个人供应商和模型，管理已保存的个人 ZCode 账号。默认模型请在 ZCode 中选择。",

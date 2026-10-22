@@ -46,6 +46,7 @@ pub(crate) mod paperclip;
 #[allow(dead_code)]
 mod live;
 mod maintenance;
+mod mcode_config;
 mod mcp;
 // Pure mode models only; no startup/persistence/controller is registered.
 #[cfg(any(feature = "gui", test))]
@@ -1825,6 +1826,8 @@ pub fn run() {
             secrets::rewrap::rotate_secret_key,
             secrets::export::export_plaintext_secrets,
             commands::get_providers,
+            commands::get_mcode_backup,
+            commands::restore_mcode_backup,
             commands::get_application_overview,
             commands::get_service_sources,
             commands::bind_vendor_service_source,

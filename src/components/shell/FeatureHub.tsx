@@ -109,13 +109,14 @@ export function FeatureHub({
               ]
             : []),
         ];
+  const visibleEntries = appId === "mcode" ? [] : entries;
   return (
     <div className="page-content">
       <p className="mb-6 text-sm leading-6 text-muted-foreground">
         {t(`client.${kind}Description`)}
       </p>
       <div className="grid gap-4 md:grid-cols-2">
-        {entries.map((entry) => {
+        {visibleEntries.map((entry) => {
           const Icon = entry.icon;
           return (
             <Button

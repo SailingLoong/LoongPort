@@ -254,8 +254,8 @@ impl Provider {
                 crate::pi_config::provider_base_url(settings).unwrap_or_default(),
                 str_at(settings.get("apiKey")),
             ),
-            // OpenCode (OMO) nests credentials under `options` (the SDK options object).
-            AppType::OpenCode => {
+            // OpenCode and Mcode nest credentials under `options`.
+            AppType::OpenCode | AppType::Mcode => {
                 let options = settings.get("options");
                 (
                     str_at(options.and_then(|o| o.get("baseURL"))),
@@ -478,6 +478,13 @@ impl LocalProxyRequestOverrides {
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
+    /// Read-only native revision returned to the editor for conflict detection.
+    #[serde(
+        rename = "mcodeConfigRevision",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mcode_config_revision: Option<String>,
     /// Backend-owned Qoder claim state; generic saves never trust this input.
     #[serde(
         default,
@@ -1738,6 +1745,25 @@ mod tests {
                 "https://api.example.com/v1".to_string(),
                 "sk-pi".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn resolve_credentials_mcode_options() {
+        let provider = provider_with(json!({
+            "options": { "baseURL": "https://api.example.com/v1/", "apiKey": "mcode-test-key" },
+            "env": { "ANTHROPIC_AUTH_TOKEN": "unrelated-key" }
+        }));
+        assert_eq!(
+            provider.resolve_usage_credentials(&AppType::Mcode),
+            (
+                "https://api.example.com/v1".to_string(),
+                "mcode-test-key".to_string()
+            )
+        );
+        assert_eq!(
+            provider_with(json!({})).resolve_usage_credentials(&AppType::Mcode),
+            (String::new(), String::new())
         );
     }
 

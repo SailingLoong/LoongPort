@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import {
   getModelExtraFields,
   isKnownModelKey,
+  isKnownOpencodeOptionKey,
   OPENCODE_EXTRA_OPTION_DRAFT_PREFIX,
 } from "./helpers/opencodeFormUtils";
 import { RequestHeadersEditor } from "./RequestHeadersEditor";
@@ -154,6 +155,7 @@ function ModelOptionKeyInput({
 }
 
 interface OpenCodeFormFieldsProps {
+  apiFormats?: ReadonlyArray<{ value: string; label: string }>;
   // NPM Package
   npm: string;
   onNpmChange: (value: string) => void;
@@ -183,6 +185,7 @@ interface OpenCodeFormFieldsProps {
 }
 
 export function OpenCodeFormFields({
+  apiFormats,
   npm,
   onNpmChange,
   apiKey,
@@ -482,6 +485,23 @@ export function OpenCodeFormFields({
 
   const handleExtraOptionKeyChange = (oldKey: string, newKey: string) => {
     if (oldKey === newKey) return;
+    if (isKnownOpencodeOptionKey(newKey.trim())) {
+      toast.error(
+        t("opencode.reservedOptionKey", {
+          defaultValue:
+            "Use the dedicated fields for baseURL, apiKey and headers.",
+        }),
+      );
+      return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(extraOptions, newKey.trim())) {
+      toast.error(
+        t("opencode.duplicateOptionKey", {
+          defaultValue: "An extra option with this name already exists.",
+        }),
+      );
+      return false;
+    }
     const newOptions: Record<string, string> = {};
     for (const [k, v] of Object.entries(extraOptions)) {
       if (k === oldKey) {
@@ -518,19 +538,21 @@ export function OpenCodeFormFields({
             />
           </SelectTrigger>
           <SelectContent>
-            {opencodeNpmPackages.map((pkg) => (
+            {(apiFormats ?? opencodeNpmPackages).map((pkg) => (
               <SelectItem key={pkg.value} value={pkg.value}>
                 {pkg.label}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        <p className="text-xs text-muted-foreground">
-          {t("opencode.npmPackageHint", {
-            defaultValue:
-              "Select the AI SDK package that matches your provider.",
-          })}
-        </p>
+        {!apiFormats && (
+          <p className="text-xs text-muted-foreground">
+            {t("opencode.npmPackageHint", {
+              defaultValue:
+                "Select the AI SDK package that matches your provider.",
+            })}
+          </p>
+        )}
       </div>
 
       {/* API Key */}

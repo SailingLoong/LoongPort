@@ -23,6 +23,9 @@ mod managed_inference_tests;
 pub(crate) mod model_settings;
 mod native;
 pub(crate) use native::service_configuration_revision;
+pub(crate) mod mcode;
+#[cfg(test)]
+mod mcode_tests;
 mod pi;
 pub(crate) mod qoder_auth_http;
 pub(crate) mod qoder_daily;
@@ -286,6 +289,9 @@ pub fn provider_routing_requirement(
     app_type: &AppType,
     provider: &Provider,
 ) -> Option<ProviderRoutingReason> {
+    if matches!(app_type, AppType::Mcode) {
+        return None;
+    }
     if managed_inference::is_managed_inference(provider) {
         return Some(ProviderRoutingReason::ManagedOAuth);
     }
@@ -366,6 +372,9 @@ pub fn provider_presentation_context(
         AppType::OpenClaw => crate::openclaw_config::get_providers()
             .ok()
             .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        AppType::Mcode => crate::mcode_config::get_providers()
+            .ok()
+            .map(|providers| providers.into_keys().collect()),
         AppType::Pi => pi_state
             .as_ref()
             .map(|state| state.enabled_provider_ids.iter().cloned().collect()),
@@ -450,8 +459,14 @@ pub fn provider_presentation_with_context(
         .as_ref()
         .map(|provider_ids| provider_ids.contains(&provider.id))
         .unwrap_or(!app_type.is_additive_mode());
-    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
-        && context.default_model_provider_id.as_deref() == Some(provider.id.as_str());
+    let is_default_model = if matches!(app_type, AppType::Mcode) {
+        crate::mcode_config::referenced_provider_ids()
+            .map(|ids| ids.contains(&provider.id))
+            .unwrap_or(true)
+    } else {
+        matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
+            && context.default_model_provider_id.as_deref() == Some(provider.id.as_str())
+    };
     let is_managed = crate::relay::is_managed(&provider.id);
     let is_read_only = matches!(app_type, AppType::Hermes)
         && provider
@@ -477,7 +492,8 @@ pub fn provider_presentation_with_context(
     let uses_official_subscription_usage =
         provider_uses_official_subscription_usage(app_type, provider);
     let account_route = managed_inference::is_managed_inference(provider);
-    let can_configure_usage = !account_route
+    let can_configure_usage = !matches!(app_type, AppType::Mcode)
+        && !account_route
         && (!is_official || uses_official_subscription_usage)
         && !provider.is_github_copilot()
         && !provider.is_codex_oauth()
@@ -490,9 +506,12 @@ pub fn provider_presentation_with_context(
         is_default_model,
         is_managed,
         is_read_only,
-        can_delete: !is_read_only && (is_omo || app_type.is_additive_mode() || !is_current),
+        can_delete: !(is_read_only || matches!(app_type, AppType::Mcode) && is_default_model)
+            && (is_omo || app_type.is_additive_mode() || !is_current),
         can_edit: !is_read_only && !account_route,
-        can_test_connectivity: !is_official && !account_route,
+        can_test_connectivity: !matches!(app_type, AppType::Mcode)
+            && !is_official
+            && !account_route,
         can_configure_usage,
         uses_official_subscription_usage,
         can_set_as_default: matches!(app_type, AppType::OpenClaw | AppType::Hermes) && is_in_config,
@@ -538,7 +557,8 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::Pi => false,
+        | AppType::Pi
+        | AppType::Mcode => false,
     }
 }
 
@@ -5322,6 +5342,9 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::list(state);
+        }
         if app_type == AppType::Pi {
             return pi::list(state);
         }
@@ -5351,6 +5374,9 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
     ) -> Result<bool, AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::add(state, provider, add_to_live);
+        }
         let modern = app_type.supports_local_proxy()
             && crate::mode::operation::uses_upstream4_schema(&state.db)?;
         let managed = matches!(app_type, AppType::Codex)
@@ -5787,6 +5813,9 @@ impl ProviderService {
         original_id: Option<&str>,
         provider: Provider,
     ) -> Result<bool, AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::update(state, original_id, provider);
+        }
         if app_type == AppType::Pi {
             return pi::update(state, original_id, provider);
         }
@@ -6201,6 +6230,9 @@ impl ProviderService {
         id: &str,
         allow_current: bool,
     ) -> Result<(), AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::delete(state, id);
+        }
         if app_type == AppType::Pi {
             return pi::delete(state, id);
         }
@@ -6290,6 +6322,9 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<(), AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::remove(state, id);
+        }
         if app_type == AppType::Pi {
             return pi::remove(state, id);
         }
@@ -6480,6 +6515,9 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<SwitchResult, AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::enable(state, id);
+        }
         if app_type == AppType::Pi {
             return pi::enable(state, id);
         }
@@ -7166,7 +7204,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
-            AppType::Pi => Ok(String::new()),
+            AppType::Pi | AppType::Mcode => Ok(String::new()),
         }
     }
 
@@ -7185,7 +7223,7 @@ impl ProviderService {
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
-            AppType::Pi => Ok(String::new()),
+            AppType::Pi | AppType::Mcode => Ok(String::new()),
         }
     }
 
@@ -7743,6 +7781,9 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<Value, AppError> {
+        if app_type == AppType::Mcode {
+            return mcode::edit_settings(state, provider_id);
+        }
         let _switch = app_type.supports_local_proxy().then(|| {
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()))
         });
@@ -8097,6 +8138,9 @@ impl ProviderService {
                     ));
                 }
             }
+            AppType::Mcode => {
+                crate::mcode_config::validate_provider(&provider.id, &provider.settings_config)?;
+            }
             AppType::Pi => {
                 crate::pi_config::validate_provider_node(&provider.id, &provider.settings_config)?;
             }
@@ -8271,7 +8315,7 @@ impl ProviderService {
 
                 Ok((api_key, base_url))
             }
-            AppType::OpenCode => {
+            AppType::OpenCode | AppType::Mcode => {
                 // OpenCode uses options.apiKey and options.baseURL
                 let options = provider
                     .settings_config
