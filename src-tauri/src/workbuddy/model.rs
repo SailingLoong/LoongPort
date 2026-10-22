@@ -57,7 +57,7 @@ impl Account {
         hex::encode(hash.finalize())
     }
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Attempt {
     pub day: String,
@@ -68,6 +68,18 @@ pub(crate) struct Attempt {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavedAccount {
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub auto_claim_enabled: bool,
+    #[serde(default)]
+    pub auto_claim_revision: u64,
+    #[serde(default)]
+    pub auto_claim_policy_version: u32,
+    #[serde(default)]
+    pub auto_claim_credential: Option<String>,
+    #[serde(default)]
+    pub attempted_day: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) inference: Option<super::inference::Authorization>,
     pub account: Account,
@@ -80,6 +92,12 @@ pub(crate) struct SavedAccount {
 impl SavedAccount {
     pub fn new(account: Account) -> Self {
         Self {
+            generation: 0,
+            auto_claim_enabled: false,
+            auto_claim_revision: 0,
+            auto_claim_policy_version: 0,
+            auto_claim_credential: None,
+            attempted_day: None,
             inference: None,
             account,
             credits: Credits::default(),
@@ -88,6 +106,26 @@ impl SavedAccount {
             credited: None,
             pending: None,
         }
+    }
+    pub fn credential_binding(&self) -> String {
+        let mut hash = Sha256::new();
+        for value in [
+            self.account.domain.host(),
+            &self.account.uid,
+            &self.account.token,
+        ] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        hex::encode(hash.finalize())
+    }
+    pub fn automatic_enabled(&self) -> bool {
+        self.auto_claim_enabled
+            && self.auto_claim_policy_version == AUTO_CLAIM_POLICY_VERSION
+            && self.auto_claim_credential.as_deref() == Some(&self.credential_binding())
+    }
+    pub fn can_set_automatic(&self) -> bool {
+        !self.account.token.is_empty() && self.claim_state != ClaimState::NeedsVerification
     }
     pub fn view(&self, owner: &str, day: &str) -> AccountView {
         let same_day = self.claim_day == day;
@@ -103,13 +141,27 @@ impl SavedAccount {
             claim_state: state,
             credited: if same_day { self.credited } else { None },
             can_refresh: true,
-            can_claim: matches!(state, ClaimState::Available | ClaimState::Unconfirmed),
+            can_claim: self.pending.is_none()
+                && self.attempted_day.as_deref().is_none_or(|old| old < day)
+                && matches!(state, ClaimState::Available | ClaimState::Unconfirmed),
+            generation: self.generation,
+            auto_claim_enabled: self.automatic_enabled(),
+            auto_claim_revision: self.auto_claim_revision,
+            auto_claim_policy_version: AUTO_CLAIM_POLICY_VERSION,
+            can_set_automatic: self.can_set_automatic(),
+            auto_claim_blocked: self.pending.is_some(),
         }
     }
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountView {
+    pub generation: u64,
+    pub auto_claim_enabled: bool,
+    pub auto_claim_revision: u64,
+    pub auto_claim_policy_version: u32,
+    pub can_set_automatic: bool,
+    pub auto_claim_blocked: bool,
     pub id: String,
     pub label: String,
     pub credits: Credits,
@@ -134,3 +186,6 @@ pub(crate) fn today(now: i64) -> String {
         .format("%Y-%m-%d")
         .to_string()
 }
+
+/// Version of the explicit per-account, running-and-unlocked-only consent.
+pub(crate) const AUTO_CLAIM_POLICY_VERSION: u32 = 1;

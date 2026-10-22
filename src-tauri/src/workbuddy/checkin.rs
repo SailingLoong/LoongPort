@@ -1,5 +1,5 @@
 //! Adapted from workbuddy-switch checkin.rs (MIT); see docs/licenses/workbuddy-switch-MIT.txt.
-//! No scheduler, automatic claim, raw receipt, token refresh or write retry.
+//! Shared manual/automatic protocol parser; no raw receipt, token refresh or write retry.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

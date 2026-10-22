@@ -1,9 +1,9 @@
-//! Explicit operations share the existing sync/vault lifecycle owner.
+//! Manual and opted-in automatic operations share the existing sync/vault lifecycle owner.
 use super::{
     checkin::{self, ClaimState},
     credits::{self, Credits},
     model::*,
-    protocol::{Endpoint, Transport},
+    protocol::{DispatchFailure, Endpoint, Transport},
     store,
 };
 use crate::secrets::{session::SecretSession, VaultMetadata};
@@ -85,30 +85,14 @@ impl<T: Transport> Engine<'_, T> {
         store::save(self.session, b, rows)?;
         Ok(view)
     }
-    fn resolve_pending(
-        &self,
-        row: &mut SavedAccount,
-        state: ClaimState,
-        credits: &Credits,
-        allow_reset: bool,
-    ) {
+    fn resolve_pending(&self, row: &mut SavedAccount, state: ClaimState, credits: &Credits) {
         let Some(attempt) = row.pending.as_ref() else {
             return;
         };
         if attempt.day != today(self.clock.now_ms()) {
             // A previous day's receipt cannot prove today's check-in.
-            row.pending = None;
-            row.claim_state = state;
-            row.credited = None;
-            return;
-        }
-        if allow_reset
-            && attempt.receipt == ClaimState::Unconfirmed
-            && state == ClaimState::Available
-            && credits.total_remaining.is_some()
-        {
-            row.pending = None;
-            row.claim_state = ClaimState::Available;
+            // Today's status cannot resolve an older write with an uncertain outcome.
+            row.claim_state = ClaimState::Unconfirmed;
             row.credited = None;
             return;
         }
@@ -149,7 +133,7 @@ impl<T: Transport> Engine<'_, T> {
         let credits = self.credits(&b, &rows[i].account).await;
         let status = self.status(&b, &rows[i].account).await;
         if rows[i].pending.is_some() {
-            self.resolve_pending(&mut rows[i], status, &credits, true);
+            self.resolve_pending(&mut rows[i], status, &credits);
         } else if rows[i].claim_day != today(self.clock.now_ms())
             || !(rows[i].claim_state == ClaimState::Claimed && status == ClaimState::AlreadyClaimed)
         {
@@ -193,63 +177,126 @@ impl<T: Transport> Engine<'_, T> {
         Ok(results)
     }
     pub async fn claim(&self, id: &str) -> Result<AccountView, Failure> {
+        self.claim_with_policy(id, None).await
+    }
+    async fn claim_with_policy(
+        &self,
+        id: &str,
+        policy: Option<(u64, u64)>,
+    ) -> Result<AccountView, Failure> {
         let operation_day = today(self.clock.now_ms());
         let _lease = lease(self.session, id)?;
-        let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
-        let b = store::binding(self.session)?;
-        let mut rows = store::load(self.session, &b)?;
-        let i = rows
-            .iter()
-            .position(|r| r.account.id(&b.vault_id) == id)
-            .ok_or(Failure::UnsupportedContext)?;
-        let status = self.status(&b, &rows[i].account).await;
-        rows[i].claim_day = today(self.clock.now_ms());
-        rows[i].credited = None;
-        if rows[i].pending.is_some() {
-            // An explicit retry first reconciles the durable pending attempt and never
-            // submits within that same operation, including after process restart.
-            let credits = self.credits(&b, &rows[i].account).await;
-            self.resolve_pending(&mut rows[i], status, &credits, true);
-            if credits.updated_at.is_some() {
-                rows[i].credits = credits;
-            }
-            return self.persist(&b, rows, i);
+        let (b, epoch, snapshot) = {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            let b = store::binding(self.session)?;
+            let rows = store::load(self.session, &b)?;
+            let row = rows
+                .into_iter()
+                .find(|r| r.account.id(&b.vault_id) == id)
+                .ok_or(Failure::UnsupportedContext)?;
+            automatic_admission(&row, policy)?;
+            (b, self.session.lifecycle_epoch(), row)
+        };
+        // Automatic runs never query/replay an unresolved write. Manual refresh can
+        // reconcile a known same-day receipt, but cannot reset an unknown outcome.
+        if policy.is_some()
+            && (snapshot.pending.is_some()
+                || snapshot
+                    .attempted_day
+                    .as_deref()
+                    .is_some_and(|d| d >= operation_day.as_str()))
+        {
+            return Ok(snapshot.view(&b.vault_id, &operation_day));
         }
-        rows[i].claim_state = status;
-        if status != ClaimState::Available {
-            return self.persist(&b, rows, i);
-        }
-        let before = self.credits(&b, &rows[i].account).await;
-        // Without a complete baseline, do not submit a write we cannot verify.
-        if before.total_remaining.is_none() || today(self.clock.now_ms()) != operation_day {
-            rows[i].claim_state = ClaimState::Unconfirmed;
-            return self.persist(&b, rows, i);
-        }
-        rows[i].credits = before.clone();
-        rows[i].pending = Some(Attempt {
-            day: today(self.clock.now_ms()),
-            before: before.total_remaining,
-            expected: None,
-            receipt: ClaimState::Unconfirmed,
-        });
-        // Persist before dispatch: a lost response or cancellation is recoverable.
-        store::save(self.session, &b, rows.clone())?;
-        if today(self.clock.now_ms()) != operation_day {
-            rows[i].pending = None;
+        let status = self.status(&b, &snapshot.account).await;
+        let credits = if snapshot.pending.is_some() || status == ClaimState::Available {
+            self.credits(&b, &snapshot.account).await
+        } else {
+            Credits::default()
+        };
+        let (prepared, previous_day) = {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            self.check_epoch(&b, epoch)?;
+            let mut rows = store::load(self.session, &b)?;
+            let i = matched(&rows, &b, &snapshot)?;
+            automatic_admission(&rows[i], policy)?;
             rows[i].claim_day = today(self.clock.now_ms());
-            rows[i].claim_state = ClaimState::Unconfirmed;
-            return self.persist(&b, rows, i);
+            rows[i].credited = None;
+            if credits.updated_at.is_some() {
+                rows[i].credits = credits.clone();
+            }
+            if rows[i].pending.is_some() {
+                self.resolve_pending(&mut rows[i], status, &credits);
+                return self.persist(&b, rows, i);
+            }
+            rows[i].claim_state = status;
+            if status != ClaimState::Available
+                || rows[i]
+                    .attempted_day
+                    .as_deref()
+                    .is_some_and(|d| d >= operation_day.as_str())
+            {
+                return self.persist(&b, rows, i);
+            }
+            if credits.total_remaining.is_none() || today(self.clock.now_ms()) != operation_day {
+                rows[i].claim_state = ClaimState::Unconfirmed;
+                return self.persist(&b, rows, i);
+            }
+            let previous_day = rows[i].attempted_day.clone();
+            rows[i].attempted_day = Some(operation_day.clone());
+            rows[i].pending = Some(Attempt {
+                day: operation_day.clone(),
+                before: credits.total_remaining,
+                expected: None,
+                receipt: ClaimState::Unconfirmed,
+            });
+            let prepared = rows[i].clone();
+            store::save(self.session, &b, rows)?;
+            (prepared, previous_day)
+        };
+        #[cfg(test)]
+        super::engine_tests::before_claim_dispatch(self.session).await;
+        let response = self
+            .dispatch_claim(&b, epoch, &prepared, policy, &operation_day)
+            .await;
+        let receipt = match response {
+            Err(DispatchFailure::NotDispatched(error)) => {
+                // Clear only this exact unsent intent, never a later identity or attempt.
+                let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+                let mut rows = store::load(self.session, &b)?;
+                let i = matched(&rows, &b, &prepared)?;
+                if rows[i].pending == prepared.pending {
+                    rows[i].pending = None;
+                    rows[i].attempted_day = previous_day;
+                    store::save(self.session, &b, rows)?;
+                }
+                return Err(error);
+            }
+            Err(DispatchFailure::OutcomeUnknown(_)) => serde_json::json!({}),
+            Ok(value) => value,
+        };
+        {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            self.check_epoch(&b, epoch)?;
+            let mut rows = store::load(self.session, &b)?;
+            let i = matched(&rows, &b, &prepared)?;
+            if rows[i].pending != prepared.pending {
+                return Err(Failure::ExpiredAuthorization);
+            }
+            if let Some(attempt) = rows[i].pending.as_mut() {
+                attempt.receipt = checkin::receipt(&receipt);
+                attempt.expected = checkin::receipt_credit(&receipt);
+            }
+            store::save(self.session, &b, rows)?;
         }
-        let receipt = self.request(&b, Endpoint::Claim, &rows[i].account).await;
-        if let Some(attempt) = rows[i].pending.as_mut() {
-            attempt.receipt = checkin::receipt(&receipt);
-            attempt.expected = checkin::receipt_credit(&receipt);
-        }
-        store::save(self.session, &b, rows.clone())?;
-        let after = self.status(&b, &rows[i].account).await;
-        let credits = self.credits(&b, &rows[i].account).await;
+        let after = self.status(&b, &snapshot.account).await;
+        let credits = self.credits(&b, &snapshot.account).await;
+        let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+        self.check_epoch(&b, epoch)?;
+        let mut rows = store::load(self.session, &b)?;
+        let i = matched(&rows, &b, &prepared)?;
         if today(self.clock.now_ms()) == operation_day {
-            self.resolve_pending(&mut rows[i], after, &credits, false);
+            self.resolve_pending(&mut rows[i], after, &credits);
         } else {
             rows[i].claim_day = today(self.clock.now_ms());
             rows[i].claim_state = ClaimState::Unconfirmed;
@@ -260,4 +307,81 @@ impl<T: Transport> Engine<'_, T> {
         }
         self.persist(&b, rows, i)
     }
+    fn check_epoch(&self, b: &VaultMetadata, epoch: u64) -> Result<(), Failure> {
+        if store::binding(self.session)? != *b || self.session.lifecycle_epoch() != epoch {
+            return Err(Failure::ExpiredAuthorization);
+        }
+        Ok(())
+    }
+    async fn dispatch_claim(
+        &self,
+        b: &VaultMetadata,
+        epoch: u64,
+        prepared: &SavedAccount,
+        policy: Option<(u64, u64)>,
+        day: &str,
+    ) -> Result<serde_json::Value, DispatchFailure> {
+        use DispatchFailure::NotDispatched;
+        let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
+        let mut pending = None;
+        let mut ready = None;
+        {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            self.check_epoch(b, epoch).map_err(NotDispatched)?;
+            let rows = store::load(self.session, b).map_err(NotDispatched)?;
+            let i = matched(&rows, b, prepared).map_err(NotDispatched)?;
+            automatic_admission(&rows[i], policy).map_err(NotDispatched)?;
+            if rows[i].pending != prepared.pending || today(self.clock.now_ms()) != day {
+                return Err(NotDispatched(Failure::ExpiredAuthorization));
+            }
+            let _vault = self
+                .session
+                .read()
+                .map_err(|_| NotDispatched(Failure::StorageUnavailable))?;
+            if self.session.lifecycle_epoch() != epoch {
+                return Err(NotDispatched(Failure::ExpiredAuthorization));
+            }
+            // Final admission includes creation AND first poll, as in the existing
+            // inference owner; never hold a vault/owner guard over network waits.
+            let mut future = self.transport.claim(&prepared.account, self.clock.now_ms());
+            match future
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+            {
+                std::task::Poll::Ready(result) => ready = Some(result),
+                std::task::Poll::Pending => pending = Some(future),
+            }
+        }
+        if let Some(result) = ready {
+            result
+        } else {
+            pending.ok_or(NotDispatched(Failure::Unconfirmed))?.await
+        }
+    }
 }
+fn matched(
+    rows: &[SavedAccount],
+    b: &VaultMetadata,
+    expected: &SavedAccount,
+) -> Result<usize, Failure> {
+    rows.iter()
+        .position(|r| {
+            r.account.id(&b.vault_id) == expected.account.id(&b.vault_id)
+                && r.generation == expected.generation
+                && r.account.token == expected.account.token
+        })
+        .ok_or(Failure::ExpiredAuthorization)
+}
+fn automatic_admission(row: &SavedAccount, policy: Option<(u64, u64)>) -> Result<(), Failure> {
+    if policy.is_some_and(|(generation, revision)| {
+        !row.automatic_enabled()
+            || !row.can_set_automatic()
+            || row.generation != generation
+            || row.auto_claim_revision != revision
+    }) {
+        return Err(Failure::ExpiredAuthorization);
+    }
+    Ok(())
+}
+#[path = "automatic.rs"]
+mod automatic;
