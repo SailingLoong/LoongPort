@@ -9,6 +9,7 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
 #[cfg(feature = "gui")]
 pub fn start(app: tauri::AppHandle) {
+    start_qoder_claim(app.clone());
     start_zcode_claim(app.clone());
     start_trae_automatic_checkin(app.clone());
     start_workbuddy_automatic_claim(app.clone());
@@ -18,6 +19,28 @@ pub fn start(app: tauri::AppHandle) {
     start_crowd_metrics_flush(app.clone());
     start_plaza_visibility_seeding(app.clone());
     start_app_update_check(app);
+}
+
+#[cfg(feature = "gui")]
+fn start_qoder_claim(app: tauri::AppHandle) {
+    use crate::services::provider::qoder_daily::automatic;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "qoder-automatic-claim",
+        scheduler::TaskSchedule::new(
+            automatic::STARTUP_DELAY,
+            automatic::INTERVAL,
+            automatic::INTERVAL,
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                tauri::async_runtime::spawn_blocking(move || automatic::tick(&db))
+                    .await
+                    .map_err(|_| crate::AppError::Config("qoder.automatic_task_failed".into()))?
+            }
+        },
+    );
 }
 
 #[cfg(feature = "gui")]

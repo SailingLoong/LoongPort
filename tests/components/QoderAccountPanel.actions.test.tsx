@@ -7,6 +7,8 @@ const api = vi.hoisted(() => ({
   action: vi.fn(),
   claimContext: vi.fn(),
   claim: vi.fn(),
+  automaticContext: vi.fn(),
+  setAutomatic: vi.fn(),
 }));
 vi.mock("@/lib/api/providers", () => ({
   providersApi: {
@@ -27,7 +29,12 @@ vi.mock("@/lib/api/qoderHttpAuth", () => ({
   qoderHttpAuthApi: { context: api.context, action: api.action },
 }));
 vi.mock("@/lib/api/qoderDaily", () => ({
-  qoderDailyApi: { context: api.claimContext, claim: api.claim },
+  qoderDailyApi: {
+    context: api.claimContext,
+    claim: api.claim,
+    automaticContext: api.automaticContext,
+    setAutomatic: api.setAutomatic,
+  },
 }));
 it("opens the actual original identity and claim dialogs, with no implicit authentication or claim", async () => {
   api.context.mockResolvedValue({
@@ -39,6 +46,16 @@ it("opens the actual original identity and claim dialogs, with no implicit authe
     providerId: "one",
     credentialGeneration: "r1",
     deviceDependency: "OfficialDeviceUnsupported",
+  });
+  api.automaticContext.mockResolvedValue({
+    providerId: "one",
+    credentialGeneration: "r1",
+    revision: 0,
+    policyVersion: 1,
+    enabled: false,
+    canEnable: false,
+    reason: "OfficialDeviceUnsupported",
+    subject: null,
   });
   render(
     <QueryClientProvider
@@ -52,6 +69,7 @@ it("opens the actual original identity and claim dialogs, with no implicit authe
   await screen.findByText("Original Qoder");
   expect(api.context).not.toHaveBeenCalled();
   expect(api.claimContext).not.toHaveBeenCalled();
+  expect(api.automaticContext).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Qoder 推理身份" }));
   await waitFor(() => expect(api.context).toHaveBeenCalledWith("one"));
   expect(
@@ -71,4 +89,5 @@ it("opens the actual original identity and claim dialogs, with no implicit authe
   expect(screen.getByRole("button", { name: "查询并领取" })).toBeDisabled();
   expect(api.action).not.toHaveBeenCalled();
   expect(api.claim).not.toHaveBeenCalled();
+  expect(api.setAutomatic).not.toHaveBeenCalled();
 });

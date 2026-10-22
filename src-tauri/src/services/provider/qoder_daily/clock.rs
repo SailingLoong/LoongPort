@@ -107,3 +107,9 @@ pub(crate) fn synthetic(
 ) -> Option<Observation> {
     parse_date(date, age, context)
 }
+
+#[cfg(test)]
+pub(crate) fn synthetic_elapsed(mut observation: Observation, elapsed: Duration) -> Observation {
+    observation.received = Instant::now().checked_sub(elapsed).unwrap();
+    observation
+}
