@@ -7,6 +7,12 @@ export type WorkBuddyClaimState =
   | "unavailable"
   | "needsVerification";
 export interface WorkBuddyAccount {
+  generation: number;
+  autoClaimEnabled: boolean;
+  autoClaimRevision: number;
+  autoClaimPolicyVersion: number;
+  canSetAutomatic: boolean;
+  autoClaimBlocked: boolean;
   id: string;
   label: string;
   canRefresh: boolean;
@@ -54,6 +60,14 @@ export interface WorkBuddyInferenceModel {
   name: string;
 }
 export const workbuddyApi = {
+  setAutomatic: (account: WorkBuddyAccount, enabled: boolean) =>
+    invoke<WorkBuddyAccount>("set_workbuddy_automatic_claim", {
+      id: account.id,
+      generation: account.generation,
+      revision: account.autoClaimRevision,
+      policyVersion: account.autoClaimPolicyVersion,
+      enabled,
+    }),
   listInferenceAccounts: () =>
     invoke<WorkBuddyInferenceAccount[]>("list_workbuddy_inference_accounts"),
   beginInferenceLogin: (id: string) =>

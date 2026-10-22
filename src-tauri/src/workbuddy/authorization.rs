@@ -214,6 +214,17 @@ pub(crate) async fn finish<T: Transport>(
         .iter_mut()
         .find(|r| r.account.id(&binding.vault_id) == account_id)
     {
+        row.generation = row
+            .generation
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
+        row.auto_claim_revision = row
+            .auto_claim_revision
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
+        row.auto_claim_enabled = false;
+        row.auto_claim_credential = None;
+        // Never erase an unresolved claim or its attempted day during reauthorization.
         row.account = account;
         // This is the legacy check-in grant; never revive a prior inference grant.
         row.inference = None;

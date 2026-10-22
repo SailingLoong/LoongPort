@@ -1,4 +1,4 @@
-//! Thin commands: only explicit user actions may authorize or claim.
+//! Thin commands: only explicit user actions may authorize or opt into automatic claims.
 use crate::{
     store::AppState,
     workbuddy::{
@@ -10,6 +10,23 @@ use crate::{
     },
 };
 use tauri::State;
+#[tauri::command]
+pub(crate) async fn set_workbuddy_automatic_claim(
+    state: State<'_, AppState>,
+    id: String,
+    generation: u64,
+    revision: u64,
+    policy_version: u32,
+    enabled: bool,
+) -> Result<AccountView, Failure> {
+    Engine {
+        session: state.db.secret_session(),
+        transport: &OfficialHttp,
+        clock: &SystemClock,
+    }
+    .set_automatic(&id, generation, revision, policy_version, enabled)
+    .await
+}
 #[tauri::command]
 pub(crate) async fn list_workbuddy_accounts(
     state: State<'_, AppState>,
