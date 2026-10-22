@@ -50,6 +50,14 @@ use crate::error::AppError;
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
 pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 28;
 
+/// The authenticated snapshot contract starts at the original vault schema.
+/// Snapshots retain their recorded identity; this bound does not migrate them.
+pub(crate) const MIN_AUTHENTICATED_SNAPSHOT_VERSION: i32 = 24;
+
+pub(crate) fn supports_authenticated_snapshot_version(version: i32) -> bool {
+    (MIN_AUTHENTICATED_SNAPSHOT_VERSION..=LOONGPORT_SCHEMA_VERSION).contains(&version)
+}
+
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
 /// 用表而不是 `PRAGMA user_version`：那个 pragma 每库只有一个，已经归上游了。
@@ -968,6 +976,19 @@ mod tests {
     use super::*;
     use crate::Database;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    #[test]
+    fn authenticated_snapshots_accept_supported_history_and_reject_future_versions() {
+        for version in MIN_AUTHENTICATED_SNAPSHOT_VERSION..=LOONGPORT_SCHEMA_VERSION {
+            assert!(supports_authenticated_snapshot_version(version));
+        }
+        assert!(!supports_authenticated_snapshot_version(
+            MIN_AUTHENTICATED_SNAPSHOT_VERSION - 1
+        ));
+        assert!(!supports_authenticated_snapshot_version(
+            LOONGPORT_SCHEMA_VERSION + 1
+        ));
+    }
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")

@@ -13,10 +13,10 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
 pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Explicitly supported historical and current checkpoint identities. This is
-/// only an admission bound; manifest/database checks still require exact equality.
+/// The schema owner supplies the authenticated snapshot admission range.
+/// Manifest/database checks still require the exact recorded identity.
 pub(crate) fn supports_loongport_version(version: i32) -> bool {
-    [24, 25, 26, 27].contains(&version)
+    database::loongport_schema::supports_authenticated_snapshot_version(version)
 }
 
 fn legacy_archive_source_versions() -> SchemaVersions {
@@ -1007,7 +1007,7 @@ mod paperclip_schema_lifecycle_tests {
     fn historical_source() -> super::super::checkpoint_tests::Fixture {
         let fixture = super::super::checkpoint_tests::Fixture::new();
         let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret; DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret; DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; DROP TABLE IF EXISTS loongport_client_credentials; ALTER TABLE proxy_request_logs DROP COLUMN client_id; ALTER TABLE proxy_request_logs DROP COLUMN client_credential_id; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
         fixture
     }
 
@@ -1094,7 +1094,7 @@ mod paperclip_schema_lifecycle_tests {
     }
 
     #[test]
-    fn qoder_http_current_v27_checkpoint_keeps_recorded_identity() {
+    fn current_schema_checkpoint_keeps_recorded_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         database::loongport_schema::apply(&source).unwrap();
@@ -1103,12 +1103,19 @@ mod paperclip_schema_lifecycle_tests {
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&staged).unwrap(),
-            27
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         // The existing read-only owner validates the receipt schema and rows.
         database::vault::preflight_connection(&staged).unwrap();
-        assert!(supports_loongport_version(26));
-        assert!(!supports_loongport_version(28));
+        assert!(supports_loongport_version(
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        ));
+        assert!(!supports_loongport_version(
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1
+        ));
+        assert!(!supports_loongport_version(
+            database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION - 1
+        ));
     }
 
     #[test]
