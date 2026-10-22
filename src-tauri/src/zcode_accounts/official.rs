@@ -88,7 +88,7 @@ impl PollToken {
             encoded.push(char::from(HEX[(byte >> 4) as usize]));
             encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
         }
-        Ok(Self(SecretValue(encoded)))
+        Self::new(&encoded)
     }
 }
 
