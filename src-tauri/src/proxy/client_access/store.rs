@@ -226,11 +226,13 @@ impl Database {
         let mut random = Zeroizing::new([0u8; 32]);
         getrandom::fill(random.as_mut())
             .map_err(|_| AppError::Config("client_access.random_unavailable".into()))?;
-        let key = Zeroizing::new(
-            existing_key
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{PREFIX}{id}.{}", hex::encode(random.as_ref()))),
-        );
+        let key = Zeroizing::new(existing_key.map(str::to_owned).unwrap_or_else(|| {
+            format!(
+                "{PREFIX}{}.{}",
+                id.replace(':', "_"),
+                hex::encode(random.as_ref())
+            )
+        }));
         let digest = hex::encode(<Sha256 as sha2::Digest>::digest(key.as_bytes()));
         let sealed = seal_db(&vault, TABLE, "secret", &[&id], &key)?;
         let mut models = allowed_models.to_vec();

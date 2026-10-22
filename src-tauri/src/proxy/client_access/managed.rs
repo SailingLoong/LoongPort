@@ -20,7 +20,7 @@ pub(crate) fn key(db: &Database, app: &str) -> Result<String, AppError> {
 
 /// Recognition is not authentication. This also recognizes pre-migration backups.
 pub(crate) fn is_projection_key(value: &str) -> bool {
-    value == LEGACY_KEY || value.starts_with("lp_client_builtin:managed-")
+    value == LEGACY_KEY || value.starts_with("lp_client_builtin_managed-")
 }
 
 pub(crate) fn owned_key(db: &Database, app: &str, value: &str) -> Result<bool, AppError> {
@@ -227,6 +227,9 @@ mod tests {
         let claude = key(&db, "claude").unwrap();
         let gemini = key(&db, "gemini").unwrap();
         assert_ne!(claude, gemini);
+        assert!(claude
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte)));
         let original =
             json!({"env":{"ANTHROPIC_AUTH_TOKEN":LEGACY_KEY,"UNOWNED":"keep"},"unowned":true});
         let projected = project_json(&db, "claude", &original).unwrap();
