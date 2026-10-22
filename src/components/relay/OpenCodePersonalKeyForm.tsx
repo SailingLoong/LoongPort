@@ -34,7 +34,9 @@ export function OpenCodePersonalKeyForm({
       if (!active.current) return;
       setKey("");
       setMessage(
-        "已保存接入配置，尚未验证真实调用。请按已有权益选择 Console 或 Go。",
+        result.configurationReady === false
+          ? "凭据已保存，应用配置未完成。请在账号行刷新重试；再次导入也不会新建重复账号。尚未验证真实调用。"
+          : "已保存接入配置，尚未验证真实调用。请按已有权益选择 Console 或 Go。",
       );
       onSaved(result.rowId);
     } catch {

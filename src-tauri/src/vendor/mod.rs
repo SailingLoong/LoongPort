@@ -18,6 +18,7 @@ pub mod bigmodel;
 pub mod creds;
 pub mod deepseek;
 pub mod opencode;
+pub mod opencode_local_import;
 pub mod opencode_personal;
 pub mod provision;
 

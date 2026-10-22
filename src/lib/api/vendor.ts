@@ -135,11 +135,31 @@ export const VENDOR_CATALOG: ReadonlyArray<{
   },
 ];
 
+export interface OpenCodeLocalPreview {
+  previewId: string;
+  entries: { id: string; label: string; isActive: boolean }[];
+  notices: string[];
+}
+export interface OpenCodeKeyImportResult {
+  rowId: number;
+  configurationReady: boolean;
+}
+
 export const vendorApi = {
+  previewOpenCodeLocal: (consent: boolean): Promise<OpenCodeLocalPreview> =>
+    invoke("vendor_preview_opencode_local", { consent }),
+  importOpenCodeLocal: (
+    previewId: string,
+    entryId: string,
+    consent: boolean,
+  ): Promise<OpenCodeKeyImportResult> =>
+    invoke("vendor_import_opencode_local", { previewId, entryId, consent }),
+  cancelOpenCodeLocal: (previewId: string): Promise<void> =>
+    invoke("vendor_cancel_opencode_local", { previewId }),
   importOpenCodeKey: (
     apiKey: string,
     label: string,
-  ): Promise<{ rowId: number }> =>
+  ): Promise<OpenCodeKeyImportResult> =>
     invoke("vendor_import_opencode_key", { apiKey, label }),
   /**
    * 列出已添加的官网账号。

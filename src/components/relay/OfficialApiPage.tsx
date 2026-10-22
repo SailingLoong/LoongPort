@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2 } from "lucide-react";
 
+import { OpenCodeLocalImportForm } from "./OpenCodeLocalImportForm";
 import { OpenCodePersonalKeyForm } from "./OpenCodePersonalKeyForm";
 import { Button } from "@/components/ui/button";
 import type { AppId } from "@/lib/api";
@@ -106,11 +107,18 @@ export function OfficialApiPage({
       </div>
 
       {(!vendorId || vendorId === "opencode") && (
-        <OpenCodePersonalKeyForm
-          onSaved={() => {
-            /* Backend event refreshes the shared account list. */
-          }}
-        />
+        <div className="space-y-3">
+          <OpenCodeLocalImportForm
+            onSaved={() => {
+              /* Backend event refreshes the account list. */
+            }}
+          />
+          <OpenCodePersonalKeyForm
+            onSaved={() => {
+              /* Same account owner. */
+            }}
+          />
+        </div>
       )}
       <div className="grid gap-4 py-6 sm:grid-cols-2">
         {VENDOR_CATALOG.filter(
