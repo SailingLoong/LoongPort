@@ -19,7 +19,17 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+#[path = "inference_sse.rs"]
+mod inference_sse;
 
 /// An in-memory, non-serializable capability for one selected account incarnation.
 /// The caller must resolve account_id from its trusted selected pool row, never
@@ -45,9 +55,16 @@ pub(crate) struct DispatchResponse {
 #[derive(Clone)]
 pub(crate) struct ResponseFence {
     lease: Arc<Lease>,
+    // Shared with the upstream observer and retained through protocol conversion.
+    incomplete: Arc<AtomicBool>,
 }
 impl ResponseFence {
     pub(crate) async fn check(&self) -> Result<(), ProxyError> {
+        if self.incomplete.load(Ordering::Acquire) {
+            return Err(ProxyError::ForwardFailed(
+                "minimax_code.incomplete_stream".into(),
+            ));
+        }
         self.lease.check().await.map_err(owner_error)
     }
 
@@ -59,38 +76,38 @@ impl ResponseFence {
         S: futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
         E: Send + 'static,
     {
-        let lease = self.lease.clone();
+        let fence = self.clone();
         let stream = Box::pin(stream);
         futures::stream::unfold(
-            (lease, stream, false),
-            |(lease, mut stream, stopped)| async move {
+            (fence, stream, false),
+            |(fence, mut stream, stopped)| async move {
                 if stopped {
                     return None;
                 }
-                if lease.check().await.is_err() {
+                if fence.check().await.is_err() {
                     return Some((
                         Err(std::io::Error::other(
                             "minimax_code.stream_authorization_changed",
                         )),
-                        (lease, stream, true),
+                        (fence, stream, true),
                     ));
                 }
                 match stream.next().await {
                     Some(Ok(bytes)) => {
-                        if lease.check().await.is_err() {
+                        if fence.check().await.is_err() {
                             Some((
                                 Err(std::io::Error::other(
                                     "minimax_code.stream_authorization_changed",
                                 )),
-                                (lease, stream, true),
+                                (fence, stream, true),
                             ))
                         } else {
-                            Some((Ok(bytes), (lease, stream, false)))
+                            Some((Ok(bytes), (fence, stream, false)))
                         }
                     }
                     Some(Err(_)) => Some((
                         Err(std::io::Error::other("minimax_code.stream_interrupted")),
-                        (lease, stream, true),
+                        (fence, stream, true),
                     )),
                     None => None,
                 }
@@ -297,13 +314,19 @@ impl Lease {
                 // only its safe status and allowlisted denial category remain.
                 let fence = ResponseFence {
                     lease: Arc::new(self),
+                    incomplete: Arc::default(),
                 };
                 return Ok(DispatchResponse { response, fence });
             }
             let fence = ResponseFence {
                 lease: Arc::new(self),
+                incomplete: Arc::default(),
             };
-            let response = fence.lease.clone().fence_response(response)?;
+            let response = fence.lease.clone().fence_response(
+                response,
+                body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+                &fence,
+            )?;
             return Ok(DispatchResponse { response, fence });
         }
     }
@@ -428,6 +451,8 @@ impl Lease {
     fn fence_response(
         self: Arc<Self>,
         response: ProxyResponse,
+        streaming: bool,
+        fence: &ResponseFence,
     ) -> Result<ProxyResponse, ProxyError> {
         if response
             .headers()
@@ -456,8 +481,12 @@ impl Lease {
         .map_err(|_| owner_error(Failure::InvalidResponse))?;
         let status = response.status();
         let headers = safe_success_headers(response.headers());
-        let fenced =
-            ResponseFence { lease: self }.wrap_stream(guard.wrap_stream(response.bytes_stream()));
+        let observed = inference_sse::observe_completion(
+            guard.wrap_stream(response.bytes_stream()),
+            streaming,
+            fence.incomplete.clone(),
+        );
+        let fenced = fence.wrap_stream(observed);
         Ok(ProxyResponse::streamed(status, headers, fenced))
     }
 }
