@@ -10,7 +10,7 @@ pub(crate) const MAX_PARALLEL_ANALYSES: usize = 8;
 /// Each item is independent; the first item's model also performs the summary.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AnalysisInput {
+pub struct AnalysisInput {
     pub input: String,
     pub model: String,
 }
