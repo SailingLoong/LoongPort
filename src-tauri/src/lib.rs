@@ -14,6 +14,7 @@ mod codex_reasoning;
 mod codex_state_db;
 #[cfg(feature = "gui")]
 mod commands;
+mod clients;
 mod config;
 mod config_file_io;
 mod crowd;

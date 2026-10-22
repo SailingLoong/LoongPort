@@ -124,8 +124,9 @@ pub(crate) const DEVICE_STATE_FILE: &str = "live-state.json";
 pub(crate) const DEVICE_BACKUP_DIR: &str = "backups/live-first-write";
 pub(crate) const UPGRADE_CHECKPOINT_FILE: &str = "upgrade-checkpoint.json";
 pub(crate) const UPGRADE_ARCHIVE_FILE: &str = "upgrade-completed.json";
-pub(super) const DEVICE_FILES: [&str; 5] = [
+pub(super) const DEVICE_FILES: [&str; 6] = [
     DEVICE_STATE_FILE,
+    "client-connections.json",
     UPGRADE_CHECKPOINT_FILE,
     UPGRADE_ARCHIVE_FILE,
     "codex-login-stash.json",
