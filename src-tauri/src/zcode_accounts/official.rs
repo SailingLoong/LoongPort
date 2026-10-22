@@ -24,6 +24,7 @@ pub enum OfficialError {
     Transport,
     Timeout,
     ConsentMismatch,
+    EntropyUnavailable,
 }
 impl fmt::Display for OfficialError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -69,6 +70,27 @@ credential!(PollToken);
 credential!(ProviderAccessToken);
 credential!(StartJwt);
 credential!(CodingKey);
+
+impl PollToken {
+    /// The official CLI uses 32 random bytes encoded as lowercase hex, not a UUID.
+    pub(crate) fn generate() -> Result<Self, OfficialError> {
+        Self::generate_with(getrandom::fill)
+    }
+
+    fn generate_with<E>(
+        fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Self, OfficialError> {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        fill(bytes.as_mut()).map_err(|_| OfficialError::EntropyUnavailable)?;
+        let mut encoded = Zeroizing::new(String::with_capacity(bytes.len() * 2));
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes.iter() {
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+        Self::new(&encoded)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BusinessToken {
