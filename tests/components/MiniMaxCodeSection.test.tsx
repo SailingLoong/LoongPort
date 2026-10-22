@@ -605,3 +605,26 @@ afterEach(() => {
   cleanup();
   queryClient.clear();
 });
+
+it("enables automatic claiming only for the chosen account without claiming immediately", async () => {
+  catalog = [account("code-a"), account("code-b", { region: "global" })];
+  handlers.set_minimax_code_automatic_claim = () => {
+    catalog[0] = {
+      ...catalog[0],
+      autoClaimEnabled: true,
+      autoClaimRevision: 1,
+    };
+    return catalog[0];
+  };
+  await mount();
+  fireEvent.click(button("开启自动签到", "code-a"));
+  await waitFor(() => expect(button("关闭自动签到", "code-a")).toBeEnabled());
+  expect(button("开启自动签到", "code-b")).toBeEnabled();
+  expect(calls("set_minimax_code_automatic_claim")).toEqual([
+    [
+      "set_minimax_code_automatic_claim",
+      { id: "code-a", authGeneration: 1, policyRevision: 0, enabled: true },
+    ],
+  ]);
+  expect(calls("claim_minimax_code_today")).toEqual([]);
+});

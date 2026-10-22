@@ -134,7 +134,7 @@ export function MiniMaxCodeSection({
 
   const runAccount = async (
     account: MiniMaxCodeAccount,
-    action: AccountAction,
+    action: AccountAction | "enableAuto" | "disableAuto",
   ) => {
     if (!loaded || loading || activeAccounts.current.has(account.id)) return;
     activeAccounts.current.add(account.id);
@@ -143,7 +143,10 @@ export function MiniMaxCodeSection({
     // A list requested before this action must not replace its newer projection.
     listGeneration.current += 1;
     try {
-      const refreshed = await minimaxCodeApi[action](account.id);
+      const refreshed =
+        action === "enableAuto" || action === "disableAuto"
+          ? await minimaxCodeApi.setAutomatic(account, action === "enableAuto")
+          : await minimaxCodeApi[action](account.id);
       // Re-read the sole catalog instead of publishing a possibly late command
       // response. This also retains pending operations on every other account.
       if (alive.current)
@@ -510,6 +513,37 @@ export function MiniMaxCodeSection({
               );
               const creditActions = (
                 <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      loading ||
+                      busy.has(account.id) ||
+                      (!account.authorized && !account.autoClaimEnabled)
+                    }
+                    onClick={() =>
+                      void runAccount(
+                        account,
+                        account.autoClaimEnabled ? "disableAuto" : "enableAuto",
+                      )
+                    }
+                  >
+                    {account.autoClaimEnabled ? "关闭自动签到" : "开启自动签到"}
+                  </Button>
+                  <p className="w-full text-xs text-muted-foreground">
+                    {account.autoClaimEnabled
+                      ? "自动签到已开启"
+                      : "自动签到已关闭"}
+                    ：应用运行且凭据保管库解锁时，每 15
+                    分钟检查服务端资格。结果未确认时只查询，不重复领取；错过窗口不补领。关闭不会撤销已提交的领取。后台结果需重新读取账号查看，余额需点击刷新查询。
+                  </p>
+                  {account.autoClaimFailure && (
+                    <p role="status" className="w-full text-xs text-amber-600">
+                      自动签到需处理：
+                      {t(`minimaxCode.errors.${account.autoClaimFailure}`)}
+                    </p>
+                  )}
                   <Button
                     type="button"
                     size="sm"

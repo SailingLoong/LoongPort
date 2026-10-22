@@ -54,6 +54,9 @@ pub(crate) struct Operation {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountView {
+    pub auto_claim_enabled: bool,
+    pub auto_claim_revision: u64,
+    pub auto_claim_failure: Option<Failure>,
     pub entitlement: Option<super::entitlement::Entitlement>,
     pub id: String,
     pub label: String,
@@ -83,6 +86,12 @@ pub(super) struct Credentials {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Account {
+    #[serde(default)]
+    pub auto_claim_enabled: bool,
+    #[serde(default)]
+    pub auto_claim_revision: u64,
+    #[serde(default)]
+    pub auto_claim_failure: Option<Failure>,
     pub id: String,
     pub label: String,
     pub region: Region,
@@ -180,6 +189,9 @@ impl Account {
             self.status
         };
         AccountView {
+            auto_claim_enabled: self.auto_claim_enabled,
+            auto_claim_revision: self.auto_claim_revision,
+            auto_claim_failure: self.auto_claim_failure,
             entitlement: None,
             id: self.id.clone(),
             label: self.label.clone(),
@@ -394,6 +406,17 @@ pub(super) fn matched<'a>(
 /// under the same identity/Runtime fence as retirement and shutdown. This is not
 /// a claim that bytes are already on wire. Pending network IO is awaited only
 /// after every storage/key/Runtime guard has been dropped.
+pub(super) enum DispatchFailure {
+    NotDispatched(Failure),
+    OutcomeUnknown(Failure),
+}
+impl DispatchFailure {
+    pub(super) fn failure(self) -> Failure {
+        match self {
+            Self::NotDispatched(f) | Self::OutcomeUnknown(f) => f,
+        }
+    }
+}
 pub(super) async fn dispatch<T: super::http::Transport>(
     session: &SecretSession,
     binding: &Binding,
@@ -401,13 +424,26 @@ pub(super) async fn dispatch<T: super::http::Transport>(
     request: super::http::Request,
     validate: impl FnOnce(&mut Document, &Binding) -> Result<(), Failure>,
 ) -> Result<super::http::Response, Failure> {
+    dispatch_classified(session, binding, transport, request, validate)
+        .await
+        .map_err(DispatchFailure::failure)
+}
+pub(super) async fn dispatch_classified<T: super::http::Transport>(
+    session: &SecretSession,
+    binding: &Binding,
+    transport: &T,
+    request: super::http::Request,
+    validate: impl FnOnce(&mut Document, &Binding) -> Result<(), Failure>,
+) -> Result<super::http::Response, DispatchFailure> {
     #[cfg(test)]
     super::tests::before_dispatch(session.root(), request.endpoint).await;
     let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
+    let mut dispatched = false;
     let mut pending = None;
     let mut ready = None;
     access(session, Some(binding), |document, current| {
         validate(document, current)?;
+        dispatched = true;
         let mut future = transport.request(request);
         match future
             .as_mut()
@@ -418,10 +454,20 @@ pub(super) async fn dispatch<T: super::http::Transport>(
         }
         Ok(((), false))
     })
-    .await?;
+    .await
+    .map_err(|failure| {
+        if dispatched {
+            DispatchFailure::OutcomeUnknown(failure)
+        } else {
+            DispatchFailure::NotDispatched(failure)
+        }
+    })?;
     if let Some(response) = ready {
-        response
+        response.map_err(DispatchFailure::OutcomeUnknown)
     } else {
-        pending.ok_or(Failure::StorageUnavailable)?.await
+        pending
+            .ok_or(DispatchFailure::OutcomeUnknown(Failure::StorageUnavailable))?
+            .await
+            .map_err(DispatchFailure::OutcomeUnknown)
     }
 }

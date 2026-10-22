@@ -27,6 +27,9 @@ export interface MiniMaxCodeEntitlement {
   tokenPlanExpiresAt: number | null;
 }
 export interface MiniMaxCodeAccount {
+  autoClaimEnabled?: boolean;
+  autoClaimRevision?: number;
+  autoClaimFailure?: MiniMaxCodeFailure | null;
   /** Informational snapshot from explicit refresh; absent/unknown is not zero. */
   entitlement?: MiniMaxCodeEntitlement | null;
   id: string;
@@ -80,6 +83,13 @@ export type MiniMaxCodeFailure =
 /** Safe projections of the sole encrypted Code catalog; never API-key accounts. */
 export const minimaxCodeApi = {
   list: () => invoke<MiniMaxCodeAccount[]>("list_minimax_code_accounts"),
+  setAutomatic: (account: MiniMaxCodeAccount, enabled: boolean) =>
+    invoke<MiniMaxCodeAccount>("set_minimax_code_automatic_claim", {
+      id: account.id,
+      authGeneration: account.authGeneration,
+      policyRevision: account.autoClaimRevision ?? 0,
+      enabled,
+    }),
   refresh: (id: string) =>
     invoke<MiniMaxCodeAccount>("refresh_minimax_code_account", { id }),
   claim: (id: string) =>
