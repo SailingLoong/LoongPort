@@ -4055,7 +4055,8 @@
       "openclawTools": "Tool permissions",
       "openclawAgents": "Agent defaults",
       "hermesMemory": "Hermes memory",
-      "hermesDashboard": "Hermes dashboard"
+      "hermesDashboard": "Hermes dashboard",
+      "clients": "Client connections"
     },
     "featureDescriptions": {
       "usage": "Review requests, tokens, and costs",
@@ -4070,7 +4071,8 @@
       "openclawTools": "Manage OpenClaw tool permissions",
       "openclawAgents": "Configure OpenClaw defaults",
       "hermesMemory": "View and edit persistent memory",
-      "hermesDashboard": "Open the local management interface"
+      "hermesDashboard": "Open the local management interface",
+      "clients": "Connect WorkBuddy and other clients"
     }
   },
   "applications": {
@@ -5077,5 +5079,26 @@
       "notClaimable": "This account cannot claim now. Refresh its status.",
       "authorizationCompleted": "Authorization completed and the account was saved before cancellation. Check the account list."
     }
+  },
+  "clients": {
+    "description": "Connect other clients to existing LoongPort routes.",
+    "configured": "Configuration written; a client conversation has not been verified.",
+    "notConfigured": "Not connected",
+    "sharedRoute": "Shares the {{route}} routing policy",
+    "route": "Route",
+    "models": "Model IDs (comma separated)",
+    "credential": "Access credential",
+    "chooseCredential": "Choose an access credential",
+    "createCredential": "Create access credential",
+    "preview": "Preview configuration",
+    "previewDescription": "Configure {{count}} models on the {{route}} route, preserving other models and settings.",
+    "apply": "Apply configuration",
+    "disconnect": "Disconnect",
+    "recover": "Check interrupted operation",
+    "applied": "Configuration written. Select a model in the client and verify a conversation. Restart the client if the model is missing.",
+    "operationFailed": "The operation did not complete. Check the local proxy, credential and external configuration changes, then try again.",
+    "configurationChanged": "The client configuration has changed. Review it before reconnecting.",
+    "recoveryRequired": "An interrupted operation needs to be checked.",
+    "revoke": "Revoke credential"
   }
 }

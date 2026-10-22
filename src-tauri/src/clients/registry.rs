@@ -13,6 +13,7 @@ pub struct ClientDescriptor {
 pub struct Registration {
     pub descriptor: ClientDescriptor,
     directory: &'static str,
+    filename: &'static str,
     pub adapter: &'static dyn Adapter,
     override_env: Option<&'static str>,
 }
@@ -25,6 +26,7 @@ pub static CLIENTS: &[Registration] = &[
             route_apps: &["codex"],
         },
         directory: ".workbuddy",
+        filename: "models.json",
         adapter: &super::workbuddy::WorkBuddy,
         override_env: Some("WORKBUDDY_CONFIG_DIR"),
     },
@@ -35,6 +37,7 @@ pub static CLIENTS: &[Registration] = &[
             route_apps: &["codex"],
         },
         directory: ".workbuddy-ai",
+        filename: "models.json",
         adapter: &super::workbuddy::WorkBuddy,
         override_env: None,
     },
@@ -74,10 +77,10 @@ impl Registration {
     pub fn path(&self, home: &Path, override_dir: Option<&Path>) -> PathBuf {
         if self.override_env.is_some() {
             if let Some(path) = override_dir {
-                return path.join("models.json");
+                return path.join(self.filename);
             }
         }
-        home.join(self.directory).join("models.json")
+        home.join(self.directory).join(self.filename)
     }
 }
 

@@ -4055,7 +4055,8 @@
       "openclawTools": "工具权限",
       "openclawAgents": "Agent 默认设置",
       "hermesMemory": "Hermes 记忆",
-      "hermesDashboard": "Hermes 控制台"
+      "hermesDashboard": "Hermes 控制台",
+      "clients": "客户端接入"
     },
     "featureDescriptions": {
       "usage": "查看请求、Token 和费用",
@@ -4070,7 +4071,8 @@
       "openclawTools": "管理 OpenClaw 工具权限",
       "openclawAgents": "配置 OpenClaw 默认行为",
       "hermesMemory": "查看与编辑持久记忆",
-      "hermesDashboard": "打开本地管理界面"
+      "hermesDashboard": "打开本地管理界面",
+      "clients": "连接 WorkBuddy 等客户端"
     }
   },
   "applications": {
@@ -5077,5 +5079,26 @@
       "notClaimable": "该账号当前不允许领取，请刷新状态。",
       "authorizationCompleted": "授权已完成，账号已保存；本次取消未生效。请查看账号列表。"
     }
+  },
+  "clients": {
+    "description": "将其他客户端连接到 LoongPort 的已有路由。",
+    "configured": "配置已写入，实际对话尚未验证。",
+    "notConfigured": "尚未连接",
+    "sharedRoute": "共享 {{route}} 路由策略",
+    "route": "路由",
+    "models": "模型 ID（逗号分隔）",
+    "credential": "接入凭据",
+    "chooseCredential": "选择接入凭据",
+    "createCredential": "创建接入凭据",
+    "preview": "预览配置",
+    "previewDescription": "为 {{route}} 路由配置 {{count}} 个模型，保留其他模型和设置。",
+    "apply": "应用配置",
+    "disconnect": "断开连接",
+    "recover": "核对中断的操作",
+    "applied": "配置已写入。请在客户端选择模型并验证对话；若未出现，请重启客户端。",
+    "operationFailed": "操作未完成。请检查本地路由、凭据和配置是否有外部修改，再重试。",
+    "configurationChanged": "客户端配置已变更，请核对后再连接。",
+    "recoveryRequired": "有一次中断的操作需要核对。",
+    "revoke": "撤销凭据"
   }
 }

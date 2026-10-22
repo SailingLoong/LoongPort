@@ -64,6 +64,7 @@ export function FeatureHub({
             icon: FileText,
             action: () => onNavigate("prompts"),
           },
+          { key: "clients", icon: Plug, action: () => onNavigate("clients") },
           { key: "agents", icon: Bot, action: () => onNavigate("agents") },
           {
             key: "universal",

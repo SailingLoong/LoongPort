@@ -1798,6 +1798,14 @@ pub fn run() {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             commands::create_agents_task,
+            commands::list_client_connections,
+            commands::list_client_credentials,
+            commands::create_client_credential,
+            commands::revoke_client_credential,
+            commands::preview_client_connection,
+            commands::apply_client_connection,
+            commands::disconnect_client,
+            commands::recover_client_connection,
             commands::list_agents_tasks,
             commands::cancel_agents_task,
             secrets::startup::unlock_secret_vault,
