@@ -5074,5 +5074,37 @@
       "notClaimable": "該帳號目前不允許領取，請重新整理狀態。",
       "authorizationCompleted": "授權已完成，帳號已儲存；本次取消未生效。請查看帳號清單。"
     }
+  },
+  "codeAgents": {
+    "title": "程式碼任務",
+    "description": "在獨立工作區執行 Codex。修改保留供你檢查，不會自動合併。僅使用已授權的連線。",
+    "authorize": "授權程式碼任務",
+    "revoke": "撤銷程式碼授權",
+    "grant": "程式碼授權",
+    "chooseGrant": "請選擇授權",
+    "repository": "程式碼儲存庫",
+    "base": "基準版本",
+    "model": "程式碼模型",
+    "modelHint": "可選擇已設定的模型，或填寫模型 ID。實際可用性由執行結果確認。",
+    "run": "執行程式碼任務",
+    "refresh": "更新程式碼狀態",
+    "workspace": "工作區：",
+    "baseCommit": "基準：",
+    "headCommit": "結果版本：",
+    "lostOutput": "應用程式重啟後無法復原本文，工作區與執行狀態仍保留。",
+    "interaction": "Codex 需要額外確認，任務已停止。",
+    "unfinished": "任務未完成，請檢查工作區與執行狀態。",
+    "processUnknown": "程序停止狀態未確認。",
+    "cancel": "取消程式碼任務",
+    "readFailed": "無法讀取程式碼任務。",
+    "modelsFailed": "無法讀取已設定的模型。",
+    "createUncertain": "啟動結果未確認；再次提交相同內容會讀取已有任務。",
+    "operationFailed": "操作失敗，請更新狀態後重試。",
+    "unknown": "結果未確認",
+    "running": "執行中",
+    "completed": "完成",
+    "cancelled": "已取消",
+    "failed": "失敗",
+    "unknownStatus": "未知狀態"
   }
 }

@@ -35,6 +35,7 @@ pub struct CodeTaskRecord {
     pub output: Option<String>,
     pub output_unavailable: bool,
     pub error: Option<String>,
+    /// Confirms the Codex runtime exited after its managed session shutdown; excludes deliberately detached daemons.
     pub process_stopped: bool,
     pub can_cancel: bool,
     fingerprint: String,
@@ -61,9 +62,27 @@ fn persist(path: &Path, record: &CodeTaskRecord) -> Result<(), String> {
         .map_err(|_| "agents.code_receipt_write_failed".into())
 }
 fn recovered(path: &Path) -> Result<CodeTaskRecord, String> {
-    let bytes = std::fs::read(path).map_err(|_| "agents.code_receipt_unavailable")?;
-    let mut record: CodeTaskRecord =
-        serde_json::from_slice(&bytes).map_err(|_| "agents.code_receipt_invalid")?;
+    let mut record: CodeTaskRecord = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| CodeTaskRecord {
+            task_id: path
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            status: "unknown".into(),
+            workspace: None,
+            base_commit: None,
+            head_commit: None,
+            change_summary: None,
+            output: None,
+            output_unavailable: true,
+            error: Some("agents.code_claim_without_receipt_no_replay".into()),
+            process_stopped: false,
+            can_cancel: false,
+            fingerprint: String::new(),
+        });
     if record.workspace.is_none() {
         if let Some(root) = path.ancestors().nth(3) {
             let allocated = root.join("workspaces").join(&record.task_id);
@@ -117,7 +136,7 @@ impl CodeRuntime {
                 .lock()
                 .map_err(|_| "agents.runtime_unavailable")?
                 .clone();
-            return if record.fingerprint == fingerprint {
+            return if record.fingerprint.is_empty() || record.fingerprint == fingerprint {
                 Ok(record)
             } else {
                 Err("agents.request_conflict".into())
@@ -135,7 +154,7 @@ impl CodeRuntime {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let record = recovered(&receipt)?;
-                return if record.fingerprint == fingerprint {
+                return if record.fingerprint.is_empty() || record.fingerprint == fingerprint {
                     Ok(record)
                 } else {
                     Err("agents.request_conflict".into())
@@ -336,7 +355,7 @@ mod tests {
     }
     #[test]
     fn completed_code_tasks_are_not_replayed_after_owner_restart() {
-        let root = tempfile::tempdir().unwrap();
+        let root = super::super::tests::private_root();
         let request = CodeTaskRequest {
             request_id: "code-test".into(),
             repository: repository(root.path()),
@@ -378,5 +397,64 @@ mod tests {
             .unwrap()
             .contains("result.txt"));
         assert!(!record.can_cancel);
+    }
+    #[test]
+    fn incomplete_claim_is_visible_without_poisoning_other_tasks_or_replaying() {
+        let root = super::super::tests::private_root();
+        let tasks = root.path().join("tasks");
+        std::fs::create_dir_all(tasks.join("claims/interrupted")).unwrap();
+        std::fs::create_dir_all(tasks.join("claims/corrupted")).unwrap();
+        std::fs::write(
+            tasks.join("claims/corrupted/receipt.json"),
+            b"incomplete-json",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tasks.join("workspaces/corrupted")).unwrap();
+        let runtime = CodeRuntime::default();
+        let request = CodeTaskRequest {
+            request_id: "interrupted".into(),
+            repository: repository(root.path()),
+            base_ref: "HEAD".into(),
+            input: "Do not replay".into(),
+            model: None,
+            credential_id: "reference".into(),
+            route_app: "codex".into(),
+        };
+        let record = runtime
+            .start(&tasks, request.clone(), |_, _, _, _| {
+                panic!("replayed incomplete claim")
+            })
+            .unwrap();
+        assert_eq!(record.status, "unknown");
+        assert!(!record.can_cancel);
+        assert!(!tasks.join("claims/interrupted/receipt.json").exists());
+        let mut second = request;
+        second.request_id = "valid".into();
+        runtime
+            .start(&tasks, second, |_, _, _, _| {
+                Ok(RunnerResult {
+                    status: "completed".into(),
+                    output: None,
+                    error: None,
+                    process_stopped: true,
+                })
+            })
+            .unwrap();
+        runtime.stop().unwrap();
+        let records = runtime.list(&tasks).unwrap();
+        assert_eq!(records.len(), 3);
+        let corrupted = records
+            .iter()
+            .find(|record| record.task_id == "corrupted")
+            .unwrap();
+        assert_eq!(corrupted.status, "unknown");
+        assert_eq!(
+            corrupted.workspace.as_deref(),
+            Some(tasks.join("workspaces/corrupted").as_path())
+        );
+        assert_eq!(
+            std::fs::read(tasks.join("claims/corrupted/receipt.json")).unwrap(),
+            b"incomplete-json"
+        );
     }
 }

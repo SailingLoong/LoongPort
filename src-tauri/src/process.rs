@@ -193,7 +193,9 @@ pub(crate) fn terminate_child_tree(child: &mut std::process::Child) -> bool {
             }
         }
     }
-    child.kill().is_ok()
+    let _ = child.kill();
+    // A leader-only fallback cannot confirm that descendants stopped.
+    false
 }
 
 #[cfg(not(target_os = "windows"))]

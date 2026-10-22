@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
 import {
   codeAgentsApi,
@@ -8,14 +9,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
-const statuses: Record<string, string> = {
-  accepted: "执行中",
-  completed: "完成",
-  cancelled: "已取消",
-  failed: "失败",
-  unknown: "结果未确认",
-};
 export function CodeAgentsPanel() {
+  const { t } = useTranslation();
+  const statuses: Record<string, string> = {
+    accepted: t("codeAgents.running"),
+    completed: t("codeAgents.completed"),
+    cancelled: t("codeAgents.cancelled"),
+    failed: t("codeAgents.failed"),
+    unknown: t("codeAgents.unknown"),
+  };
   const [credentials, setCredentials] = useState<CodeCredential[]>([]);
   const [credentialId, setCredentialId] = useState("");
   const [models, setModels] = useState<string[]>([]);
@@ -48,7 +50,7 @@ export function CodeAgentsPanel() {
       setTasks(records);
     } catch {
       if (active.current && current === revision.current)
-        setError("无法读取代码任务。");
+        setError(t("codeAgents.readFailed"));
     }
   }
   useEffect(() => {
@@ -60,7 +62,7 @@ export function CodeAgentsPanel() {
         if (active.current) setModels(values);
       })
       .catch(() => {
-        if (active.current) setError("Codex 暂不可用，请检查本机安装。");
+        if (active.current) setError(t("codeAgents.modelsFailed"));
       });
     const timer = setInterval(() => void refresh(), 3000);
     return () => {
@@ -117,8 +119,8 @@ export function CodeAgentsPanel() {
       if (active.current)
         setError(
           action === "create"
-            ? "启动结果未确认；再次提交相同内容会读取已有任务。"
-            : "操作失败，请刷新状态后重试。",
+            ? t("codeAgents.createUncertain")
+            : t("codeAgents.operationFailed"),
         );
     } finally {
       operation.current = false;
@@ -137,32 +139,31 @@ export function CodeAgentsPanel() {
   );
   return (
     <section className="glass-card rounded-xl p-4 space-y-3">
-      <h3 className="font-semibold">代码任务</h3>
+      <h3 className="font-semibold">{t("codeAgents.title")}</h3>
       <p className="text-sm text-muted-foreground">
-        在独立工作区运行 Codex。修改保留供你检查，不会自动合并。仅使用你授权的
-        LoongPort 账号链。
+        {t("codeAgents.description")}
       </p>
       <div className="flex gap-2">
         <Button disabled={busy} onClick={() => void mutate("authorize")}>
-          授权代码任务
+          {t("codeAgents.authorize")}
         </Button>
         <Button
           variant="outline"
           disabled={busy || !credentialId}
           onClick={() => void mutate("revoke")}
         >
-          撤销代码授权
+          {t("codeAgents.revoke")}
         </Button>
       </div>
       <label className="block">
-        代码授权
+        {t("codeAgents.grant")}
         <select
-          aria-label="代码授权"
+          aria-label={t("codeAgents.grant")}
           value={credentialId}
           onChange={(event) => setCredentialId(event.target.value)}
           className="block w-full rounded border bg-background p-2"
         >
-          <option value="">请选择授权</option>
+          <option value="">{t("codeAgents.chooseGrant")}</option>
           {credentials.map((credential) => (
             <option key={credential.id} value={credential.id}>
               Codex · {credential.id.slice(0, 8)}
@@ -171,25 +172,25 @@ export function CodeAgentsPanel() {
         </select>
       </label>
       <label className="block">
-        代码仓库
+        {t("codeAgents.repository")}
         <Input
-          aria-label="代码仓库"
+          aria-label={t("codeAgents.repository")}
           value={repository}
           onChange={(event) => setRepository(event.target.value)}
         />
       </label>
       <label className="block">
-        基准版本
+        {t("codeAgents.base")}
         <Input
-          aria-label="基准版本"
+          aria-label={t("codeAgents.base")}
           value={baseRef}
           onChange={(event) => setBaseRef(event.target.value)}
         />
       </label>
       <label className="block">
-        代码模型
+        {t("codeAgents.model")}
         <Input
-          aria-label="代码模型"
+          aria-label={t("codeAgents.model")}
           list="code-agent-models"
           value={model}
           onChange={(event) => setModel(event.target.value)}
@@ -201,13 +202,13 @@ export function CodeAgentsPanel() {
           ))}
         </datalist>
         <span className="text-sm text-muted-foreground">
-          可选择账号链已有模型，或填写模型 ID。实际可用性由运行结果确认。
+          {t("codeAgents.modelHint")}
         </span>
       </label>
       <label className="block">
-        代码任务
+        {t("codeAgents.title")}
         <Textarea
-          aria-label="代码任务"
+          aria-label={t("codeAgents.title")}
           maxLength={65536}
           value={input}
           onChange={(event) => setInput(event.target.value)}
@@ -227,14 +228,14 @@ export function CodeAgentsPanel() {
           }
           onClick={() => void mutate("create")}
         >
-          运行代码任务
+          {t("codeAgents.run")}
         </Button>
         <Button
           variant="outline"
           disabled={busy}
           onClick={() => void refresh()}
         >
-          刷新代码状态
+          {t("codeAgents.refresh")}
         </Button>
       </div>
       {error && (
@@ -245,14 +246,27 @@ export function CodeAgentsPanel() {
       {tasks.map((task) => (
         <article key={task.taskId} className="rounded border p-3 space-y-2">
           <p>
-            代码任务 {task.taskId.slice(0, 8)} ·{" "}
-            {statuses[task.status] ?? "未知状态"}
+            {t("codeAgents.title")} {task.taskId.slice(0, 8)} ·{" "}
+            {statuses[task.status] ?? t("codeAgents.unknownStatus")}
           </p>
           {task.workspace && (
-            <p className="break-all">工作区：{task.workspace}</p>
+            <p className="break-all">
+              {t("codeAgents.workspace")}
+              {task.workspace}
+            </p>
           )}
-          {task.baseCommit && <p>基准：{task.baseCommit}</p>}
-          {task.headCommit && <p>结果版本：{task.headCommit}</p>}
+          {task.baseCommit && (
+            <p>
+              {t("codeAgents.baseCommit")}
+              {task.baseCommit}
+            </p>
+          )}
+          {task.headCommit && (
+            <p>
+              {t("codeAgents.headCommit")}
+              {task.headCommit}
+            </p>
+          )}
           {task.changeSummary && (
             <pre className="whitespace-pre-wrap break-words">
               {task.changeSummary}
@@ -261,25 +275,23 @@ export function CodeAgentsPanel() {
           {task.output && (
             <p className="whitespace-pre-wrap break-words">{task.output}</p>
           )}
-          {task.outputUnavailable && (
-            <p>应用重启后正文不可恢复，工作区和执行状态仍保留。</p>
-          )}
+          {task.outputUnavailable && <p>{t("codeAgents.lostOutput")}</p>}
           {task.error && (
             <p>
               {task.error === "agents.runtime_requires_interaction"
-                ? "Codex 需要额外确认，任务已停止。"
-                : "任务未完成，请检查工作区与执行状态。"}
+                ? t("codeAgents.interaction")
+                : t("codeAgents.unfinished")}
             </p>
           )}
           {!task.canCancel && !task.processStopped && (
-            <p>进程停止状态未确认。</p>
+            <p>{t("codeAgents.processUnknown")}</p>
           )}
           <Button
             variant="outline"
             disabled={busy || !task.canCancel}
             onClick={() => void mutate("cancel", task.taskId)}
           >
-            取消代码任务
+            {t("codeAgents.cancel")}
           </Button>
         </article>
       ))}

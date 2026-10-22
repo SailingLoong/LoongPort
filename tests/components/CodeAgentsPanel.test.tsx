@@ -1,3 +1,5 @@
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -6,6 +8,13 @@ import { CodeAgentsPanel } from "@/components/agents/CodeAgentsPanel";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const call = vi.mocked(invoke);
 beforeEach(() => {
+  i18n.addResourceBundle(
+    "zh",
+    "translation",
+    { codeAgents: zh.codeAgents },
+    true,
+    true,
+  );
   call.mockReset();
   call.mockImplementation(async (command, args) => {
     if (

@@ -177,7 +177,7 @@ impl Owner {
 fn runtime_config(endpoint: &str, model: Option<&str>, home: &std::path::Path) -> Value {
     let mut config = json!({
         "model_provider":"loongport-task", "approval_policy":"never", "sandbox_mode":"workspace-write",
-        "cli_auth_credentials_store":"file",
+        "cli_auth_credentials_store":"file", "thread_unload_delay_secs":0,
         "model_providers":{"loongport-task":{"name":"LoongPort","base_url":endpoint,"wire_api":"responses","env_key":KEY_ENV,"requires_openai_auth":false}},
         "shell_environment_policy":{"inherit":"none","set":{"PATH":std::env::var("PATH").unwrap_or_default(),"HOME":home}},
         "mcp_servers":{}, "sandbox_workspace_write":{"network_access":false}
@@ -197,7 +197,7 @@ fn isolated_command(
     let path = std::env::var("PATH").unwrap_or_default();
     let mut command = Command::new(executable);
     // CLI overrides take precedence over repository config layers, including untrusted MCP/plugin declarations.
-    command.args(["app-server", "--stdio", "--strict-config", "-c", "mcp_servers={}", "-c", "plugins={}", "-c", "model_provider=\"loongport-task\"", "-c", "shell_environment_policy.inherit=\"none\""])
+    command.args(["app-server", "--stdio", "--strict-config", "-c", "mcp_servers={}", "-c", "thread_unload_delay_secs=0", "-c", "plugins={}", "-c", "model_provider=\"loongport-task\"", "-c", "shell_environment_policy.inherit=\"none\""])
         .arg("-c").arg(format!("shell_environment_policy.set={{PATH={},HOME={}}}", toml::Value::String(path.clone()), toml::Value::String(home.to_string_lossy().into_owned())))
         .arg("-c").arg(format!("model_providers.loongport-task={{name=\"LoongPort\",base_url={},wire_api=\"responses\",env_key=\"{KEY_ENV}\",requires_openai_auth=false}}", toml::Value::String(endpoint.into())))
         .arg("-c").arg(format!("projects.{}.trust_level=\"untrusted\"", toml::Value::String(cwd.to_string_lossy().into_owned())))

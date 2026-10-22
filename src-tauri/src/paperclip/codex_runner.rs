@@ -31,6 +31,7 @@ struct Session {
     cancel: Arc<AtomicBool>,
     deadline: Instant,
     cleanup_attempted: bool,
+    tools_stopped: bool,
 }
 impl Session {
     fn send(&mut self, value: Value) -> Result<(), String> {
@@ -173,6 +174,7 @@ impl Session {
             .filter(|id| !id.is_empty())
             .ok_or("agents.runtime_invalid_thread")?
             .to_owned();
+        self.tools_stopped = false;
         let turn = self.request("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":input}],"approvalPolicy":"never","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[cwd],"networkAccess":false,"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}}))?;
         let turn_id = turn["turn"]["id"]
             .as_str()
@@ -180,12 +182,40 @@ impl Session {
             .ok_or("agents.runtime_invalid_turn")?
             .to_owned();
         let outcome = self.wait_turn(&thread_id, &turn_id);
-        if self.cancel.load(Ordering::Acquire) {
-            // Best-effort protocol cancellation precedes mandatory process cleanup.
-            let _ = self.send(json!({"id":self.next_id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}}));
-        }
+        self.close_thread(&thread_id, &turn_id, outcome.is_err());
         outcome
     }
+    fn close_thread(&mut self, thread_id: &str, turn_id: &str, interrupted: bool) {
+        // Shutdown control traffic has its own short deadline and remains writable after cancellation.
+        let cancel = std::mem::replace(&mut self.cancel, Arc::new(AtomicBool::new(false)));
+        self.deadline = Instant::now() + Duration::from_secs(2);
+        let result = (|| -> Result<(), String> {
+            if cancel.load(Ordering::Acquire) || interrupted {
+                let _ = self.request(
+                    "turn/interrupt",
+                    json!({"threadId":thread_id,"turnId":turn_id}),
+                );
+            }
+            let response = self.request("thread/unsubscribe", json!({"threadId":thread_id}))?;
+            if response["status"] != "unsubscribed" {
+                return Err("agents.runtime_cleanup_unconfirmed".into());
+            }
+            let mut pending = std::mem::take(&mut self.pending).into_iter();
+            loop {
+                let value = match pending.next() {
+                    Some(value) => value,
+                    None => self.receive()?,
+                };
+                self.server_request(&value)?;
+                if value["method"] == "thread/closed" && value["params"]["threadId"] == thread_id {
+                    return Ok(());
+                }
+            }
+        })();
+        self.tools_stopped = result.is_ok();
+        self.cancel = cancel;
+    }
+
     fn wait_turn(
         &mut self,
         thread_id: &str,
@@ -351,6 +381,7 @@ fn spawn(
         cancel: cancel.clone(),
         deadline: Instant::now() + timeout,
         cleanup_attempted: false,
+        tools_stopped: true,
     })
 }
 pub(super) fn run(
@@ -370,8 +401,8 @@ pub(super) fn run(
     }
     let mut session = spawn(command, cwd, cancel.clone(), timeout)?;
     let outcome = session.execute(cwd, input, model);
-    let process_stopped = session.stop();
-    let (status, output, error) = match outcome {
+    let process_stopped = session.stop() && session.tools_stopped;
+    let (status, output, mut error) = match outcome {
         Ok((status, output)) => (status, output, None),
         Err(error) => (
             if cancel.load(Ordering::Acquire) {
@@ -383,6 +414,9 @@ pub(super) fn run(
             Some(error),
         ),
     };
+    if !process_stopped && error.is_none() {
+        error = Some("agents.runtime_cleanup_unconfirmed".into());
+    }
     Ok(RunnerResult {
         status: if process_stopped {
             status
@@ -409,6 +443,8 @@ while IFS= read -r line; do
  *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
  *'"method":"config/read"'*) printf '%s\n' '{"id":2,"result":{"config":{"model_provider":"loongport-task","shell_environment_policy":{"inherit":"none","set":{}}}}}' ;;
  *'"method":"thread/start"'*) printf '%s\n' '{"id":3,"result":{"thread":{"id":"thread-test","ephemeral":true}}}' ;;
+ *'"method":"turn/interrupt"'*) printf '%s\n' '{"id":5,"result":{}}' ;;
+ *'"method":"thread/unsubscribe"'*) id=5; case "$line" in *'"id":6'*) id=6 ;; esac; printf '%s\n' "{\"id\":$id,\"result\":{\"status\":\"unsubscribed\"}}" '{"method":"thread/closed","params":{"threadId":"thread-test"}}' ;;
  *'"method":"turn/start"'*)
    printf '%s\n' changed > result.txt
    printf '%s\n' '{"id":4,"result":{"turn":{"id":"turn-test"}}}'
@@ -493,8 +529,8 @@ done
             .unwrap();
         cancel.store(true, Ordering::Release);
         let result = worker.join().unwrap();
-        assert_eq!(result.status, "cancelled");
-        assert!(result.process_stopped);
+        assert_eq!(result.status, "unknown");
+        assert!(!result.process_stopped);
         let deadline = Instant::now() + Duration::from_secs(2);
         while unsafe { libc::kill(pid, 0) } == 0 {
             assert!(
@@ -540,9 +576,9 @@ wait
         let started = Instant::now();
         cancel.store(true, Ordering::Release);
         let result = worker.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(3));
-        assert_eq!(result.status, "cancelled");
-        assert!(result.process_stopped);
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert_eq!(result.status, "unknown");
+        assert!(!result.process_stopped);
     }
     #[test]
     fn interactive_server_requests_are_rejected_and_never_approved() {
