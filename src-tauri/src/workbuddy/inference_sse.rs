@@ -71,6 +71,7 @@ pub(super) struct ChatGuard {
     blocked: Arc<AtomicBool>,
     denial: Arc<AtomicU32>,
     done: bool,
+    finished: bool,
 }
 impl ChatGuard {
     pub(super) fn new(
@@ -97,6 +98,7 @@ impl ChatGuard {
             blocked,
             denial,
             done: false,
+            finished: false,
         })
     }
     fn fresh(&self) -> Result<KnownSecretGuard, io::Error> {
@@ -231,6 +233,28 @@ impl ChatGuard {
             return Err(unsafe_body());
         }
         self.scan_value(&value, 0)?;
+        if self.finished {
+            let event_name = text
+                .lines()
+                .filter_map(|line| crate::proxy::sse::strip_sse_field(line, "event"))
+                .next_back()
+                .map(str::trim);
+            // Only a usage-only chunk may follow the completed choice, before
+            // DONE or clean EOF. Never reinterpret late content/tools or errors.
+            return if event_name != Some("error")
+                && value.get("error").is_none()
+                && value["type"] != "error"
+                && value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                && value.get("usage").is_some_and(Value::is_object)
+            {
+                Ok(())
+            } else {
+                Err(unsafe_body())
+            };
+        }
         let Some(choices) = value.get("choices").and_then(Value::as_array) else {
             return Ok(());
         };
@@ -308,6 +332,10 @@ impl ChatGuard {
         if choice.get("finish_reason").is_some_and(|v| !v.is_null()) {
             self.inline(None, true)?;
             self.finish_tools()?;
+            self.finished = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.is_empty());
         }
         Ok(())
     }
@@ -383,7 +411,10 @@ impl ChatGuard {
                         if guard.budget().is_err() {
                             return Some((Err(guard.block()), (guard, stream, eof, true)));
                         }
-                        if guard.done || !guard.pending() {
+                        // Existing converters stop reading at DONE. Retain the
+                        // terminal frame and usage tail until native EOF so a
+                        // later error cannot follow an already emitted success.
+                        if !guard.done && !guard.finished && !guard.pending() {
                             let bytes = Bytes::from(std::mem::take(&mut guard.held));
                             return Some((Ok(bytes), (guard, stream, eof, false)));
                         }
@@ -393,6 +424,12 @@ impl ChatGuard {
                         return Some((Err(guard.block()), (guard, stream, eof, true)));
                     }
                     if eof {
+                        // A clean transport close is not a completed inference.
+                        // Keep explicit finish_reason-only providers compatible,
+                        // but never let a truncated text stream become success.
+                        if !guard.done && !guard.finished {
+                            return Some((Err(guard.block()), (guard, stream, eof, true)));
+                        }
                         // Unterminated non-whitespace SSE bytes are ambiguous and
                         // cannot safely be replayed through a different parser.
                         if guard.buffer.iter().any(|b| !b.is_ascii_whitespace())

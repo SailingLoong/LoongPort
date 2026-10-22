@@ -22,6 +22,8 @@ enum Behavior {
     Refused(u16, i64),
     StreamRefusal,
     StreamFailure,
+    CleanEof,
+    CompletedThenError(bool),
     UnicodeFirst,
     StructuredStreamDenial(i64, bool),
 }
@@ -92,12 +94,23 @@ impl Fixture {
                     let wire = format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{encoded}\"}}}}]}}\n\ndata: [DONE]\n\n");
                     return ([("content-type", "text/event-stream")], wire).into_response();
                 }
-                if matches!(behavior,Behavior::StreamRefusal|Behavior::StreamFailure){
+                if let Behavior::CompletedThenError(done) = behavior {
+                    let stream = async_stream::stream! {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(FIRST.as_bytes()));
+                        release.notified().await;
+                        if done { yield Ok(Bytes::from_static(b"data: [DONE]\n\n")); }
+                        else { yield Ok(Bytes::from_static(b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")); }
+                        tokio::task::yield_now().await;
+                        yield Ok(Bytes::from_static(b"data: {\"error\":{\"type\":\"server_error\",\"code\":503,\"message\":\"general synthetic server error\"}}\n\n"));
+                    };
+                    return ([("content-type", "text/event-stream")], axum::body::Body::from_stream(stream)).into_response();
+                }
+                if matches!(behavior,Behavior::StreamRefusal|Behavior::StreamFailure|Behavior::CleanEof){
                     let stream=async_stream::stream!{
                         yield Ok::<Bytes,std::io::Error>(Bytes::from_static(FIRST.as_bytes()));
                         release.notified().await;
                         if matches!(behavior,Behavior::StreamFailure){yield Err(std::io::Error::other("fixture-access-synthetic-a synthetic failure"));}
-                        else{yield Ok(Bytes::from_static(b"data: {\"error\":{\"type\":\"access_denied\",\"code\":11140,\"message\":\"WorkBuddy restricted this account\"}}\n\n"));}
+                        else if matches!(behavior,Behavior::StreamRefusal){yield Ok(Bytes::from_static(b"data: {\"error\":{\"type\":\"access_denied\",\"code\":11140,\"message\":\"WorkBuddy restricted this account\"}}\n\n"));}
                     };
                     return ([("content-type","text/event-stream")],axum::body::Body::from_stream(stream)).into_response();
                 }
@@ -551,6 +564,113 @@ fn workbuddy_managed_protocol_is_mutually_exclusive_despite_editable_metadata() 
                 expected,
                 "{auth_provider}/{editable}"
             );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn workbuddy_clean_eof_after_output_is_terminal_at_all_original_entries() {
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let f = Fixture::new(Behavior::CleanEof).await;
+        let body = if path.ends_with("responses") {
+            json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
+        } else {
+            json!({"model":"synthetic-wb-model","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"synthetic prompt"}]})
+        };
+        let response = f.request(path, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        let mut failed = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !String::from_utf8_lossy(&bytes).contains(TEXT) {
+                bytes.extend_from_slice(
+                    &stream.next().await.expect("visible output absent").unwrap(),
+                );
+            }
+            // End a valid HTTP/SSE transport without a protocol completion event.
+            f.release.notify_one();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => bytes.extend_from_slice(&chunk),
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(stream);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            failed || text.contains("error"),
+            "{path}: clean EOF became success"
+        );
+        assert!(!text.contains("response.completed"));
+        assert!(!text.contains("message_stop"));
+        assert!(!text.contains("[DONE]"));
+        assert!(!text.contains("fixture-access"));
+        assert_eq!(text.matches(TEXT).count(), 1);
+        assert_eq!(f.calls.lock().unwrap().len(), 1);
+        assert_eq!(f.transport.attempts(), 1);
+        f.idle().await;
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn workbuddy_completion_then_error_cannot_escape_at_all_original_entries() {
+    for terminal_done in [false, true] {
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            let f = Fixture::new(Behavior::CompletedThenError(terminal_done)).await;
+            let body = if path.ends_with("responses") {
+                json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
+            } else {
+                json!({"model":"synthetic-wb-model","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"synthetic prompt"}]})
+            };
+            let response = f.request(path, body).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.into_body().into_data_stream();
+            let mut bytes = Vec::new();
+            let mut failed = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !String::from_utf8_lossy(&bytes).contains(TEXT) {
+                    bytes.extend_from_slice(
+                        &stream.next().await.expect("visible output absent").unwrap(),
+                    );
+                }
+                // Emit a completion signal followed by a general error only after visible output.
+                f.release.notify_one();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(chunk) => bytes.extend_from_slice(&chunk),
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            drop(stream);
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                failed || text.contains("error"),
+                "{path}: completion followed by error became success"
+            );
+            assert!(!text.contains("response.completed"));
+            assert!(!text.contains("message_stop"));
+            assert!(!text.contains("[DONE]"));
+            assert!(!text.contains("\"finish_reason\":\"stop\""));
+            assert!(!text.contains("fixture-access"));
+            assert_eq!(text.matches(TEXT).count(), 1);
+            assert_eq!(f.calls.lock().unwrap().len(), 1);
+            assert_eq!(f.transport.attempts(), 1);
+            f.idle().await;
         }
     }
 }
