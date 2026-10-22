@@ -1,5 +1,5 @@
 //! Small LoongPort task facade over the existing execution owner, not a scheduler.
-use super::contract::Task;
+use super::contract::{AnalysisInput, Task, MAX_PARALLEL_ANALYSES};
 use super::*;
 
 fn analysis_task(input: &str, model: &str) -> Task {
@@ -21,6 +21,62 @@ fn review_task(analysis: &Task, output: &str) -> Result<Task, AppError> {
     Ok(task)
 }
 
+fn analysis_index(agent: &str) -> Option<usize> {
+    if agent == "analysis" {
+        Some(0)
+    } else {
+        agent
+            .strip_prefix("analysis-")?
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(1)
+            .filter(|index| *index > 0)
+    }
+}
+
+/// UI consumers read these conclusions; legacy command callers can still read rows.
+pub(crate) fn task_groups(rows: Value) -> Value {
+    let mut groups: Vec<Value> = Vec::new();
+    for row in rows.as_array().into_iter().flatten() {
+        let index = groups
+            .iter()
+            .position(|group| group["taskId"] == row["taskId"]);
+        let index = index.unwrap_or_else(|| {
+            groups.push(json!({"taskId":row["taskId"],"runs":[]}));
+            groups.len() - 1
+        });
+        groups[index]["runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(row.clone());
+    }
+    for group in &mut groups {
+        let runs = group["runs"].as_array_mut().unwrap();
+        runs.sort_by_key(|run| {
+            analysis_index(run["agentId"].as_str().unwrap_or("")).unwrap_or(usize::MAX)
+        });
+        let can_cancel = runs.iter().any(|run| {
+            matches!(
+                run["result"]["status"].as_str(),
+                Some("accepted" | "not_started" | "waiting")
+            )
+        });
+        let summary = runs
+            .iter()
+            .find(|run| run["agentId"] == "review" && run["dependsOnAnalysis"] == true);
+        let status = match summary.map(|run| run["result"]["status"].as_str().unwrap_or("unknown"))
+        {
+            Some("completed") => "completed",
+            Some("failed" | "unknown") => "failed",
+            _ if can_cancel => "accepted",
+            _ => "failed",
+        };
+        group["status"] = json!(status);
+        group["canCancel"] = json!(can_cancel);
+    }
+    json!(groups)
+}
+
 impl Owner {
     pub(crate) fn create_local_task(
         &self,
@@ -28,7 +84,32 @@ impl Owner {
         input: String,
         model: String,
     ) -> Result<Value, AppError> {
-        if !id(&request_id) || request_id.len() > 100 {
+        self.create_local_task_analyses(request_id, input, model, None)
+    }
+    pub(crate) fn create_local_task_analyses(
+        &self,
+        request_id: String,
+        input: String,
+        model: String,
+        analyses: Option<Vec<AnalysisInput>>,
+    ) -> Result<Value, AppError> {
+        self.create_local_task_with(request_id, input, model, analyses, |binding, task| {
+            self.start_execution_until(
+                json!({"binding":binding,"task":task}),
+                Instant::now() + REQUEST_BUDGET,
+            )
+            .map(|_| ())
+        })
+    }
+    fn create_local_task_with(
+        &self,
+        request_id: String,
+        input: String,
+        model: String,
+        analyses: Option<Vec<AnalysisInput>>,
+        mut start: impl FnMut(Value, Task) -> Result<(), AppError>,
+    ) -> Result<Value, AppError> {
+        if !id(&request_id) || request_id.len() > 100 || input.trim().is_empty() {
             return Err(unavailable());
         }
         let _gate = self
@@ -36,8 +117,24 @@ impl Owner {
             .local_task_gate
             .try_lock()
             .map_err(|_| unavailable())?;
-        let task = analysis_task(&input, &model);
-        if input.trim().is_empty() || !task.valid() {
+        // This bounds local fan-out, not the capabilities of any upstream model.
+        let tasks = match analyses {
+            None => vec![analysis_task(&input, &model)],
+            Some(items) if !items.is_empty() && items.len() <= MAX_PARALLEL_ANALYSES => items
+                .into_iter()
+                .map(|item| {
+                    if item.input.trim().is_empty() {
+                        return Err(unavailable());
+                    }
+                    Ok(analysis_task(
+                        &format!("{input}\n分析要求：\n{}", item.input),
+                        &item.model,
+                    ))
+                })
+                .collect::<Result<Vec<_>, AppError>>()?,
+            _ => return Err(unavailable()),
+        };
+        if tasks.iter().any(|task| !task.valid()) {
             return Err(unavailable());
         }
         let existing: Vec<_> = self
@@ -46,51 +143,89 @@ impl Owner {
             .filter(|(id, _, _, _)| id == &request_id)
             .collect();
         if !existing.is_empty() {
-            // An uncertain retry reads the original claim, including its old
-            // revision. It must never fill in or replay a partially started task.
-            let (_, _, binding, _) = existing
+            if existing
                 .iter()
-                .find(|(_, agent, _, _)| agent == "analysis")
-                .ok_or_else(unavailable)?;
-            let scope = self.execution_scope(binding)?;
-            contract::task_for_start(binding, &scope, self.app.as_str(), task)?;
+                .filter(|(_, agent, _, _)| analysis_index(agent).is_some())
+                .count()
+                != tasks.len()
+            {
+                return Err(unavailable());
+            }
+            // Validate every claimed member, but never fill in a partial group.
+            for (_, agent, binding, _) in &existing {
+                if agent == "review" {
+                    continue;
+                }
+                let index = analysis_index(agent).ok_or_else(unavailable)?;
+                let task = tasks.get(index).ok_or_else(unavailable)?.clone();
+                let scope = self.execution_scope(binding)?;
+                contract::task_for_start(binding, &scope, self.app.as_str(), task)?;
+            }
             return self.local_tasks_inner();
         }
         let snapshot = self.snapshot_until(Instant::now() + REQUEST_BUDGET)?;
         let revision = snapshot["revision"].as_str().ok_or_else(unavailable)?;
-        let scope = Scope {
-            company_id: "loongport".into(),
-            task_id: request_id.clone(),
-            agent_id: "analysis".into(),
-            run_id: format!("{request_id}-analysis"),
-            resource_id: snapshot::resource_id(&self.owner, self.app.as_str()),
-            owner_id: self.owner.clone(),
-            snapshot_revision: revision.into(),
-        };
-        let binding = self.bind_execution_until(
-            json!({"scope":scope,"task":task}),
-            Instant::now() + REQUEST_BUDGET,
-        )?;
-        // Only this fresh submission registers a continuation. Reading an old
-        // request, including after restart, can never start additional work.
+        let mut bindings = Vec::new();
+        // Bind the entire finite membership before allowing any worker to run.
+        // A failed bind leaves only durable claims; reads and retries never fill them.
+        for (index, task) in tasks.iter().enumerate() {
+            let agent = if index == 0 {
+                "analysis".into()
+            } else {
+                format!("analysis-{}", index + 1)
+            };
+            let scope = Scope {
+                company_id: "loongport".into(),
+                task_id: request_id.clone(),
+                run_id: format!("{request_id}-{agent}"),
+                agent_id: agent,
+                resource_id: snapshot::resource_id(&self.owner, self.app.as_str()),
+                owner_id: self.owner.clone(),
+                snapshot_revision: revision.into(),
+            };
+            match self.bind_execution_until(
+                json!({"scope":scope,"task":task}),
+                Instant::now() + REQUEST_BUDGET,
+            ) {
+                Ok(binding) => bindings.push(binding),
+                Err(error) => {
+                    for binding in &bindings {
+                        self.fail_bound_local_run(binding, "analysis_binding_failed")?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
         self.control
             .local_followups
             .lock()
             .map_err(|_| unavailable())?
             .insert(request_id.clone(), None);
-        if self
-            .start_execution_until(
-                json!({"binding":binding,"task":task}),
-                Instant::now() + REQUEST_BUDGET,
-            )
-            .is_err()
-        {
-            self.control
-                .local_followups
-                .lock()
-                .map_err(|_| unavailable())?
-                .insert(request_id, Some("analysis_start_failed"));
-            self.fail_bound_local_run(&binding, "analysis_start_failed")?;
+        self.control
+            .local_summary_tasks
+            .lock()
+            .map_err(|_| unavailable())?
+            .insert(request_id.clone(), analysis_task(&input, &tasks[0].model));
+        for (binding, task) in bindings.iter().zip(tasks) {
+            if start(binding.clone(), task).is_err() {
+                self.control
+                    .local_followups
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .insert(request_id.clone(), Some("analysis_start_failed"));
+                self.control
+                    .local_summary_tasks
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .remove(&request_id);
+                // Cancel already accepted workers and close all unstarted claims.
+                for binding in &bindings {
+                    self.fail_bound_local_run(binding, "analysis_start_failed")?;
+                    let _ = self
+                        .cancel_execution_until(binding.clone(), Instant::now() + REQUEST_BUDGET);
+                }
+                break;
+            }
         }
         self.local_tasks_inner()
     }
@@ -112,7 +247,7 @@ impl Owner {
         result: &Value,
         start: impl FnOnce(Value, Task) -> Result<(), AppError>,
     ) {
-        if scope.company_id != "loongport" || scope.agent_id != "analysis" {
+        if scope.company_id != "loongport" || analysis_index(&scope.agent_id).is_none() {
             return;
         }
         let Ok(_gate) = self.control.local_task_gate.lock() else {
@@ -127,17 +262,50 @@ impl Owner {
         if !pending {
             return;
         }
-        let outcome = (|| -> Result<(), &'static str> {
+        let outcome = (|| -> Result<bool, &'static str> {
             if self.control.stop.load(Ordering::Acquire) {
                 return Err("application_stopping");
             }
             if result["status"] != "completed" {
                 return Err("analysis_not_completed");
             }
-            let output = result["output"]
-                .as_str()
-                .ok_or("analysis_output_unavailable")?;
-            let next = review_task(task, output).map_err(|_| "analysis_output_too_large")?;
+            let mut members = self
+                .local_bindings()
+                .map_err(|_| "analysis_output_unavailable")?
+                .into_iter()
+                .filter(|(id, agent, _, _)| id == &scope.task_id && analysis_index(agent).is_some())
+                .collect::<Vec<_>>();
+            members.sort_by_key(|(_, agent, _, _)| analysis_index(agent));
+            let mut outputs = Vec::new();
+            for (_, agent, binding, phase) in &members {
+                let value = if agent == &scope.agent_id {
+                    result.clone()
+                } else if phase == "bound" {
+                    return Ok(false);
+                } else {
+                    self.execution_result(binding.clone())
+                        .map_err(|_| "analysis_output_unavailable")?
+                };
+                match value["status"].as_str() {
+                    Some("accepted") => return Ok(false),
+                    Some("completed") => {}
+                    _ => return Err("analysis_not_completed"),
+                }
+                let output = value["output"]
+                    .as_str()
+                    .filter(|output| !output.is_empty())
+                    .ok_or("analysis_output_unavailable")?;
+                outputs.push(format!("{agent}:\n{output}"));
+            }
+            let summary_task = self
+                .control
+                .local_summary_tasks
+                .lock()
+                .map_err(|_| "analysis_output_unavailable")?
+                .get(&scope.task_id)
+                .cloned();
+            let next = review_task(summary_task.as_ref().unwrap_or(task), &outputs.join("\n\n"))
+                .map_err(|_| "analysis_output_too_large")?;
             let mut review_scope = scope.clone();
             review_scope.agent_id = "review".into();
             review_scope.run_id = format!("{}-review-after-analysis", scope.task_id);
@@ -153,13 +321,19 @@ impl Owner {
                 let _ = self.fail_bound_local_run(&binding, "review_start_failed");
                 return Err("review_start_failed");
             }
-            Ok(())
+            Ok(true)
         })();
+        if !matches!(outcome, Ok(false)) {
+            if let Ok(mut tasks) = self.control.local_summary_tasks.lock() {
+                tasks.remove(&scope.task_id);
+            }
+        }
         if let Ok(mut rows) = self.control.local_followups.lock() {
             match outcome {
-                Ok(()) => {
+                Ok(true) => {
                     rows.remove(&scope.task_id);
                 }
+                Ok(false) => {}
                 Err(reason) => {
                     rows.insert(scope.task_id.clone(), Some(reason));
                 }
@@ -260,6 +434,11 @@ impl Owner {
             .local_task_gate
             .try_lock()
             .map_err(|_| unavailable())?;
+        self.control
+            .local_summary_tasks
+            .lock()
+            .map_err(|_| unavailable())?
+            .remove(task_id);
         let mut found = false;
         for (task, _, b, phase) in self.local_bindings()? {
             if task == task_id {
@@ -323,6 +502,219 @@ mod tests {
             .unwrap()
             .insert(s.task_id.clone(), None);
         (s, task)
+    }
+    #[test]
+    fn frontend_fanout_limit_matches_the_owner() {
+        let api = include_str!("../../../src/lib/api/agents.ts");
+        assert!(api.contains(&format!(
+            "export const MAX_PARALLEL_ANALYSES = {MAX_PARALLEL_ANALYSES};"
+        )));
+    }
+    fn analyses() -> Vec<AnalysisInput> {
+        vec![
+            AnalysisInput {
+                input: "Solutions".into(),
+                model: "test-model".into(),
+            },
+            AnalysisInput {
+                input: "Risks".into(),
+                model: "other-model".into(),
+            },
+        ]
+    }
+    #[test]
+    #[serial_test::serial]
+    fn finite_group_workers_overlap_and_cancel_blocks_summary_and_replay() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, state, owner) = super::super::tests::fixture();
+        let (send, receive) = std::sync::mpsc::channel();
+        owner
+            .create_local_task_with(
+                "parallel".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |binding, task| {
+                    assert_eq!(
+                        owner.local_bindings().unwrap().len(),
+                        2,
+                        "all members must be bound before any start"
+                    );
+                    let send = send.clone();
+                    owner
+                        .start_execution_with_until(
+                            json!({"binding":binding,"task":task}),
+                            move |_, _| async move {
+                                send.send(()).unwrap();
+                                std::future::pending::<Result<Value, AppError>>().await
+                            },
+                            Instant::now() + REQUEST_BUDGET,
+                        )
+                        .map(|_| ())
+                },
+            )
+            .unwrap();
+        // Neither worker can finish. Observing both starts proves real overlap.
+        receive.recv_timeout(Duration::from_secs(2)).unwrap();
+        receive.recv_timeout(Duration::from_secs(2)).unwrap();
+        owner.cancel_local_task("parallel").unwrap();
+        owner
+            .create_local_task_with(
+                "parallel".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |_, _| panic!("duplicate start"),
+            )
+            .unwrap();
+        owner.stop_local_tasks().unwrap();
+        assert_eq!(owner.local_bindings().unwrap().len(), 2);
+        let reopened = Owner::new(state, AppType::Codex, owner.owner.clone()).unwrap();
+        let rows = reopened
+            .create_local_task_with(
+                "parallel".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |_, _| panic!("restart replay"),
+            )
+            .unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["result"]["reason"] == "review_not_started_no_replay"));
+        assert!(reopened
+            .create_local_task_with(
+                "parallel".into(),
+                "Changed".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |_, _| panic!("changed start")
+            )
+            .is_err());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn partially_started_group_closes_unstarted_members_and_cancels_running_member() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, _state, owner) = super::super::tests::fixture();
+        let mut starts = 0;
+        let rows = owner
+            .create_local_task_with(
+                "partial-group".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |binding, task| {
+                    starts += 1;
+                    if starts == 2 {
+                        return Err(unavailable());
+                    }
+                    owner
+                        .start_execution_with_until(
+                            json!({"binding":binding,"task":task}),
+                            |_, _| std::future::pending::<Result<Value, AppError>>(),
+                            Instant::now() + REQUEST_BUDGET,
+                        )
+                        .map(|_| ())
+                },
+            )
+            .unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["agentId"] == "review"
+                && row["result"]["reason"] == "analysis_start_failed"));
+        owner.stop_local_tasks().unwrap();
+        assert_eq!(owner.local_bindings().unwrap().len(), 2);
+        assert!(owner
+            .local_tasks()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["result"]["status"] == "failed"));
+    }
+    #[test]
+    #[serial_test::serial]
+    fn parallel_results_are_combined_once_with_the_original_snapshot() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, state, owner) = super::super::tests::fixture();
+        let (scope, task) = chain_fixture(&owner);
+        let binding = owner.local_bindings().unwrap()[0].2.clone();
+        let mut peer = scope.clone();
+        peer.agent_id = "analysis-2".into();
+        peer.run_id = format!("{}-analysis-2", scope.task_id);
+        owner
+            .bind_execution(json!({"scope":peer,"task":task}))
+            .unwrap();
+        let provider = state
+            .db
+            .get_provider_by_id("synthetic", "codex")
+            .unwrap()
+            .unwrap();
+        owner.start_execution_with_until(json!({"binding":binding,"task":task}), move |task, route| async move {
+            let body = json!({"model":task.model,"input":[{"role":"user","content":[{"type":"input_text","text":task.input}]}],"stream":false,"store":false,"max_output_tokens":task.max_output_tokens});
+            route.before_send(&state.proxy_service, "codex", &provider, &body).unwrap();
+            Ok(json!({"output":"First actual result"}))
+        }, Instant::now() + REQUEST_BUDGET).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if owner.execution_result(binding.clone()).unwrap()["status"] == "completed" {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        let result = json!({"status":"completed","output":"Second actual result"});
+        let calls = std::cell::Cell::new(0);
+        owner.finish_local_analysis_with(&peer, &task, &result, |binding, next| {
+            calls.set(calls.get() + 1);
+            assert!(next.input.contains("First actual result"));
+            assert!(next.input.contains("Second actual result"));
+            assert_eq!(
+                owner.execution_scope(&binding).unwrap().snapshot_revision,
+                scope.snapshot_revision
+            );
+            Ok(())
+        });
+        owner.finish_local_analysis_with(&peer, &task, &result, |_, _| panic!("duplicate summary"));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(owner.local_bindings().unwrap().len(), 3);
+        owner.stop_local_tasks().unwrap();
+    }
+    #[test]
+    fn group_state_is_owned_by_backend_and_partial_success_is_not_completion() {
+        let groups = task_groups(json!([
+            {"taskId":"a","agentId":"analysis","result":{"status":"completed"}},
+            {"taskId":"a","agentId":"analysis-2","result":{"status":"failed"}},
+            {"taskId":"a","agentId":"review","dependsOnAnalysis":true,"result":{"status":"failed"}}
+        ]));
+        assert_eq!(groups[0]["status"], "failed");
+        assert_eq!(groups[0]["canCancel"], false);
+        assert_eq!(groups[0]["runs"].as_array().unwrap().len(), 3);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn parallel_analysis_waits_for_every_member_before_review() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, _state, owner) = super::super::tests::fixture();
+        let (scope, task) = chain_fixture(&owner);
+        let mut peer = scope.clone();
+        peer.agent_id = "analysis-2".into();
+        peer.run_id = format!("{}-analysis-2", scope.task_id);
+        owner
+            .bind_execution(json!({"scope":peer,"task":task}))
+            .unwrap();
+        owner.finish_local_analysis_with(
+            &scope,
+            &task,
+            &json!({"status":"completed","output":"First answer"}),
+            |_, _| panic!("review started before the other analysis completed"),
+        );
+        assert_eq!(owner.local_bindings().unwrap().len(), 2);
     }
     #[test]
     #[serial_test::serial]

@@ -5,7 +5,7 @@ pub(crate) mod contract;
 pub(crate) mod execution;
 pub(crate) mod snapshot;
 #[cfg(unix)]
-mod tasks;
+pub(crate) mod tasks;
 use crate::error::AppError;
 #[cfg(any(unix, test))]
 use crate::{app_config::AppType, store::AppState};
@@ -340,6 +340,8 @@ struct Control {
     #[cfg(unix)]
     // Ephemeral gap before the dependent binding exists: None is pending, Some is a stop reason.
     local_followups: Mutex<std::collections::HashMap<String, Option<&'static str>>>,
+    #[cfg(unix)]
+    local_summary_tasks: Mutex<std::collections::HashMap<String, contract::Task>>,
     stop: AtomicBool,
     #[cfg(unix)]
     active: Mutex<Option<UnixStream>>,

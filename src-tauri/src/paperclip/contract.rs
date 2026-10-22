@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub(crate) const MAX_PARALLEL_ANALYSES: usize = 8;
+
+/// Each item is independent; the first item's model also performs the summary.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AnalysisInput {
+    pub input: String,
+    pub model: String,
+}
+
 pub(crate) const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 fn denied() -> AppError {
     AppError::Config("paperclip.invalid_task".into())
