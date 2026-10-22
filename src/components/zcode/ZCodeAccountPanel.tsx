@@ -110,6 +110,11 @@ export function ZCodeAccountPanel({
   const [context, setContext] = useState<SourceContext | null>(null);
   const [busy, setBusy] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [localImportOpen, setLocalImportOpen] = useState(false);
+  const localImportRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (localImportOpen) localImportRef.current?.focus();
+  }, [localImportOpen]);
   const [codingAccount, setCodingAccount] = useState<
     { id: string; catalogRevision: string } | undefined
   >(undefined);
@@ -1049,7 +1054,7 @@ export function ZCodeAccountPanel({
         <p className="text-xs text-muted-foreground">
           {copy(
             "supportedBuilds",
-            "Verified operation range: macOS 3.14.4, build 3.14.4.7912, exact accepted artifacts only.",
+            "Verified operation range: macOS 3.14.4 (build 3.14.4.7912) and 3.16.2 arm64 (build 3.16.2.8769), exact accepted artifacts only.",
           )}
         </p>
         <Button
@@ -1205,10 +1210,18 @@ export function ZCodeAccountPanel({
           }
           onClick={() => {
             setCodingAccount(undefined);
+            setLocalImportOpen(false);
             setLoginOpen(true);
           }}
         >
           {copy("addAccount", "Add account")}
+        </Button>
+        <Button
+          variant="outline"
+          disabled={locked || !!action || discovery.isFetching}
+          onClick={() => setLocalImportOpen(true)}
+        >
+          {copy("localImport.open", "Import from local ZCode")}
         </Button>
         <Button
           variant="outline"
@@ -1240,6 +1253,64 @@ export function ZCodeAccountPanel({
           {copy("backupAccounts", "Encrypted backup")}
         </Button>
       </div>
+      {localImportOpen && (
+        <section
+          ref={localImportRef}
+          tabIndex={-1}
+          aria-label={copy(
+            "localImport.title",
+            "Import the signed-in ZCode account",
+          )}
+          className="space-y-3 rounded-md border border-border-default p-4"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="font-medium">
+              {copy("localImport.title", "Import the signed-in ZCode account")}
+            </h4>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={locked || !!action}
+              onClick={() => setLocalImportOpen(false)}
+            >
+              {copy("localImport.close", "Close local import")}
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {copy(
+              "localImport.intro",
+              "Reuse the account already signed in to official ZCode on this computer. No folder is moved, and the current ZCode sign-in stays unchanged.",
+            )}
+          </p>
+          <ol className="list-decimal space-y-1 pl-5 text-sm">
+            <li>
+              {copy(
+                "localImport.stepLogin",
+                "Sign in in official ZCode, then quit it normally.",
+              )}
+            </li>
+            <li>
+              {copy(
+                "localImport.stepInspect",
+                "Review the detected installation and data directory below, select the standard local key, then inspect the source.",
+              )}
+            </li>
+            <li>
+              {copy(
+                "localImport.stepPreview",
+                "Preview the local account, then confirm saving it separately. Unsupported or changed sources remain blocked.",
+              )}
+            </li>
+          </ol>
+          {nativeTools}
+          <Button
+            disabled={!ordinaryReady || !!action}
+            onClick={() => review("capture")}
+          >
+            {copy("localImport.preview", "Preview local account")}
+          </Button>
+        </section>
+      )}
       {library.data?.actions.blockedReason && (
         <p role="status" className="text-sm text-muted-foreground">
           {errorText(library.data.actions.blockedReason)}
@@ -1253,7 +1324,7 @@ export function ZCodeAccountPanel({
           )}
         </p>
       )}
-      {!unified && nativeTools}
+      {!unified && !localImportOpen && nativeTools}
       {library.data && (
         <ZCodeBundleImport
           open={importOpen}
@@ -1270,6 +1341,7 @@ export function ZCodeAccountPanel({
           setCodingAccount(undefined);
         }}
         onSaved={refreshLibrary}
+        onImportLocal={() => setLocalImportOpen(true)}
         libraryDataRoot={libraryRoot}
         savedAccount={codingAccount}
       />
@@ -1617,7 +1689,7 @@ export function ZCodeAccountPanel({
               )}
           </section>
         ))}
-      {unified && (
+      {unified && !localImportOpen && (
         <Collapsible className="space-y-3 rounded-md border p-3">
           <CollapsibleTrigger asChild>
             <Button type="button" variant="outline" size="sm">

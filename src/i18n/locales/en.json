@@ -4590,6 +4590,7 @@
         "confirmKey": "Authorize creating and saving this Key",
         "save": "Save to encrypted account vault",
         "addAnother": "Add another account",
+        "importLocal": "Import from local ZCode instead",
         "restart": "Start a new sign-in"
       },
       "refreshed": "Saved account refreshed locally.",
@@ -4612,7 +4613,17 @@
       "latestQueryFailed": "Official version query failed at {{time}}. No current result is available.",
       "latestQueried": "Official latest version: {{version}} · checked {{time}}",
       "queryLatest": "Query official latest version",
-      "supportedBuilds": "Verified operation range: macOS 3.14.4, build 3.14.4.7912, exact accepted artifacts only.",
+      "localImport": {
+        "open": "Import from local ZCode",
+        "title": "Import the signed-in ZCode account",
+        "close": "Close local import",
+        "intro": "Reuse the account already signed in to official ZCode on this computer. No folder is moved, and the current ZCode sign-in stays unchanged.",
+        "stepLogin": "Sign in in official ZCode, then quit it normally.",
+        "stepInspect": "Review the detected installation and data directory below, select the standard local key, then inspect the source.",
+        "stepPreview": "Preview the local account, then confirm saving it separately. Unsupported or changed sources remain blocked.",
+        "preview": "Preview local account"
+      },
+      "supportedBuilds": "Verified operation range: macOS 3.14.4 (build 3.14.4.7912) and 3.16.2 arm64 (build 3.16.2.8769), exact accepted artifacts only.",
       "officialGuide": "Official installation / update guide",
       "bootstrapSource": "Data source discovered from the official desktop bootstrap data base directory.",
       "homeSource": "Default data source uses the OS account home. Advanced source selection remains available below.",
