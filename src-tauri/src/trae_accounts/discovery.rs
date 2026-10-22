@@ -248,14 +248,19 @@ mod tests {
     fn mac_candidates_are_finite_and_pair_only_matching_edition() {
         let paths = mac_candidates(std::path::Path::new("/synthetic-home"), true);
         assert_eq!(paths.len(), 2);
-        assert!(paths
-            .iter()
-            .all(|(s, p)| s.to_string_lossy().contains("Trae CN/")
-                && p.to_string_lossy().contains("Trae CN.app/")));
+        assert!(paths.iter().all(
+            |(s, p)| s.ends_with("Trae CN/User/globalStorage/storage.json")
+                && p.ends_with("Trae CN.app/Contents/Resources/app/product.json")
+        ));
     }
     #[test]
     fn windows_candidates_are_bounded_deduplicated_and_do_not_mix_editions() {
-        let home = Path::new("/synthetic-home");
+        let home = Path::new(if cfg!(windows) {
+            "C:/synthetic-home"
+        } else {
+            "/synthetic-home"
+        });
+        assert!(home.is_absolute());
         let roaming = home.join("AppData/Roaming");
         let local = home.join("AppData/Local");
         let cn = windows_candidates(home, Some(&roaming), Some(&local), true);
@@ -319,7 +324,7 @@ mod tests {
             .all(|(s, p)| inspect_windows(s, p, true).is_none()));
         let metadata = serde_json::json!({"packageType":"TRAE_CN","quality":"stable","appVersion":"3.6.2","win32DirName":"TRAE CN","iCubeApp":{"authConfig":{"TRAE":{"stable":"ono9krqynydwx5"}}}});
         for (storage, product) in &paths {
-            if storage.to_string_lossy().contains("/Trae CN/") {
+            if storage.ends_with("Trae CN/User/globalStorage/storage.json") {
                 std::fs::create_dir_all(storage.parent().unwrap()).unwrap();
                 std::fs::write(storage, "NOT JSON: SYNTHETIC SECRET").unwrap();
             }
