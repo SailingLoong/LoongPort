@@ -2630,7 +2630,7 @@ mod qoder_identity_command_tests {
 
 /// Read-only recovery descriptor; backup plaintext never crosses the IPC boundary.
 #[tauri::command]
-pub fn get_mcode_backup(
+pub(crate) fn get_mcode_backup(
     state: State<'_, AppState>,
 ) -> Result<Option<crate::services::provider::mcode::BackupDescriptor>, String> {
     crate::services::provider::mcode::latest_backup(&state).map_err(|error| error.to_string())

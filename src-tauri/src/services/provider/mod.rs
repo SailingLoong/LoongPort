@@ -506,8 +506,7 @@ pub fn provider_presentation_with_context(
         is_default_model,
         is_managed,
         is_read_only,
-        can_delete: !is_read_only
-            && !(matches!(app_type, AppType::Mcode) && is_default_model)
+        can_delete: !(is_read_only || matches!(app_type, AppType::Mcode) && is_default_model)
             && (is_omo || app_type.is_additive_mode() || !is_current),
         can_edit: !is_read_only && !account_route,
         can_test_connectivity: !matches!(app_type, AppType::Mcode)
