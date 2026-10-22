@@ -150,16 +150,34 @@ impl<T: Transport> Engine<'_, T> {
     pub async fn list(&self) -> Result<Vec<AccountView>, Failure> {
         catalog::list(self.session).await
     }
-    async fn send(&self, snapshot: &Snapshot, endpoint: Endpoint) -> Result<Response, Failure> {
-        catalog::dispatch(
+    async fn send(
+        &self,
+        snapshot: &Snapshot,
+        endpoint: Endpoint,
+        policy: Option<u64>,
+    ) -> Result<Response, Failure> {
+        self.send_classified(snapshot, endpoint, policy)
+            .await
+            .map_err(catalog::DispatchFailure::failure)
+    }
+    async fn send_classified(
+        &self,
+        snapshot: &Snapshot,
+        endpoint: Endpoint,
+        policy: Option<u64>,
+    ) -> Result<Response, catalog::DispatchFailure> {
+        catalog::dispatch_classified(
             self.session,
             &snapshot.binding,
             self.transport,
-            request(snapshot, endpoint)?,
+            request(snapshot, endpoint).map_err(catalog::DispatchFailure::NotDispatched)?,
             |d, _| {
                 let current = catalog::matched(d, snapshot)?;
                 if current.credential_version != snapshot.account.credential_version {
                     return Err(Failure::StaleIdentity);
+                }
+                if endpoint == Endpoint::Claim {
+                    automatic_admission(current, policy)?;
                 }
                 if endpoint == Endpoint::Claim
                     && current.operation.as_ref().map(|o| &o.attempt_id)
@@ -172,20 +190,28 @@ impl<T: Transport> Engine<'_, T> {
         )
         .await
     }
-    async fn get_status(&self, mut snapshot: Snapshot) -> Result<(Snapshot, Status), Failure> {
-        let mut response = self.send(&snapshot, Endpoint::Status).await?;
+    async fn get_status(
+        &self,
+        mut snapshot: Snapshot,
+        automatic: bool,
+    ) -> Result<(Snapshot, Status), Failure> {
+        let mut response = self.send(&snapshot, Endpoint::Status, None).await?;
         if response.status == 401 {
             snapshot =
                 super::auth::refresh_snapshot(self.session, self.transport, &snapshot).await?;
-            response = self.send(&snapshot, Endpoint::Status).await?;
+            response = self.send(&snapshot, Endpoint::Status, None).await?;
         }
-        let status = panel_status(data(&response)?)?;
+        let status = if automatic {
+            automatic_panel_status(data(&response)?)?
+        } else {
+            panel_status(data(&response)?)?
+        };
         Ok((snapshot, status))
     }
     pub async fn refresh(&self, id: &str) -> Result<AccountView, Failure> {
         let _lease = lease(self.session, id)?;
         let snapshot = catalog::snapshot(self.session, id).await?;
-        let (snapshot, status) = self.get_status(snapshot).await?;
+        let (snapshot, status) = self.get_status(snapshot, false).await?;
         catalog::access(self.session, Some(&snapshot.binding), |d, _| {
             let a = catalog::matched(d, &snapshot)?;
             a.last_checked_at = Some(now_ms());
@@ -203,12 +229,31 @@ impl<T: Transport> Engine<'_, T> {
         self.refresh(id).await
     }
     pub async fn claim(&self, id: &str) -> Result<AccountView, Failure> {
+        self.claim_with_policy(id, None).await
+    }
+    async fn claim_with_policy(
+        &self,
+        id: &str,
+        policy: Option<u64>,
+    ) -> Result<AccountView, Failure> {
         let _lease = lease(self.session, id)?;
         let snapshot = catalog::snapshot(self.session, id).await?;
+        automatic_admission(&snapshot.account, policy)?;
         if snapshot.account.unresolved() {
+            if policy.is_some() {
+                let (snapshot, status) = self.get_status(snapshot, policy.is_some()).await?;
+                return catalog::access(self.session, Some(&snapshot.binding), |d, _| {
+                    let a = catalog::matched(d, &snapshot)?;
+                    a.last_checked_at = Some(now_ms());
+                    a.last_observed_status = Some(status);
+                    // Query only: the daily panel cannot resolve an old POST.
+                    Ok((a.view(), true))
+                })
+                .await;
+            }
             return Ok(snapshot.account.view());
         }
-        let (snapshot, status) = self.get_status(snapshot).await?;
+        let (snapshot, status) = self.get_status(snapshot, policy.is_some()).await?;
         let now = now_ms();
         let operation_day = day(now);
         let prepared = catalog::access(self.session, Some(&snapshot.binding), |d, b| {
@@ -216,6 +261,7 @@ impl<T: Transport> Engine<'_, T> {
             if a.credential_version != snapshot.account.credential_version {
                 return Err(Failure::StaleIdentity);
             }
+            automatic_admission(a, policy)?;
             a.last_checked_at = Some(now);
             a.last_observed_status = Some(status);
             if a.unresolved() {
@@ -271,7 +317,33 @@ impl<T: Transport> Engine<'_, T> {
             Ok(((), false))
         })
         .await?;
-        let response = self.send(&prepared, Endpoint::Claim).await;
+        let response = self
+            .send_classified(&prepared, Endpoint::Claim, policy)
+            .await;
+        let response = match response {
+            Err(catalog::DispatchFailure::NotDispatched(_)) => {
+                // No transport future was created/polled. Only the exact original
+                // Pending intent may be withdrawn; newer identity/attempts survive.
+                return catalog::access(self.session, Some(&prepared.binding), |d, _| {
+                    let a = catalog::matched(d, &prepared)?;
+                    if a.credential_version != prepared.account.credential_version
+                        || !a.operation.as_ref().is_some_and(|op| {
+                            op.attempt_id == attempt
+                                && op.status == AttemptStatus::Pending
+                                && op.bound_auth_generation == prepared.account.auth_generation
+                        })
+                    {
+                        return Err(Failure::StaleIdentity);
+                    }
+                    a.operation = snapshot.account.operation.clone();
+                    a.status = status;
+                    Ok((a.view(), true))
+                })
+                .await;
+            }
+            Err(catalog::DispatchFailure::OutcomeUnknown(failure)) => Err(failure),
+            Ok(response) => Ok(response),
+        };
         // A 401 is allowed to refresh the same identity, never to replay this POST.
         if response.as_ref().is_ok_and(|r| r.status == 401) {
             let _ = super::auth::refresh_snapshot(self.session, self.transport, &prepared).await;
@@ -304,6 +376,66 @@ impl<T: Transport> Engine<'_, T> {
         })
         .await
     }
+    /// Persist opt-in per authenticated account. Old UI revisions cannot enable a new login.
+    pub async fn set_automatic(
+        &self,
+        id: &str,
+        auth_generation: u64,
+        revision: u64,
+        enabled: bool,
+    ) -> Result<AccountView, Failure> {
+        catalog::access(self.session, None, |d, _| {
+            let a = d
+                .accounts
+                .iter_mut()
+                .find(|a| a.id == id)
+                .ok_or(Failure::StaleIdentity)?;
+            if a.auth_generation != auth_generation || a.auto_claim_revision != revision {
+                return Err(Failure::StaleIdentity);
+            }
+            if enabled && a.credentials.is_none() {
+                return Err(Failure::NeedsLogin);
+            }
+            a.auto_claim_revision = a
+                .auto_claim_revision
+                .checked_add(1)
+                .ok_or(Failure::StorageUnavailable)?;
+            a.auto_claim_enabled = enabled;
+            a.auto_claim_failure = None;
+            Ok((a.view(), true))
+        })
+        .await
+    }
+    /// No local midnight/reset/credit arithmetic. The existing owner consults the
+    /// live panel, then applies its durable intent and same-day receipt protection.
+    pub async fn automatic_tick(&self) -> Result<(), Failure> {
+        for view in self.list().await? {
+            if !view.auto_claim_enabled || !view.authorized {
+                continue;
+            }
+            let result = self
+                .claim_with_policy(&view.id, Some(view.auto_claim_revision))
+                .await;
+            let error = result.err();
+            // Persist only an observation of this same policy and login, never overwrite
+            // a policy edit/re-login that happened while the network call was pending.
+            catalog::access(self.session, None, |d, _| {
+                let Some(a) = d.accounts.iter_mut().find(|a| a.id == view.id) else {
+                    return Ok(((), false));
+                };
+                if a.auth_generation != view.auth_generation
+                    || a.auto_claim_revision != view.auto_claim_revision
+                {
+                    return Ok(((), false));
+                }
+                let changed = a.auto_claim_failure != error;
+                a.auto_claim_failure = error;
+                Ok(((), changed))
+            })
+            .await?;
+        }
+        Ok(())
+    }
     pub async fn retire(&self, id: &str) -> Result<(), Failure> {
         catalog::access(self.session, None, |d, _| {
             let a = d
@@ -323,4 +455,26 @@ impl<T: Transport> Engine<'_, T> {
         })
         .await
     }
+}
+
+fn automatic_admission(account: &Account, policy: Option<u64>) -> Result<(), Failure> {
+    if policy.is_some_and(|revision| {
+        !account.auto_claim_enabled || account.auto_claim_revision != revision
+    }) {
+        return Err(Failure::StaleIdentity);
+    }
+    Ok(())
+}
+
+pub(super) fn automatic_panel_status(value: &Value) -> Result<Status, Failure> {
+    let status = panel_status(value)?;
+    let panel: Panel =
+        serde_json::from_value(value.clone()).map_err(|_| Failure::InvalidResponse)?;
+    Ok(
+        if status == Status::Claimable && !panel.days.iter().any(|d| d.is_today && d.status == 2) {
+            Status::Unavailable
+        } else {
+            status
+        },
+    )
 }

@@ -100,3 +100,19 @@ pub(crate) async fn cancel_minimax_code_authorization(
 ) -> Result<(), Failure> {
     auth::cancel(state.db.secret_session(), &flow_id).await
 }
+
+#[tauri::command]
+pub(crate) async fn set_minimax_code_automatic_claim(
+    state: State<'_, AppState>,
+    id: String,
+    auth_generation: u64,
+    policy_revision: u64,
+    enabled: bool,
+) -> Result<AccountView, Failure> {
+    Engine {
+        session: state.db.secret_session(),
+        transport: &OfficialHttp,
+    }
+    .set_automatic(&id, auth_generation, policy_revision, enabled)
+    .await
+}

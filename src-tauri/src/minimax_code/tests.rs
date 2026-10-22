@@ -45,6 +45,9 @@ impl Fixture {
 }
 fn account() -> Account {
     Account {
+        auto_claim_enabled: false,
+        auto_claim_revision: 0,
+        auto_claim_failure: None,
         id: "synthetic-account".into(),
         label: "Synthetic".into(),
         region: Region::Cn,
@@ -1933,4 +1936,281 @@ mod entitlement_owner_tests {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn automatic_claim_is_opt_in_per_account_and_never_replays_unknown() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let t = Fake::default();
+    let engine = Engine {
+        session: &f.session,
+        transport: &t,
+    };
+    engine.automatic_tick().await.unwrap();
+    assert!(t.calls.lock().unwrap().is_empty());
+    engine
+        .set_automatic("synthetic-account", 1, 0, true)
+        .await
+        .unwrap();
+    *t.claim.lock().unwrap() = Some(Err(Failure::NetworkUnavailable));
+    engine.automatic_tick().await.unwrap();
+    engine.automatic_tick().await.unwrap();
+    assert_eq!(
+        t.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
+    let account = engine.list().await.unwrap().remove(0);
+    assert_eq!(account.status, Status::Unknown);
+    engine
+        .set_automatic(
+            &account.id,
+            account.auth_generation,
+            account.auto_claim_revision,
+            false,
+        )
+        .await
+        .unwrap();
+    let before = t.calls.lock().unwrap().len();
+    engine.automatic_tick().await.unwrap();
+    assert_eq!(t.calls.lock().unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn disabling_automatic_before_dispatch_prevents_claim_and_stale_enable() {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let remote = Arc::new(Fake::default());
+    let engine = Engine {
+        session: &f.session,
+        transport: remote.as_ref(),
+    };
+    engine
+        .set_automatic("synthetic-account", 1, 0, true)
+        .await
+        .unwrap();
+    let (reached, resume) = pause_dispatch(&f, Endpoint::Claim);
+    let session = f.session.clone();
+    let task_remote = remote.clone();
+    let task = tokio::spawn(async move {
+        Engine {
+            session: &session,
+            transport: task_remote.as_ref(),
+        }
+        .automatic_tick()
+        .await
+    });
+    reached.notified().await;
+    engine
+        .set_automatic("synthetic-account", 1, 1, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .set_automatic("synthetic-account", 1, 1, true)
+            .await
+            .unwrap_err(),
+        Failure::StaleIdentity
+    );
+    resume.notify_one();
+    task.await.unwrap().unwrap();
+    assert!(!remote.calls.lock().unwrap().contains(&Endpoint::Claim));
+    let restored = engine.list().await.unwrap().remove(0);
+    assert!(!restored.auto_claim_enabled);
+    assert!(
+        restored.operation.is_none(),
+        "a definitely unsent intent must not become durable unknown"
+    );
+    // Reopen the durable catalog with a fresh session and the synthetic Vault key.
+    let restored_vault = {
+        let vault = f.session.read().unwrap();
+        VaultContext::from_key(vault.metadata().clone(), vault.export_key()).unwrap()
+    };
+    let reopened = SecretSession::from_context(f.root.path().into(), restored_vault);
+    let resumed = Engine {
+        session: &reopened,
+        transport: remote.as_ref(),
+    };
+    assert!(resumed.list().await.unwrap()[0].operation.is_none());
+    resumed
+        .set_automatic("synthetic-account", 1, restored.auto_claim_revision, true)
+        .await
+        .unwrap();
+    resumed.automatic_tick().await.unwrap();
+    assert_eq!(resumed.list().await.unwrap()[0].status, Status::Claimed);
+    assert_eq!(
+        remote
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn automatic_multiaccount_keeps_opt_ins_and_regions_separate() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        let mut second = account();
+        second.id = "synthetic-global".into();
+        second.region = Region::Global;
+        d.accounts.push(second);
+    });
+    let remote = Fake::default();
+    let engine = Engine {
+        session: &f.session,
+        transport: &remote,
+    };
+    engine
+        .set_automatic("synthetic-global", 1, 0, true)
+        .await
+        .unwrap();
+    engine.automatic_tick().await.unwrap();
+    let accounts = engine.list().await.unwrap();
+    assert!(accounts
+        .iter()
+        .find(|a| a.region == Region::Cn)
+        .unwrap()
+        .operation
+        .is_none());
+    assert_eq!(
+        accounts
+            .iter()
+            .find(|a| a.region == Region::Global)
+            .unwrap()
+            .status,
+        Status::Claimed
+    );
+    assert_eq!(
+        remote
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn old_account_defaults_to_automatic_disabled_and_missed_days_are_not_claimable() {
+    let mut value = serde_json::to_value(account()).unwrap();
+    for key in ["autoClaimEnabled", "autoClaimRevision", "autoClaimFailure"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    let old: Account = serde_json::from_value(value).unwrap();
+    assert!(!old.auto_claim_enabled);
+    let mut missed = panel(2);
+    missed["days"][0]["is_today"] = json!(false);
+    assert_eq!(
+        super::checkin::automatic_panel_status(&missed).unwrap(),
+        Status::Unavailable
+    );
+    assert_eq!(
+        super::checkin::automatic_panel_status(&panel(2)).unwrap(),
+        Status::Claimable
+    );
+}
+
+#[tokio::test]
+async fn unsent_old_generation_cannot_withdraw_or_revive_a_reauthorized_account() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        d.accounts[0].auto_claim_enabled = true;
+        d.accounts[0].auto_claim_revision = 1;
+    });
+    let remote = Arc::new(Fake::default());
+    let (reached, resume) = pause_dispatch(&f, Endpoint::Claim);
+    let session = f.session.clone();
+    let task_remote = remote.clone();
+    let task = tokio::spawn(async move {
+        Engine {
+            session: &session,
+            transport: task_remote.as_ref(),
+        }
+        .automatic_tick()
+        .await
+    });
+    reached.notified().await;
+    super::catalog::access(&f.session, None, |d, _| {
+        let a = &mut d.accounts[0];
+        a.auth_generation += 1;
+        a.credential_version += 1;
+        a.auto_claim_enabled = false;
+        a.auto_claim_revision += 1;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    resume.notify_one();
+    task.await.unwrap().unwrap();
+    let view = Engine {
+        session: &f.session,
+        transport: remote.as_ref(),
+    }
+    .list()
+    .await
+    .unwrap()
+    .remove(0);
+    assert_eq!(view.auth_generation, 2);
+    assert!(!view.auto_claim_enabled);
+    assert_eq!(view.status, Status::Unknown);
+    assert_eq!(view.operation.unwrap().bound_auth_generation, 1);
+    assert!(!remote.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+#[tokio::test]
+async fn dispatched_unknown_survives_policy_toggle_and_owner_recreation_without_replay() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        d.accounts[0].auto_claim_enabled = true;
+        d.accounts[0].auto_claim_revision = 1;
+    });
+    let remote = Fake::default();
+    *remote.claim.lock().unwrap() = Some(Err(Failure::NetworkUnavailable));
+    let engine = Engine {
+        session: &f.session,
+        transport: &remote,
+    };
+    engine.automatic_tick().await.unwrap();
+    engine
+        .set_automatic("synthetic-account", 1, 1, false)
+        .await
+        .unwrap();
+    engine
+        .set_automatic("synthetic-account", 1, 2, true)
+        .await
+        .unwrap();
+    let restored_vault = {
+        let vault = f.session.read().unwrap();
+        VaultContext::from_key(vault.metadata().clone(), vault.export_key()).unwrap()
+    };
+    let reopened = SecretSession::from_context(f.root.path().into(), restored_vault);
+    let resumed = Engine {
+        session: &reopened,
+        transport: &remote,
+    };
+    resumed.automatic_tick().await.unwrap();
+    assert_eq!(
+        resumed.recheck("synthetic-account").await.unwrap().status,
+        Status::Unknown
+    );
+    assert_eq!(
+        remote
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
 }

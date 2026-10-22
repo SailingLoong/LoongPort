@@ -2049,6 +2049,7 @@ pub fn run() {
             commands::list_minimax_code_accounts,
             commands::refresh_minimax_code_account,
             commands::claim_minimax_code_today,
+            commands::set_minimax_code_automatic_claim,
             commands::recheck_minimax_code_claim,
             commands::retire_minimax_code_account,
             commands::begin_minimax_code_authorization,

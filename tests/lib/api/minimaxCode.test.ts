@@ -54,3 +54,19 @@ describe("MiniMax Code thin command boundary", () => {
     },
   );
 });
+
+it("automatic policy binds the displayed account and revisions, never credentials", async () => {
+  const account = {
+    id: "synthetic",
+    authGeneration: 3,
+    autoClaimRevision: 7,
+    token: "SYNTHETIC-SECRET",
+  } as unknown as import("@/lib/api/minimaxCode").MiniMaxCodeAccount;
+  await minimaxCodeApi.setAutomatic(account, true);
+  expect(invoke.mock.calls).toEqual([
+    [
+      "set_minimax_code_automatic_claim",
+      { id: "synthetic", authGeneration: 3, policyRevision: 7, enabled: true },
+    ],
+  ]);
+});

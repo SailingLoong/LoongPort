@@ -457,6 +457,12 @@ pub(crate) async fn poll<T: Transport>(
                     .credential_version
                     .checked_add(1)
                     .ok_or(Failure::StorageUnavailable)?;
+                a.auto_claim_enabled = false;
+                a.auto_claim_revision = a
+                    .auto_claim_revision
+                    .checked_add(1)
+                    .ok_or(Failure::StorageUnavailable)?;
+                a.auto_claim_failure = None;
                 a.credentials = Some(credentials.clone());
                 a.label = label.clone();
                 if !a.unresolved() {
@@ -465,6 +471,9 @@ pub(crate) async fn poll<T: Transport>(
                 i
             } else {
                 d.accounts.push(Account {
+                    auto_claim_enabled: false,
+                    auto_claim_revision: 0,
+                    auto_claim_failure: None,
                     id: account_id,
                     label: label.clone(),
                     region: flow.region,

@@ -11,6 +11,7 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 pub fn start(app: tauri::AppHandle) {
     start_qoder_claim(app.clone());
     start_zcode_claim(app.clone());
+    start_minimax_automatic_claim(app.clone());
     start_trae_automatic_checkin(app.clone());
     start_workbuddy_automatic_claim(app.clone());
     start_directory_refresh(app.clone());
@@ -254,6 +255,33 @@ fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
                     session: db.secret_session(),
                     transport: &crate::workbuddy::http::OfficialHttp,
                     clock: &crate::workbuddy::clock::SystemClock,
+                }
+                .automatic_tick()
+                .await;
+                Ok(())
+            }
+        },
+    );
+}
+
+#[cfg(feature = "gui")]
+fn start_minimax_automatic_claim(app: tauri::AppHandle) {
+    use std::time::Duration;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "minimax-automatic-claim",
+        scheduler::TaskSchedule::new(
+            Duration::from_secs(30),
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(15 * 60),
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                // Closed/locked Vault admits no account action. Each pass reads current opt-ins.
+                let _ = crate::minimax_code::checkin::Engine {
+                    session: db.secret_session(),
+                    transport: &crate::minimax_code::http::OfficialHttp,
                 }
                 .automatic_tick()
                 .await;
