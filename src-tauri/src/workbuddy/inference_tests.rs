@@ -1146,6 +1146,57 @@ async fn malformed_sse_or_incomplete_tool_json_never_becomes_successful_eof() {
 }
 
 #[tokio::test]
+async fn clean_eof_without_a_terminal_signal_is_not_success() {
+    for chunks in [
+        vec![],
+        vec![Bytes::from_static(b": heartbeat\n\n")],
+        vec![delta(json!({"role":"assistant"}))],
+        vec![delta(json!({"content":"partial response"}))],
+        vec![delta(json!({"reasoning_content":"partial reasoning"}))],
+        vec![event(json!({"choices":[],"usage":{"total_tokens":1}}))],
+        vec![event(
+            json!({"choices":[{"delta":{},"finish_reason":false}]}),
+        )],
+        vec![event(json!({"choices":[{"delta":{},"finish_reason":""}]}))],
+    ] {
+        semantic_case(chunks, true).await;
+    }
+}
+
+#[tokio::test]
+async fn explicit_terminal_signals_preserve_clean_eof_wire_bytes() {
+    for terminal in [
+        done(),
+        event(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+        event(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+    ] {
+        let chunks = vec![delta(json!({"content":"complete response"})), terminal];
+        let expected = chunks.concat();
+        assert_eq!(semantic_case(chunks, false).await, expected);
+    }
+}
+
+#[tokio::test]
+async fn finish_reason_only_keeps_usage_tail_and_completed_tools() {
+    for chunks in [
+        vec![
+            delta(json!({"content":"complete response"})),
+            event(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+            event(json!({"choices":[],"usage":{"total_tokens":2}})),
+        ],
+        vec![
+            delta(
+                json!({"tool_calls":[{"index":0,"id":"call_0","function":{"name":"lookup","arguments":"{}"}}]}),
+            ),
+            event(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})),
+        ],
+    ] {
+        let expected = chunks.concat();
+        assert_eq!(semantic_case(chunks, false).await, expected);
+    }
+}
+
+#[tokio::test]
 async fn split_leading_think_and_reasoning_alias_follow_original_late_parse_order() {
     let blocked = vec![
         delta(json!({"reasoning_content":"new-infer"})),
@@ -1278,4 +1329,79 @@ async fn structured_sse_typed_fence_keeps_retirement_terminal_not_auth_retry() {
     ));
     assert!(result.response.bytes_with_limit(4096).await.is_err());
     assert_eq!(t.count(), 1);
+}
+
+#[tokio::test]
+async fn workbuddy_finish_reason_rejects_late_content_reasoning_role_or_new_tool() {
+    let first = delta(json!({"content":"visible partial output"}));
+    let finish = event(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}));
+    for late in [
+        delta(json!({"content":"late content"})),
+        delta(json!({"reasoning_content":"late reasoning"})),
+        delta(json!({"role":"assistant"})),
+        delta(
+            json!({"tool_calls":[{"index":1,"id":"call_late","function":{"name":"lookup","arguments":"{}"}}]}),
+        ),
+    ] {
+        let emitted = semantic_case(vec![first.clone(), finish.clone(), late], true).await;
+        assert_eq!(emitted, first);
+    }
+}
+#[tokio::test]
+async fn workbuddy_finish_reason_rejects_general_error_frames() {
+    let finish = event(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}));
+    for error in [
+        event(json!({"error":{"type":"server_error","code":503,"message":"synthetic failure"}})),
+        Bytes::from_static(b"event: error\ndata: {\"message\":\"synthetic failure\"}\n\n"),
+        event(json!({"error":{"type":"server_error"},"choices":[],"usage":{"total_tokens":1}})),
+    ] {
+        assert!(semantic_case(vec![finish.clone(), error], true)
+            .await
+            .is_empty());
+    }
+}
+#[tokio::test]
+async fn workbuddy_done_is_withheld_until_the_following_tail_is_checked() {
+    let first = delta(json!({"content":"visible partial output"}));
+    let emitted = semantic_case(
+        vec![
+            first.clone(),
+            done(),
+            event(json!({"error":{"type":"server_error","message":"late failure"}})),
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(
+        emitted, first,
+        "DONE must not escape before the native EOF is validated"
+    );
+}
+#[tokio::test]
+async fn workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order() {
+    for (first, reason) in [
+        (delta(json!({"content":"complete answer"})), "stop"),
+        (
+            delta(
+                json!({"tool_calls":[{"index":0,"id":"call_0","function":{"name":"lookup","arguments":"{}"}}]}),
+            ),
+            "tool_calls",
+        ),
+    ] {
+        let chunks = vec![
+            first,
+            event(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]})),
+            event(
+                json!({"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+            ),
+            done(),
+            Bytes::from_static(b": inert comment\n\n"),
+        ];
+        let wire = chunks.concat();
+        assert_eq!(semantic_case(chunks, false).await, wire);
+        assert_eq!(
+            semantic_case(wire.chunks(1).map(Bytes::copy_from_slice).collect(), false).await,
+            wire
+        );
+    }
 }
