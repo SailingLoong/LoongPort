@@ -4356,13 +4356,14 @@ impl ProxyService {
     }
 
     fn project_codex_client_auth(&self, text: &str, native: bool) -> Result<String, String> {
-        use toml_edit::{DocumentMut, Item, Table};
+        use toml_edit::{Item, Table};
         self.db
             .provision_managed_client_credential("codex")
             .map_err(|e| e.to_string())?;
         let key = crate::proxy::client_access::managed::key(&self.db, "codex")
             .map_err(|e| e.to_string())?;
-        let mut doc = text.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+        let mut doc = crate::proxy::client_access::managed::parse_config(text)
+            .map_err(|error| error.to_string())?;
         let selected = doc
             .get("model_provider")
             .and_then(Item::as_str)
@@ -4959,6 +4960,13 @@ mod tests {
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
         )
         .unwrap();
+        let canary = "SYNTHETIC_NATIVE_CODEX_API_KEY_CANARY";
+        let malformed = format!("experimental_bearer_token = \"{canary}\" trailing\n");
+        let error = service
+            .project_codex_client_auth(&malformed, true)
+            .unwrap_err();
+        assert!(error.contains("client_access.invalid_toml"));
+        assert!(!error.contains(canary));
         let text = "openai_base_url = 'http://127.0.0.1:15721/v1'\nmodel = 'synthetic-model'\n[model_providers.foreign]\nbase_url = 'https://relay.example/v1'\nexperimental_bearer_token = 'foreign-key'\n";
         let projected = service.project_codex_client_auth(text, true).unwrap();
         let doc = projected.parse::<toml_edit::DocumentMut>().unwrap();

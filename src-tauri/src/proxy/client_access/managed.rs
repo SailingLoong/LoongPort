@@ -6,6 +6,12 @@ use toml_edit::{Item, Table};
 pub(crate) use crate::live::project::claude::PROXY_TOKEN_PLACEHOLDER as LEGACY_KEY;
 pub(crate) const CLI_APPS: &[&str] = &["claude", "codex", "gemini", "grokbuild"];
 
+/// Parser diagnostics include source lines, which can contain client credentials.
+pub(crate) fn parse_config(text: &str) -> Result<toml_edit::DocumentMut, AppError> {
+    text.parse()
+        .map_err(|_| AppError::Config("client_access.invalid_toml".into()))
+}
+
 pub(crate) fn provision(db: &Database) -> Result<(), AppError> {
     for app in CLI_APPS {
         db.provision_managed_client_credential(app)?;
@@ -64,9 +70,7 @@ pub(crate) fn project_json(db: &Database, app: &str, config: &Value) -> Result<V
     }
     if app == "grokbuild" {
         if let Some(text) = out.get("config").and_then(Value::as_str) {
-            let mut doc = text
-                .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| AppError::Config(e.to_string()))?;
+            let mut doc = parse_config(text)?;
             if let Some(models) = doc.get_mut("model").and_then(Item::as_table_like_mut) {
                 for (_, item) in models.iter_mut() {
                     if let Some(table) = item.as_table_like_mut() {
@@ -102,9 +106,7 @@ pub(crate) fn codex_has_local_credential(text: &str) -> bool {
 }
 
 pub(crate) fn clean_codex(db: &Database, text: &str) -> Result<String, AppError> {
-    let mut doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let mut doc = parse_config(text)?;
     let mut removed = Vec::new();
     if let Some(providers) = doc
         .get_mut("model_providers")
@@ -219,6 +221,28 @@ pub(crate) fn verify_json(db: &Database, app: &str, config: &Value) -> Result<()
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn malformed_grok_projection_does_not_expose_credential_source() {
+        let db = Database::memory().unwrap();
+        let canary = "SYNTHETIC_GROK_API_KEY_CANARY";
+        let text = format!("[model.custom]\napi_key = \"{canary}\" trailing\n");
+        let error = project_json(&db, "grokbuild", &json!({"config":text})).unwrap_err();
+        assert!(matches!(&error, AppError::Config(code) if code == "client_access.invalid_toml"));
+        assert!(!error.to_string().contains(canary));
+    }
+
+    #[test]
+    fn malformed_codex_cleanup_does_not_expose_credential_source() {
+        let db = Database::memory().unwrap();
+        let canary = "SYNTHETIC_CODEX_API_KEY_CANARY";
+        let text = format!(
+            "[model_providers.custom]\nexperimental_bearer_token = \"{canary}\" trailing\n"
+        );
+        let error = clean_codex(&db, &text).unwrap_err();
+        assert!(matches!(&error, AppError::Config(code) if code == "client_access.invalid_toml"));
+        assert!(!error.to_string().contains(canary));
+    }
 
     #[test]
     fn cli_projection_is_scoped_and_keeps_foreign_configuration() {
