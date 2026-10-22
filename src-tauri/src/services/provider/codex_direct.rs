@@ -585,6 +585,7 @@ fn plan_target(db: &Database, owner: &Owner<'_>, target: &Target<'_>) -> Result<
             base_url,
             crate::settings::unify_codex_session_history(),
         );
+        bind_proxy_client_key(db, &mut planned, base_url)?;
     }
     Ok(planned)
 }
@@ -634,6 +635,22 @@ fn apply_proxy_projection(planned: &mut Planned, base_url: &str, unify: bool) {
     }
 }
 
+fn bind_proxy_client_key(
+    db: &Database,
+    planned: &mut Planned,
+    base_url: &str,
+) -> Result<(), AppError> {
+    let key = crate::proxy::client_access::managed::key(db, "codex")?;
+    if planned.official {
+        let mut table = official_mirror_table(Some(base_url), false);
+        crate::proxy::client_access::managed::codex_table(&mut table, &key, true);
+        planned.config.route = RouteWrite::Custom(table);
+    } else if let RouteWrite::Custom(table) = &mut planned.config.route {
+        crate::proxy::client_access::managed::codex_table(table, &key, false);
+    }
+    Ok(())
+}
+
 /// The controller borrows the existing manager and five-file writer. Preparation
 /// precedes the pinned vault, and the manager guard encloses intent publication.
 pub(crate) fn apply_mode(
@@ -664,6 +681,11 @@ pub(crate) fn apply_mode_with_catalog(
     )?;
     // Validate the chosen pure catalog before preparing a login. The original
     // pinned writer checks it again after preparation, immediately before IO.
+    if matches!(desired, Target::Proxy { .. }) {
+        service
+            .database()
+            .provision_managed_client_credential("codex")?;
+    }
     let chosen = decision
         .map(|decision| {
             let provider = desired.provider().ok_or_else(invalid)?;
@@ -675,6 +697,7 @@ pub(crate) fn apply_mode_with_catalog(
                     base_url,
                     crate::settings::unify_codex_session_history(),
                 );
+                bind_proxy_client_key(service.database(), &mut planned, base_url)?;
             }
             Ok::<_, AppError>(planned)
         })
@@ -1886,6 +1909,7 @@ pub(crate) fn plan_editor_save_with_generation(
     let generated_digest = digest(planned.catalog.as_deref());
     if let Target::Proxy { base_url, .. } = desired {
         apply_proxy_projection(&mut planned, base_url, settings.unify_codex_session_history);
+        bind_proxy_client_key(service.database(), &mut planned, base_url)?;
     }
     let assemble = |generation: &CodexLiveAuthGuard<'_>| {
         let vault = service.database().secret_session().read()?;

@@ -2069,7 +2069,10 @@ impl ProxyService {
                                     .map(|s| (key, s.trim()))
                             })
                             .filter(|(_, token)| {
-                                !token.is_empty() && *token != PROXY_TOKEN_PLACEHOLDER
+                                !token.is_empty()
+                                    && !crate::proxy::client_access::managed::is_projection_key(
+                                        token,
+                                    )
                             });
 
                             if let Some((token_key, token)) = token_pair {
@@ -2164,7 +2167,10 @@ impl ProxyService {
                             .and_then(|v| v.get("GEMINI_API_KEY"))
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && *s != PROXY_TOKEN_PLACEHOLDER)
+                            .filter(|s| {
+                                !s.is_empty()
+                                    && !crate::proxy::client_access::managed::is_projection_key(s)
+                            })
                         {
                             if let Some(env_obj) = provider
                                 .settings_config
@@ -2220,7 +2226,9 @@ impl ProxyService {
                         if let Some(token) =
                             crate::grok_config::extract_inline_api_key(live_config_toml)
                         {
-                            if !token.is_empty() && token != PROXY_TOKEN_PLACEHOLDER {
+                            if !token.is_empty()
+                                && !crate::proxy::client_access::managed::is_projection_key(&token)
+                            {
                                 if let Some(provider_config) = provider
                                     .settings_config
                                     .get("config")
@@ -3189,7 +3197,16 @@ impl ProxyService {
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
         ] {
-            if env.get(key).and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+            if env
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|value| {
+                    crate::proxy::client_access::managed::owned_key(&self.db, "claude", value)
+                })
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(false)
+            {
                 env.remove(key);
             }
         }
@@ -3211,17 +3228,22 @@ impl ProxyService {
         let mut config = self.read_codex_live()?;
 
         if let Some(auth) = config.get_mut("auth").and_then(|v| v.as_object_mut()) {
-            if auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+            if auth
+                .get("OPENAI_API_KEY")
+                .and_then(|v| v.as_str())
+                .is_some_and(crate::proxy::client_access::managed::is_projection_key)
             {
                 auth.remove("OPENAI_API_KEY");
             }
         }
 
         if let Some(cfg_str) = config.get("config").and_then(|v| v.as_str()) {
-            let updated = Self::remove_local_toml_base_url(cfg_str);
+            let owned = crate::proxy::client_access::managed::clean_codex(&self.db, cfg_str)
+                .map_err(|e| e.to_string())?;
+            let updated = Self::remove_local_toml_base_url(&owned);
             let updated =
                 crate::codex_config::remove_codex_experimental_bearer_token_if(&updated, |token| {
-                    token == PROXY_TOKEN_PLACEHOLDER
+                    crate::proxy::client_access::managed::is_projection_key(token)
                 })
                 .map_err(|e| format!("清理 Codex 接管占位符失败: {e}"))?;
             let updated = crate::codex_config::remove_codex_official_proxy_route(&updated)
@@ -3245,7 +3267,14 @@ impl ProxyService {
             return Ok(());
         };
 
-        if env.get("GEMINI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+        if env
+            .get("GEMINI_API_KEY")
+            .and_then(|v| v.as_str())
+            .map(|value| crate::proxy::client_access::managed::owned_key(&self.db, "gemini", value))
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false)
+        {
             env.remove("GEMINI_API_KEY");
         }
 
@@ -3264,19 +3293,23 @@ impl ProxyService {
 
     fn cleanup_grok_takeover_placeholders_in_live(&self) -> Result<(), String> {
         let config = self.read_grok_live()?;
-        let Some(config_toml) = config.get("config").and_then(Value::as_str) else {
+        let Some(text) = config.get("config").and_then(Value::as_str) else {
             return Ok(());
         };
-        if !crate::grok_config::has_proxy_placeholder(config_toml, PROXY_TOKEN_PLACEHOLDER) {
+        let Some(model) = crate::grok_config::extract_model_config(text) else {
+            return Ok(());
+        };
+        let Some(key) = model.api_key else {
+            return Ok(());
+        };
+        if !crate::proxy::client_access::managed::owned_key(&self.db, "grokbuild", &key)
+            .map_err(|e| e.to_string())?
+        {
             return Ok(());
         }
-
-        // A valid provider snapshot should normally restore before this fallback.
-        // Clearing the token prevents a stale local route from looking usable.
-        let updated = crate::grok_config::update_api_key(config_toml, "")
-            .map_err(|e| format!("清理 Grok Build 接管占位符失败: {e}"))?;
+        let updated = crate::grok_config::update_api_key(text, "").map_err(|e| e.to_string())?;
         crate::config::write_text_file(&crate::grok_config::get_grok_config_path(), &updated)
-            .map_err(|e| format!("写入 Grok Build 配置失败: {e}"))
+            .map_err(|e| e.to_string())
     }
 
     /// 检查是否处于 Live 接管模式
@@ -3311,6 +3344,54 @@ impl ProxyService {
 
         log::info!("已从异常退出中恢复 Live 配置");
         Ok(())
+    }
+
+    /// Startup admission publishes enforcement only after all managed projections agree.
+    /// Partial failures remain retryable using the existing app operation journals/backups.
+    pub(crate) async fn complete_client_access_migration(&self) -> Result<(), String> {
+        let _lifecycle = self.takeover_lock.lock().await;
+        crate::proxy::client_access::managed::provision(&self.db).map_err(|e| e.to_string())?;
+        crate::claude_desktop_config::migrate_gateway_credential(&self.db)
+            .map_err(|e| e.to_string())?;
+        if crate::mode::operation::uses_upstream4_schema(&self.db).map_err(|e| e.to_string())? {
+            // Reattach through the sole mode writer, so contracts and crash recovery
+            // acquire the same key as the file projection before readiness publishes.
+            crate::mode::controller::startup_locked(self).await?;
+        } else {
+            for app in [
+                AppType::Claude,
+                AppType::Codex,
+                AppType::Gemini,
+                AppType::GrokBuild,
+            ] {
+                let _switch = self.lock_switch_for_app(app.as_str()).await;
+                if self
+                    .db
+                    .get_proxy_config_for_app(app.as_str())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .enabled
+                {
+                    self.takeover_live_config_strict(&app).await?;
+                    let config = match app {
+                        AppType::Claude => self.read_claude_live()?,
+                        AppType::Codex => self.read_codex_live()?,
+                        AppType::Gemini => self.read_gemini_live()?,
+                        AppType::GrokBuild => self.read_grok_live()?,
+                        _ => unreachable!(),
+                    };
+                    crate::proxy::client_access::managed::verify_json(
+                        &self.db,
+                        app.as_str(),
+                        &config,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        self.db
+            .set_setting("client_access_migration_version", "1")
+            .map_err(|e| e.to_string())
     }
 
     /// 检测 Live 配置是否处于"被接管"的残留状态
@@ -3357,7 +3438,11 @@ impl ProxyService {
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
         ] {
-            if env.get(key).and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER) {
+            if env
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(crate::proxy::client_access::managed::is_projection_key)
+            {
                 return true;
             }
         }
@@ -3371,7 +3456,7 @@ impl ProxyService {
             .and_then(|v| v.as_object())
             .and_then(|auth| auth.get("OPENAI_API_KEY"))
             .and_then(|v| v.as_str())
-            == Some(PROXY_TOKEN_PLACEHOLDER)
+            .is_some_and(crate::proxy::client_access::managed::is_projection_key)
         {
             return true;
         }
@@ -3381,11 +3466,15 @@ impl ProxyService {
             .and_then(|v| v.as_str())
             .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
             .as_deref()
-            == Some(PROXY_TOKEN_PLACEHOLDER)
+            .is_some_and(crate::proxy::client_access::managed::is_projection_key)
     }
 
     fn is_codex_live_taken_over(config: &Value) -> bool {
         Self::codex_live_has_proxy_placeholder(config)
+            || config
+                .get("config")
+                .and_then(Value::as_str)
+                .is_some_and(crate::proxy::client_access::managed::codex_has_local_credential)
             || config
                 .get("config")
                 .and_then(|v| v.as_str())
@@ -3397,7 +3486,9 @@ impl ProxyService {
             Some(env) => env,
             None => return false,
         };
-        env.get("GEMINI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+        env.get("GEMINI_API_KEY")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::proxy::client_access::managed::is_projection_key)
     }
 
     fn is_grok_live_taken_over(config: &Value) -> bool {
@@ -3406,6 +3497,7 @@ impl ProxyService {
             .and_then(Value::as_str)
             .is_some_and(|config_toml| {
                 crate::grok_config::has_proxy_placeholder(config_toml, PROXY_TOKEN_PLACEHOLDER)
+                    || crate::proxy::client_access::managed::is_grok_projection(config_toml)
             })
     }
 
@@ -4236,6 +4328,9 @@ impl ProxyService {
     }
 
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
+        let config =
+            &crate::proxy::client_access::managed::project_json(&self.db, "claude", config)
+                .map_err(|e| e.to_string())?;
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
         crate::config::write_json_file_private(&path, &settings)
@@ -4268,13 +4363,16 @@ impl ProxyService {
                     config.get("auth"),
                     config.get("config").and_then(|v| v.as_str()),
                 ) {
-                    if auth.get("OPENAI_API_KEY").and_then(|v| v.as_str())
-                        == Some(PROXY_TOKEN_PLACEHOLDER)
+                    if auth
+                        .get("OPENAI_API_KEY")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(crate::proxy::client_access::managed::is_projection_key)
                     {
                         let live_config = crate::codex_config::prepare_codex_provider_live_config(
                             auth, config_str,
                         )
                         .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+                        let live_config = self.project_codex_client_auth(&live_config, false)?;
                         crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
                             .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                         return Ok(());
@@ -4303,7 +4401,60 @@ impl ProxyService {
     }
 
     fn codex_auth_has_proxy_placeholder(auth: &Value) -> bool {
-        auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
+        auth.get("OPENAI_API_KEY")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::proxy::client_access::managed::is_projection_key)
+    }
+
+    fn project_codex_client_auth(&self, text: &str, native: bool) -> Result<String, String> {
+        use toml_edit::{DocumentMut, Item, Table};
+        self.db
+            .provision_managed_client_credential("codex")
+            .map_err(|e| e.to_string())?;
+        let key = crate::proxy::client_access::managed::key(&self.db, "codex")
+            .map_err(|e| e.to_string())?;
+        let mut doc = text.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+        let selected = doc
+            .get("model_provider")
+            .and_then(Item::as_str)
+            .unwrap_or("openai")
+            .to_string();
+        let selected_url = doc
+            .get("model_providers")
+            .and_then(Item::as_table_like)
+            .and_then(|p| p.get(&selected))
+            .and_then(|p| p.get("base_url"))
+            .and_then(Item::as_str);
+        let url = selected_url
+            .or_else(|| doc.get("openai_base_url").and_then(Item::as_str))
+            .ok_or_else(|| "client_access.local_endpoint_missing".to_string())?
+            .to_string();
+        if !Self::is_local_proxy_url(&url) {
+            return Err("client_access.local_endpoint_required".into());
+        }
+        let id = if native {
+            crate::live::project::codex::ROUTE_ID.to_string()
+        } else {
+            selected
+        };
+        let mut table = if native {
+            crate::live::project::codex::official_mirror_table(Some(&url), false)
+        } else {
+            doc.get("model_providers")
+                .and_then(Item::as_table_like)
+                .and_then(|p| p.get(&id))
+                .and_then(Item::as_table)
+                .cloned()
+                .ok_or_else(|| "client_access.provider_missing".to_string())?
+        };
+        crate::proxy::client_access::managed::codex_table(&mut table, &key, native);
+        doc.as_table_mut().remove("openai_base_url");
+        doc["model_provider"] = toml_edit::value(&id);
+        if doc.get("model_providers").is_none() {
+            doc["model_providers"] = Item::Table(Table::new());
+        }
+        doc["model_providers"][&id] = Item::Table(table);
+        Ok(doc.to_string())
     }
 
     fn write_codex_takeover_live_for_provider(
@@ -4336,6 +4487,8 @@ impl ProxyService {
                     config, config_str, profile, provider,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let prepared_config =
+                self.project_codex_client_auth(&prepared_config, official_passthrough)?;
             if managed_official {
                 let auth = config
                     .get("auth")
@@ -4362,6 +4515,7 @@ impl ProxyService {
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?
             };
+            let live_config = self.project_codex_client_auth(&live_config, official_passthrough)?;
             crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             return Ok(());
@@ -4525,6 +4679,9 @@ impl ProxyService {
     }
 
     fn write_gemini_live(&self, config: &Value) -> Result<(), String> {
+        let config =
+            &crate::proxy::client_access::managed::project_json(&self.db, "gemini", config)
+                .map_err(|e| e.to_string())?;
         use crate::gemini_config::{json_to_env, write_gemini_env_atomic};
 
         let env_map = json_to_env(config).map_err(|e| format!("转换 Gemini 配置失败: {e}"))?;
@@ -4538,6 +4695,9 @@ impl ProxyService {
     }
 
     fn write_grok_live(&self, config: &Value) -> Result<(), String> {
+        let config =
+            &crate::proxy::client_access::managed::project_json(&self.db, "grokbuild", config)
+                .map_err(|e| e.to_string())?;
         crate::grok_config::write_grok_live_settings(config)
             .map_err(|e| format!("写入 Grok Build 配置失败: {e}"))
     }

@@ -843,10 +843,17 @@ impl CodexConfigPatch {
 }
 
 fn holds_placeholder(item: &Item) -> bool {
-    item.as_table_like()
-        .and_then(|table| table.get("experimental_bearer_token"))
-        .and_then(Item::as_str)
-        == Some(PROXY_TOKEN_PLACEHOLDER)
+    item.as_table_like().is_some_and(|table| {
+        table
+            .get("experimental_bearer_token")
+            .and_then(Item::as_str)
+            .is_some_and(crate::proxy::client_access::managed::is_projection_key)
+            || table
+                .get("http_headers")
+                .and_then(|h| h.get(crate::proxy::client_access::CLIENT_KEY_HEADER))
+                .and_then(Item::as_str)
+                .is_some_and(crate::proxy::client_access::managed::is_projection_key)
+    })
 }
 
 fn first_free_id(providers: &dyn TableLike, base: &str) -> String {

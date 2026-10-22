@@ -14,6 +14,7 @@ mod tests {
 }
 
 use serde::Serialize;
+pub(crate) mod managed;
 mod policy;
 mod store;
 mod transport;
@@ -30,7 +31,7 @@ pub(crate) use store::{create_schema, validate_schema};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CredentialRef {
+pub struct CredentialRef {
     pub id: String,
     pub client_id: String,
     pub route_app: String,

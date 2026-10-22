@@ -21,6 +21,7 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), AppError> {
         route_app TEXT NOT NULL,
         allowed_models TEXT NOT NULL,
         secret TEXT NOT NULL,
+        secret_digest TEXT NOT NULL UNIQUE,
         revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
     );",
     )?;
@@ -40,7 +41,7 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), AppError> {
 }
 
 pub(crate) fn validate_schema(conn: &Connection) -> Result<(), AppError> {
-    conn.prepare("SELECT id, client_id, route_app, allowed_models, revoked, secret FROM loongport_client_credentials LIMIT 0")?;
+    conn.prepare("SELECT id, client_id, route_app, allowed_models, revoked, secret, secret_digest FROM loongport_client_credentials LIMIT 0")?;
     Ok(())
 }
 
@@ -96,6 +97,7 @@ impl Database {
             client_id,
             route_app,
             allowed_models,
+            None,
         )
     }
 
@@ -111,11 +113,49 @@ impl Database {
             client_id,
             route_app,
             models,
+            None,
         )?;
         if reference.revoked {
             return Err(denied());
         }
         Ok(reference)
+    }
+
+    /// Preserve an existing high-entropy local credential while moving its owner.
+    pub(crate) fn adopt_builtin_client_credential(
+        &self,
+        client_id: &str,
+        route_app: &str,
+        key: &str,
+    ) -> Result<CredentialRef, AppError> {
+        if key.len() < 32 {
+            return Err(denied());
+        }
+        let reference = self.issue_client_credential_with_id(
+            format!("builtin:{client_id}:{route_app}"),
+            client_id,
+            route_app,
+            &[],
+            Some(key),
+        )?;
+        if reference.revoked
+            || self.resolve_client_credential(&reference.id, client_id, route_app)? != key
+        {
+            return Err(denied());
+        }
+        Ok(reference)
+    }
+
+    pub(crate) fn builtin_client_key(
+        &self,
+        client_id: &str,
+        route_app: &str,
+    ) -> Result<String, AppError> {
+        self.resolve_client_credential(
+            &format!("builtin:{client_id}:{route_app}"),
+            client_id,
+            route_app,
+        )
     }
 
     /// Called only by the managed configuration lifecycle, never by a read path.
@@ -151,12 +191,26 @@ impl Database {
         Ok(None)
     }
 
+    /// Restoration recognizes the issued projection even after revocation.
+    /// This is an ownership witness and never authorizes a request.
+    pub(crate) fn owns_managed_client_key(
+        &self,
+        route_app: &str,
+        key: &str,
+    ) -> Result<bool, AppError> {
+        let id = format!("builtin:managed-{route_app}:{route_app}");
+        let digest = hex::encode(<Sha256 as sha2::Digest>::digest(key.as_bytes()));
+        let conn = lock_conn!(self.conn);
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM loongport_client_credentials WHERE id=?1 AND route_app=?2 AND secret_digest=?3)", params![id, route_app, digest], |row| row.get(0))?)
+    }
+
     fn issue_client_credential_with_id(
         &self,
         id: String,
         client_id: &str,
         route_app: &str,
         allowed_models: &[String],
+        existing_key: Option<&str>,
     ) -> Result<CredentialRef, AppError> {
         if client_id.is_empty()
             || client_id.len() > 128
@@ -172,13 +226,18 @@ impl Database {
         let mut random = Zeroizing::new([0u8; 32]);
         getrandom::fill(random.as_mut())
             .map_err(|_| AppError::Config("client_access.random_unavailable".into()))?;
-        let key = Zeroizing::new(format!("{PREFIX}{id}.{}", hex::encode(random.as_ref())));
+        let key = Zeroizing::new(
+            existing_key
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{PREFIX}{id}.{}", hex::encode(random.as_ref()))),
+        );
+        let digest = hex::encode(<Sha256 as sha2::Digest>::digest(key.as_bytes()));
         let sealed = seal_db(&vault, TABLE, "secret", &[&id], &key)?;
         let mut models = allowed_models.to_vec();
         models.sort();
         models.dedup();
         let conn = lock_conn!(self.conn);
-        conn.execute("INSERT OR IGNORE INTO loongport_client_credentials (id, client_id, route_app, allowed_models, secret) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, client_id, route_app, serde_json::to_string(&models).map_err(|error| AppError::Config(error.to_string()))?, sealed])?;
+        conn.execute("INSERT OR IGNORE INTO loongport_client_credentials (id, client_id, route_app, allowed_models, secret, secret_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![id, client_id, route_app, serde_json::to_string(&models).map_err(|error| AppError::Config(error.to_string()))?, sealed, digest])?;
         let (reference, _) = lookup(&conn, &id)?;
         if reference.client_id != client_id
             || reference.route_app != route_app
@@ -211,15 +270,19 @@ impl Database {
         route_app: &str,
         model: Option<&str>,
     ) -> Result<CallerIdentity, AppError> {
-        let id = key
-            .strip_prefix(PREFIX)
-            .and_then(|value| value.split_once('.'))
-            .map(|(id, _)| id)
-            .ok_or_else(denied)?;
         let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
-        let (reference, sealed) = lookup(&conn, id)?;
-        let expected = Zeroizing::new(open_db(&vault, TABLE, "secret", &[id], &sealed)?);
+        let digest = hex::encode(<Sha256 as sha2::Digest>::digest(key.as_bytes()));
+        let id: String = conn
+            .query_row(
+                "SELECT id FROM loongport_client_credentials WHERE secret_digest=?1",
+                [digest],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(denied)?;
+        let (reference, sealed) = lookup(&conn, &id)?;
+        let expected = Zeroizing::new(open_db(&vault, TABLE, "secret", &[&id], &sealed)?);
         // Compare MACs through the crypto library's constant-time verifier.
         let mut mac = Hmac::<Sha256>::new_from_slice(expected.as_bytes()).map_err(|_| denied())?;
         mac.update(b"loongport-client-auth");
