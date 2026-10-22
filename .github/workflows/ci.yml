@@ -92,6 +92,10 @@ jobs:
             backend:
               - "src-tauri/**"
               - "rust-toolchain.toml"
+              # Qoder Rust tests execute these Node runtime/worker inputs.
+              - ".node-version"
+              - "scripts/qoder/**"
+              - "tests/qoder-runtime/**"
               - ".github/workflows/**"
               # 仓内 remote-config 的字节被闸测试 include_str!/include_bytes!
               # 编译期嵌入（remote_config.rs 的 checked_in_config_*）——改它
@@ -299,6 +303,39 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Rust Qoder tests launch Node fixtures through private pipes. Do not let
+      # runner-image updates silently choose a different runtime than the app.
+      - name: Setup backend Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify backend Node runtime
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const expected = readFileSync('.node-version', 'utf8').trim();
+          if (process.versions.node !== expected) throw new Error('Backend Node version mismatch');
+          console.log(`Backend Node ${process.version}: ${process.execPath}`);
+          const env = { ...process.env };
+          delete env.NODE_OPTIONS;
+          delete env.NODE_PATH;
+          const probe = spawnSync(process.execPath, ['tests/qoder-runtime/fixtures/interrupted.mjs'], {
+            env, encoding: 'utf8', timeout: 30_000,
+          });
+          const diagnostics = `status=${probe.status} signal=${probe.signal} error=${probe.error?.code ?? 'none'} stdoutBytes=${Buffer.byteLength(probe.stdout ?? '')}`;
+          if (probe.error || probe.status !== 7) throw new Error(`Backend Node pipe preflight failed: ${diagnostics}`);
+          let frame;
+          try { frame = JSON.parse(probe.stdout.trim()); } catch { throw new Error(`Backend Node pipe preflight invalid frame: ${diagnostics}`); }
+          if (frame.kind !== 'event' || frame.event?.type !== 'text_delta' || frame.event?.text !== 'partial') {
+            throw new Error(`Backend Node pipe preflight wrong frame: ${diagnostics}`);
+          }
+          console.log('Backend Node pipe preflight passed');
+          appendFileSync(process.env.GITHUB_ENV, `QODER_HOST_NODE=${process.execPath}\n`);
+          NODE
 
       - name: Setup Rust
         # 工具链同 backend job：跟 rust-toolchain.toml 走（理由见那边注释）。

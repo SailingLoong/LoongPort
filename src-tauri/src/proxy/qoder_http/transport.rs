@@ -341,9 +341,14 @@ mod tests {
                 Some(handler),
             )
             .await;
-            if let Ok(crate::proxy::hyper_client::ProxyResponse::Streamed { mut stream, .. }) =
-                response
-            {
+            if mode == "stream" {
+                let mut stream = match response {
+                    Ok(crate::proxy::hyper_client::ProxyResponse::Streamed { stream, .. }) => {
+                        stream
+                    }
+                    Err(error) => panic!("mode={mode}: stream setup failed: {error}"),
+                    _ => panic!("mode={mode}: expected streaming response"),
+                };
                 assert_eq!(calls.load(Ordering::SeqCst), 0, "not before clean end");
                 let mut bytes = Vec::new();
                 let mut failed = false;
@@ -358,6 +363,19 @@ mod tests {
                 }
                 assert!(failed);
                 assert!(!String::from_utf8_lossy(&bytes).contains("[DONE]"));
+            } else {
+                let expected_error = if expected == 1 {
+                    REAUTHORIZE
+                } else {
+                    "qoder_http_outcome_unverified"
+                };
+                match response {
+                    Err(ProxyError::ForwardFailed(code)) => {
+                        assert_eq!(code, expected_error, "mode={mode}: forward result");
+                    }
+                    Err(error) => panic!("mode={mode}: unexpected forward error: {error}"),
+                    _ => panic!("mode={mode}: rejected request unexpectedly succeeded"),
+                }
             }
             assert_eq!(calls.load(Ordering::SeqCst), expected, "mode={mode}");
         }

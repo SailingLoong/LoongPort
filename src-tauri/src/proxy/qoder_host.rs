@@ -272,7 +272,17 @@ mod tests {
         // Keep a finite test deadline without imposing a 5s startup contract.
         tokio::time::timeout(Duration::from_secs(30), host.next_event())
             .await
-            .expect("worker timeout")
+            .unwrap_or_else(|_| {
+                // Metadata only: never dump the private request, output frame,
+                // stderr or inherited environment while diagnosing a stall.
+                let child_status = host.child.as_mut().map(|child| child.try_wait());
+                panic!(
+                    "worker read timeout: child_status={child_status:?}, partial_bytes={}, buffered_bytes={}, ended={}",
+                    host.partial.len(),
+                    host.output.buffer().len(),
+                    host.ended,
+                )
+            })
     }
     #[tokio::test]
     async fn actual_child_entry_forwards_text_terminal_then_eof() {
