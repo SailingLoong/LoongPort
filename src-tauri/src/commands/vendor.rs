@@ -1121,6 +1121,7 @@ async fn provision_impl(
 #[serde(rename_all = "camelCase")]
 pub struct OpenCodeKeyImportResult {
     pub row_id: i64,
+    pub configuration_ready: bool,
 }
 
 /// Explicit user-entered key import; no network validation, no consumption, no selection.
@@ -1131,15 +1132,81 @@ pub async fn vendor_import_opencode_key(
     api_key: String,
     label: String,
 ) -> Result<OpenCodeKeyImportResult, String> {
-    let row_id = with_conn(state.inner(), |conn, vault| {
-        crate::vendor::opencode_personal::save(conn, vault, &api_key, &label)
+    import_opencode_key_impl(&app_handle, state.inner(), &api_key, &label).await
+}
+
+// Shared Personal key owner for manual entry and explicit local import. A provider
+// setup failure must not pretend the already encrypted credential was rolled back.
+async fn import_opencode_key_impl(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    api_key: &str,
+    label: &str,
+) -> Result<OpenCodeKeyImportResult, String> {
+    let row_id = with_conn(state, |conn, vault| {
+        crate::vendor::opencode_personal::save(conn, vault, api_key, label)
     })
     .map_err(|_| "保存失败，请确认输入完整 Personal API key 且本地密钥库已解锁".to_string())?;
-    provision_impl(state.inner(), row_id)
-        .await
-        .map_err(|_| "密钥已加密保存，但接入配置未完成；可重试，不会重复新建账号".to_string())?;
+    let configuration_ready = provision_impl(state, row_id).await.is_ok();
     let _ = app_handle.emit(crate::events::VENDOR_ACCOUNTS_CHANGED, ());
-    Ok(OpenCodeKeyImportResult { row_id })
+    Ok(OpenCodeKeyImportResult {
+        row_id,
+        configuration_ready,
+    })
+}
+
+fn opencode_local_session(
+) -> &'static std::sync::Mutex<crate::vendor::opencode_local_import::Session> {
+    static SESSION: std::sync::OnceLock<
+        std::sync::Mutex<crate::vendor::opencode_local_import::Session>,
+    > = std::sync::OnceLock::new();
+    SESSION.get_or_init(Default::default)
+}
+
+#[tauri::command]
+pub fn vendor_preview_opencode_local(
+    consent: bool,
+) -> Result<crate::vendor::opencode_local_import::Preview, String> {
+    opencode_local_session()
+        .lock()
+        .map_err(|_| "preview_unavailable".to_string())?
+        .preview(
+            &crate::opencode_config::get_opencode_db_path(),
+            consent,
+            std::time::Instant::now(),
+        )
+        .map_err(str::to_string)
+}
+
+#[tauri::command]
+pub fn vendor_cancel_opencode_local(preview_id: String) -> Result<(), String> {
+    opencode_local_session()
+        .lock()
+        .map_err(|_| "preview_unavailable".to_string())?
+        .cancel(&preview_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn vendor_import_opencode_local(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    preview_id: String,
+    entry_id: String,
+    consent: bool,
+) -> Result<OpenCodeKeyImportResult, String> {
+    let selected = opencode_local_session()
+        .lock()
+        .map_err(|_| "preview_unavailable".to_string())?
+        .take(
+            &crate::opencode_config::get_opencode_db_path(),
+            &preview_id,
+            &entry_id,
+            consent,
+            std::time::Instant::now(),
+        )
+        .map_err(str::to_string)?;
+    import_opencode_key_impl(&app_handle, state.inner(), &selected.key, &selected.label).await
 }
 
 /// 把**一个平台**的配置恢复成 LoongPort 生成的默认值。**密钥保留不变。**
