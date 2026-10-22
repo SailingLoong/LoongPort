@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   open: vi.fn(),
   list: vi.fn(),
+  discover: vi.fn(),
   begin: vi.fn(),
   confirm: vi.fn(),
   cancel: vi.fn(),
@@ -75,6 +76,7 @@ beforeEach(() => {
     title === "trae.selectStorage" ? storagePath : productPath,
   );
   mocks.list.mockResolvedValue([]);
+  mocks.discover.mockResolvedValue([]);
   mocks.begin.mockResolvedValue(flow);
   mocks.confirm.mockResolvedValue(account);
   mocks.cancel.mockResolvedValue(undefined);
@@ -82,6 +84,8 @@ beforeEach(() => {
   mocks.invoke.mockImplementation(
     (command: string, args?: Record<string, unknown>) => {
       switch (command) {
+        case "discover_trae_installations":
+          return mocks.discover(args?.realm);
         case "list_trae_accounts":
           return mocks.list();
         case "begin_trae_authorization":
@@ -594,7 +598,9 @@ it("isolates CN Code accounts and consent from Global, without enabling check-in
   render(<TraeAccounts edition="cn" />);
   expect(await screen.findByText("synthetic-cn")).toBeVisible();
   expect(screen.queryByText(account.id)).not.toBeInTheDocument();
-  expect(screen.getByText(/签到尚未接入/)).toBeVisible();
+  expect(
+    screen.getByText(/自动签到默认关闭，需在权益区逐账号开启/),
+  ).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "trae.add" }));
   expect(screen.queryByRole("radio", { name: "SG" })).not.toBeInTheDocument();
   expect(screen.queryByRole("radio", { name: "US" })).not.toBeInTheDocument();
@@ -627,4 +633,483 @@ it("rejects Global authorization host returned to the CN entry without confirmin
   );
   await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(flow.flowId));
   expect(mocks.confirm).not.toHaveBeenCalled();
+});
+
+it("one discovered installation skips file dialogs but never confirms without consent", async () => {
+  mocks.discover.mockResolvedValue([
+    { storagePath, productPath, version: "3.6.2" },
+  ]);
+  render(<TraeAccounts />);
+  await openDialog();
+  await userEvent.click(
+    screen.getByRole("button", { name: "自动发现本机 TRAE 安装" }),
+  );
+  await screen.findByRole("checkbox", { name: "trae.consent" });
+  expect(mocks.discover).toHaveBeenCalledExactlyOnceWith("sg");
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(mocks.begin).toHaveBeenCalledExactlyOnceWith({
+    storagePath,
+    productPath,
+    realm: "sg",
+  });
+  expect(mocks.confirm).not.toHaveBeenCalled();
+});
+it("multiple installations require an explicit choice", async () => {
+  const second = {
+    storagePath,
+    productPath: "/synthetic/other/product.json",
+    version: "3.6.3",
+  };
+  mocks.discover.mockResolvedValue([
+    { storagePath, productPath, version: "3.6.2" },
+    second,
+  ]);
+  render(<TraeAccounts />);
+  await openDialog();
+  await userEvent.click(
+    screen.getByRole("button", { name: "自动发现本机 TRAE 安装" }),
+  );
+  await screen.findByText("发现多个安装，请选择本次导入来源：");
+  expect(mocks.begin).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: new RegExp("other/product.json") }),
+  );
+  await screen.findByRole("checkbox", { name: "trae.consent" });
+  expect(mocks.begin).toHaveBeenCalledExactlyOnceWith({
+    storagePath,
+    productPath: second.productPath,
+    realm: "sg",
+  });
+});
+it("late discovery after cancellation cannot start an import", async () => {
+  const pending = deferred<unknown[]>();
+  mocks.discover.mockReturnValue(pending.promise);
+  render(<TraeAccounts />);
+  await openDialog();
+  await userEvent.click(
+    screen.getByRole("button", { name: "自动发现本机 TRAE 安装" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "trae.cancel" }));
+  await act(async () =>
+    pending.resolve([{ storagePath, productPath, version: "3.6.2" }]),
+  );
+  expect(mocks.begin).not.toHaveBeenCalled();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+});
+
+it("CN check-in is explicit, at most one pending request and accepted is not credited", async () => {
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn", nativeSourceSupported: true },
+  ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "checkin_trae_account"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  const button = await screen.findByRole("button", { name: "检查并尝试签到" });
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(0);
+  fireEvent.click(button);
+  fireEvent.click(button);
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toEqual([["checkin_trae_account", { id: account.id }]]);
+  await act(async () =>
+    pending.resolve({ status: "accepted", reportedCredits: 30 }),
+  );
+  expect(screen.getByText(/已受理，尚未确认签到或积分到账/)).toBeVisible();
+  expect(screen.queryByText(/余额.*30/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ["done", "服务已确认此账号已签到"],
+  ["inactive", "此账号当前未开放签到"],
+  ["ineligible", "服务拒绝本次领取或账号不符合条件"],
+  ["alreadyAttempted", "已尝试领取或仍有未确认的领取"],
+])(
+  "CN check-in renders %s without inferring a balance",
+  async (status, message) => {
+    mocks.list.mockResolvedValue([
+      { ...account, realm: "cn", nativeSourceSupported: true },
+    ]);
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) =>
+      command === "checkin_trae_account"
+        ? Promise.resolve({ status })
+        : original(command, args),
+    );
+    render(<TraeAccounts unified edition="cn" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "检查并尝试签到" }),
+    );
+    expect(await screen.findByText(new RegExp(message))).toBeVisible();
+    expect(
+      mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+    ).toHaveLength(1);
+  },
+);
+
+it("global and unverified or retired CN accounts cannot send claims", async () => {
+  mocks.list.mockResolvedValue([account]);
+  const view = render(<TraeAccounts unified />);
+  await screen.findByRole("button", { name: `查看 ${account.id}` });
+  expect(
+    screen.queryByRole("button", { name: "检查并尝试签到" }),
+  ).not.toBeInTheDocument();
+  view.unmount();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn" },
+    {
+      ...account,
+      id: "retired-cn",
+      realm: "cn",
+      nativeSourceSupported: true,
+      status: "retired",
+    },
+  ]);
+  render(<TraeAccounts unified edition="cn" />);
+  expect(
+    await screen.findByRole("button", { name: "检查并尝试签到" }),
+  ).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "查看 retired-cn" }));
+  expect(screen.getByRole("button", { name: "检查并尝试签到" })).toBeDisabled();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(0);
+});
+
+it("reload invalidates a pending check-in result without automatic claims", async () => {
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn", nativeSourceSupported: true },
+    { ...account, id: "other-cn", realm: "cn", nativeSourceSupported: true },
+  ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "checkin_trae_account"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "检查并尝试签到" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "查看 other-cn" }));
+  expect(screen.getByRole("button", { name: "检查并尝试签到" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  await act(async () => pending.resolve({ status: "done" }));
+  expect(screen.queryByText(/服务已确认此账号已签到/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: `查看 ${account.id}` }));
+  expect(screen.queryByText(/服务已确认此账号已签到/)).not.toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(1);
+});
+
+it("check-in failure is safe and does not auto retry", async () => {
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn", nativeSourceSupported: true },
+  ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "checkin_trae_account"
+      ? pending.promise
+      : original(command, args),
+  );
+  const view = render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "检查并尝试签到" }),
+  );
+  await act(async () => pending.reject(new Error("secret-upstream-error")));
+  expect(screen.getByText(/无法确认签到结果，不会自动重试/)).toBeVisible();
+  expect(screen.queryByText(/secret-upstream-error/)).not.toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(1);
+  view.unmount();
+});
+
+it("ignores check-in completion after unmount and a fresh account view", async () => {
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn", nativeSourceSupported: true },
+  ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "checkin_trae_account"
+      ? pending.promise
+      : original(command, args),
+  );
+  const view = render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "检查并尝试签到" }),
+  );
+  view.unmount();
+  render(<TraeAccounts unified edition="cn" />);
+  await screen.findByRole("button", { name: "检查并尝试签到" });
+  await act(async () => pending.resolve({ status: "done" }));
+  expect(screen.queryByText(/服务已确认此账号已签到/)).not.toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(1);
+});
+
+it.each(["sg", "us"])(
+  "%s accounts never expose or send a CN claim, even with native source metadata",
+  async (realm) => {
+    mocks.list.mockResolvedValue([
+      { ...account, realm, nativeSourceSupported: true },
+    ]);
+    render(<TraeAccounts unified />);
+    await screen.findByRole("button", { name: `查看 ${account.id}` });
+    expect(
+      screen.queryByRole("button", { name: "检查并尝试签到" }),
+    ).not.toBeInTheDocument();
+    expect(
+      mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+    ).toHaveLength(0);
+  },
+);
+
+it("a late check-in result remains attached to its originating account", async () => {
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([
+    { ...account, realm: "cn", nativeSourceSupported: true },
+    { ...account, id: "other-cn", realm: "cn", nativeSourceSupported: true },
+  ]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "checkin_trae_account"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "检查并尝试签到" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "查看 other-cn" }));
+  await act(async () => pending.resolve({ status: "done" }));
+  expect(screen.queryByText(/服务已确认此账号已签到/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: `查看 ${account.id}` }));
+  expect(screen.getByText(/服务已确认此账号已签到/)).toBeVisible();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toEqual([["checkin_trae_account", { id: account.id }]]);
+});
+
+it("CN discovery reuses the native import flow without confirming or claiming", async () => {
+  mocks.discover.mockResolvedValue([
+    { storagePath, productPath, version: "3.6.2" },
+  ]);
+  mocks.begin.mockResolvedValue({
+    ...flow,
+    realm: "cn",
+    authHost: "https://api.trae.cn",
+  });
+  render(<TraeAccounts unified edition="cn" />);
+  await userEvent.click(screen.getByRole("button", { name: "trae.add" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "自动发现本机 TRAE 安装" }),
+  );
+  await screen.findByRole("checkbox", { name: "trae.consent" });
+  expect(mocks.discover).toHaveBeenCalledExactlyOnceWith("cn");
+  expect(mocks.begin).toHaveBeenCalledExactlyOnceWith({
+    storagePath,
+    productPath,
+    realm: "cn",
+  });
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(0);
+});
+
+it("automatic CN checkin requires explicit per-account opt-in and sends fenced policy only", async () => {
+  const row = {
+    ...account,
+    realm: "cn",
+    nativeSourceSupported: true,
+    generation: 7,
+    autoCheckinRevision: 3,
+    autoCheckinEnabled: false,
+    canSetAutomatic: true,
+    checkinAttemptStatus: null,
+  };
+  mocks.list.mockResolvedValue([row]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.resolve({
+          ...row,
+          autoCheckinRevision: 4,
+          autoCheckinEnabled: true,
+        })
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  const enable = await screen.findByRole("button", { name: "开启自动签到" });
+  expect(mocks.invoke.mock.calls).toEqual([["list_trae_accounts"]]);
+  fireEvent.click(enable);
+  expect(mocks.invoke).toHaveBeenCalledWith("set_trae_automatic_checkin", {
+    id: account.id,
+    generation: 7,
+    policyRevision: 3,
+    enabled: true,
+  });
+  await screen.findByRole("button", { name: "关闭自动签到" });
+  expect(
+    mocks.invoke.mock.calls.filter(([cmd]) => cmd === "checkin_trae_account"),
+  ).toHaveLength(0);
+});
+
+it("automatic policy guards repeated clicks and preserves confirmed consent across reload", async () => {
+  const row = {
+    ...account,
+    realm: "cn",
+    nativeSourceSupported: true,
+    generation: 2,
+    autoCheckinRevision: 0,
+    autoCheckinEnabled: false,
+    canSetAutomatic: true,
+    checkinAttemptStatus: "unknown",
+  };
+  mocks.list.mockResolvedValue([row]);
+  const pending = deferred<unknown>();
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  const enable = await screen.findByRole("button", { name: "开启自动签到" });
+  act(() => {
+    fireEvent.click(enable);
+    fireEvent.click(enable);
+  });
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "set_trae_automatic_checkin",
+    ),
+  ).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+  await act(async () =>
+    pending.resolve({
+      ...row,
+      autoCheckinRevision: 1,
+      autoCheckinEnabled: true,
+    }),
+  );
+  expect(screen.getByRole("button", { name: "关闭自动签到" })).toBeVisible();
+  expect(screen.getByText(/仍有未确认的领取/)).toBeVisible();
+});
+
+it("an older list response cannot overwrite a newly confirmed automatic policy", async () => {
+  const row = {
+    ...account,
+    realm: "cn",
+    nativeSourceSupported: true,
+    generation: 2,
+    autoCheckinRevision: 0,
+    autoCheckinEnabled: false,
+    canSetAutomatic: true,
+    checkinAttemptStatus: null,
+  };
+  const stale = deferred<unknown[]>();
+  mocks.list.mockResolvedValueOnce([row]).mockReturnValueOnce(stale.promise);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? Promise.resolve({
+          ...row,
+          autoCheckinRevision: 1,
+          autoCheckinEnabled: true,
+        })
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  await screen.findByRole("button", { name: "开启自动签到" });
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  fireEvent.click(screen.getByRole("button", { name: "开启自动签到" }));
+  await screen.findByRole("button", { name: "关闭自动签到" });
+  await act(async () => stale.resolve([row]));
+  expect(screen.getByRole("button", { name: "关闭自动签到" })).toBeVisible();
+  expect(screen.queryByText("trae.loading")).not.toBeInTheDocument();
+});
+
+it("opening and closing an empty authorization dialog does not discard confirmed policy", async () => {
+  const row = {
+    ...account,
+    realm: "cn",
+    nativeSourceSupported: true,
+    generation: 2,
+    autoCheckinRevision: 0,
+    autoCheckinEnabled: false,
+    canSetAutomatic: true,
+    checkinAttemptStatus: null,
+  };
+  const pending = deferred<unknown>();
+  mocks.list.mockResolvedValue([row]);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "开启自动签到" }));
+  fireEvent.click(screen.getByRole("button", { name: "trae.add" }));
+  fireEvent.click(screen.getByRole("button", { name: "trae.cancel" }));
+  await act(async () =>
+    pending.resolve({
+      ...row,
+      autoCheckinRevision: 1,
+      autoCheckinEnabled: true,
+    }),
+  );
+  expect(screen.getByRole("button", { name: "关闭自动签到" })).toBeVisible();
+  expect(mocks.confirm).not.toHaveBeenCalled();
+});
+
+it("a newer account generation from reload is not overwritten by an older policy reply", async () => {
+  const row = {
+    ...account,
+    realm: "cn",
+    nativeSourceSupported: true,
+    generation: 2,
+    autoCheckinRevision: 0,
+    autoCheckinEnabled: false,
+    canSetAutomatic: true,
+    checkinAttemptStatus: null,
+  };
+  const pending = deferred<unknown>();
+  const refresh = deferred<unknown[]>();
+  mocks.list.mockResolvedValueOnce([row]).mockReturnValueOnce(refresh.promise);
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "set_trae_automatic_checkin"
+      ? pending.promise
+      : original(command, args),
+  );
+  render(<TraeAccounts unified edition="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "开启自动签到" }));
+  fireEvent.click(screen.getByRole("button", { name: "trae.reload" }));
+  await act(async () =>
+    pending.resolve({
+      ...row,
+      autoCheckinRevision: 1,
+      autoCheckinEnabled: true,
+    }),
+  );
+  await act(async () =>
+    refresh.resolve([{ ...row, generation: 3, autoCheckinRevision: 2 }]),
+  );
+  expect(screen.getByRole("button", { name: "开启自动签到" })).toBeVisible();
 });

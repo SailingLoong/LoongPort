@@ -80,6 +80,24 @@ impl Drop for Grant {
         self.refresh.zeroize();
     }
 }
+/// A receipt outcome, not a credit-balance assertion. The existing checkin_day
+/// remains the sole calendar fact; an unresolved attempt survives every new day.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CheckinAttemptStatus {
+    Pending,
+    Unknown,
+    Accepted,
+    Ineligible,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CheckinAttempt {
+    pub id: String,
+    pub generation: u64,
+    pub version: u64,
+    pub status: CheckinAttemptStatus,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Account {
@@ -93,6 +111,12 @@ pub(super) struct Account {
     pub refresh_pending: bool,
     #[serde(default)]
     pub checkin_day: Option<i64>,
+    #[serde(default)]
+    pub checkin_attempt: Option<CheckinAttempt>,
+    #[serde(default)]
+    pub auto_checkin_enabled: bool,
+    #[serde(default)]
+    pub auto_checkin_revision: u64,
     pub imported_refresh_hash: String,
 }
 #[derive(Serialize, Deserialize)]
@@ -161,6 +185,16 @@ fn validate(d: &Document) -> Result<(), Failure> {
             || a.device.source_digest.len() != 64
             || a.imported_refresh_hash.len() != 64
         {
+            return Err(Failure::Storage);
+        }
+        if a.checkin_attempt.as_ref().is_some_and(|op| {
+            a.checkin_day.is_none()
+                || !text(&op.id, 128)
+                || op.generation == 0
+                || op.generation > a.generation
+                || op.version == 0
+                || op.version > a.version
+        }) {
             return Err(Failure::Storage);
         }
         if let Some(g) = &a.grant {
@@ -289,6 +323,11 @@ pub(crate) async fn retire(session: &SecretSession, id: &str) -> Result<(), Fail
             .find(|a| a.id == id)
             .ok_or(Failure::Retired)?;
         a.generation = a.generation.checked_add(1).ok_or(Failure::Storage)?;
+        a.auto_checkin_enabled = false;
+        a.auto_checkin_revision = a
+            .auto_checkin_revision
+            .checked_add(1)
+            .ok_or(Failure::Storage)?;
         a.grant = None;
         a.refresh_pending = false;
         Ok(((), true))
@@ -312,6 +351,54 @@ pub(crate) struct AccountView {
     /// Source adapter eligibility only; never a live inference acceptance claim.
     #[serde(rename = "nativeSourceSupported")]
     pub native_source_supported: bool,
+    pub generation: u64,
+    #[serde(rename = "autoCheckinEnabled")]
+    pub auto_checkin_enabled: bool,
+    #[serde(rename = "autoCheckinRevision")]
+    pub auto_checkin_revision: u64,
+    #[serde(rename = "canSetAutomatic")]
+    pub can_set_automatic: bool,
+    #[serde(rename = "checkinAttemptStatus")]
+    pub checkin_attempt_status: Option<CheckinAttemptStatus>,
+}
+impl Account {
+    pub(super) fn checkin_attempt_status(&self) -> Option<CheckinAttemptStatus> {
+        self.checkin_attempt
+            .as_ref()
+            .map(|a| a.status)
+            .or(self.checkin_day.map(|_| CheckinAttemptStatus::Unknown))
+    }
+    pub(super) fn checkin_unresolved(&self) -> bool {
+        matches!(
+            self.checkin_attempt_status(),
+            Some(CheckinAttemptStatus::Pending | CheckinAttemptStatus::Unknown)
+        )
+    }
+    pub(super) fn can_set_automatic(&self) -> bool {
+        self.realm == Realm::Cn
+            && native_source_supported(self)
+            && self.grant.is_some()
+            && !self.refresh_pending
+    }
+    pub(super) fn view(&self) -> AccountView {
+        AccountView {
+            id: self.id.clone(),
+            realm: self.realm,
+            generation: self.generation,
+            native_source_supported: native_source_supported(self),
+            status: if self.grant.is_none() {
+                AccountStatus::Retired
+            } else if self.refresh_pending {
+                AccountStatus::RefreshPending
+            } else {
+                AccountStatus::Stored
+            },
+            auto_checkin_enabled: self.auto_checkin_enabled,
+            auto_checkin_revision: self.auto_checkin_revision,
+            can_set_automatic: self.can_set_automatic(),
+            checkin_attempt_status: self.checkin_attempt_status(),
+        }
+    }
 }
 pub(super) fn native_source_supported(a: &Account) -> bool {
     a.device.auth_host == a.realm.auth()
@@ -320,22 +407,7 @@ pub(super) fn native_source_supported(a: &Account) -> bool {
 }
 pub(crate) async fn list(session: &SecretSession) -> Result<Vec<AccountView>, Failure> {
     access(session, None, |d, _| {
-        let views = d
-            .accounts
-            .iter()
-            .map(|a| AccountView {
-                id: a.id.clone(),
-                realm: a.realm,
-                native_source_supported: native_source_supported(a),
-                status: if a.grant.is_none() {
-                    AccountStatus::Retired
-                } else if a.refresh_pending {
-                    AccountStatus::RefreshPending
-                } else {
-                    AccountStatus::Stored
-                },
-            })
-            .collect();
+        let views = d.accounts.iter().map(Account::view).collect();
         Ok((views, false))
     })
     .await

@@ -418,6 +418,19 @@ async fn classified_failure(response: ProxyResponse) -> u16 {
         status
     }
 }
+/// Classification is conservative: only a failure before transport creation and
+/// first poll may withdraw an exact durable intent. Never infer "unsent" from IO.
+pub(super) enum DispatchFailure {
+    NotDispatched(ProxyError),
+    OutcomeUnknown(ProxyError),
+}
+impl DispatchFailure {
+    pub(super) fn error(self) -> ProxyError {
+        match self {
+            Self::NotDispatched(e) | Self::OutcomeUnknown(e) => e,
+        }
+    }
+}
 /// Transport creation and first poll share the owner's mutation admission fence.
 pub(super) async fn admit(
     session: &SecretSession,
@@ -426,14 +439,29 @@ pub(super) async fn admit(
     request: Request,
     pending_refresh: bool,
 ) -> Result<ProxyResponse, ProxyError> {
+    admit_checked(session, s, transport, request, pending_refresh, |_| Ok(()))
+        .await
+        .map_err(DispatchFailure::error)
+}
+pub(super) async fn admit_checked(
+    session: &SecretSession,
+    s: &Snapshot,
+    transport: &impl Transport,
+    request: Request,
+    pending_refresh: bool,
+    check: impl FnOnce(&store::Account) -> Result<(), Failure>,
+) -> Result<ProxyResponse, DispatchFailure> {
     let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
     let mut pending = None;
     let mut ready = None;
-    store::access(session, Some(&s.binding), |d, _| {
+    let mut entered = false;
+    let admission = store::access(session, Some(&s.binding), |d, _| {
         let a = store::matched(d, s)?;
         if a.version != s.account.version || a.refresh_pending != pending_refresh {
             return Err(Failure::Retired);
         }
+        check(a)?;
+        entered = true;
         let mut future = transport.send(request);
         match future
             .as_mut()
@@ -444,13 +472,22 @@ pub(super) async fn admit(
         }
         Ok(((), false))
     })
-    .await
-    .map_err(|_| auth_error())?;
+    .await;
+    if admission.is_err() {
+        return Err(if entered {
+            DispatchFailure::OutcomeUnknown(auth_error())
+        } else {
+            DispatchFailure::NotDispatched(auth_error())
+        });
+    }
     if let Some(r) = ready {
         r
     } else {
-        pending.ok_or_else(auth_error)?.await
+        pending
+            .ok_or_else(|| DispatchFailure::OutcomeUnknown(auth_error()))?
+            .await
     }
+    .map_err(DispatchFailure::OutcomeUnknown)
 }
 struct Parts {
     content_guard: Option<KnownSecretGuard>,

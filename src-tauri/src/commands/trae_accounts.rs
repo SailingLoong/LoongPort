@@ -58,3 +58,33 @@ pub(crate) async fn checkin_trae_account(
     .await
     .map_err(|_| "trae.checkin_unavailable".to_string())
 }
+
+/// Exposes paths and public product metadata only. No credential file is opened.
+#[tauri::command]
+pub(crate) async fn discover_trae_installations(
+    realm: Realm,
+) -> Result<Vec<crate::trae_accounts::discovery::Installation>, Error> {
+    tauri::async_runtime::spawn_blocking(move || crate::trae_accounts::discovery::discover(realm))
+        .await
+        .map_err(|_| Error::StorageUnavailable)
+}
+
+/// Per-account consent only. Never accepts credentials, a host, or a device.
+#[tauri::command]
+pub(crate) async fn set_trae_automatic_checkin(
+    state: State<'_, AppState>,
+    id: String,
+    generation: u64,
+    policy_revision: u64,
+    enabled: bool,
+) -> Result<AccountView, String> {
+    crate::trae_accounts::checkin::set_automatic(
+        state.db.secret_session(),
+        &id,
+        generation,
+        policy_revision,
+        enabled,
+    )
+    .await
+    .map_err(|_| "trae.checkin_unavailable".to_string())
+}

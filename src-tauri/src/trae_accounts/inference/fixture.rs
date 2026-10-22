@@ -86,6 +86,9 @@ impl FixtureTransport {
                 }),
                 refresh_pending: false,
                 checkin_day: None,
+                checkin_attempt: None,
+                auto_checkin_enabled: false,
+                auto_checkin_revision: 0,
                 imported_refresh_hash: hex::encode(Sha256::digest(
                     format!("{id}-refresh").as_bytes(),
                 )),

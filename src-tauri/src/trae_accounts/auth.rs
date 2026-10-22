@@ -423,6 +423,12 @@ async fn activate_inner(
                 return Err(Failure::NeedsLogin);
             }
             row.checkin_day = previous.checkin_day;
+            row.checkin_attempt = previous.checkin_attempt.clone();
+            row.auto_checkin_enabled = false;
+            row.auto_checkin_revision = previous
+                .auto_checkin_revision
+                .checked_add(1)
+                .ok_or(Failure::Storage)?;
             row.generation = previous.generation.checked_add(1).ok_or(Failure::Storage)?;
             row.version = previous.version.checked_add(1).ok_or(Failure::Storage)?;
             *previous = row.clone();
