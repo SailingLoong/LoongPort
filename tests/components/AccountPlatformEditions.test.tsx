@@ -61,9 +61,15 @@ it("mounts only CN Code source, accounts and authorization host for the China ed
   ).toBeInTheDocument();
   expect(screen.queryByText("SG-only-account")).not.toBeInTheDocument();
   expect(screen.queryByText("US-only-account")).not.toBeInTheDocument();
-  expect(screen.getByText(/签到尚未接入/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "检查并尝试签到" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "开启自动签到" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/签到尚未接入/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /添加.*TRAE/ }));
-  expect(screen.getByText(/同一官方稳定版 Trae CN Code/)).toBeInTheDocument();
+  expect(screen.getByText(/官方稳定版 Trae CN Code/)).toBeInTheDocument();
   expect(screen.getByRole("radio", { name: "CN" })).toBeInTheDocument();
   expect(screen.queryByRole("radio", { name: "SG" })).not.toBeInTheDocument();
   expect(screen.queryByRole("radio", { name: "US" })).not.toBeInTheDocument();
@@ -119,4 +125,18 @@ it("keeps a claimed badge out of MiniMax authorization status", async () => {
       "minimaxCode.status.claimed",
     ),
   ).toBeInTheDocument();
+});
+
+it("does not expose CN check-in controls in the global TRAE edition", async () => {
+  render(<AuthCenterPanel platform="trae" editionScoped />);
+  expect(
+    await screen.findByRole("heading", { name: "SG-only-account" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("CN-only-account")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "检查并尝试签到" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /开启自动签到|关闭自动签到/ }),
+  ).not.toBeInTheDocument();
 });

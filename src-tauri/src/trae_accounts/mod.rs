@@ -1,6 +1,7 @@
 //! TRAE's isolated account owner; no native credential scanning or extra pool.
 pub(crate) mod auth;
 pub(crate) mod checkin;
+pub(crate) mod discovery;
 pub(crate) mod entry;
 pub(crate) mod import;
 pub(crate) mod inference;
