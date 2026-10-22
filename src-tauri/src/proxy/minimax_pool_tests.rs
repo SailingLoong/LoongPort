@@ -29,6 +29,8 @@ enum UpstreamBehavior {
     Complete,
     FirstRateLimited,
     FailAfterOutput,
+    CleanEofAfterOutput,
+    ErrorAfterMessageStop,
 }
 
 #[derive(Clone)]
@@ -84,14 +86,21 @@ impl MiniMaxRouterFixture {
                         return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], axum::Json(json!({"error":{"type":"rate_limit_error","message":"synthetic-a-access"}}))).into_response();
                     }
                     if body["stream"] == true {
-                        if matches!(behavior, UpstreamBehavior::FailAfterOutput) {
+                        if matches!(behavior, UpstreamBehavior::FailAfterOutput | UpstreamBehavior::CleanEofAfterOutput | UpstreamBehavior::ErrorAfterMessageStop) {
                             // The test releases this gate only after downstream
                             // converted text was observed. Timing cannot turn
                             // this into a retryable first-byte failure.
                             let stream = async_stream::stream! {
                                 yield Ok::<Bytes, std::io::Error>(Bytes::from_static(START_AND_TEXT.as_bytes()));
                                 gate.notified().await;
-                                yield Err(std::io::Error::other("synthetic-a-access interrupted"));
+                                if matches!(behavior, UpstreamBehavior::FailAfterOutput) {
+                                    yield Err(std::io::Error::other("synthetic-a-access interrupted"));
+                                }
+                                if matches!(behavior, UpstreamBehavior::ErrorAfterMessageStop) {
+                                    yield Ok(Bytes::from_static(STOP.as_bytes()));
+                                    tokio::task::yield_now().await;
+                                    yield Ok(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic late error\"}}\n\n"));
+                                }
                             };
                             return ([("content-type", "text/event-stream")], axum::body::Body::from_stream(stream)).into_response();
                         }
@@ -467,3 +476,117 @@ async fn minimax_router_fixture_missing_or_cross_root_is_zero_http() {
 #[cfg(unix)]
 #[path = "cross_owner_pool_tests.rs"]
 mod cross_owner_pool_tests;
+
+#[tokio::test]
+#[serial_test::serial]
+async fn minimax_clean_eof_after_visible_output_never_completes_or_changes_account() {
+    let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::CleanEofAfterOutput).await;
+    let response = fixture.request(true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let mut emitted = Vec::new();
+    let mut failed = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !sse_data(&emitted)
+            .iter()
+            .any(|e| e["type"] == "response.output_text.delta" && e["delta"] == TEXT)
+        {
+            emitted.extend_from_slice(
+                &stream
+                    .next()
+                    .await
+                    .expect("stream ended before visible output")
+                    .unwrap(),
+            );
+        }
+        // Close valid HTTP/SSE only AFTER the original downstream route emitted text.
+        fixture.release_error.notify_one();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => emitted.extend_from_slice(&chunk),
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    let events = sse_data(&emitted);
+    assert!(
+        failed || events.iter().any(|e| e["type"] == "response.failed"),
+        "clean EOF became successful inference"
+    );
+    assert!(!events.iter().any(|e| e["type"] == "response.completed"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "response.output_text.delta" && e["delta"] == TEXT)
+            .count(),
+        1
+    );
+    assert!(!String::from_utf8_lossy(&emitted).contains("synthetic-a-access"));
+    assert_eq!(fixture.calls.lock().unwrap().len(), 1);
+    assert_eq!(fixture.transport.attempts(), 1);
+    assert_wire(&fixture.calls.lock().unwrap()[0], "synthetic-a", "cn");
+    fixture.assert_idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn minimax_error_after_message_stop_never_escapes_as_converted_success() {
+    let fixture = MiniMaxRouterFixture::new(UpstreamBehavior::ErrorAfterMessageStop).await;
+    let response = fixture.request(true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let mut emitted = Vec::new();
+    let mut failed = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !sse_data(&emitted)
+            .iter()
+            .any(|e| e["type"] == "response.output_text.delta" && e["delta"] == TEXT)
+        {
+            emitted.extend_from_slice(
+                &stream
+                    .next()
+                    .await
+                    .expect("stream ended before visible output")
+                    .unwrap(),
+            );
+        }
+        // Close valid HTTP/SSE only AFTER the original downstream route emitted text.
+        fixture.release_error.notify_one();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => emitted.extend_from_slice(&chunk),
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    let events = sse_data(&emitted);
+    assert!(
+        failed || events.iter().any(|e| e["type"] == "response.failed"),
+        "post-terminal error became successful inference"
+    );
+    assert!(!events.iter().any(|e| e["type"] == "response.completed"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "response.output_text.delta" && e["delta"] == TEXT)
+            .count(),
+        1
+    );
+    assert!(!String::from_utf8_lossy(&emitted).contains("synthetic-a-access"));
+    assert_eq!(fixture.calls.lock().unwrap().len(), 1);
+    assert_eq!(fixture.transport.attempts(), 1);
+    assert_wire(&fixture.calls.lock().unwrap()[0], "synthetic-a", "cn");
+    fixture.assert_idle().await;
+}
