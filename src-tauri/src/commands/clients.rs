@@ -85,20 +85,6 @@ async fn project(state: &AppState, request: &Connection) -> Result<serde_json::V
     {
         return Err("clients.invalid_request".into());
     }
-    let credential = state
-        .db
-        .list_client_credentials()
-        .map_err(message)?
-        .into_iter()
-        .find(|credential| credential.id == request.credential_ref)
-        .ok_or("clients.invalid_credential")?;
-    if request
-        .models
-        .iter()
-        .any(|model| !credential.allowed_models.contains(model))
-    {
-        return Err("clients.invalid_credential".into());
-    }
     let secret = zeroize::Zeroizing::new(
         state
             .db
@@ -109,6 +95,12 @@ async fn project(state: &AppState, request: &Connection) -> Result<serde_json::V
             )
             .map_err(message)?,
     );
+    for model in &request.models {
+        state
+            .db
+            .authenticate_client(&secret, &request.route_app, Some(model))
+            .map_err(message)?;
+    }
     if !state.db.client_access_ready().map_err(message)? {
         return Err("clients.access_not_ready".into());
     }
