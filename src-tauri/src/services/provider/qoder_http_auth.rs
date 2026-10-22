@@ -34,6 +34,7 @@ pub(crate) struct SourceBinding {
 pub(crate) enum SourceKind {
     InternationalQoderPat,
     ChinaQoderPat,
+    ChinaQoderDevice,
 }
 impl SourceKind {
     pub(crate) fn from_provider(provider: &Provider) -> Result<Self, AppError> {
@@ -44,19 +45,21 @@ impl SourceKind {
         {
             Some("qoder_sdk") => Ok(Self::InternationalQoderPat),
             Some("qoder_cn") => Ok(Self::ChinaQoderPat),
+            Some("qoder_cn_device") => Ok(Self::ChinaQoderDevice),
             _ => Err(denied("unsupported_source")),
         }
     }
     pub(crate) fn origin(&self) -> &'static str {
         match self {
             Self::InternationalQoderPat => ORIGIN,
-            Self::ChinaQoderPat => "https://openapi.qoder.com.cn",
+            Self::ChinaQoderPat | Self::ChinaQoderDevice => "https://openapi.qoder.com.cn",
         }
     }
     pub(crate) fn declaration(&self) -> CredentialSource {
         match self {
             Self::InternationalQoderPat => CredentialSource::InternationalQoderPat,
             Self::ChinaQoderPat => CredentialSource::ChinaQoderPat,
+            Self::ChinaQoderDevice => CredentialSource::ChinaQoderDevice,
         }
     }
 }
@@ -75,15 +78,30 @@ impl SourceBinding {
             .map(|s| s.generation.clone())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| denied("source_generation_required"))?;
-        let pat = Zeroizing::new(
+        let candidate = Zeroizing::new(
             qoder_daily::credential_candidate(provider)
                 .map_err(|_| denied("external_source_untracked"))?
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| denied("source_required"))?,
+                .unwrap_or_default(),
         );
         let mut digest = Sha256::new();
-        digest.update(b"loongport.qoder-http.pat.v1\0");
-        digest.update(pat.as_bytes());
+        let pat = if source == SourceKind::ChinaQoderDevice {
+            // Native tokens belong only to the existing encrypted subordinate owner.
+            if !candidate.trim().is_empty() {
+                return Err(denied("device_source_has_api_key"));
+            }
+            digest.update(b"loongport.qoder-http.device.v1\0");
+            digest.update(provider.id.as_bytes());
+            digest.update(b"\0");
+            digest.update(generation.as_bytes());
+            Zeroizing::new(String::new())
+        } else {
+            if candidate.trim().is_empty() {
+                return Err(denied("source_required"));
+            }
+            digest.update(b"loongport.qoder-http.pat.v1\0");
+            digest.update(candidate.as_bytes());
+            candidate
+        };
         Ok((
             Self {
                 provider_id: provider.id.clone(),
@@ -315,7 +333,14 @@ impl RequestSnapshot {
     pub(crate) fn region(&self) -> &'static str {
         match self.stamp.source.source {
             SourceKind::InternationalQoderPat => "international",
-            SourceKind::ChinaQoderPat => "cn",
+            SourceKind::ChinaQoderPat | SourceKind::ChinaQoderDevice => "cn",
+        }
+    }
+    pub(crate) fn credential_kind(&self) -> &'static str {
+        match self.stamp.source.source {
+            SourceKind::InternationalQoderPat => "international_qoder_pat",
+            SourceKind::ChinaQoderPat => "china_qoder_pat",
+            SourceKind::ChinaQoderDevice => "china_qoder_device",
         }
     }
     pub(crate) fn expires_at_ms(&self) -> i64 {
@@ -476,6 +501,12 @@ pub(crate) enum IdentityStatus {
     Pending,
     Unknown,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DeviceIdentityAction {
+    Login,
+    Rebind,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentityContext {
@@ -485,6 +516,8 @@ pub(crate) struct IdentityContext {
     pub(crate) status: IdentityStatus,
     pub(crate) expires_at_ms: Option<i64>,
     pub(crate) allowed_actions: Vec<IdentityAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allowed_device_actions: Vec<DeviceIdentityAction>,
 }
 impl IdentityContext {
     pub(crate) fn unavailable(provider_id: impl Into<String>) -> Self {
@@ -495,7 +528,23 @@ impl IdentityContext {
             status: IdentityStatus::Unavailable,
             expires_at_ms: None,
             allowed_actions: Vec::new(),
+            allowed_device_actions: Vec::new(),
         }
+    }
+    fn project_device_actions(mut self) -> Self {
+        if self.source == Some(CredentialSource::ChinaQoderDevice) {
+            self.allowed_device_actions = self
+                .allowed_actions
+                .drain(..)
+                .map(|action| match action {
+                    IdentityAction::Establish | IdentityAction::Recover => {
+                        DeviceIdentityAction::Login
+                    }
+                    IdentityAction::Rebind => DeviceIdentityAction::Rebind,
+                })
+                .collect();
+        }
+        self
     }
     fn ready(source: &SourceBinding, expires_at_ms: i64, refreshable: bool, now_ms: i64) -> Self {
         let status = if expires_at_ms > now_ms.saturating_add(REFRESH_MARGIN_MS) {
@@ -518,7 +567,9 @@ impl IdentityContext {
             status,
             expires_at_ms: Some(expires_at_ms),
             allowed_actions,
+            allowed_device_actions: Vec::new(),
         }
+        .project_device_actions()
     }
     pub(crate) fn from_record(
         source: &SourceBinding,
@@ -556,7 +607,9 @@ impl IdentityContext {
             status,
             expires_at_ms,
             allowed_actions,
+            allowed_device_actions: Vec::new(),
         }
+        .project_device_actions()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -695,6 +748,12 @@ where
     C: FnOnce(IdentityConfirmation) -> F,
     F: Future<Output = bool>,
 {
+    if request.declaration.source == CredentialSource::ChinaQoderDevice {
+        // The independent browser grant, never PAT exchange, owns device login.
+        return IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource,
+        };
+    }
     let prepared = match db.qoder_http_prepare_identity_action(&request, now_ms()) {
         Ok(prepared) => prepared,
         Err(error) => return IdentityActionResult::error(&error),

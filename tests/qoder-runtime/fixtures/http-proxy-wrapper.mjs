@@ -19,17 +19,19 @@ export async function runFixture({origin,tracePath,workerPath,terminalFault=null
   tls.connect=deny;dgram.createSocket=deny;net.Server.prototype.listen=deny;
   for(const k of ['spawn','exec','execFile','fork','spawnSync','execSync','execFileSync'])cp[k]=deny;
   syncBuiltinESMExports();
-  let binding;
+  let binding,region,credentialKind;
   const urls=new Map([
     ['https://api3.qoder.sh/algo/api/v2/model/list?Encode=1','GET'],
+    ['https://gateway.qoder.com.cn/algo/api/v2/model/list','GET'],
+    ['https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1','POST'],
     ['https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1','POST'],
   ]);
   const protocolURL=new URL('./http-protocol.mjs',pathToFileURL(workerPath));
   const {_internal}=await import(protocolURL.href);
   globalThis.fetch=(input,init={})=>{
     const url=new URL(String(input));const method=init.method??'GET';
-    if(!binding||urls.get(url.href)!==method||init.redirect!=='error'||!init.signal)return deny();
-    const capture={kind:'network',account:binding.accountId,method,cosyPresent:/^Bearer COSY\./.test(init.headers?.Authorization??''),signalPresent:true};
+    if(!binding||urls.get(url.href)!==method||init.redirect!=='error'||!init.signal||url.origin!==(region==='cn'?'https://gateway.qoder.com.cn':'https://api3.qoder.sh'))return deny();
+    const capture={kind:'network',account:binding.accountId,method,origin:url.origin,credentialKind,cosyPresent:/^Bearer COSY\./.test(init.headers?.Authorization??''),signalPresent:true};
     if(method==='POST')capture.body=JSON.parse(_internal.decodeBody(init.body));
     trace(capture);
     return realFetch(new URL(url.pathname+url.search,endpoint),init);
@@ -37,8 +39,8 @@ export async function runFixture({origin,tracePath,workerPath,terminalFault=null
   let partial='';
   const gate=new Transform({transform(chunk,encoding,callback){try{partial+=chunk.toString('utf8');if(Buffer.byteLength(partial)>1048576)throw Error('FIXTURE_LINE');let n;while((n=partial.indexOf('\n'))>=0){const line=partial.slice(0,n);partial=partial.slice(n+1);const command=JSON.parse(line);if(command.kind==='start'){
     const r=command.request,s=r?.snapshot,b=r?.binding,id=b?.accountId;
-    if(binding||typeof id!=='string'||!/^qoder-[a-z-]+$/.test(id)||s?.access!==`synthetic-http-access:${id}`||s.uid!==`synthetic-http-uid:${id}`||s.region!=='international'||!Number.isSafeInteger(s.expiry)||s.expiry<=Date.now()||!/^[a-f0-9-]{36}$/i.test(s.machineId??'')||Object.keys(s).sort().join(',')!=='access,expiry,machineId,region,uid')throw Error('FIXTURE_SYNTHETIC_SNAPSHOT_REQUIRED');
-    binding={...b};trace({kind:'start',account:id,chat:r.chat});
+    if(binding||typeof id!=='string'||!/^qoder-[a-z-]+$/.test(id)||s?.access!==`synthetic-http-access:${id}`||s.uid!==`synthetic-http-uid:${id}`||!['international','cn'].includes(s.region)||!Number.isSafeInteger(s.expiry)||s.expiry<=Date.now()||!/^[a-f0-9-]{36}$/i.test(s.machineId??'')||Object.keys(s).sort().join(',')!=='access,credentialKind,expiry,machineId,region,uid'||!['international_qoder_pat','china_qoder_pat','china_qoder_device'].includes(s.credentialKind)||(s.credentialKind==='international_qoder_pat')!==(s.region==='international'))throw Error('FIXTURE_SYNTHETIC_SNAPSHOT_REQUIRED');
+    binding={...b};region=s.region;credentialKind=s.credentialKind;trace({kind:'start',account:id,credentialKind,region,chat:r.chat});
   }this.push(line+'\n');}callback();}catch{callback(Error('FIXTURE_INPUT_DENIED'));}},flush(callback){if(partial)this.push(partial);callback();}});
   const {runWorker}=await import(pathToFileURL(workerPath).href);
   process.stdin.pipe(gate);

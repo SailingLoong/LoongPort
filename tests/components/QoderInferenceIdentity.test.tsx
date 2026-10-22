@@ -630,3 +630,22 @@ it("cannot act on missing source context even when a legacy response claims acti
   expect(screen.getByRole("button", { name: labels.establish })).toBeDisabled();
   expect(api.action).not.toHaveBeenCalled();
 });
+
+it("displays a backend CN device identity without presenting it as a PAT or international account", async () => {
+  api.context.mockResolvedValue({
+    ...ready,
+    source: "chinaQoderDevice",
+    allowedActions: [],
+    allowedDeviceActions: ["rebind"],
+  });
+  render(<QoderInferenceIdentity providerId="fixture" />);
+  await open();
+  expect(
+    await screen.findByText("凭据区域：Qoder CN（本应用独立授权）"),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toHaveTextContent(
+    "授权已保存不代表真实推理已验证",
+  );
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(api.action).not.toHaveBeenCalled();
+});

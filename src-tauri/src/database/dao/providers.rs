@@ -722,7 +722,7 @@ impl Database {
         let is_qoder = app_type == "codex"
             && matches!(
                 next.meta.as_ref().and_then(|m| m.provider_type.as_deref()),
-                Some("qoder_sdk" | "qoder_cn")
+                Some("qoder_sdk" | "qoder_cn" | "qoder_cn_device")
             );
         let owned = current
             .and_then(|p| p.meta.as_ref())

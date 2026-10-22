@@ -10,7 +10,7 @@ const records=[];
 const model={key:'fixture-model',source:'fixture',enable:true,max_input_tokens:100000};
 const tools=[{type:'function',function:{name:'fixture_read',description:'Client fixture only',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false,$defs:{extra:{type:'number'}}}}}];
 const binding={accountId:'account-fixture',sessionId:'session-fixture',turnId:'turn-fixture'};
-const snapshot=()=>({access:'SYNTHETIC_HTTP_WORKER_ACCESS',uid:'fixture-user',machineId:'fixture-machine',expiry:Date.now()+3600000,region:'international'});
+const snapshot=()=>({access:'SYNTHETIC_HTTP_WORKER_ACCESS',uid:'fixture-user',machineId:'fixture-machine',expiry:Date.now()+3600000,region:'international',credentialKind:'international_qoder_pat'});
 const chat=(more={})=>({model:model.key,messages:[{role:'user',content:'Read fixture'}],tools:structuredClone(tools),...more});
 const start=(more={})=>({kind:'start',request:{binding:{...binding},snapshot:snapshot(),chat:chat(),...more}});
 const env=body=>`data: ${JSON.stringify({statusCodeValue:200,body:typeof body==='string'?body:JSON.stringify(body)})}\n\n`;
@@ -27,7 +27,7 @@ function ordered(fs){assert.equal(fs.filter(f=>f.kind==='end').length,1);assert.
 async function fixture(label,handler){
  const record={label,requests:[],exit:null,stderr:'',frames:[],observations:{}};records.push(record);
  const sockets=new Set();
- const server=http.createServer(async(req,res)=>{const r={method:req.method,path:req.url,cosyPresent:/^Bearer COSY\./.test(req.headers.authorization??''),machinePresent:!!req.headers['cosy-machineid'],userPresent:!!req.headers['cosy-user'],closed:false,premature:false};record.requests.push(r);res.on('close',()=>{r.closed=true;r.premature=!res.writableEnded;});if(req.method==='GET'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({chat:[model]}));return;}let wire='';for await(const b of req)wire+=b.toString();const {_internal}=await import('../../scripts/qoder/http-protocol.mjs');r.decodedBody=JSON.parse(_internal.decodeBody(wire));r.wireBytes=Buffer.byteLength(wire);res.writeHead(handler.status??200,{'content-type':'text/event-stream',...(handler.location?{location:handler.location}:{})});res.flushHeaders();await handler(req,res,r);});
+ const server=http.createServer(async(req,res)=>{const r={method:req.method,path:req.url,origin:req.headers['x-fixture-origin'],clientType:req.headers['cosy-clienttype'],cosyPresent:/^Bearer COSY\./.test(req.headers.authorization??''),machinePresent:!!req.headers['cosy-machineid'],userPresent:!!req.headers['cosy-user'],closed:false,premature:false};record.requests.push(r);res.on('close',()=>{r.closed=true;r.premature=!res.writableEnded;});if(req.method==='GET'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({chat:[model]}));return;}let wire='';for await(const b of req)wire+=b.toString();const {_internal}=await import('../../scripts/qoder/http-protocol.mjs');r.decodedBody=JSON.parse(_internal.decodeBody(wire));r.wireBytes=Buffer.byteLength(wire);res.writeHead(handler.status??200,{'content-type':'text/event-stream',...(handler.location?{location:handler.location}:{})});res.flushHeaders();await handler(req,res,r);});
  server.on('connection',s=>{sockets.add(s);s.on('close',()=>sockets.delete(s));});
  await new Promise(r=>server.listen({host:'127.0.0.1',port:0},r));
  const child=spawn(process.execPath,['--no-warnings',new URL('fixtures/http-worker-entry.mjs',import.meta.url).pathname,String(server.address().port)],{cwd:ROOT,env:{NODE_DISABLE_COMPILE_CACHE:'1'},stdio:['pipe','pipe','pipe']});
@@ -79,3 +79,55 @@ test('redirect is not followed or replayed after a POST',async()=>{const handler
 test('non-200 body is discarded and only fixed allowlisted metadata is forwarded',async()=>{const handler=async(_,res)=>res.end('PRIVATE_FAILURE_BODY');handler.status=429;const h=await fixture('http-error-fixed',handler);try{h.send(start());const r=await h.finish();assert.equal(r.frames[0].event.status,429);assert.equal(JSON.parse(bodyOf(r.frames)).error.message,'QODER_UPSTREAM_REJECTED');assert.ok(!bodyOf(r.frames).includes('PRIVATE_FAILURE_BODY'));assert.equal(h.post().length,1);}finally{await h.clean();}});
 
 test('production input line limit rejects an oversized JSONL command without HTTP',async()=>{const child=spawn(process.execPath,['--import',new URL('fixtures/http-offline-guard.mjs',import.meta.url).pathname,new URL('../../scripts/qoder/worker.mjs',import.meta.url).pathname],{env:{NODE_DISABLE_COMPILE_CACHE:'1'},stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b.toString());child.stderr.on('data',b=>stderr+=b.toString());child.stdin.on('error',()=>{});child.stdin.write(' '.repeat(1048576));const code=await bound(new Promise(resolve=>child.once('close',resolve)));assert.equal(code,0);assert.equal(stderr,'');const fs=stdout.trim().split('\n').map(JSON.parse);assert.deepEqual(fs,[{kind:'error',code:'QODER_INVALID_COMMAND'},{kind:'end',cleanupFailed:false,transportFailed:true}]);});
+
+
+const cnDevice=()=>({...snapshot(),region:'cn',credentialKind:'china_qoder_device'});
+test('CN device private pipe works in two real processes with full tools history and fixed regional URLs',async()=>{
+  let assistant;
+  const first=await fixture('cn-device-tools',async(_,res)=>res.end(toolReply));
+  try {
+    first.send(start({snapshot:cnDevice()}));
+    const result=await first.finish();
+    assert.equal(result.frames[0].event.status,200);
+    assistant=JSON.parse(bodyOf(result.frames)).choices[0].message;
+    assert.equal(assistant.tool_calls[0].id,'call_fixture');
+    assert.equal(first.post().length,1);
+    assert.ok(result.requests.every(r=>r.origin==='https://gateway.qoder.com.cn'&&r.clientType==='5'));
+  } finally {await first.clean();}
+  const second=await fixture('cn-device-followup',async(_,res)=>res.end(plain('CN followup')));
+  try {
+    const history=[...chat().messages,assistant,{role:'tool',tool_call_id:'call_fixture',content:'synthetic tool result'},{role:'user',content:'summarize'}];
+    second.send(start({snapshot:cnDevice(),chat:chat({stream:true,messages:history})}));
+    const result=await second.finish();
+    const body=second.post()[0].decodedBody;
+    assert.equal(body.session_type,'qodercli');assert.equal(body.business.product,'cli');
+    assert.ok(body.messages.some(m=>m.role==='tool'&&m.tool_call_id==='call_fixture'&&m.content==='synthetic tool result'));
+    assert.deepEqual(body.tools,tools);
+    assert.equal(frames(bodyOf(result.frames)).at(-1),'[DONE]');
+    assert.equal(second.post().length,1);
+    assert.ok(result.requests.every(r=>r.origin==='https://gateway.qoder.com.cn'&&r.clientType==='5'));
+  } finally {await second.clean();}
+});
+
+test('CN device late stream failure never finishes or retries inference',async()=>{
+  const h=await fixture('cn-device-tail-failure',async(_,res)=>{
+    res.write(piece({content:'CN visible prefix'}));
+    res.end(`data: ${JSON.stringify({statusCodeValue:401,body:'PRIVATE_CN_EXPIRED_TOKEN'})}\n\n`);
+  });
+  try {
+    h.send(start({snapshot:cnDevice(),chat:chat({stream:true})}));
+    const result=await h.finish(),body=bodyOf(result.frames),stream=frames(body);
+    assert.match(body,/CN visible prefix/);assert.ok(stream.some(f=>f.error));
+    assert.ok(!stream.includes('[DONE]'));assert.ok(!stream.some(f=>f.choices?.[0]?.finish_reason));
+    assert.doesNotMatch(body,/PRIVATE_CN_EXPIRED_TOKEN/);assert.equal(h.post().length,1);
+    assert.ok(result.requests.every(r=>r.origin==='https://gateway.qoder.com.cn'));
+  } finally {await h.clean();}
+});
+
+test('CN device cross-region private frame is rejected before any worker network request',async()=>{
+  const h=await fixture('cn-device-region-mismatch',async(_,res)=>res.end(plain('must not submit')));
+  try {
+    h.send(start({snapshot:{...cnDevice(),region:'international'}}));
+    const result=await h.finish();assert.equal(result.frames[0].event.status,400);assert.equal(result.requests.length,0);
+  } finally {await h.clean();}
+});

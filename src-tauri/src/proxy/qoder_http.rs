@@ -60,10 +60,23 @@ pub(crate) async fn forward(body: Value, dispatch: Dispatch) -> Result<ProxyResp
             "uid": dispatch.snapshot.uid(),
             "machineId": dispatch.snapshot.machine_id(),
             "expiry": dispatch.snapshot.expires_at_ms(),
-            "region": dispatch.snapshot.region()
+            "region": dispatch.snapshot.region(),
+            "credentialKind": dispatch.snapshot.credential_kind()
         },
         "chat": body
     }));
+    let on_device_rejected =
+        (dispatch.snapshot.credential_kind() == "china_qoder_device").then(|| {
+            let database = dispatch.database.clone();
+            let snapshot = dispatch.snapshot.clone();
+            Arc::new(move || {
+                database
+                    .qoder_http_reject_device_snapshot(&snapshot)
+                    .map_err(|_| {
+                        ProxyError::ForwardFailed("qoder.http_auth.authorization_changed".into())
+                    })
+            }) as transport::DeviceRejection
+        });
     transport::forward(
         &dispatch.host,
         &private_request.0,
@@ -71,6 +84,7 @@ pub(crate) async fn forward(body: Value, dispatch: Dispatch) -> Result<ProxyResp
         Duration::from_secs(dispatch.first_byte_timeout),
         Duration::from_secs(dispatch.idle_timeout),
         Duration::from_secs(dispatch.non_streaming_timeout),
+        on_device_rejected,
     )
     .await
 }

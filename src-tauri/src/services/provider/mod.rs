@@ -28,6 +28,7 @@ pub(crate) mod mcode;
 mod mcode_tests;
 mod pi;
 pub(crate) mod qoder_auth_http;
+pub(crate) mod qoder_cn_device_login;
 pub(crate) mod qoder_daily;
 pub(crate) mod qoder_http_auth;
 mod transaction;

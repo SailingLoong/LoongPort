@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { providersApi } from "@/lib/api/providers";
 import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
+import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLogin";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import type { Provider } from "@/types";
 
@@ -24,7 +25,9 @@ export function QoderAccountPanel() {
   });
   const accounts = Object.values(query.data?.providers ?? {}).filter(
     (provider) =>
-      ["qoder_sdk", "qoder_cn"].includes(provider.meta?.providerType ?? ""),
+      ["qoder_sdk", "qoder_cn", "qoder_cn_device"].includes(
+        provider.meta?.providerType ?? "",
+      ),
   );
   return (
     <section className="space-y-4" aria-label="Qoder 账号管理">
@@ -38,6 +41,7 @@ export function QoderAccountPanel() {
           刷新账号
         </Button>
       </div>
+      <QoderCnDeviceLogin disabled={!active} />
       <p className="text-sm text-muted-foreground">
         这里管理原有 Qoder 配置，不会以自定义 API 或 SDK
         配置代替账号接入。保存配置不代表推理已接通。
@@ -72,11 +76,20 @@ export function QoderAccountPanel() {
               >
                 <h3 className="font-medium">{provider.name}</h3>
                 <p className="text-sm text-muted-foreground">
-                  {provider.meta?.providerType === "qoder_cn"
-                    ? "Qoder CN · 独立 PAT"
-                    : "Qoder 国际版"}
+                  {provider.meta?.providerType === "qoder_cn_device"
+                    ? "Qoder CN · 本应用独立授权"
+                    : provider.meta?.providerType === "qoder_cn"
+                      ? "Qoder CN · 独立 PAT"
+                      : "Qoder 国际版"}
                 </p>
                 <div className="flex flex-wrap gap-2">
+                  {provider.meta?.providerType === "qoder_cn_device" && (
+                    <QoderCnDeviceLogin
+                      providerId={provider.id}
+                      sourceGeneration={generation}
+                      disabled={!active}
+                    />
+                  )}
                   <QoderInferenceIdentity
                     providerId={provider.id}
                     sourceGeneration={generation}
@@ -89,7 +102,7 @@ export function QoderAccountPanel() {
                     />
                   ) : (
                     <span>
-                      CN 原生浏览器登录与签到尚未接通；当前为独立 CN PAT 模式。
+                      CN 签到仍未接通；独立 PAT 与本应用独立授权分别管理。
                     </span>
                   )}
                 </div>
