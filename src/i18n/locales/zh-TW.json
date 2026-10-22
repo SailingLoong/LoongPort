@@ -4587,6 +4587,7 @@
         "confirmKey": "授權建立並儲存此 Key",
         "save": "儲存到加密帳號庫",
         "addAnother": "再新增一個",
+        "importLocal": "改為從本機 ZCode 匯入",
         "restart": "開始新的登入"
       },
       "refreshed": "已在本機更新儲存的帳號。",
@@ -4609,7 +4610,17 @@
       "latestQueryFailed": "官方版本查詢在 {{time}} 失敗，目前沒有可用查詢結果。",
       "latestQueried": "官方最新版本：{{version}} · 查詢時間 {{time}}",
       "queryLatest": "查詢官方最新版本",
-      "supportedBuilds": "已驗證可操作範圍：macOS 3.14.4，build 3.14.4.7912，僅接受已驗證產物的完整指紋。",
+      "localImport": {
+        "open": "從本機 ZCode 匯入",
+        "title": "匯入 ZCode 已登入帳號",
+        "close": "關閉本機匯入",
+        "intro": "重用這台電腦上官方 ZCode 已登入的帳號。不搬走任何資料夾，也不會改變 ZCode 目前的登入狀態。",
+        "stepLogin": "先在官方 ZCode 中登入，然後正常結束 ZCode。",
+        "stepInspect": "核對下方找到的安裝位置與資料目錄，選擇標準本機金鑰，再檢查所選來源。",
+        "stepPreview": "預覽本機帳號，再單獨確認儲存。不支援或已變更的來源仍會被攔截。",
+        "preview": "預覽本機帳號"
+      },
+      "supportedBuilds": "已驗證操作範圍：macOS 3.14.4（組建 3.14.4.7912）和 3.16.2 arm64（組建 3.16.2.8769），僅限精確符合的已接受建置產物。",
       "officialGuide": "官方安裝 / 更新說明",
       "bootstrapSource": "資料來源按官方桌面 bootstrap 中的資料基礎目錄發現。",
       "homeSource": "預設資料來源使用 OS 帳號 home，也可在下方手動選擇來源。",

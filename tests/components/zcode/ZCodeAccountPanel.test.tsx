@@ -277,6 +277,201 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue(undefined);
 });
+describe("ZCode local import entry", () => {
+  function discover(
+    candidates = [
+      {
+        installPath: source.installPath,
+        version: "3.16.2",
+        build: "3.16.2.8769",
+        verifiedBuild: true,
+      },
+    ],
+  ) {
+    vi.mocked(zcodeAccountsApi.discover).mockResolvedValue({
+      dataRoot: source.dataRoot,
+      sourceBasis: "bootstrapDataBaseDir",
+      candidates,
+      latestStatus: "notQueried",
+    });
+  }
+  async function openLocal() {
+    const button = await screen.findByRole("button", {
+      name: "Import from local ZCode",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    return screen.getByRole("region", {
+      name: "Import the signed-in ZCode account",
+    });
+  }
+  it("guides a discovered local account through existing read and save confirmations", async () => {
+    discover();
+    mount(vi.fn(), true);
+    const guide = await openLocal();
+    expect(within(guide).getByLabelText("ZCode installation")).toHaveValue(
+      source.installPath,
+    );
+    expect(within(guide).getByLabelText("ZCode data directory")).toHaveValue(
+      source.dataRoot,
+    );
+    expect(within(guide).getByRole("checkbox")).not.toBeChecked();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    const preview = within(guide).getByRole("button", {
+      name: "Preview local account",
+    });
+    expect(preview).toBeDisabled();
+    await inspect();
+    await waitFor(() => expect(preview).toBeEnabled());
+    fireEvent.click(preview);
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      "Read current ZCode account for preview?",
+    );
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    confirm("Read masked preview");
+    await screen.findByText("Save reviewed ZCode account?");
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    confirm("Confirm account choice");
+    await waitFor(() =>
+      expect(zcodeAccountsApi.commitCapture).toHaveBeenCalledExactlyOnceWith(
+        source,
+        context.contextRevision,
+        catalog.revision,
+        "review-one",
+        false,
+      ),
+    );
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("routes a failed official sign-in to the local guide without reading credentials", async () => {
+    discover();
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "get_zcode_last_login_progress")
+        return {
+          flowId: "failed-login",
+          phase: "failed",
+          family: "bigmodel",
+          authorization: null,
+          account: null,
+          connections: null,
+          project: null,
+          keyCreated: false,
+          keyMayExist: false,
+          keyManagementUrl: "",
+          error: {
+            code: "zcode.account.official_unavailable",
+            remedy: "queryOriginal",
+            committed: false,
+          },
+          saved: null,
+        };
+      return null;
+    });
+    mount(vi.fn(), true);
+    await waitFor(() =>
+      expect(zcodeAccountsApi.library).toHaveBeenCalledWith(source.dataRoot),
+    );
+    const add = screen.getByRole("button", { name: "Add account" });
+    await waitFor(() => expect(add).toBeEnabled());
+    fireEvent.click(add);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Import from local ZCode instead",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("region", {
+        name: "Import the signed-in ZCode account",
+      }),
+    ).toBeInTheDocument();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("cancel_zcode_official_login", {
+      flowId: "failed-login",
+    });
+  });
+  it("shows the exact supported build matrix without implying Intel support", async () => {
+    discover();
+    mount(vi.fn(), true);
+    const guide = await openLocal();
+    expect(
+      within(guide).getByText(/Verified operation range:/),
+    ).toHaveTextContent("3.16.2 arm64");
+    expect(
+      within(guide).getByText(/Verified operation range:/),
+    ).toHaveTextContent("3.16.2.8769");
+    expect(
+      within(guide).getByText(/Verified operation range:/),
+    ).toHaveTextContent("3.14.4.7912");
+  });
+  it("keeps multiple discovered installations unselected until the user chooses", async () => {
+    discover([
+      {
+        installPath: source.installPath,
+        version: "3.16.2",
+        build: "3.16.2.8769",
+        verifiedBuild: true,
+      },
+      {
+        installPath: "/Applications/Another ZCode.app",
+        version: "3.16.2",
+        build: "3.16.2.8769",
+        verifiedBuild: true,
+      },
+    ]);
+    mount(vi.fn(), true);
+    const guide = await openLocal();
+    expect(within(guide).getByLabelText("ZCode installation")).toHaveValue("");
+    expect(
+      within(guide).getByRole("button", { name: "Inspect selected source" }),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+  });
+  it("keeps rejected source checks from enabling local preview", async () => {
+    discover();
+    vi.mocked(zcodeAccountsApi.inspect).mockRejectedValue({
+      code: "zcode.account.unsupported_build",
+      remedy: "useVerifiedBuild",
+      committed: false,
+    });
+    mount(vi.fn(), true);
+    const guide = await openLocal();
+    fireEvent.click(within(guide).getByRole("checkbox"));
+    fireEvent.click(
+      within(guide).getByRole("button", { name: "Inspect selected source" }),
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.inspect).toHaveBeenCalledOnce(),
+    );
+    expect(
+      within(guide).getByRole("button", { name: "Preview local account" }),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+  });
+  it("closes the guide without reading or saving credentials", async () => {
+    discover();
+    mount(vi.fn(), true);
+    const guide = await openLocal();
+    fireEvent.click(
+      within(guide).getByRole("button", { name: "Close local import" }),
+    );
+    expect(
+      screen.queryByRole("region", {
+        name: "Import the signed-in ZCode account",
+      }),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.previewCapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+  });
+});
+
 describe("ZCode saved accounts", () => {
   it("keeps prior verified facts and marks retained amounts as historical after a query failure", async () => {
     const prior = {
