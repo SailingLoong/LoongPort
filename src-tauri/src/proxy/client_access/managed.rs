@@ -1,9 +1,9 @@
-//! Managed CLI authentication projections. Lifecycle owners issue; projections only read.
+//! Managed authentication shared by the CLI configuration lifecycle owners.
 use crate::{database::Database, error::AppError};
 use serde_json::Value;
 use toml_edit::{Item, Table};
 
-pub(crate) const LEGACY_KEY: &str = "PROXY_MANAGED";
+pub(crate) use crate::live::project::claude::PROXY_TOKEN_PLACEHOLDER as LEGACY_KEY;
 pub(crate) const CLI_APPS: &[&str] = &["claude", "codex", "gemini", "grokbuild"];
 
 pub(crate) fn provision(db: &Database) -> Result<(), AppError> {

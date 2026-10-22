@@ -28,7 +28,7 @@ use tauri::Emitter;
 use tokio::sync::RwLock;
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
-const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
+const PROXY_TOKEN_PLACEHOLDER: &str = crate::live::project::claude::PROXY_TOKEN_PLACEHOLDER;
 
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
@@ -4357,29 +4357,13 @@ impl ProxyService {
         config: &Value,
         provider: Option<&Provider>,
     ) -> Result<(), String> {
+        if config
+            .get("auth")
+            .is_some_and(Self::codex_auth_has_proxy_placeholder)
+        {
+            return self.write_codex_takeover_live_for_provider(config, provider);
+        }
         let Some(provider) = provider else {
-            if crate::settings::preserve_codex_official_auth_on_switch() {
-                if let (Some(auth), Some(config_str)) = (
-                    config.get("auth"),
-                    config.get("config").and_then(|v| v.as_str()),
-                ) {
-                    if auth
-                        .get("OPENAI_API_KEY")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(crate::proxy::client_access::managed::is_projection_key)
-                    {
-                        let live_config = crate::codex_config::prepare_codex_provider_live_config(
-                            auth, config_str,
-                        )
-                        .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                        let live_config = self.project_codex_client_auth(&live_config, false)?;
-                        crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
-                            .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                        return Ok(());
-                    }
-                }
-            }
-
             return self.write_codex_live_verbatim(config);
         };
 
@@ -4443,17 +4427,27 @@ impl ProxyService {
             doc.get("model_providers")
                 .and_then(Item::as_table_like)
                 .and_then(|p| p.get(&id))
-                .and_then(Item::as_table)
-                .cloned()
+                .and_then(Item::as_table_like)
+                .map(|source| {
+                    let mut table = Table::new();
+                    for (name, item) in source.iter() {
+                        table.insert(name, item.clone());
+                    }
+                    table
+                })
                 .ok_or_else(|| "client_access.provider_missing".to_string())?
         };
         crate::proxy::client_access::managed::codex_table(&mut table, &key, native);
         doc.as_table_mut().remove("openai_base_url");
         doc["model_provider"] = toml_edit::value(&id);
-        if doc.get("model_providers").is_none() {
-            doc["model_providers"] = Item::Table(Table::new());
+        let mut providers = Table::new();
+        if let Some(source) = doc.get("model_providers").and_then(Item::as_table_like) {
+            for (name, item) in source.iter() {
+                providers.insert(name, item.clone());
+            }
         }
-        doc["model_providers"][&id] = Item::Table(table);
+        providers.insert(&id, Item::Table(table));
+        doc["model_providers"] = Item::Table(providers);
         Ok(doc.to_string())
     }
 
@@ -4475,8 +4469,8 @@ impl ProxyService {
 
         // Takeover must never overwrite Codex's long-lived ChatGPT login. For
         // third-party providers the placeholder is moved into config.toml; for
-        // codex-official no placeholder is needed because requires_openai_auth
-        // makes Codex supply its native authorization.
+        // native routes keep Authorization and carry the local credential in
+        // an independent provider header.
         if official_passthrough || placeholder_auth {
             let config_str = config.get("config").and_then(|v| v.as_str()).unwrap_or("");
             let profile = provider
@@ -4988,6 +4982,108 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
+
+    #[test]
+    #[serial]
+    fn legacy_codex_native_projection_keeps_auth_separate_and_recovers_only_its_route() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        let text = "openai_base_url = 'http://127.0.0.1:15721/v1'\nmodel = 'synthetic-model'\n[model_providers.foreign]\nbase_url = 'https://relay.example/v1'\nexperimental_bearer_token = 'foreign-key'\n";
+        let projected = service.project_codex_client_auth(text, true).unwrap();
+        let doc = projected.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(doc.get("openai_base_url").is_none());
+        let route = &doc["model_providers"]["custom"];
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert!(route.get("experimental_bearer_token").is_none());
+        assert_eq!(
+            route["http_headers"][crate::proxy::client_access::CLIENT_KEY_HEADER].as_str(),
+            Some(db.managed_client_key("codex").unwrap().unwrap().as_str())
+        );
+        assert!(!crate::codex_config::get_codex_auth_path().exists());
+        let live =
+            json!({"config":projected,"auth":{"tokens":{"access_token":"synthetic-native-token"}}});
+        assert!(ProxyService::is_codex_live_taken_over(&live));
+        assert!(ProxyService::live_has_proxy_placeholder_for_app(
+            &AppType::Codex,
+            &live
+        ));
+        db.revoke_client_credential("builtin:managed-codex:codex")
+            .unwrap();
+        let clean = crate::proxy::client_access::managed::clean_codex(
+            &db,
+            live["config"].as_str().unwrap(),
+        )
+        .unwrap();
+        let clean = clean.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(clean["model_providers"].get("custom").is_none());
+        assert_eq!(
+            clean["model_providers"]["foreign"]["experimental_bearer_token"].as_str(),
+            Some("foreign-key")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn revoked_claude_projection_can_restore_without_reissuing_credentials() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        service.write_claude_live(&json!({"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:15721","ANTHROPIC_AUTH_TOKEN":PROXY_TOKEN_PLACEHOLDER,"UNOWNED":"keep"}})).unwrap();
+        let key = db.managed_client_key("claude").unwrap().unwrap();
+        assert_eq!(
+            service.read_claude_live().unwrap()["env"]["ANTHROPIC_AUTH_TOKEN"],
+            key
+        );
+        db.revoke_client_credential("builtin:managed-claude:claude")
+            .unwrap();
+        service
+            .cleanup_claude_takeover_placeholders_in_live()
+            .unwrap();
+        let restored = service.read_claude_live().unwrap();
+        assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(restored["env"].get("ANTHROPIC_BASE_URL").is_none());
+        assert_eq!(restored["env"]["UNOWNED"], "keep");
+        assert!(db.authenticate_client(&key, "claude", None).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn client_access_migration_publishes_only_after_cli_readback() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        assert!(!db.client_access_ready().unwrap());
+        // An enabled application without its provider cannot be safely projected.
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        assert!(service.complete_client_access_migration().await.is_err());
+        assert!(!db.client_access_ready().unwrap());
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = false;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        service.complete_client_access_migration().await.unwrap();
+        assert!(db.client_access_ready().unwrap());
+        assert!(db
+            .authenticate_client(PROXY_TOKEN_PLACEHOLDER, "codex", None)
+            .is_err());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -5536,7 +5632,10 @@ mod tests {
         let flags = db.get_proxy_config_for_app("claude").await.unwrap();
         assert!(flags.enabled && flags.auto_failover_enabled);
         let live = service.read_claude_live().unwrap();
-        assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], PROXY_TOKEN_PLACEHOLDER);
+        assert_eq!(
+            live["env"]["ANTHROPIC_AUTH_TOKEN"],
+            db.managed_client_key("claude").unwrap().unwrap()
+        );
         service.stop_with_restore().await.unwrap();
         assert_eq!(service.read_claude_live().unwrap(), settings);
     }
