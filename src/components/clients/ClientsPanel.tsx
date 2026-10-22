@@ -71,6 +71,10 @@ function ClientCard({
     } catch {
       setError(t("clients.operationFailed"));
       setPreview(null);
+      setApplied(false);
+      // Publication can fail after a durable intent was saved. Read the owner
+      // again so recovery is available without replaying the failed operation.
+      await refresh().catch(() => undefined);
     } finally {
       setBusy(false);
     }

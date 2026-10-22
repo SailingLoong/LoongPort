@@ -91,3 +91,53 @@ describe("Client connections", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+it("reads recovery state after a failed apply and removes earlier success", async () => {
+  const defaultCall = call.getMockImplementation()!;
+  let attempts = 0;
+  call.mockImplementation(async (name, args) => {
+    if (name === "apply_client_connection") {
+      attempts += 1;
+      if (attempts === 2) throw new Error("clients.readback_failed");
+      return undefined;
+    }
+    if (name === "list_client_connections") {
+      return [
+        {
+          ...client,
+          connection: attempts
+            ? {
+                clientId: "workbuddy",
+                credentialRef: "credential-ref",
+                routeApp: "codex",
+                models: ["model-a"],
+              }
+            : null,
+          status:
+            attempts === 2
+              ? "recoveryRequired"
+              : attempts
+                ? "configured"
+                : "notConfigured",
+          recoveryRequired: attempts === 2,
+        },
+      ];
+    }
+    return defaultCall(name, args);
+  });
+  const user = userEvent.setup();
+  render(<ClientsPanel />);
+  await screen.findByText("WorkBuddy");
+  await user.type(screen.getByLabelText("模型 ID（逗号分隔）"), "model-a");
+  await user.selectOptions(screen.getByLabelText("接入凭据"), "credential-ref");
+  await user.click(screen.getByRole("button", { name: "预览配置" }));
+  await user.click(await screen.findByRole("button", { name: "应用配置" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("配置已写入");
+  await user.click(screen.getByRole("button", { name: "预览配置" }));
+  await user.click(await screen.findByRole("button", { name: "应用配置" }));
+  expect(
+    await screen.findByRole("button", { name: "核对中断的操作" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("操作未完成");
+});
