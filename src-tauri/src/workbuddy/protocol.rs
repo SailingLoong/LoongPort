@@ -28,6 +28,17 @@ impl Endpoint {
     }
 }
 pub(crate) trait Transport: Send + Sync {
+    fn claim<'a>(
+        &'a self,
+        account: &'a Account,
+        now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+        Box::pin(async move {
+            self.request(Endpoint::Claim, Some(account), None, now)
+                .await
+                .map_err(DispatchFailure::OutcomeUnknown)
+        })
+    }
     fn request<'a>(
         &'a self,
         endpoint: Endpoint,
@@ -35,4 +46,11 @@ pub(crate) trait Transport: Send + Sync {
         state: Option<&'a str>,
         now: i64,
     ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>>;
+}
+
+/// Only a transport failure proven to precede dispatch may clear a durable intent.
+#[derive(Debug)]
+pub(crate) enum DispatchFailure {
+    NotDispatched(Failure),
+    OutcomeUnknown(Failure),
 }

@@ -4846,6 +4846,15 @@
     }
   },
   "workbuddy": {
+    "auto": {
+      "unknown": "Automatic claim: unconfirmed",
+      "label": "Automatic claim for this account",
+      "on": "Automatic claim: on",
+      "off": "Automatic claim: off",
+      "notice": "Opt in per account. Checks and claims run only while LoongPort is running and the vault is unlocked. Eligibility comes from the official status, with no guaranteed daily reward. Reauthorization turns this off.",
+      "blocked": "A previous claim is unconfirmed. Repeat claims are paused.",
+      "failed": "The automatic claim setting could not be confirmed. Reload accounts to verify it."
+    },
     "title": "WorkBuddy China",
     "add": "Add WorkBuddy account",
     "refreshAll": "Refresh all",

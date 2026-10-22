@@ -27,6 +27,32 @@ const amount = (value: number | null) =>
     : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 const date = (value: number | null) =>
   value == null ? "—" : new Date(value).toLocaleString();
+// Order backend snapshots only. An older list/refresh cannot undo a confirmed
+// policy mutation; identity generations always take precedence over revisions.
+function latestAccount(
+  previous: WorkBuddyAccount | undefined,
+  incoming: WorkBuddyAccount,
+) {
+  if (
+    previous &&
+    (previous.generation > incoming.generation ||
+      (previous.generation === incoming.generation &&
+        previous.autoClaimRevision > incoming.autoClaimRevision))
+  )
+    return previous;
+  return incoming;
+}
+function mergeAccounts(
+  previous: WorkBuddyAccount[],
+  incoming: WorkBuddyAccount[],
+) {
+  return incoming.map((row) =>
+    latestAccount(
+      previous.find((old) => old.id === row.id),
+      row,
+    ),
+  );
+}
 export function WorkBuddyAccounts({
   unified = false,
 }: { unified?: boolean } = {}) {
@@ -38,6 +64,97 @@ export function WorkBuddyAccounts({
   const active = useRef(false);
   const alive = useRef(true);
   const listGeneration = useRef(0);
+  const policyLifecycle = useRef(0);
+  const automaticActive = useRef(false);
+  const [automaticBusy, setAutomaticBusy] = useState(false);
+  const [automaticFailed, setAutomaticFailed] = useState(false);
+  const [automaticUncertain, setAutomaticUncertain] = useState<
+    Record<string, { generation: number; revision: number } | undefined>
+  >({});
+  const reconcileAutomatic = useCallback((rows: WorkBuddyAccount[]) => {
+    setAutomaticUncertain((old) => {
+      const next = { ...old };
+      for (const row of rows) {
+        const expected = next[row.id];
+        if (
+          expected &&
+          (row.generation > expected.generation ||
+            (row.generation === expected.generation &&
+              row.autoClaimRevision > expected.revision))
+        )
+          delete next[row.id];
+      }
+      return next;
+    });
+  }, []);
+  const setAutomatic = async (account: WorkBuddyAccount) => {
+    if (
+      automaticActive.current ||
+      automaticUncertain[account.id] ||
+      busy !== null ||
+      account.generation === undefined ||
+      account.autoClaimRevision === undefined ||
+      account.autoClaimPolicyVersion === undefined ||
+      (!account.canSetAutomatic && !account.autoClaimEnabled)
+    )
+      return;
+    automaticActive.current = true;
+    setAutomaticBusy(true);
+    setAutomaticFailed(false);
+    const lifecycle = policyLifecycle.current;
+    const current = () =>
+      alive.current && lifecycle === policyLifecycle.current;
+    try {
+      const updated = await workbuddyApi.setAutomatic(
+        account,
+        !account.autoClaimEnabled,
+      );
+      if (!current()) return;
+      if (
+        updated.id !== account.id ||
+        updated.generation !== account.generation ||
+        updated.autoClaimRevision <= account.autoClaimRevision
+      )
+        throw new Error("Unconfirmed policy response");
+      setAccounts((rows) =>
+        rows.map((row) =>
+          row.id === updated.id ? latestAccount(row, updated) : row,
+        ),
+      );
+    } catch {
+      if (!current()) return;
+      // IPC failure is not proof the setter failed. Never display the old off/on
+      // value as authoritative until a later backend revision resolves it.
+      setAutomaticFailed(true);
+      setAutomaticUncertain((old) => ({
+        ...old,
+        [account.id]: {
+          generation: account.generation,
+          revision: account.autoClaimRevision,
+        },
+      }));
+      try {
+        const rows = await workbuddyApi.list();
+        if (!current()) return;
+        const confirmed = rows.find((row) => row.id === account.id);
+        setAccounts((old) => mergeAccounts(old, rows));
+        if (
+          confirmed &&
+          (confirmed.generation > account.generation ||
+            (confirmed.generation === account.generation &&
+              confirmed.autoClaimRevision > account.autoClaimRevision))
+        ) {
+          reconcileAutomatic(rows);
+          setAutomaticFailed(false);
+        }
+      } catch {
+        // Uncertain remains visible and disabled, not a false "off" confirmation.
+      }
+    } finally {
+      automaticActive.current = false;
+      if (current()) setAutomaticBusy(false);
+    }
+  };
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [inferenceAccounts, setInferenceAccounts] = useState<
@@ -197,7 +314,8 @@ export function WorkBuddyAccounts({
     try {
       const rows = await workbuddyApi.list();
       if (isCurrent()) {
-        setAccounts(rows);
+        setAccounts((old) => mergeAccounts(old, rows));
+        reconcileAutomatic(rows);
         setClaimResults(null);
       }
     } catch {
@@ -205,13 +323,14 @@ export function WorkBuddyAccounts({
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, []);
+  }, [reconcileAutomatic]);
   useEffect(() => {
     alive.current = true;
     void loadAccounts();
     void loadInferenceAccounts();
     return () => {
       alive.current = false;
+      policyLifecycle.current += 1;
       listGeneration.current += 1;
       inferenceGeneration.current += 1;
       inferenceStatusGeneration.current += 1;
@@ -237,9 +356,10 @@ export function WorkBuddyAccounts({
   };
   const update = (row: WorkBuddyAccount) => {
     if (!alive.current) return;
+    reconcileAutomatic([row]);
     setAccounts((rows) =>
       rows.some((old) => old.id === row.id)
-        ? rows.map((old) => (old.id === row.id ? row : old))
+        ? rows.map((old) => (old.id === row.id ? latestAccount(old, row) : old))
         : [...rows, row],
     );
     setClaimResults(
@@ -268,7 +388,10 @@ export function WorkBuddyAccounts({
                 setAccounts((rows) => {
                   const updated = new Map(rows.map((row) => [row.id, row]));
                   for (const { account } of results)
-                    updated.set(account.id, account);
+                    updated.set(
+                      account.id,
+                      latestAccount(updated.get(account.id), account),
+                    );
                   return [...updated.values()];
                 });
                 setClaimResults(
@@ -297,7 +420,8 @@ export function WorkBuddyAccounts({
               void run("all", async () => {
                 const rows = await workbuddyApi.refreshAll();
                 if (alive.current) {
-                  setAccounts(rows);
+                  setAccounts((old) => mergeAccounts(old, rows));
+                  reconcileAutomatic(rows);
                   setClaimResults(null);
                 }
               })
@@ -333,6 +457,14 @@ export function WorkBuddyAccounts({
       {failed && (
         <p role="alert" className="text-sm text-destructive">
           {t("workbuddy.failed")}
+        </p>
+      )}
+      <p className="text-xs text-muted-foreground">
+        {t("workbuddy.auto.notice")}
+      </p>
+      {automaticFailed && (
+        <p role="alert" className="text-sm text-destructive">
+          {t("workbuddy.auto.failed")}
         </p>
       )}
       {inferenceFailed && (
@@ -428,6 +560,10 @@ export function WorkBuddyAccounts({
                 const result = await workbuddyApi.finishLogin(login.flowId);
                 if (!alive.current) return;
                 if (result.state === "saved") {
+                  policyLifecycle.current += 1;
+                  setAutomaticBusy(false);
+                  setAutomaticFailed(false);
+                  setAutomaticUncertain({});
                   setLogin(null);
                   // The legacy owner may replace this row and clear its inference
                   // grant. Retire all transient reads/flows before either reload;
@@ -508,7 +644,50 @@ export function WorkBuddyAccounts({
                   {!unified && (
                     <h3 className="text-sm font-medium">{account.label}</h3>
                   )}
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      role={
+                        automaticUncertain[account.id] ? "button" : "switch"
+                      }
+                      aria-label={t(
+                        automaticUncertain[account.id]
+                          ? "workbuddy.auto.unknown"
+                          : "workbuddy.auto.label",
+                      )}
+                      aria-checked={
+                        automaticUncertain[account.id]
+                          ? undefined
+                          : account.autoClaimEnabled === true
+                      }
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        automaticBusy ||
+                        Boolean(automaticUncertain[account.id]) ||
+                        busy !== null ||
+                        account.generation === undefined ||
+                        account.autoClaimRevision === undefined ||
+                        account.autoClaimPolicyVersion === undefined ||
+                        (!account.canSetAutomatic && !account.autoClaimEnabled)
+                      }
+                      onClick={() => void setAutomatic(account)}
+                    >
+                      {t(
+                        automaticUncertain[account.id]
+                          ? "workbuddy.auto.unknown"
+                          : account.autoClaimEnabled
+                            ? "workbuddy.auto.on"
+                            : "workbuddy.auto.off",
+                      )}
+                    </Button>
+                    {account.autoClaimBlocked && (
+                      <span
+                        role="status"
+                        className="text-xs text-muted-foreground"
+                      >
+                        {t("workbuddy.auto.blocked")}
+                      </span>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"

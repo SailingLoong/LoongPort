@@ -73,6 +73,13 @@ pub(crate) fn body(endpoint: Endpoint, now: i64) -> Value {
     }
 }
 impl Transport for OfficialHttp {
+    fn claim<'a>(
+        &'a self,
+        account: &'a Account,
+        now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+        Box::pin(async move { send(Endpoint::Claim, Some(account), None, now).await })
+    }
     fn request<'a>(
         &'a self,
         endpoint: Endpoint,
@@ -81,61 +88,86 @@ impl Transport for OfficialHttp {
         now: i64,
     ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
         Box::pin(async move {
-            let url = request_url(endpoint, account, state)?;
-            let client = reqwest::Client::builder()
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(20))
-                .build()
-                .map_err(|_| Failure::Unconfirmed)?;
-            let get = matches!(endpoint, Endpoint::AuthToken | Endpoint::Profile);
-            let mut request = if get {
-                client.get(url)
-            } else {
-                client.post(url).json(&body(endpoint, now))
-            };
-            request = request.header("Accept", "application/json");
-            if let Some(account) = account {
-                request = request
-                    .bearer_auth(&account.token)
-                    .header("X-Domain", account.domain.host());
-                if endpoint != Endpoint::Profile {
-                    request = request.header("X-User-Id", &account.uid);
-                } else {
-                    request = request
-                        .header("X-No-User-Id", "true")
-                        .header("X-No-Enterprise-Id", "true");
-                }
-                if matches!(
-                    endpoint,
-                    Endpoint::Summary | Endpoint::Paid | Endpoint::Free
-                ) {
-                    let origin = format!("https://{}", account.domain.host());
-                    request = request
-                        .header("X-Client-Platform", "web")
-                        .header("Origin", &origin)
-                        .header("Referer", format!("{origin}/profile/plans-usage"));
-                }
-            }
-            let mut response = request.send().await.map_err(|_| Failure::Unconfirmed)?;
-            if matches!(response.status().as_u16(), 401 | 403) {
-                return Err(Failure::NeedsVerification);
-            }
-            if !response.status().is_success() {
-                return Err(Failure::Unconfirmed);
-            }
-            const MAX: usize = 4 * 1024 * 1024;
-            if response.content_length().is_some_and(|n| n > MAX as u64) {
-                return Err(Failure::Unconfirmed);
-            }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Unconfirmed)? {
-                if bytes.len() + chunk.len() > MAX {
-                    return Err(Failure::Unconfirmed);
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            serde_json::from_slice(&bytes).map_err(|_| Failure::Unconfirmed)
+            send(endpoint, account, state, now)
+                .await
+                .map_err(|error| match error {
+                    DispatchFailure::NotDispatched(e) | DispatchFailure::OutcomeUnknown(e) => e,
+                })
         })
     }
+}
+async fn send(
+    endpoint: Endpoint,
+    account: Option<&Account>,
+    state: Option<&str>,
+    now: i64,
+) -> Result<Value, DispatchFailure> {
+    use DispatchFailure::{NotDispatched, OutcomeUnknown};
+    let url = request_url(endpoint, account, state).map_err(NotDispatched)?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| NotDispatched(Failure::Unconfirmed))?;
+    let get = matches!(endpoint, Endpoint::AuthToken | Endpoint::Profile);
+    let mut request = if get {
+        client.get(url)
+    } else {
+        client.post(url).json(&body(endpoint, now))
+    };
+    request = request.header("Accept", "application/json");
+    if let Some(account) = account {
+        request = request
+            .bearer_auth(&account.token)
+            .header("X-Domain", account.domain.host());
+        if endpoint != Endpoint::Profile {
+            request = request.header("X-User-Id", &account.uid);
+        } else {
+            request = request
+                .header("X-No-User-Id", "true")
+                .header("X-No-Enterprise-Id", "true");
+        }
+        if matches!(
+            endpoint,
+            Endpoint::Summary | Endpoint::Paid | Endpoint::Free
+        ) {
+            let origin = format!("https://{}", account.domain.host());
+            request = request
+                .header("X-Client-Platform", "web")
+                .header("Origin", &origin)
+                .header("Referer", format!("{origin}/profile/plans-usage"));
+        }
+    }
+    // Build errors are definitely unsent. Everything after execute is uncertain.
+    let request = request
+        .build()
+        .map_err(|_| NotDispatched(Failure::Unconfirmed))?;
+    let mut response = client
+        .execute(request)
+        .await
+        .map_err(|_| OutcomeUnknown(Failure::Unconfirmed))?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err(OutcomeUnknown(Failure::NeedsVerification));
+    }
+    if !response.status().is_success() {
+        return Err(OutcomeUnknown(Failure::Unconfirmed));
+    }
+    const MAX: usize = 4 * 1024 * 1024;
+    if response.content_length().is_some_and(|n| n > MAX as u64) {
+        return Err(OutcomeUnknown(Failure::Unconfirmed));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| OutcomeUnknown(Failure::Unconfirmed))?
+    {
+        if bytes.len() + chunk.len() > MAX {
+            return Err(OutcomeUnknown(Failure::Unconfirmed));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| OutcomeUnknown(Failure::Unconfirmed))
 }

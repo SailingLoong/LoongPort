@@ -11,6 +11,7 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 pub fn start(app: tauri::AppHandle) {
     start_zcode_claim(app.clone());
     start_trae_automatic_checkin(app.clone());
+    start_workbuddy_automatic_claim(app.clone());
     start_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
@@ -205,6 +206,34 @@ fn start_trae_automatic_checkin(app: tauri::AppHandle) {
             async move {
                 // The existing account owner enforces current per-account consent.
                 let _ = crate::trae_accounts::checkin::automatic_tick(db.secrets.clone()).await;
+                Ok(())
+            }
+        },
+    );
+}
+
+#[cfg(feature = "gui")]
+fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
+    use std::time::Duration;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "workbuddy-automatic-claim",
+        scheduler::TaskSchedule::new(
+            Duration::from_secs(30),
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(15 * 60),
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                // Fail closed when locked; the owner checks consent at final dispatch.
+                let _ = crate::workbuddy::engine::Engine {
+                    session: db.secret_session(),
+                    transport: &crate::workbuddy::http::OfficialHttp,
+                    clock: &crate::workbuddy::clock::SystemClock,
+                }
+                .automatic_tick()
+                .await;
                 Ok(())
             }
         },

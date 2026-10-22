@@ -2050,6 +2050,7 @@ pub fn run() {
             commands::refresh_all_workbuddy_accounts,
             commands::claim_workbuddy_today,
             commands::claim_all_workbuddy_today,
+            commands::set_workbuddy_automatic_claim,
             commands::begin_workbuddy_authorization,
             commands::finish_workbuddy_authorization,
             commands::list_workbuddy_inference_accounts,
