@@ -142,6 +142,10 @@ impl CodeRuntime {
                 Err("agents.request_conflict".into())
             };
         }
+        // The caller allocates an application-owned root with an existing parent.
+        // Admit/create that one directory before its children; never chmod ancestors.
+        crate::config::ensure_private_directory(root)
+            .map_err(|_| "agents.workspace_unavailable")?;
         let claims = root.join("claims");
         let workspaces = root.join("workspaces");
         crate::config::ensure_private_directory(&claims)

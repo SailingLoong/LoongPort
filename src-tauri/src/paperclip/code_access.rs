@@ -16,6 +16,16 @@ impl Owner {
             .join("agent-code-tasks")
             .join(&self.owner)
     }
+    /// Initialize only this owner's application directories; the config root is owned by app startup.
+    fn prepare_code_root(&self) -> Result<PathBuf, String> {
+        let root = self.code_root();
+        let namespace = root.parent().ok_or("agents.workspace_unavailable")?;
+        crate::config::ensure_private_directory(namespace)
+            .map_err(|_| "agents.workspace_unavailable")?;
+        crate::config::ensure_private_directory(&root)
+            .map_err(|_| "agents.workspace_unavailable")?;
+        Ok(root)
+    }
     pub(crate) fn code_access_options(&self) -> Result<Value, String> {
         let refs = self
             .state
@@ -86,12 +96,12 @@ impl Owner {
         }
         // Admission precedes any worktree side effect; recheck again at the execution boundary.
         self.code_key(&request.credential_id, request.model.as_deref())?;
+        let root = self.prepare_code_root()?;
         let owner = self.clone();
         let credential_id = request.credential_id.clone();
-        self.control.code_tasks.start(
-            &self.code_root(),
-            request,
-            move |cwd, input, model, cancel| {
+        self.control
+            .code_tasks
+            .start(&root, request, move |cwd, input, model, cancel| {
                 let key = owner.code_key(&credential_id, model)?;
                 let runtime = owner.runtime.as_ref().ok_or("agents.runtime_unavailable")?;
                 if !runtime.block_on(owner.state.proxy_service.is_running()) {
@@ -143,8 +153,7 @@ impl Owner {
                     let _ = home.keep();
                 }
                 result
-            },
-        )
+            })
     }
     fn code_key(&self, credential_id: &str, model: Option<&str>) -> Result<String, String> {
         let db = &self.state.db;
@@ -259,5 +268,29 @@ mod tests {
             false
         );
         assert!(config["mcp_servers"].as_object().unwrap().is_empty());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn fresh_owner_initializes_each_private_directory_without_changing_config_parent() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_runtime, _state, owner) = super::super::tests::fixture();
+        let config = crate::config::get_app_config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let before = std::fs::metadata(&config).unwrap().mode() & 0o777;
+        assert!(!owner.code_root().exists());
+        assert!(owner.list_code_tasks().unwrap().is_empty());
+        assert!(
+            !config.join("agent-code-tasks").exists(),
+            "listing must not initialize directories"
+        );
+        let root = owner.prepare_code_root().unwrap();
+        assert_eq!(root, owner.code_root());
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, before);
+        for path in [config.join("agent-code-tasks"), root.clone()] {
+            assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o777, 0o700);
+        }
+        assert_eq!(owner.prepare_code_root().unwrap(), root);
     }
 }
