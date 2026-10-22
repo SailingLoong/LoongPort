@@ -402,10 +402,50 @@ try {
                 true,
                 "An empty personal key cannot be imported without explicit input",
               );
+              const localImport = destination.getByRole("region", {
+                name: "从本机 OpenCode 导入",
+                exact: true,
+              });
+              // Enumerate the actual actions, including the explicit local-read
+              // consent. A raw historical count missed that shipped entry.
+              const actions = [
+                destination.getByRole("button", {
+                  name: "返回平台列表",
+                  exact: true,
+                }),
+                localImport.getByRole("button", {
+                  name: "同意只读预览本机 OpenCode 凭据",
+                  exact: true,
+                }),
+                personalKey.getByRole("button", {
+                  name: "同意加密保存并添加 OpenCode",
+                  exact: true,
+                }),
+                destination.getByRole("button", {
+                  name: /官网账户登录（不会自动获取密钥）/,
+                }),
+              ];
+              for (const action of actions) {
+                assert.equal(await action.count(), 1, "Each action is unique");
+                assert.equal(await action.isVisible(), true);
+              }
+              assert.equal(await actions[1].isEnabled(), true);
+              assert.deepEqual(
+                await destination.getByRole("button").allTextContents(),
+                await Promise.all(
+                  actions.map((action) => action.textContent()),
+                ),
+                "Only Back, local-read consent, personal-key consent and the original vendor action belong to OpenCode",
+              );
               assert.equal(
-                await destination.getByRole("button").count(),
-                3,
-                "OpenCode destination contains Back, explicit personal-key import and the original vendor action",
+                await destination
+                  .getByRole("region", {
+                    name: "Qoder 账号管理",
+                    exact: true,
+                  })
+                  .count(),
+                0,
+                "The previous Qoder destination must not leak into OpenCode",
               );
             }
             await destination
@@ -414,6 +454,13 @@ try {
             await main
               .getByRole("button", { name: "Qoder", exact: true })
               .waitFor();
+            assert.equal(
+              await main
+                .getByRole("region", { name: "服务接入", exact: true })
+                .count(),
+              0,
+              "Returning to the platform list must retire the source destination",
+            );
           }
           await page
             .getByRole("tab", {
