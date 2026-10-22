@@ -95,6 +95,7 @@ import { useAccountSessionStartup } from "@/components/relay/accounts/useAccount
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
 import { useServiceOnboardingStatus } from "@/components/relay/onboarding/useServiceOnboarding";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
+import { McodeProviderPanel } from "@/components/providers/McodeProviderPanel";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -301,6 +302,7 @@ function App() {
   const [promptManagementBusy, setPromptManagementBusy] = useState(false);
   const [promptNavigationBusy, setPromptNavigationBusy] = useState(false);
   const [zcodeNavigationBusy, setZcodeNavigationBusy] = useState(false);
+  const [mcodeNavigationBusy, setMcodeNavigationBusy] = useState(false);
   const [skillsCheckUpdatesState, setSkillsCheckUpdatesState] =
     useState<SkillsCheckUpdatesState>({
       isChecking: false,
@@ -333,6 +335,21 @@ function App() {
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
+    if (
+      sharedFeatureApp === "mcode" &&
+      [
+        "prompts",
+        "skills",
+        "skillsDiscovery",
+        "mcp",
+        "sessions",
+        "agents",
+        "workspace",
+      ].includes(currentView)
+    ) {
+      navigation.replace("providers");
+      return;
+    }
     if (currentView === "mcp" && sharedFeatureApp === "pi") {
       navigation.replace("providers");
       return;
@@ -752,7 +769,8 @@ function App() {
     mcpManagementBusy ||
     skillsNavigationBusy ||
     promptNavigationBusy ||
-    zcodeNavigationBusy;
+    zcodeNavigationBusy ||
+    mcodeNavigationBusy;
   const managementBusyRef = useRef(false);
   managementBusyRef.current = managementBusy;
 
@@ -855,6 +873,11 @@ function App() {
       }
       if (activeApp === "pi") {
         await invalidatePiProviderCaches(queryClient);
+      }
+      if (activeApp === "mcode") {
+        await queryClient.invalidateQueries({
+          queryKey: ["providers", "mcode"],
+        });
       }
       // Invalidate queries to refresh the isInConfig state
       if (activeApp === "opencode") {
@@ -1028,7 +1051,7 @@ function App() {
         ...entries,
         [app]: {
           id: (entries[app]?.id ?? 0) + 1,
-          tab,
+          tab: app === "mcode" ? "manual" : tab,
           firstVisit: opts?.firstVisit === true,
           intent: opts?.intent,
         },
@@ -1112,6 +1135,7 @@ function App() {
           activeApp === "opencode" ||
           activeApp === "openclaw" ||
           activeApp === "hermes" ||
+          activeApp === "mcode" ||
           activeApp === "pi"
             ? (provider) =>
                 setConfirmAction({
@@ -1282,6 +1306,10 @@ function App() {
                         }
                         onNavigationBlockedChange={setZcodeNavigationBusy}
                       />
+                    ) : activeApp === "mcode" ? (
+                      <McodeProviderPanel onBusyChange={setMcodeNavigationBusy}>
+                        {(busy) => providerList(busy)}
+                      </McodeProviderPanel>
                     ) : activeApp === "codex-image" ? (
                       <>
                         <ImageTabPage onOpenAddHub={handleOpenAddHub} />

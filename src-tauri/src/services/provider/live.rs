@@ -191,6 +191,7 @@ pub(crate) fn provider_exists_in_live_config(
         AppType::Hermes => crate::hermes_config::get_providers()
             .map(|providers| providers.contains_key(provider_id)),
         AppType::Pi => crate::pi_config::pi_provider_exists(provider_id),
+        AppType::Mcode => crate::mcode_config::provider_key_exists(provider_id),
         _ => Ok(false),
     }
 }
@@ -532,7 +533,7 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::Pi
+        | AppType::Pi | AppType::Mcode
         | AppType::ClaudeDesktop
         // 生图栏不写 live 配置，所以「通用配置」这套对它无意义。
         | AppType::CodexImage => false,
@@ -610,6 +611,7 @@ pub(crate) fn remove_common_config_from_settings(
         | AppType::OpenClaw
         | AppType::Hermes
         | AppType::Pi
+        | AppType::Mcode
         | AppType::ClaudeDesktop
         | AppType::CodexImage => Ok(settings.clone()),
     }
@@ -671,6 +673,7 @@ fn apply_common_config_to_settings(
         | AppType::OpenClaw
         | AppType::Hermes
         | AppType::Pi
+        | AppType::Mcode
         | AppType::ClaudeDesktop
         | AppType::CodexImage => Ok(settings.clone()),
     }
@@ -1491,6 +1494,11 @@ fn write_live_snapshot_inner(
             };
             log::debug!("Hermes provider '{}' written to live config", provider.id);
         }
+        AppType::Mcode => {
+            return Err(AppError::InvalidInput(
+                "MCode providers use the native provider service".into(),
+            ))
+        }
         AppType::Pi => {
             return Err(AppError::InvalidInput(
                 "Pi providers use the Pi provider service".to_string(),
@@ -1614,7 +1622,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 
     // Sync providers based on mode
     for app_type in AppType::all() {
-        if matches!(app_type, AppType::Pi) {
+        if matches!(app_type, AppType::Pi | AppType::Mcode) {
             continue;
         }
         let result = if app_type.is_additive_mode() {
@@ -1711,7 +1719,7 @@ impl super::ProviderService {
         previous_local_id: Option<&str>,
         taken_over: bool,
     ) -> Result<(), AppError> {
-        if matches!(app, AppType::Pi) {
+        if matches!(app, AppType::Pi | AppType::Mcode) {
             return Ok(());
         }
         if app.is_additive_mode() {
@@ -1884,6 +1892,7 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             let config = crate::hermes_config::yaml_to_json(&yaml_config)?;
             Ok(config)
         }
+        AppType::Mcode => Err(AppError::InvalidInput("Use explicit MCode provider import".into())),
         AppType::Pi => Err(AppError::InvalidInput(
             "Pi providers are read from Pi's native models file".to_string(),
         )),
@@ -2006,7 +2015,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             })
         }
         // OpenCode, OpenClaw and Hermes use additive mode and are handled by early return above
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::Mcode => {
             unreachable!("additive mode apps are handled by early return")
         }
     };

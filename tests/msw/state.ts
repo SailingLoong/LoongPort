@@ -77,6 +77,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
   "codex-image": {},
   pi: {},
   zcode: {},
+  mcode: {},
 });
 
 const createDefaultCurrent = (): CurrentProviderState => ({
@@ -91,6 +92,7 @@ const createDefaultCurrent = (): CurrentProviderState => ({
   hermes: "",
   pi: "",
   zcode: "",
+  mcode: "",
 });
 
 let providers = createDefaultProviders();
@@ -114,6 +116,7 @@ const createDefaultSettings = (): Settings => ({
     "codex-image": true,
     pi: true,
     zcode: false,
+    mcode: false,
     gemini: true,
     grokbuild: true,
     opencode: true,
@@ -222,6 +225,7 @@ let mcpConfigs: McpConfigState = {
   "codex-image": {},
   pi: {},
   zcode: {},
+  mcode: {},
 };
 
 const cloneProviders = (value: ProvidersByApp) =>
@@ -287,6 +291,7 @@ export const resetProviderState = () => {
     "codex-image": {},
     pi: {},
     zcode: {},
+    mcode: {},
   };
 };
 

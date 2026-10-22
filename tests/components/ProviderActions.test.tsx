@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -165,4 +165,31 @@ describe("ProviderActions Pi provider switching", () => {
     expect(screen.getByTitle("provider.configureUsage")).toBeDisabled();
     expect(screen.getByTitle("检测连通")).toBeEnabled();
   });
+});
+
+it("uses native MiniMax Code membership actions without defaults or failover", () => {
+  const onSwitch = vi.fn();
+  const onRemoveFromConfig = vi.fn();
+  const onToggleFailover = vi.fn();
+  const props = {
+    appId: "mcode" as const,
+    isCurrent: false,
+    onSwitch,
+    onRemoveFromConfig,
+    onToggleFailover,
+    isAutoFailoverEnabled: true,
+    onEdit: vi.fn(),
+    onDelete: vi.fn(),
+    onSetAsDefault: vi.fn(),
+  };
+  const view = render(<ProviderActions {...props} isInConfig={false} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  expect(onSwitch).toHaveBeenCalledOnce();
+  view.rerender(<ProviderActions {...props} isInConfig />);
+  fireEvent.click(screen.getByRole("button", { name: "移除" }));
+  expect(onRemoveFromConfig).toHaveBeenCalledOnce();
+  expect(onToggleFailover).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("button", { name: /设为默认|failover.addQueue/ }),
+  ).not.toBeInTheDocument();
 });

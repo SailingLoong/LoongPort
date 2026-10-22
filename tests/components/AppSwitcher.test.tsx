@@ -17,6 +17,7 @@ const allVisible: VisibleApps = {
   hermes: true,
   pi: true,
   zcode: true,
+  mcode: true,
 };
 
 /** 测试环境 i18n 资源为空，t() 回落成键名本身；× 的 title 即 "appSwitcher.hide" */
@@ -72,6 +73,7 @@ describe("AppSwitcher", () => {
       hermes: false,
       pi: false,
       zcode: false,
+      mcode: false,
     };
     const { container } = render(
       <AppSwitcher
@@ -119,6 +121,7 @@ describe("AppSwitcher", () => {
       ...allVisible,
       pi: false,
       zcode: false,
+      mcode: false,
       hermes: false,
     };
     render(

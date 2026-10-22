@@ -242,9 +242,11 @@ fn add_provider_internal(
     let result = add_provider_internal_impl(state, app_type.clone(), provider, add_to_live)?;
     // 用户手工新建的 provider 归他维护 ⇒ 置「已手工维护」标记。
     // provision 不走这条命令（直调 save_provider），所以托管档位不会被误置位。
-    state
-        .db
-        .set_user_edited(&app_type_name, &provider_id, true)?;
+    if app_type_name != "mcode" {
+        state
+            .db
+            .set_user_edited(&app_type_name, &provider_id, true)?;
+    }
     if result && add_to_live && app_type.is_additive_mode() {
         crate::services::application_overview::record_successful_selection(
             &state.db,
@@ -311,9 +313,11 @@ fn update_provider_internal(
     let result = ProviderService::update(state, app_type, original_id, provider)?;
     // 用户手工编辑保存 ⇒ 置「已手工维护」标记（即使改得跟默认一样，见需求）。
     // 更新后的行 id 是 `provider.id`（改名时 original_id 指向旧行）。
-    state
-        .db
-        .set_user_edited(&app_type_name, &provider_id, true)?;
+    if app_type_name != "mcode" {
+        state
+            .db
+            .set_user_edited(&app_type_name, &provider_id, true)?;
+    }
     Ok(result)
 }
 
@@ -1087,6 +1091,9 @@ mod switch_presentation_tests {
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+    if matches!(app_type, AppType::Mcode) {
+        return crate::services::provider::mcode::import_from_live(state).map(|count| count > 0);
+    }
     if matches!(app_type, AppType::GrokBuild) {
         // 官方登录态（live 语法合法且无自定义模型表）+ 用户手动导入：
         // 导入的正确结果是让 Grok Official 成为当前供应商，而非报错。
@@ -2619,4 +2626,21 @@ mod qoder_identity_command_tests {
             }
         ));
     }
+}
+
+/// Read-only recovery descriptor; backup plaintext never crosses the IPC boundary.
+#[tauri::command]
+pub fn get_mcode_backup(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::services::provider::mcode::BackupDescriptor>, String> {
+    crate::services::provider::mcode::latest_backup(&state).map_err(|error| error.to_string())
+}
+#[tauri::command]
+pub fn restore_mcode_backup(
+    state: State<'_, AppState>,
+    id: String,
+    revision: String,
+) -> Result<bool, String> {
+    crate::services::provider::mcode::restore_backup(&state, &id, &revision)
+        .map_err(|error| error.to_string())
 }

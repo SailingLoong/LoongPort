@@ -71,6 +71,8 @@ pub struct VisibleApps {
     #[serde(default = "default_true")]
     pub pi: bool,
     #[serde(default)]
+    pub mcode: bool,
+    #[serde(default)]
     pub zcode: bool,
 }
 
@@ -93,6 +95,7 @@ impl Default for VisibleApps {
             openclaw: false,
             hermes: false,
             pi: false,
+            mcode: false,
             zcode: false,
         }
     }
@@ -142,6 +145,7 @@ impl VisibleApps {
             AppType::OpenClaw => &mut self.openclaw,
             AppType::Hermes => &mut self.hermes,
             AppType::Pi => &mut self.pi,
+            AppType::Mcode => &mut self.mcode,
         };
         *slot = visible;
         Ok(())
@@ -160,6 +164,7 @@ impl VisibleApps {
             AppType::OpenClaw => self.openclaw,
             AppType::Hermes => self.hermes,
             AppType::Pi => self.pi,
+            AppType::Mcode => self.mcode,
         }
     }
 }
@@ -2375,7 +2380,7 @@ fn current_provider_slot<'a>(
         AppType::OpenCode => Some(&mut settings.current_provider_opencode),
         AppType::OpenClaw => Some(&mut settings.current_provider_openclaw),
         AppType::Hermes => Some(&mut settings.current_provider_hermes),
-        AppType::Pi => None,
+        AppType::Pi | AppType::Mcode => None,
     }
 }
 
@@ -2458,6 +2463,10 @@ pub fn get_effective_current_provider_readonly(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    // Native Mcode providers coexist; a database selection is not authoritative.
+    if matches!(app_type, AppType::Mcode) {
+        return Ok(None);
+    }
     validate_selected_pointer_at(&settings_path(), app_type)?;
     if let Some(local_id) = get_current_provider(app_type) {
         if db
@@ -2483,6 +2492,10 @@ pub fn get_effective_current_provider(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
+    // Native Mcode providers coexist; a database selection is not authoritative.
+    if matches!(app_type, AppType::Mcode) {
+        return Ok(None);
+    }
     validate_selected_pointer_at(&settings_path(), app_type)?;
     // 1. 从本地 settings 读取
     if let Some(local_id) = get_current_provider(app_type) {
@@ -3006,6 +3019,7 @@ mod tests {
         assert!(!visible.openclaw);
         assert!(!visible.hermes);
         assert!(!visible.pi);
+        assert!(!visible.mcode);
     }
 
     /// 「新装用户默认看哪些 app」在 Rust（`VisibleApps::default`）与 TS
@@ -3036,6 +3050,7 @@ mod tests {
             ("openclaw", defaults.openclaw),
             ("hermes", defaults.hermes),
             ("pi", defaults.pi),
+            ("mcode", defaults.mcode),
             ("zcode", defaults.zcode),
         ] {
             // 键名与 serde 序列化一致；TS 里含连字符的键带引号（"claude-desktop"）
@@ -3620,5 +3635,54 @@ mod u03_completion_settings_tests {
         ensure_upgrade_sync_resumed().unwrap();
         fs::write(settings_path(), b"{broken").unwrap();
         assert!(ensure_upgrade_sync_resumed().is_err());
+    }
+}
+
+#[cfg(test)]
+mod mcode_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn mcode_is_hidden_for_new_and_existing_settings_until_enabled() {
+        let app: AppType = "mcode".parse().expect("mcode app is registered");
+        assert!(!VisibleApps::default().is_visible(&app));
+        let mut existing: VisibleApps = serde_json::from_str("{}").unwrap();
+        assert!(!existing.is_visible(&app));
+        existing.set_visible(&app, true).unwrap();
+        assert!(existing.is_visible(&app));
+        assert_eq!(serde_json::to_value(existing).unwrap()["mcode"], true);
+    }
+
+    #[test]
+    fn mcode_has_no_current_provider_slot() {
+        let app: AppType = "mcode".parse().expect("mcode app is registered");
+        assert!(current_provider_slot(&mut AppSettings::default(), &app).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mcode_current_tests {
+    use super::*;
+
+    #[test]
+    fn mcode_never_uses_or_repairs_a_stale_database_selection() {
+        let db = crate::database::Database::memory().unwrap();
+        let provider = crate::provider::Provider::with_id(
+            "mcode-stale".into(),
+            "Mcode".into(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("mcode", &provider).unwrap();
+        db.set_current_provider("mcode", &provider.id).unwrap();
+        assert_eq!(
+            get_effective_current_provider_readonly(&db, &AppType::Mcode).unwrap(),
+            None
+        );
+        assert_eq!(
+            get_effective_current_provider(&db, &AppType::Mcode).unwrap(),
+            None
+        );
+        assert_eq!(db.get_current_provider("mcode").unwrap(), Some(provider.id));
     }
 }

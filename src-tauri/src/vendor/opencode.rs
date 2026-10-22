@@ -659,7 +659,8 @@ impl Plan {
                 crate::app_config::AppType::Gemini
                 | crate::app_config::AppType::GrokBuild
                 | crate::app_config::AppType::CodexImage
-                | crate::app_config::AppType::Pi => return None,
+                | crate::app_config::AppType::Pi
+                | crate::app_config::AppType::Mcode => return None,
             }),
             Plan::Go => Some(match app {
                 crate::app_config::AppType::Codex => (GO_API_ORIGIN, GO_CHAT_MODEL),
@@ -672,7 +673,8 @@ impl Plan {
                 crate::app_config::AppType::Gemini
                 | crate::app_config::AppType::GrokBuild
                 | crate::app_config::AppType::CodexImage
-                | crate::app_config::AppType::Pi => return None,
+                | crate::app_config::AppType::Pi
+                | crate::app_config::AppType::Mcode => return None,
             }),
         }
     }

@@ -175,15 +175,21 @@ export function AddHubPage({
               {t("common.back")}
             </Button>
             <TabsList>
-              <TabsTrigger value="accounts">
-                {t("zcode.accounts.login.account", { defaultValue: "账号" })}
-              </TabsTrigger>
-              <TabsTrigger value="directory">
-                {t("loongport.sections.relay")}
-              </TabsTrigger>
-              <TabsTrigger value="official">
-                {t("loongport.sections.official")}
-              </TabsTrigger>
+              {sourceAppId !== "mcode" && (
+                <>
+                  <TabsTrigger value="accounts">
+                    {t("zcode.accounts.login.account", {
+                      defaultValue: "账号",
+                    })}
+                  </TabsTrigger>
+                  <TabsTrigger value="directory">
+                    {t("loongport.sections.relay")}
+                  </TabsTrigger>
+                  <TabsTrigger value="official">
+                    {t("loongport.sections.official")}
+                  </TabsTrigger>
+                </>
+              )}
               <TabsTrigger value="manual">
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
                 {t("loongport.addEntry.manual")}

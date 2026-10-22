@@ -32,7 +32,7 @@ impl McpApps {
             AppType::OpenCode => self.opencode,
             AppType::OpenClaw => false, // OpenClaw doesn't support MCP
             AppType::Hermes => self.hermes,
-            AppType::Pi => false, // Pi core has no native MCP registry.
+            AppType::Pi | AppType::Mcode => false, // No MCP integration for Pi or Mcode.
             AppType::ClaudeDesktop => false,
             // 生图栏不是一个装 MCP 的 CLI（生图工具装进 codex/claude/gemini）。
             AppType::CodexImage => false,
@@ -49,7 +49,7 @@ impl McpApps {
             AppType::OpenCode => self.opencode = enabled,
             AppType::OpenClaw => {} // OpenClaw doesn't support MCP, ignore
             AppType::Hermes => self.hermes = enabled,
-            AppType::Pi => {}            // Pi core has no native MCP registry.
+            AppType::Pi | AppType::Mcode => {} // No MCP integration for Pi or Mcode.
             AppType::ClaudeDesktop => {} // Claude Desktop 3P provider config doesn't support MCP here
             AppType::CodexImage => {}    // 生图栏不装 MCP
         }
@@ -120,6 +120,7 @@ impl SkillApps {
             AppType::OpenCode => self.opencode,
             AppType::Hermes => self.hermes,
             AppType::Pi => self.pi,
+            AppType::Mcode => false,
             AppType::OpenClaw => false, // OpenClaw doesn't support Skills
             AppType::ClaudeDesktop => false,
             // 生图栏不是一个能读 SKILL.md 的 CLI。
@@ -137,6 +138,7 @@ impl SkillApps {
             AppType::OpenCode => self.opencode = enabled,
             AppType::Hermes => self.hermes = enabled,
             AppType::Pi => self.pi = enabled,
+            AppType::Mcode => {}
             AppType::OpenClaw => {} // OpenClaw doesn't support Skills, ignore
             AppType::ClaudeDesktop => {} // Claude Desktop 3P profiles don't use CC Switch skill sync
             AppType::CodexImage => {}    // 生图栏不装 Skill
@@ -424,6 +426,7 @@ pub enum AppType {
     OpenClaw,
     Hermes,
     Pi,
+    Mcode,
 }
 
 impl AppType {
@@ -446,6 +449,7 @@ impl AppType {
             AppType::OpenClaw => "openclaw",
             AppType::Hermes => "hermes",
             AppType::Pi => "pi",
+            AppType::Mcode => "mcode",
         }
     }
 
@@ -453,11 +457,11 @@ impl AppType {
     ///
     /// - Switch mode (false): Only the current provider is written to live config (Claude, Codex, Gemini)
     /// - Additive mode (true): Providers coexist in native config and can be enabled independently
-    ///   (OpenCode, OpenClaw, Hermes, Pi)
+    ///   (OpenCode, OpenClaw, Hermes, Pi, Mcode)
     pub fn is_additive_mode(&self) -> bool {
         matches!(
             self,
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::Mcode
         )
     }
 
@@ -470,11 +474,14 @@ impl AppType {
 
     /// 该 app 是否有可托管的提示词文件（AGENTS.md / AGENTS.md / …）。
     ///
-    /// ClaudeDesktop 与 CodexImage 不是能读提示词文件的 CLI —— 见
+    /// Mcode 暂不接入提示词管理；ClaudeDesktop 与 CodexImage 不是提示词 CLI —— 见
     /// [`AppType::CodexImage`] 的说明。「支不支持 Prompts」以这里为唯一判据，
     /// 别在调用方再手写排除名单。
     pub fn supports_prompts(&self) -> bool {
-        !matches!(self, AppType::ClaudeDesktop | AppType::CodexImage)
+        !matches!(
+            self,
+            AppType::ClaudeDesktop | AppType::CodexImage | AppType::Mcode
+        )
     }
 
     /// Return an iterator over all app types
@@ -490,6 +497,7 @@ impl AppType {
             AppType::OpenClaw,
             AppType::Hermes,
             AppType::Pi,
+            AppType::Mcode,
         ]
         .into_iter()
     }
@@ -511,10 +519,11 @@ impl FromStr for AppType {
             "openclaw" => Ok(AppType::OpenClaw),
             "hermes" => Ok(AppType::Hermes),
             "pi" => Ok(AppType::Pi),
+            "mcode" => Ok(AppType::Mcode),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes, pi。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes, pi."),
+                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes, pi, mcode。"),
+                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes, pi, mcode."),
             )),
         }
     }
@@ -556,7 +565,7 @@ impl CommonConfigSnippets {
             AppType::OpenCode => self.opencode.as_ref(),
             AppType::OpenClaw => self.openclaw.as_ref(),
             AppType::Hermes => self.hermes.as_ref(),
-            AppType::Pi => None,
+            AppType::Pi | AppType::Mcode => None,
         }
     }
 
@@ -572,7 +581,7 @@ impl CommonConfigSnippets {
             AppType::OpenCode => self.opencode = snippet,
             AppType::OpenClaw => self.openclaw = snippet,
             AppType::Hermes => self.hermes = snippet,
-            AppType::Pi => {}
+            AppType::Pi | AppType::Mcode => {}
         }
     }
 }
@@ -886,9 +895,9 @@ impl MultiAppConfig {
             AppType::OpenCode => &mut config.prompts.opencode.prompts,
             AppType::OpenClaw => &mut config.prompts.openclaw.prompts,
             AppType::Hermes => &mut config.prompts.hermes.prompts,
-            // Pi was added after prompts moved to SQLite. Keeping it out of
+            // Pi and Mcode were added after prompts moved to SQLite. Keeping them out of
             // this legacy config avoids a second, unused prompt state.
-            AppType::Pi => return Ok(false),
+            AppType::Pi | AppType::Mcode => return Ok(false),
         };
 
         prompts.insert(id, prompt);
@@ -933,7 +942,7 @@ impl MultiAppConfig {
                 AppType::OpenClaw => continue, // OpenClaw MCP is still in development, skip
                 AppType::Hermes => continue,   // Hermes didn't exist in v3.6.x, skip
                 AppType::CodexImage => continue, // 生图栏 v3.6.x 时不存在，且不装 MCP
-                AppType::Pi => continue,       // Pi didn't exist in v3.6.x, skip
+                AppType::Pi | AppType::Mcode => continue, // Neither existed in v3.6.x, skip
             };
 
             for (id, entry) in old_servers {
@@ -1392,6 +1401,7 @@ mod app_type_all_tests {
             "openclaw",
             "hermes",
             "pi",
+            "mcode",
         ];
         for s in known {
             let app = AppType::from_str(s).unwrap_or_else(|e| panic!("{s} 该能解析: {e}"));
@@ -1426,7 +1436,10 @@ mod app_type_all_tests {
         // 其余（含 Pi——`sync_to_live` 对它的跳过是投影语义不同，不是能力
         // 缺失）都是能读 AGENTS.md / AGENTS.md / SOUL.md 的 CLI。
         for app in AppType::all() {
-            let is_non_cli = matches!(app, AppType::ClaudeDesktop | AppType::CodexImage);
+            let is_non_cli = matches!(
+                app,
+                AppType::ClaudeDesktop | AppType::CodexImage | AppType::Mcode
+            );
             assert_ne!(
                 app.supports_prompts(),
                 is_non_cli,
@@ -1434,5 +1447,29 @@ mod app_type_all_tests {
                 app.as_str()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod mcode_app_tests {
+    use super::{AppType, McpApps, SkillApps};
+
+    #[test]
+    fn mcode_is_registered_additive_without_unsupported_capabilities() {
+        let app: AppType = "mcode".parse().expect("mcode app is registered");
+        assert_eq!(app.as_str(), "mcode");
+        assert_eq!(serde_json::to_string(&app).unwrap(), "\"mcode\"");
+        assert_eq!(" MCODE ".parse::<AppType>().unwrap(), app);
+        assert!(AppType::all().any(|candidate| candidate == app));
+        assert!(app.is_additive_mode());
+        assert!(!app.supports_local_proxy());
+        assert!(!app.supports_prompts());
+        let mut mcp = McpApps::default();
+        mcp.set_enabled_for(&app, true);
+        assert!(!mcp.is_enabled_for(&app));
+        assert!(mcp.is_empty());
+        let skills = SkillApps::only(&app);
+        assert!(!skills.is_enabled_for(&app));
+        assert!(skills.is_empty());
     }
 }

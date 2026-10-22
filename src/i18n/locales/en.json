@@ -1134,7 +1134,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "zcode": "ZCode"
+    "zcode": "ZCode",
+    "mcode": "MiniMax Code"
   },
   "grokBuild": {
     "apiBackend": "API backend",
@@ -1646,7 +1647,9 @@
     "removeHeader": "Remove header",
     "noHeaders": "No custom headers configured",
     "extraOptions": "Extra Options",
-    "extraOptionsHint": "Configure extra SDK options like timeout, setCacheKey, etc. Values are auto-parsed to appropriate types (number, boolean, etc.).",
+    "extraOptionsHint": "JSON values set the type: false and 123 are boolean/number; use \"false\" and \"123\" for strings. Other plain text stays a string.",
+    "reservedOptionKey": "Use the dedicated fields for baseURL, apiKey and headers.",
+    "duplicateOptionKey": "An extra option with this name already exists.",
     "addExtraOption": "Add",
     "extraOptionKey": "Key",
     "extraOptionValue": "Value",
@@ -4386,6 +4389,14 @@
     "keep": "Keep {{selected}}",
     "adopt": "Switch to {{requested}}",
     "switchFailed": "Failed to switch model"
+  },
+  "mcode": {
+    "restore": "Restore previous configuration",
+    "restoreConfirm": "Restore the native config.yaml to before the last LoongPort write? Check the configuration in MiniMax Code afterward. Changes made outside LoongPort will not be overwritten.",
+    "restoreFailed": "Could not restore the configuration.",
+    "restored": "Configuration restored. Check it in MiniMax Code.",
+    "rereadHint": "Cancel and refresh before trying again. External changes cannot be overwritten.",
+    "nativeDefaultsHint": "Manage custom providers here. Select the default and light models in MiniMax Code; importing reads existing custom providers only."
   },
   "zcode": {
     "description": "Configure personal providers and models, and manage saved personal ZCode accounts. Choose the default model in ZCode.",

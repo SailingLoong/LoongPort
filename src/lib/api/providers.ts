@@ -14,6 +14,8 @@ import type { ApplicationModeState } from "./applicationRouting";
 export interface ProviderEditSettings {
   settingsConfig: Record<string, unknown>;
   modeState: ApplicationModeState | null;
+  /** MiniMax Code revision captured with this native configuration snapshot. */
+  mcodeConfigRevision?: string;
   /** Original journal result for this app/row, never inferred from row equality. */
   originalSave?: ProviderEditResult | null;
   /** The native mode owner selects this receipt only for its restore scope. */

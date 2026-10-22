@@ -182,7 +182,7 @@ impl McpService {
                     &server.server,
                 )?;
             }
-            AppType::Pi => {}
+            AppType::Pi | AppType::Mcode => {}
         }
         Ok(())
     }
@@ -222,7 +222,7 @@ impl McpService {
             AppType::Hermes => {
                 mcp::remove_server_from_hermes(state.db.secret_session(), id)?;
             }
-            AppType::Pi => {}
+            AppType::Pi | AppType::Mcode => {}
         }
         Ok(())
     }
@@ -269,7 +269,7 @@ impl McpService {
     ) -> Result<(), AppError> {
         if matches!(
             app,
-            AppType::OpenClaw | AppType::ClaudeDesktop | AppType::Pi
+            AppType::OpenClaw | AppType::ClaudeDesktop | AppType::Pi | AppType::Mcode
         ) {
             return Ok(());
         }
