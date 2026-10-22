@@ -34,8 +34,7 @@ pub struct Preview {
 struct Active {
     path_identity: String,
     connection: Connection,
-    original: Option<Vec<u8>>,
-    installed: Vec<Value>,
+    ownership: Value,
 }
 #[derive(Serialize, Deserialize)]
 struct Intent {
@@ -90,99 +89,89 @@ impl Configuration {
         &self,
         vault: &RwLockReadGuard<'_, VaultContext>,
         id: &str,
-    ) -> Result<(Option<Connection>, bool), AppError> {
+        path: &Path,
+    ) -> Result<(Option<Connection>, bool, &'static str), AppError> {
+        let _lock = engine::lock_app("client-configurations");
         let state = self.load(vault)?;
-        Ok(state
-            .clients
-            .get(id)
-            .map(|r| {
-                (
-                    r.active.as_ref().map(|a| a.connection.clone()),
-                    r.pending.is_some(),
-                )
-            })
-            .unwrap_or_default())
+        let Some(record) = state.clients.get(id) else {
+            return Ok((None, false, "notConfigured"));
+        };
+        let status = if record.pending.is_some() {
+            "recoveryRequired"
+        } else if let Some(active) = &record.active {
+            let current = engine::read_current(path)?;
+            if active.path_identity == engine::sha256_hex(path.to_string_lossy().as_bytes())
+                && registry::get(id)?
+                    .adapter
+                    .matches(current.as_deref(), &active.ownership)
+            {
+                "configured"
+            } else {
+                "configurationChanged"
+            }
+        } else {
+            "notConfigured"
+        };
+        Ok((
+            record
+                .active
+                .as_ref()
+                .map(|active| active.connection.clone()),
+            record.pending.is_some(),
+            status,
+        ))
     }
     fn plan(
         &self,
         state: &State,
         path: &Path,
         request: &Connection,
-        entries: &[Value],
-    ) -> Result<(engine::Planned, Active, String), AppError> {
+        desired: &Value,
+    ) -> Result<(engine::Planned, Active, String, usize), AppError> {
         let current = engine::read_current(path)?;
         let record = state.clients.get(&request.client_id);
         if record.is_some_and(|r| r.pending.is_some()) {
             return Err(error("clients.recovery_required"));
         }
         let active = record.and_then(|r| r.active.as_ref());
-        // Never adopt another installation's entries based on a public vendor label.
         let adapter = registry::get(&request.client_id)?.adapter;
         let path_identity = engine::sha256_hex(path.to_string_lossy().as_bytes());
         if active.is_some_and(|a| a.path_identity != path_identity) {
             return Err(error("clients.configuration_changed"));
         }
-        let models = adapter.entries(current.as_deref()).map_err(|e| error(&e))?;
-        if models.iter().any(|entry| {
-            entry["vendor"] == "LoongPort" && !active.is_some_and(|a| a.installed.contains(entry))
-        }) {
-            return Err(error("clients.configuration_changed"));
-        }
-        let base = match active {
-            Some(a) => Some(
-                adapter
-                    .restore(
-                        current
-                            .as_deref()
-                            .ok_or_else(|| error("clients.configuration_changed"))?,
-                        a.original.as_deref(),
-                        &a.installed,
-                    )
-                    .map_err(|e| error(&e))?,
-            ),
-            None => current.clone(),
-        };
-        let bytes = adapter
-            .project(base.as_deref(), entries)
+        let projection = adapter
+            .apply(current.as_deref(), active.map(|a| &a.ownership), desired)
             .map_err(|e| error(&e))?;
-        let result = adapter.entries(Some(&bytes)).map_err(|e| error(&e))?;
-        let installed = result
-            .iter()
-            .filter(|entry| {
-                entries
-                    .iter()
-                    .any(|new| new["id"] == entry["id"] && new["vendor"] == entry["vendor"])
-            })
-            .cloned()
-            .collect();
         let next = Active {
             path_identity,
             connection: request.clone(),
-            original: active
-                .map(|a| a.original.clone())
-                .unwrap_or(current.clone()),
-            installed,
+            ownership: projection.ownership,
         };
-        let plan = engine::plan_from(&LiveFile::private(path), &WholeFile::Write(bytes), current)?;
+        let plan = engine::plan_from(
+            &LiveFile::private(path),
+            &WholeFile::Write(projection.bytes),
+            current,
+        )?;
         let token = engine::sha256_hex(
             &serde_json::to_vec(&(request, &plan.pre, &plan.planned))
                 .map_err(|_| error("clients.invalid_request"))?,
         );
-        Ok((plan, next, token))
+        Ok((plan, next, token, projection.model_count))
     }
     pub fn preview(
         &self,
         vault: &RwLockReadGuard<'_, VaultContext>,
         path: &Path,
         request: &Connection,
-        entries: &[Value],
+        desired: &Value,
     ) -> Result<Preview, AppError> {
         let _lock = engine::lock_app("client-configurations");
-        let (plan, _, token) = self.plan(&self.load(vault)?, path, request, entries)?;
+        let (plan, _, token, model_count) =
+            self.plan(&self.load(vault)?, path, request, desired)?;
         Ok(Preview {
             token,
             changed: !plan.is_noop(),
-            model_count: entries.len(),
+            model_count,
         })
     }
     pub fn apply(
@@ -190,12 +179,12 @@ impl Configuration {
         vault: &RwLockReadGuard<'_, VaultContext>,
         path: &Path,
         request: &Connection,
-        entries: &[Value],
+        desired: &Value,
         token: &str,
     ) -> Result<(), AppError> {
         let _lock = engine::lock_app("client-configurations");
         let mut state = self.load(vault)?;
-        let (plan, next, expected) = self.plan(&state, path, request, entries)?;
+        let (plan, next, expected, _) = self.plan(&state, path, request, desired)?;
         if token != expected {
             return Err(error("clients.configuration_changed"));
         }
@@ -283,23 +272,19 @@ impl Configuration {
         let Some(active) = &record.active else {
             return Ok(());
         };
-        let current =
-            engine::read_current(path)?.ok_or_else(|| error("clients.configuration_changed"))?;
+        let current = engine::read_current(path)?;
         if active.path_identity != engine::sha256_hex(path.to_string_lossy().as_bytes()) {
             return Err(error("clients.configuration_changed"));
         }
-        let adapter = registry::get(id)?.adapter;
-        let restored = adapter
-            .restore(&current, active.original.as_deref(), &active.installed)
+        let restored = registry::get(id)?
+            .adapter
+            .disconnect(current.as_deref(), &active.ownership)
             .map_err(|e| error(&e))?;
-        let restored_doc: Value =
-            serde_json::from_slice(&restored).map_err(|_| error("clients.invalid_json"))?;
-        let patch = if active.original.is_none() && restored_doc == serde_json::json!([]) {
-            WholeFile::Delete
-        } else {
-            WholeFile::Write(restored)
+        let patch = match restored {
+            Some(bytes) => WholeFile::Write(bytes),
+            None => WholeFile::Delete,
         };
-        let plan = engine::plan_from(&LiveFile::private(path), &patch, Some(current))?;
+        let plan = engine::plan_from(&LiveFile::private(path), &patch, current)?;
         self.commit(vault, &mut state, id, plan, None)
     }
 }

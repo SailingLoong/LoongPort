@@ -40,21 +40,26 @@ pub static CLIENTS: &[Registration] = &[
     },
 ];
 
+/// Adapter state is opaque to the transaction owner and stays encrypted.
+pub struct Projection {
+    pub bytes: Vec<u8>,
+    pub ownership: serde_json::Value,
+    pub model_count: usize,
+}
 pub trait Adapter: Sync {
-    fn project(
+    fn apply(
         &self,
         current: Option<&[u8]>,
-        entries: &[serde_json::Value],
-    ) -> Result<Vec<u8>, String>;
-    fn restore(
+        previous: Option<&serde_json::Value>,
+        desired: &serde_json::Value,
+    ) -> Result<Projection, String>;
+    fn disconnect(
         &self,
-        current: &[u8],
-        original: Option<&[u8]>,
-        installed: &[serde_json::Value],
-    ) -> Result<Vec<u8>, String>;
-    fn entries(&self, current: Option<&[u8]>) -> Result<Vec<serde_json::Value>, String>;
-    fn projection(&self, endpoint: &str, secret: &str, models: &[String])
-        -> Vec<serde_json::Value>;
+        current: Option<&[u8]>,
+        ownership: &serde_json::Value,
+    ) -> Result<Option<Vec<u8>>, String>;
+    fn matches(&self, current: Option<&[u8]>, ownership: &serde_json::Value) -> bool;
+    fn desired(&self, endpoint: &str, secret: &str, models: &[String]) -> serde_json::Value;
 }
 
 impl Registration {

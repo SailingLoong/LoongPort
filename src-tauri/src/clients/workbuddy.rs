@@ -174,23 +174,90 @@ mod tests {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Ownership {
+    original: Option<Vec<u8>>,
+    installed: Vec<Value>,
+}
+
 pub struct WorkBuddy;
 impl super::registry::Adapter for WorkBuddy {
-    fn project(&self, current: Option<&[u8]>, entries: &[Value]) -> Result<Vec<u8>, String> {
-        project(current, entries)
-    }
-    fn restore(
+    fn apply(
         &self,
-        current: &[u8],
-        original: Option<&[u8]>,
-        installed: &[Value],
-    ) -> Result<Vec<u8>, String> {
-        restore(current, original, installed)
+        current: Option<&[u8]>,
+        previous: Option<&Value>,
+        desired: &Value,
+    ) -> Result<super::registry::Projection, String> {
+        let previous: Option<Ownership> = previous
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .map_err(|_| "clients.invalid_state".to_string())
+            })
+            .transpose()?;
+        let document = parse(current)?;
+        if models(&document)?.iter().any(|entry| {
+            entry["vendor"] == "LoongPort"
+                && !previous
+                    .as_ref()
+                    .is_some_and(|prior| prior.installed.contains(entry))
+        }) {
+            return Err("clients.configuration_changed".into());
+        }
+        let desired = desired.as_array().ok_or("clients.invalid_request")?;
+        let base = match &previous {
+            Some(prior) => Some(restore(
+                current.ok_or("clients.configuration_changed")?,
+                prior.original.as_deref(),
+                &prior.installed,
+            )?),
+            None => current.map(ToOwned::to_owned),
+        };
+        let bytes = project(base.as_deref(), desired)?;
+        let document = parse(Some(&bytes))?;
+        let installed = models(&document)?
+            .iter()
+            .filter(|entry| {
+                desired
+                    .iter()
+                    .any(|new| new["id"] == entry["id"] && new["vendor"] == entry["vendor"])
+            })
+            .cloned()
+            .collect();
+        let original = previous
+            .map(|prior| prior.original)
+            .unwrap_or_else(|| current.map(ToOwned::to_owned));
+        Ok(super::registry::Projection {
+            bytes,
+            ownership: serde_json::to_value(Ownership {
+                original,
+                installed,
+            })
+            .map_err(|_| "clients.invalid_state")?,
+            model_count: desired.len(),
+        })
     }
-    fn entries(&self, current: Option<&[u8]>) -> Result<Vec<Value>, String> {
-        Ok(models(&parse(current)?)?.clone())
+    fn disconnect(
+        &self,
+        current: Option<&[u8]>,
+        ownership: &Value,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let ownership: Ownership =
+            serde_json::from_value(ownership.clone()).map_err(|_| "clients.invalid_state")?;
+        let restored = restore(
+            current.ok_or("clients.configuration_changed")?,
+            ownership.original.as_deref(),
+            &ownership.installed,
+        )?;
+        if ownership.original.is_none() && parse(Some(&restored))? == serde_json::json!([]) {
+            Ok(None)
+        } else {
+            Ok(Some(restored))
+        }
     }
-    fn projection(&self, endpoint: &str, secret: &str, models: &[String]) -> Vec<Value> {
-        models.iter().map(|model| serde_json::json!({"id":model,"name":model,"vendor":"LoongPort","url":endpoint,"apiKey":secret})).collect()
+    fn matches(&self, current: Option<&[u8]>, ownership: &Value) -> bool {
+        self.disconnect(current, ownership).is_ok()
+    }
+    fn desired(&self, endpoint: &str, secret: &str, models: &[String]) -> Value {
+        Value::Array(models.iter().map(|model| serde_json::json!({"id":model,"name":model,"vendor":"LoongPort","url":endpoint,"apiKey":secret})).collect())
     }
 }

@@ -23,18 +23,30 @@ fn preview_apply_conflict_and_disconnect_preserve_user_edits() {
         models: vec!["model-a".into()],
     };
     let preview = owner
-        .preview(&vault, &path, &request, &[entry.clone()])
+        .preview(&vault, &path, &request, &json!([entry.clone()]))
         .unwrap();
     assert!(!std::fs::read_to_string(&path).unwrap().contains("model-a"));
     std::fs::write(&path, br#"{"models":[],"external":true}"#).unwrap();
     assert!(owner
-        .apply(&vault, &path, &request, &[entry.clone()], &preview.token)
+        .apply(
+            &vault,
+            &path,
+            &request,
+            &json!([entry.clone()]),
+            &preview.token
+        )
         .is_err());
     let preview = owner
-        .preview(&vault, &path, &request, &[entry.clone()])
+        .preview(&vault, &path, &request, &json!([entry.clone()]))
         .unwrap();
     owner
-        .apply(&vault, &path, &request, &[entry.clone()], &preview.token)
+        .apply(
+            &vault,
+            &path,
+            &request,
+            &json!([entry.clone()]),
+            &preview.token,
+        )
         .unwrap();
     let mut current: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     current["external"] = json!("edited");
@@ -137,7 +149,7 @@ fn changed_owned_entry_is_not_removed_or_silently_adopted() {
         route_app: "codex".into(),
         models: vec!["model-a".into()],
     };
-    let entries = [json!({"id":"model-a","vendor":"LoongPort","apiKey":"fixture-key"})];
+    let entries = json!([{"id":"model-a","vendor":"LoongPort","apiKey":"fixture-key"}]);
     let preview = owner.preview(&vault, &path, &request, &entries).unwrap();
     owner
         .apply(&vault, &path, &request, &entries, &preview.token)
