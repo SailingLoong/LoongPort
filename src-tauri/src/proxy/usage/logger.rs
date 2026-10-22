@@ -23,6 +23,8 @@ pub(crate) struct CalculatedUsage {
 
 #[derive(Debug, PartialEq, Eq)]
 struct UsageSemantic {
+    client_id: Option<String>,
+    client_credential_id: Option<String>,
     app_type: String,
     provider_id: String,
     model: String,
@@ -35,8 +37,14 @@ struct UsageSemantic {
 }
 
 impl UsageSemantic {
-    fn from_log(log: &RequestLog, input_token_semantics: i64) -> Self {
+    fn from_log(
+        log: &RequestLog,
+        input_token_semantics: i64,
+        caller: Option<&crate::proxy::client_access::CallerIdentity>,
+    ) -> Self {
         Self {
+            client_id: caller.map(|caller| caller.client_id.clone()),
+            client_credential_id: caller.map(|caller| caller.credential_id.clone()),
             app_type: log.app_type.clone(),
             provider_id: log.provider_id.clone(),
             model: log.model.clone(),
@@ -51,6 +59,8 @@ impl UsageSemantic {
 
     fn sha256(&self) -> String {
         let encoded = serde_json::to_vec(&(
+            &self.client_id,
+            &self.client_credential_id,
             &self.app_type,
             &self.provider_id,
             &self.model,
@@ -103,11 +113,20 @@ pub struct RequestLog {
 /// 使用量记录器
 pub struct UsageLogger<'a> {
     db: &'a Database,
+    caller: Option<&'a crate::proxy::client_access::CallerIdentity>,
 }
 
 impl<'a> UsageLogger<'a> {
     pub fn new(db: &'a Database) -> Self {
-        Self { db }
+        Self { db, caller: None }
+    }
+
+    pub(crate) fn with_caller(
+        mut self,
+        caller: Option<&'a crate::proxy::client_access::CallerIdentity>,
+    ) -> Self {
+        self.caller = caller;
+        self
     }
 
     /// 记录成功的请求
@@ -150,7 +169,7 @@ impl<'a> UsageLogger<'a> {
             } else {
                 INPUT_TOKEN_SEMANTICS_FRESH
             };
-        let semantic = UsageSemantic::from_log(log, input_token_semantics);
+        let semantic = UsageSemantic::from_log(log, input_token_semantics, self.caller);
         let existing = Self::load_existing_semantic(&conn, &log.request_id)?;
 
         let (request_id, replace_session_log, collision) = match existing {
@@ -196,8 +215,8 @@ impl<'a> UsageLogger<'a> {
                 input_token_semantics, local_input_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                 latency_ms, first_token_ms, status_code, error_message, session_id,
-                provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
+                provider_type, is_streaming, cost_multiplier, created_at, client_id, client_credential_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)"
         );
         let affected_rows = conn
             .execute(
@@ -229,6 +248,8 @@ impl<'a> UsageLogger<'a> {
                     log.is_streaming as i64,
                     log.cost_multiplier,
                     created_at,
+                    semantic.client_id,
+                    semantic.client_credential_id,
                 ],
             )
             .map_err(|e| AppError::Database(format!("记录请求日志失败: {e}")))?;
@@ -261,13 +282,15 @@ impl<'a> UsageLogger<'a> {
         conn.query_row(
             "SELECT data_source, app_type, provider_id, model, input_token_semantics,
                     input_tokens, output_tokens, cache_read_tokens,
-                    cache_creation_tokens, status_code
+                    cache_creation_tokens, status_code, client_id, client_credential_id
              FROM proxy_request_logs WHERE request_id = ?1",
             [request_id],
             |row| {
                 Ok((
                     row.get(0)?,
                     UsageSemantic {
+                        client_id: row.get(10)?,
+                        client_credential_id: row.get(11)?,
                         app_type: row.get(1)?,
                         provider_id: row.get(2)?,
                         model: row.get(3)?,
@@ -861,6 +884,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, "0");
+    }
+
+    #[test]
+    fn caller_attribution_survives_streaming_and_nonstreaming_and_dedup() {
+        use crate::proxy::client_access::CallerIdentity;
+        let db = Database::memory().unwrap();
+        let first = CallerIdentity {
+            client_id: "client-a".into(),
+            credential_id: "credential-a".into(),
+            route_app: "codex".into(),
+        };
+        let second = CallerIdentity {
+            client_id: "client-b".into(),
+            credential_id: "credential-b".into(),
+            route_app: "codex".into(),
+        };
+        let mut log = request_log("shared-upstream-id", 10);
+        log.app_type = "codex".into();
+        log.is_streaming = true;
+        UsageLogger::new(&db)
+            .with_caller(Some(&first))
+            .log_request(&log)
+            .unwrap();
+        log.is_streaming = false;
+        UsageLogger::new(&db)
+            .with_caller(Some(&second))
+            .log_request(&log)
+            .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let rows: Vec<(String, String, String)> = conn.prepare("SELECT client_id, client_credential_id, app_type FROM proxy_request_logs ORDER BY client_id").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("client-a".into(), "credential-a".into(), "codex".into()),
+                ("client-b".into(), "credential-b".into(), "codex".into())
+            ]
+        );
     }
 
     fn request_log(request_id: &str, input_tokens: u32) -> RequestLog {

@@ -24,6 +24,18 @@ pub(crate) fn create_schema(conn: &Connection) -> Result<(), AppError> {
         revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
     );",
     )?;
+    let logs_exist: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='proxy_request_logs' AND type='table')", [], |row| row.get(0))?;
+    if logs_exist {
+        for column in ["client_id", "client_credential_id"] {
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('proxy_request_logs') WHERE name=?1)", [column], |row| row.get(0))?;
+            if !exists {
+                conn.execute(
+                    &format!("ALTER TABLE proxy_request_logs ADD COLUMN {column} TEXT"),
+                    [],
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 

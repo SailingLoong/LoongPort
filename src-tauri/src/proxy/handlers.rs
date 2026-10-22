@@ -300,6 +300,7 @@ fn validate_claude_desktop_gateway_auth(
 ///
 /// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
 struct ClaudeUsageLog {
+    caller: Option<super::client_access::CallerIdentity>,
     model: String,
     request_model: String,
     outbound_model: String,
@@ -331,6 +332,7 @@ fn prepare_claude_usage_log(
         .unwrap_or_else(|| ctx.request_model.clone());
 
     Some(ClaudeUsageLog {
+        caller: ctx.caller.clone(),
         model,
         request_model: ctx.request_model.clone(),
         outbound_model: ctx
@@ -351,6 +353,7 @@ fn prepare_claude_usage_log(
 async fn write_claude_usage_log(state: &ProxyState, log: ClaudeUsageLog) {
     log_usage(
         state,
+        log.caller,
         &log.provider_id,
         log.app_type,
         &log.model,
@@ -474,6 +477,7 @@ async fn handle_claude_transform(
             let app_type_str = ctx.app_type_str;
 
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
                 Some(claude_stream_usage_event_filter),
@@ -490,10 +494,12 @@ async fn handle_claude_transform(
                         let session_id = session_id.clone();
                         let request_model = request_model.clone();
                         let outbound_model = fallback_model.clone();
+                        let caller = caller.clone();
 
                         tokio::spawn(async move {
                             log_usage(
                                 &state,
+                                caller,
                                 &provider_id,
                                 app_type_str,
                                 &model,
@@ -1282,9 +1288,11 @@ async fn handle_codex_responses_namespace_restore(
                     let session_id = ctx.session_id.clone();
                     let latency_ms = ctx.latency_ms();
                     let local_input_tokens = ctx.local_input_tokens;
+                    let caller = ctx.caller.clone();
                     async move {
                         log_usage(
                             &state,
+                            caller,
                             &provider_id,
                             app_type_str,
                             &model,
@@ -1371,6 +1379,7 @@ async fn handle_codex_chat_to_responses_transform(
             let session_id = ctx.session_id.clone();
 
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
                 Some(codex_stream_usage_event_filter),
@@ -1397,11 +1406,13 @@ async fn handle_codex_chat_to_responses_transform(
                     let provider_id = provider_id.clone();
                     let request_model = request_model.clone();
                     let outbound_model = fallback_model.clone();
+                    let caller = caller.clone();
                     let session_id = session_id.clone();
 
                     tokio::spawn(async move {
                         log_usage(
                             &state,
+                            caller,
                             &provider_id,
                             app_type_str,
                             &model,
@@ -1523,9 +1534,11 @@ async fn handle_codex_chat_to_responses_transform(
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             async move {
                 log_usage(
                     &state,
+                    caller,
                     &provider_id,
                     app_type_str,
                     &model,
@@ -1691,9 +1704,11 @@ async fn handle_codex_anthropic_to_responses_transform(
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             async move {
                 log_usage(
                     &state,
+                    caller,
                     &provider_id,
                     app_type_str,
                     &model,
@@ -1761,6 +1776,7 @@ fn build_codex_anthropic_sse_response(
         let session_id = ctx.session_id.clone();
 
         let local_input_tokens = ctx.local_input_tokens;
+        let caller = ctx.caller.clone();
         Some(SseUsageCollector::new(
             start_time,
             Some(codex_stream_usage_event_filter),
@@ -1781,11 +1797,13 @@ fn build_codex_anthropic_sse_response(
                 let provider_id = provider_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let caller = caller.clone();
                 let session_id = session_id.clone();
 
                 tokio::spawn(async move {
                     log_usage(
                         &state,
+                        caller,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -2856,7 +2874,7 @@ fn log_forward_error(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new(&state.db).with_caller(ctx.caller.as_ref());
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -2885,6 +2903,7 @@ fn log_forward_error(
 #[allow(clippy::too_many_arguments)]
 async fn log_usage(
     state: &ProxyState,
+    caller: Option<super::client_access::CallerIdentity>,
     provider_id: &str,
     app_type: &str,
     model: &str,
@@ -2904,7 +2923,7 @@ async fn log_usage(
         return;
     }
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new(&state.db).with_caller(caller.as_ref());
 
     let (multiplier, pricing_model_source) =
         logger.resolve_pricing_config(provider_id, app_type).await;
@@ -3728,6 +3747,7 @@ async fn handle_budgeted_native_response(
                 // Preserve the normal proxy pricing source, multiplier and usage owner.
                 log_usage(
                     state,
+                    ctx.caller.clone(),
                     &ctx.provider.id,
                     ctx.app_type_str,
                     model,
