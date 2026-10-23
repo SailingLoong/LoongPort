@@ -93,6 +93,8 @@ export const workbuddyApi = {
   claim: (id: string) =>
     invoke<WorkBuddyAccount>("claim_workbuddy_today", { id }),
   claimAll: () => invoke<WorkBuddyClaimResult[]>("claim_all_workbuddy_today"),
+  cancelLogin: (flowId: string) =>
+    invoke<void>("cancel_workbuddy_authorization", { flowId }),
   beginLogin: () => invoke<WorkBuddyLogin>("begin_workbuddy_authorization"),
   finishLogin: (flowId: string) =>
     invoke<{ state: "saved" | "waiting" }>("finish_workbuddy_authorization", {

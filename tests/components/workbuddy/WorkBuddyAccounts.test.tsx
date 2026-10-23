@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   claimAll: vi.fn(),
   setAutomatic: vi.fn(),
   beginLogin: vi.fn(),
+  cancelLogin: vi.fn(),
   finishLogin: vi.fn(),
   listInferenceAccounts: vi.fn(),
   beginInferenceLogin: vi.fn(),
@@ -62,6 +63,7 @@ beforeEach(() => {
   });
   api.pollInferenceLogin.mockResolvedValue({ state: "waiting" });
   api.cancelInferenceLogin.mockResolvedValue(undefined);
+  api.cancelLogin.mockResolvedValue(undefined);
   api.discoverModels.mockResolvedValue([
     { id: "live-cli-model", name: "Live model" },
   ]);
@@ -1107,3 +1109,123 @@ it("lost disable response and failed readback display unknown, never a false on 
   await screen.findByRole("button", { name: "workbuddy.auto.unknown" });
   expect(screen.queryByRole("switch")).not.toBeInTheDocument();
 });
+
+it.each(["cancel", "unmount"] as const)(
+  "retires a late account login after %s without showing it",
+  async (action) => {
+    let resolve!: (flow: { flowId: string; verificationUri: string }) => void;
+    api.beginLogin.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const view = render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    if (action === "cancel")
+      await userEvent.click(
+        screen.getByRole("button", { name: "common.cancel" }),
+      );
+    else view.unmount();
+    await act(async () =>
+      resolve({
+        flowId: "late-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=late",
+      }),
+    );
+    await waitFor(() =>
+      expect(api.cancelLogin).toHaveBeenCalledWith("late-login"),
+    );
+    expect(
+      screen.queryByRole("link", { name: "workbuddy.authorize" }),
+    ).not.toBeInTheDocument();
+    expect(api.finishLogin).not.toHaveBeenCalled();
+  },
+);
+
+it("cancels the exact previous login when adding another account", async () => {
+  api.beginLogin
+    .mockResolvedValueOnce({
+      flowId: "old-login",
+      verificationUri: "https://www.codebuddy.cn/login?state=old",
+    })
+    .mockResolvedValueOnce({
+      flowId: "new-login",
+      verificationUri: "https://www.codebuddy.cn/login?state=new",
+    });
+  const view = render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await screen.findByRole("link", { name: "workbuddy.authorize" });
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("link", { name: "workbuddy.authorize" }),
+    ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new"),
+  );
+  expect(api.cancelLogin).toHaveBeenCalledWith("old-login");
+  view.unmount();
+  expect(api.cancelLogin).toHaveBeenCalledWith("new-login");
+});
+
+it.each(["saved", "waiting", "failure"] as const)(
+  "ignores a retired account finish %s after cancel and a new login",
+  async (outcome) => {
+    let resolve!: (value: { state: string }) => void;
+    let reject!: (error: Error) => void;
+    api.beginLogin
+      .mockResolvedValueOnce({
+        flowId: "old-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=old",
+      })
+      .mockResolvedValueOnce({
+        flowId: "new-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=new",
+      });
+    api.finishLogin.mockImplementationOnce(
+      () =>
+        new Promise((done, fail) => {
+          resolve = done;
+          reject = fail;
+        }),
+    );
+    render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "workbuddy.finishAuthorization",
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "common.cancel" }),
+    );
+    expect(api.cancelLogin).toHaveBeenCalledWith("old-login");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: "workbuddy.authorize" }),
+      ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new"),
+    );
+    await act(async () => {
+      if (outcome === "failure") reject(new Error("SYNTHETIC_RETIRED_FAILURE"));
+      else resolve({ state: outcome });
+    });
+    expect(
+      screen.getByRole("link", { name: "workbuddy.authorize" }),
+    ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new");
+    expect(
+      screen.queryByText("workbuddy.authorizationWaiting"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.list).toHaveBeenCalledTimes(1);
+    expect(api.claim).not.toHaveBeenCalled();
+  },
+);
