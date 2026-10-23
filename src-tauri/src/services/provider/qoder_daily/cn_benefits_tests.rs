@@ -363,10 +363,26 @@ async fn vault_lock_after_post_suppresses_receipt_and_stops_next_activity() {
     ));
     let seen = server.finish().await;
     assert_eq!(seen.len(), 2);
+    assert!(seen[0].starts_with("GET /sash/api/v1/me/campaigns HTTP/1.1"));
+    assert!(seen[1].starts_with("POST /sash/api/v1/me/campaigns/c1/claim HTTP/1.1"));
+    // The real connection owner denies even receipt reads while recovery is
+    // required. Do not bypass that guard to inspect the synthetic test outcome.
+    assert!(matches!(
+        db.conn.lock(),
+        Err(AppError::Config(code)) if code == "secret.recovery_required"
+    ));
+    // Both the consumer and server have finished. Clear only this test's injected
+    // block, then inspect the durable intent through the normal guarded owner.
+    db.secrets.set_blocked(false);
+    let retained = receipts(&db);
+    assert_eq!(retained.len(), 1, "c2 must not acquire an intent");
+    assert_eq!(retained[0].target.campaign_id, "c1");
     assert_eq!(
-        receipts(&db)[0].outcome,
+        retained[0].outcome,
         super::super::contract::Outcome::Unknown
     );
+    assert!(!retained[0].receipt_confirmed);
+    assert!(!retained[0].listing_claimed);
 }
 #[tokio::test]
 async fn policy_revision_revoked_during_listing_stops_before_any_intent() {
