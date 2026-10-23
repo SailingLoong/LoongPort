@@ -39,12 +39,15 @@ export function OfficialApiPage({
 }: OfficialApiPageProps) {
   const { t } = useTranslation();
   const [loginningVendor, setLoginningVendor] = useState<string | null>(null);
+  const [showOpenCodeRecovery, setShowOpenCodeRecovery] = useState(false);
+  const openCodeKeyForms = useRef<HTMLDivElement>(null);
 
   const alive = useRef(true);
   const generation = useRef(0);
   useEffect(() => {
     alive.current = true;
     setLoginningVendor(null);
+    setShowOpenCodeRecovery(false);
     return () => {
       alive.current = false;
       generation.current += 1;
@@ -55,6 +58,7 @@ export function OfficialApiPage({
     const request = generation.current;
     const current = () => alive.current && request === generation.current;
     setLoginningVendor(vendorId);
+    setShowOpenCodeRecovery(false);
     try {
       const result = await vendorApi.openLogin(vendorId, sourceAppId);
       // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
@@ -70,7 +74,11 @@ export function OfficialApiPage({
         });
       else onBack();
     } catch (e) {
-      if (current()) toast.error(extractErrorMessage(e));
+      if (current()) {
+        toast.error(extractErrorMessage(e));
+        // Offer existing forms, not a diagnosis or an automatic credential import.
+        if (vendorId === "opencode") setShowOpenCodeRecovery(true);
+      }
     } finally {
       if (current()) setLoginningVendor(null);
     }
@@ -107,7 +115,13 @@ export function OfficialApiPage({
       </div>
 
       {(!vendorId || vendorId === "opencode") && (
-        <div className="space-y-3">
+        <div
+          ref={openCodeKeyForms}
+          role="region"
+          aria-label="OpenCode API key 接入方式"
+          tabIndex={-1}
+          className="space-y-3"
+        >
           <OpenCodeLocalImportForm
             onSaved={() => {
               /* Backend event refreshes the account list. */
@@ -148,6 +162,29 @@ export function OfficialApiPage({
           </button>
         ))}
       </div>
+      {showOpenCodeRecovery && (!vendorId || vendorId === "opencode") && (
+        <div
+          role="alert"
+          className="space-y-3 rounded-lg border border-border-default p-4"
+        >
+          <p className="text-sm">
+            网页登录未完成。若已有完整 Personal API
+            key，可使用本页的个人密钥入口； 若密钥已在本机 OpenCode
+            中，可先只读预览，再自行确认导入。不会自动读取、
+            保存或创建密钥；保存或导入后仍尚未验证真实调用。
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              openCodeKeyForms.current?.focus();
+              openCodeKeyForms.current?.scrollIntoView({ block: "nearest" });
+            }}
+          >
+            使用已有 Personal key 或本机导入
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

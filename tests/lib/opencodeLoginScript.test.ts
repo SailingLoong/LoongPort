@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import vm from "node:vm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Execute the actual Rust template, not a copy of the login state machine.
 const rust = readFileSync(
@@ -29,7 +29,7 @@ function page(pathname: string) {
     location,
     top: null as unknown,
     self: null as unknown,
-    fetch: async () => ({ clone: () => ({ text: async () => "[]" }) }),
+    fetch: vi.fn(async () => ({ clone: () => ({ text: async () => "[]" }) })),
   };
   window.top = window.self = window;
   const sandbox = {
@@ -49,16 +49,19 @@ function page(pathname: string) {
         appendChild: (el: { textContent: string }) =>
           banners.push(el.textContent),
       },
-      querySelector: () => {
+      querySelector: vi.fn(() => {
         throw new Error("must not create credentials");
-      },
+      }),
     },
   };
+  const fetch = window.fetch;
   vm.runInNewContext(js, sandbox);
   return {
+    fetch,
     location,
     window,
     banners,
+    querySelector: sandbox.document.querySelector,
     emptyList() {
       (
         window as unknown as { __loongport_oc: { log: string[] } }
@@ -87,6 +90,9 @@ describe("OpenCode console login handoff", () => {
     const p = page("/console/workspace/example");
     p.tick();
     expect(p.location.href).toContain("error=console_key_required");
+    expect(new URL(p.location.href).searchParams.has("d")).toBe(false);
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.querySelector).not.toHaveBeenCalled();
   });
   it("allows login then notices an SPA console navigation", () => {
     const p = page("/console/login");
@@ -173,8 +179,30 @@ describe("OpenCode console login handoff", () => {
     p.emptyList();
     p.tick(6000);
     expect(p.banners.join("")).toContain("不会自动创建");
+    expect(p.banners.join("")).toContain("Personal API key");
+    expect(p.banners.join("")).toContain("从本机 OpenCode 导入");
+    expect(p.banners.join("")).not.toContain("自定义 API");
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.querySelector).not.toHaveBeenCalled();
     expect(p.location.href).toBe("");
     p.tick(121000);
     expect(p.location.href).toContain("error=login_timeout");
+  });
+  it("guides a masked legacy key to existing official forms without transmitting it", () => {
+    const p = page("/workspace/wrk_example/keys");
+    p.response("oc_sk_prefix_***");
+    p.tick();
+    expect(p.banners.join("")).toContain("Personal API key");
+    expect(p.banners.join("")).toContain("从本机 OpenCode 导入");
+    expect(p.banners.join("")).not.toContain("自定义 API");
+    expect(p.banners.join("")).not.toContain("oc_sk_prefix");
+    expect(p.location.href).toBe("");
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.querySelector).not.toHaveBeenCalled();
+    p.tick(121000);
+    expect(new URL(p.location.href).searchParams.get("error")).toBe(
+      "login_timeout",
+    );
+    expect(new URL(p.location.href).searchParams.has("d")).toBe(false);
   });
 });

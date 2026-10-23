@@ -172,8 +172,8 @@ pub fn parse_creds_navigation(
     }
     if let Some((_, code)) = url.query_pairs().find(|(key, _)| key == "error") {
         let message = match code.as_ref() {
-            "console_key_required" => "OpenCode 已切换到新版 Console，当前自动获取密钥不支持此页面，尚未接通账号。已有完整 API key 可在「服务」的「自定义 API」入口手动配置；个人 key 在官网 Account → Personal API keys。官网只在创建时显示一次完整 key，不能从列表恢复。手动 API 配置不等于账号积分池已验收。",
-            "login_timeout" => "OpenCode 登录接入超时，未获取可用密钥。请关闭窗口后重试；如果已进入新版 Console，请使用已有 API key 手动配置，勿重复创建密钥。",
+            "console_key_required" => "OpenCode 已切换到新版 Console，当前网页登录不能自动获取此页面的密钥，尚未接通账号。请返回 LoongPort 本页，在「OpenCode · Personal API key」添加已有完整个人密钥，或在「从本机 OpenCode 导入」先预览再确认。不要复制列表前缀或掩码，也无需重复创建密钥。保存或导入不代表真实调用已验证。",
+            "login_timeout" => "OpenCode 登录接入超时，未获取可用密钥。请关闭窗口后重试；也可返回 LoongPort 本页，在「OpenCode · Personal API key」添加已有完整个人密钥，或在「从本机 OpenCode 导入」先预览再确认。勿使用列表前缀、掩码或重复创建密钥；保存或导入不代表真实调用已验证。",
             _ => "OpenCode 登录接入未完成，请重试。",
         };
         return Some(Err(AppError::Config(message.into())));
@@ -474,7 +474,7 @@ pub fn login_script(_login_hint: &str) -> String {
       // provide guidance promptly instead of silently waiting for the deadline.
       if (!guidanceShown && Date.now() - started > 5000) {{
         guidanceShown = true;
-        banner('LoongPort：尚未取得完整专用密钥，不会自动创建。可检查官网密钥状态，或使用已有完整密钥手动配置；未接通账号。');
+        banner('LoongPort：尚未取得完整专用密钥，不会自动创建。请返回 LoongPort 本页，使用「OpenCode · Personal API key」添加已有完整个人密钥，或使用「从本机 OpenCode 导入」先预览再确认。未接通账号，勿复制列表前缀或掩码。');
       }}
       if (Date.now() - started > 120000) {{ fail('login_timeout'); clearInterval(timer); }}
       return;
@@ -482,7 +482,7 @@ pub fn login_script(_login_hint: &str) -> String {
     // B：只提示，不驱动创建。已有专用 key 的回传始终走 A。
     if (!guidanceShown) {{
       guidanceShown = true;
-      banner('LoongPort：未找到专用密钥，不会自动创建。若需要新密钥，请自行在官网确认创建；已有完整密钥可使用服务中的自定义 API 入口配置。');
+      banner('LoongPort：未找到专用密钥，不会自动创建。请返回 LoongPort 本页，使用「OpenCode · Personal API key」添加已有完整个人密钥，或使用「从本机 OpenCode 导入」先预览再确认。未接通账号，勿复制列表前缀或掩码。');
     }}
 
     // 两分钟兜底：明确失败，不把空凭据报告为接入成功。
@@ -771,8 +771,21 @@ mod tests {
     #[test]
     fn console_handoff_and_timeout_are_errors_not_credentials() {
         for code in ["console_key_required", "login_timeout", "unknown"] {
-            let url = url::Url::parse(&format!("{CREDS_SCHEME}://t?error={code}")).unwrap();
-            assert!(parse_creds_navigation(&url).unwrap().is_err());
+            let url = url::Url::parse(&format!(
+                "{CREDS_SCHEME}://t?error={code}&d=oc_sk_synthetic_secret"
+            ))
+            .unwrap();
+            let error = parse_creds_navigation(&url)
+                .unwrap()
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(!error.contains("oc_sk_synthetic_secret"));
+            if code != "unknown" {
+                assert!(error.contains("Personal API key"), "{error}");
+                assert!(error.contains("从本机 OpenCode 导入"), "{error}");
+                assert!(!error.contains("自定义 API"), "{error}");
+            }
         }
     }
 
