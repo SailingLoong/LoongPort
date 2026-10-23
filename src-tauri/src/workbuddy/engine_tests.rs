@@ -1642,3 +1642,292 @@ async fn unsent_rollback_does_not_clear_a_replacement_pending_attempt() {
     assert!(store::load(&s, &b).unwrap()[0].pending == replacement);
     assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
 }
+
+// The gate lives inside the real transport future: reaching it proves refresh
+// has entered HTTP, rather than merely being queued for the catalog mutex.
+struct RefreshReadGate {
+    inner: Fake,
+    endpoint: Endpoint,
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+impl RefreshReadGate {
+    fn new(endpoint: Endpoint, balance: f64, checked: bool) -> Self {
+        let mut requests = resource(balance);
+        requests.push(status(checked));
+        Self {
+            inner: Fake::new(requests),
+            endpoint,
+            reached: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        }
+    }
+}
+impl Transport for RefreshReadGate {
+    fn request<'a>(
+        &'a self,
+        endpoint: Endpoint,
+        account: Option<&'a Account>,
+        state: Option<&'a str>,
+        now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+        Box::pin(async move {
+            if endpoint == self.endpoint {
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.request(endpoint, account, state, now).await
+        })
+    }
+}
+async fn refresh_progress<F: Future>(future: F) -> F::Output {
+    tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .expect("unrelated local operation must finish while refresh HTTP is suspended")
+}
+
+#[tokio::test]
+async fn refresh_pending_http_allows_other_accounts_and_minimax_owner_to_progress() {
+    let _minimax = crate::minimax_code::isolated_fixture_guard().await;
+    let (s, ids) = account_isolation_fixture();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&ids[0]));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    assert!(matches!(engine.refresh(&ids[0]).await, Err(Failure::Busy)));
+    assert!(matches!(engine.claim(&ids[0]).await, Err(Failure::Busy)));
+    assert_eq!(refresh_progress(engine.list()).await.unwrap().len(), 3);
+    let minimax = crate::minimax_code::checkin::Engine {
+        session: &s,
+        transport: &crate::minimax_code::http::OfficialHttp,
+    };
+    // Real MiniMax catalog consumer; list has no HTTP side effects.
+    assert!(refresh_progress(minimax.list()).await.unwrap().is_empty());
+    let mut requests = resource(77.0);
+    requests.push(status(true));
+    let other_transport = Fake::new(requests);
+    let other = Engine {
+        session: &s,
+        transport: &other_transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert_eq!(
+        refresh_progress(other.refresh(&ids[1]))
+            .await
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(77.0)
+    );
+    gate.resume.notify_one();
+    assert_eq!(refresh.await.unwrap().credits.total_remaining, Some(10.0));
+    let rows = engine.list().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == ids[1])
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(77.0)
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.id == ids[1]).unwrap().claim_state,
+        ClaimState::AlreadyClaimed
+    );
+}
+
+#[tokio::test]
+async fn refresh_pending_http_preserves_concurrent_policy_and_current_account_fields() {
+    let (s, id) = setup();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    let on = refresh_progress(enable(&engine, &id)).await;
+    let off = refresh_progress(engine.set_automatic(
+        &id,
+        on.generation,
+        on.auto_claim_revision,
+        on.auto_claim_policy_version,
+        false,
+    ))
+    .await
+    .unwrap();
+    {
+        let _owner = refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+        let b = store::binding(&s).unwrap();
+        let mut rows = store::load(&s, &b).unwrap();
+        rows[0].account.label = "Updated while reading".into();
+        store::save(&s, &b, rows).unwrap();
+    }
+    gate.resume.notify_one();
+    let refreshed = refresh.await.unwrap();
+    assert!(!refreshed.auto_claim_enabled);
+    assert_eq!(refreshed.auto_claim_revision, off.auto_claim_revision);
+    assert_eq!(refreshed.label, "Updated while reading");
+    assert_eq!(refreshed.credits.total_remaining, Some(10.0));
+}
+
+#[tokio::test]
+async fn refresh_late_result_rejects_relogin_generation_token_identity_deletion_and_epoch() {
+    for endpoint in [Endpoint::Summary, Endpoint::Status] {
+        for change in [
+            "relogin",
+            "generation",
+            "token",
+            "identity",
+            "delete",
+            "epoch",
+        ] {
+            let (s, id) = setup();
+            let gate = RefreshReadGate::new(endpoint, 99.0, true);
+            let engine = Engine {
+                session: &s,
+                transport: &gate,
+                clock: &super::clock::FixedClock(NOW),
+            };
+            let mut refresh = Box::pin(engine.refresh(&id));
+            tokio::select! { _ = &mut refresh => panic!("read must be suspended"), _ = gate.reached.notified() => {} }
+            if change == "relogin" {
+                let auth = Fake::new(vec![
+                    (
+                        Endpoint::AuthState,
+                        Ok(
+                            json!({"code":0,"data":{"state":"refresh-relogin","authUrl":"https://www.codebuddy.cn/login?state=refresh-relogin"}}),
+                        ),
+                    ),
+                    (
+                        Endpoint::AuthToken,
+                        Ok(
+                            json!({"code":0,"data":{"accessToken":"SYNTHETIC_RELOGIN_TOKEN","domain":"www.codebuddy.cn"}}),
+                        ),
+                    ),
+                    (
+                        Endpoint::Profile,
+                        Ok(
+                            json!({"code":0,"data":{"uid":"synthetic-uid","domain":"www.codebuddy.cn"}}),
+                        ),
+                    ),
+                ]);
+                let login = refresh_progress(super::authorization::begin(&s, &auth, NOW))
+                    .await
+                    .unwrap();
+                refresh_progress(super::authorization::finish(
+                    &s,
+                    &auth,
+                    &login.flow_id,
+                    NOW + 1,
+                ))
+                .await
+                .unwrap();
+            } else if change == "epoch" {
+                s.set_blocked(true);
+                s.set_blocked(false);
+            } else {
+                let _owner =
+                    refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+                let b = store::binding(&s).unwrap();
+                let mut rows = store::load(&s, &b).unwrap();
+                match change {
+                    "generation" => rows[0].generation += 1,
+                    "token" => rows[0].account.token = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
+                    "identity" => rows[0].account.uid = "replacement-uid".into(),
+                    "delete" => rows.clear(),
+                    _ => unreachable!(),
+                }
+                store::save(&s, &b, rows).unwrap();
+            }
+            let latest = std::fs::read(s.root().join(store::FILE)).unwrap();
+            gate.resume.notify_one();
+            assert!(
+                matches!(refresh.await, Err(Failure::ExpiredAuthorization)),
+                "{change}"
+            );
+            let expected = if endpoint == Endpoint::Summary {
+                vec![Endpoint::Summary]
+            } else {
+                vec![
+                    Endpoint::Summary,
+                    Endpoint::Paid,
+                    Endpoint::Free,
+                    Endpoint::Status,
+                ]
+            };
+            assert_eq!(
+                *gate.inner.calls.lock().unwrap(),
+                expected,
+                "{change}: no follow-up request may use the retired snapshot"
+            );
+            assert_eq!(
+                latest,
+                std::fs::read(s.root().join(store::FILE)).unwrap(),
+                "{change}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn refresh_cancellation_releases_lease_without_writing_partial_results() {
+    let (s, id) = setup();
+    let before = std::fs::read(s.root().join(store::FILE)).unwrap();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    drop(refresh);
+    assert_eq!(before, std::fs::read(s.root().join(store::FILE)).unwrap());
+    gate.resume.notify_one();
+    assert_eq!(
+        refresh_progress(engine.refresh(&id))
+            .await
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(10.0)
+    );
+}
+
+#[tokio::test]
+async fn refresh_waiting_to_merge_across_midnight_does_not_relabel_yesterday_data() {
+    let (s, id) = setup();
+    let before = 1_800_028_799_000;
+    let clock = MovingClock(std::sync::atomic::AtomicI64::new(before));
+    let gate = RefreshReadGate::new(Endpoint::Status, 10.0, true);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &clock,
+    };
+    let original = std::fs::read(s.root().join(store::FILE)).unwrap();
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Status must be suspended"), _ = gate.reached.notified() => {} }
+    let owner = refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+    gate.resume.notify_one();
+    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(refresh.as_mut().poll(cx))).await;
+    assert!(polled.is_pending(), "HTTP completed; merge waits for owner");
+    assert_eq!(
+        gate.inner.calls.lock().unwrap().last(),
+        Some(&Endpoint::Status)
+    );
+    clock
+        .0
+        .store(before + 2000, std::sync::atomic::Ordering::SeqCst);
+    drop(owner);
+    let row = refresh.await.unwrap();
+    assert_eq!(row.claim_state, ClaimState::Unconfirmed);
+    assert_eq!(row.credits.total_remaining, None);
+    assert_eq!(original, std::fs::read(s.root().join(store::FILE)).unwrap());
+}

@@ -121,20 +121,107 @@ impl<T: Transport> Engine<'_, T> {
             row.pending = None;
         }
     }
+    async fn refresh_read(
+        &self,
+        b: &VaultMetadata,
+        epoch: u64,
+        snapshot: &SavedAccount,
+        endpoint: Endpoint,
+    ) -> Result<serde_json::Value, Failure> {
+        let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
+        let mut pending = None;
+        let mut ready = None;
+        {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            self.check_epoch(b, epoch)?;
+            let rows = store::load(self.session, b)?;
+            matched(&rows, b, snapshot)?;
+            let _vault = self
+                .session
+                .read()
+                .map_err(|_| Failure::StorageUnavailable)?;
+            if self.session.lifecycle_epoch() != epoch {
+                return Err(Failure::ExpiredAuthorization);
+            }
+            // Reuse dispatch_claim's final admission boundary: creation and first
+            // poll are protected, but a pending HTTP read never holds the owner.
+            let mut future = self.transport.request(
+                endpoint,
+                Some(&snapshot.account),
+                None,
+                self.clock.now_ms(),
+            );
+            match future
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+            {
+                std::task::Poll::Ready(result) => ready = Some(result),
+                std::task::Poll::Pending => pending = Some(future),
+            }
+        }
+        let result = if let Some(result) = ready {
+            result
+        } else {
+            pending.ok_or(Failure::Unconfirmed)?.await
+        };
+        Ok(result.unwrap_or_else(|error| match error {
+            Failure::NeedsVerification => serde_json::json!({"code":401}),
+            _ => serde_json::json!({}),
+        }))
+    }
     pub async fn refresh(&self, id: &str) -> Result<AccountView, Failure> {
         let _lease = lease(self.session, id)?;
+        let (b, epoch, snapshot, read_day) = {
+            let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+            let b = store::binding(self.session)?;
+            let row = store::load(self.session, &b)?
+                .into_iter()
+                .find(|r| r.account.id(&b.vault_id) == id)
+                .ok_or(Failure::UnsupportedContext)?;
+            (
+                b,
+                self.session.lifecycle_epoch(),
+                row,
+                today(self.clock.now_ms()),
+            )
+        };
+        // Retain the account lease, but never retain the shared owner over HTTP.
+        let summary = self
+            .refresh_read(&b, epoch, &snapshot, Endpoint::Summary)
+            .await?;
+        let paid = self
+            .refresh_read(&b, epoch, &snapshot, Endpoint::Paid)
+            .await?;
+        let free = self
+            .refresh_read(&b, epoch, &snapshot, Endpoint::Free)
+            .await?;
+        let credits = if read_day == today(self.clock.now_ms()) {
+            credits::normalize(&summary, &paid, &free, self.clock.now_ms())
+        } else {
+            Credits::default()
+        };
+        let status_day = today(self.clock.now_ms());
+        let response = self
+            .refresh_read(&b, epoch, &snapshot, Endpoint::Status)
+            .await?;
+        let status = if status_day == today(self.clock.now_ms()) {
+            checkin::status(&response)
+        } else {
+            ClaimState::Unconfirmed
+        };
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
-        let b = store::binding(self.session)?;
+        self.check_epoch(&b, epoch)?;
         let mut rows = store::load(self.session, &b)?;
-        let i = rows
-            .iter()
-            .position(|r| r.account.id(&b.vault_id) == id)
-            .ok_or(Failure::UnsupportedContext)?;
-        let credits = self.credits(&b, &rows[i].account).await;
-        let status = self.status(&b, &rows[i].account).await;
+        let i = matched(&rows, &b, &snapshot)?;
+        let day = today(self.clock.now_ms());
+        if read_day != day {
+            // The final owner wait can cross midnight after status() returned.
+            // Keep the latest row intact instead of relabeling yesterday's read.
+            return Ok(rows[i].view(&b.vault_id, &day));
+        }
         if rows[i].pending.is_some() {
             self.resolve_pending(&mut rows[i], status, &credits);
-        } else if rows[i].claim_day != today(self.clock.now_ms())
+        } else if rows[i].claim_day != day
             || !(rows[i].claim_state == ClaimState::Claimed && status == ClaimState::AlreadyClaimed)
         {
             rows[i].claim_state = status;
@@ -143,7 +230,7 @@ impl<T: Transport> Engine<'_, T> {
         if credits.updated_at.is_some() {
             rows[i].credits = credits;
         }
-        rows[i].claim_day = today(self.clock.now_ms());
+        rows[i].claim_day = day;
         self.persist(&b, rows, i)
     }
     pub async fn refresh_all(&self) -> Result<Vec<AccountView>, Failure> {
