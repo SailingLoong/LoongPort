@@ -58,7 +58,6 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
     )
     .unwrap();
     let config_path = crate::codex_config::get_codex_config_path();
-    let auth_path = crate::codex_config::get_codex_auth_path();
     let mut original = Provider::with_id(
         "synthetic-original".into(),
         "Synthetic original direct configuration".into(),
@@ -144,7 +143,19 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         .as_str()
         .unwrap();
     assert_eq!(endpoint, format!("http://127.0.0.1:{}/v1", info.port));
-    let auth: Value = serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+    // Current Codex proxy routes use provider-scoped bearer auth, not an
+    // OPENAI_API_KEY in auth.json. Read the same generated route the client uses.
+    let bearer = native["model_providers"][provider]["experimental_bearer_token"]
+        .as_str()
+        .expect("native proxy route must provide its local bearer token");
+    assert_eq!(bearer, crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER);
+    assert_eq!(
+        native["model_providers"][provider]["wire_api"].as_str(),
+        Some("responses")
+    );
+    assert!(native["model_providers"][provider]
+        .get("requires_openai_auth")
+        .is_none());
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -156,7 +167,7 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         "tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]});
     let response = client
         .post(format!("{endpoint}/responses"))
-        .bearer_auth(auth["OPENAI_API_KEY"].as_str().unwrap())
+        .bearer_auth(bearer)
         .json(&body)
         .send()
         .await
@@ -196,7 +207,7 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
     // No set_current_provider, route selection or re-ENTER between turns.
     let response = client
         .post(format!("{endpoint}/responses"))
-        .bearer_auth(auth["OPENAI_API_KEY"].as_str().unwrap())
+        .bearer_auth(bearer)
         .json(&body)
         .send()
         .await
