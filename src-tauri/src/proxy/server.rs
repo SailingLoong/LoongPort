@@ -921,3 +921,7 @@ mod trae_pool_tests;
 #[cfg(test)]
 #[path = "qoder_http_pool_tests.rs"]
 mod qoder_http_pool_tests;
+
+#[cfg(all(test, feature = "gui"))]
+#[path = "opencode_personal_session_tests.rs"]
+mod opencode_personal_session_tests;

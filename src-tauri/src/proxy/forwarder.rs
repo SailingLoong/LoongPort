@@ -3199,6 +3199,7 @@ impl RequestForwarder {
             &self.router.managed_secret_session(),
             provider,
             &url,
+            app_type,
         )?;
         #[cfg(all(test, feature = "gui"))]
         if vendor_fixture.is_some() && !is_socks_proxy && preserve_exact_header_case {
