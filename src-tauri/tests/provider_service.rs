@@ -657,10 +657,16 @@ wire_api = "responses"
         config_after_takeover.contains(&codex_proxy_base_url),
         "enabling takeover should point Codex config.toml at the local proxy"
     );
-    assert!(
-        config_after_takeover.contains("PROXY_MANAGED"),
-        "enabling takeover should move the proxy placeholder into config.toml"
-    );
+    let takeover_doc: toml_edit::DocumentMut = config_after_takeover.parse().expect("valid TOML");
+    let takeover_route = takeover_doc["model_provider"]
+        .as_str()
+        .expect("active route");
+    let client_key = takeover_doc["model_providers"][takeover_route]["experimental_bearer_token"]
+        .as_str()
+        .filter(|key| !key.is_empty())
+        .expect("takeover must project a calling credential");
+    assert_ne!(client_key, "PROXY_MANAGED");
+    assert_ne!(client_key, "deepseek-key");
     assert!(
         !config_after_takeover.contains("https://api.deepseek.com/v1"),
         "takeover live config should not keep the upstream DeepSeek endpoint"
@@ -705,8 +711,8 @@ wire_api = "responses"
         "disabling takeover should restore the selected DeepSeek live config"
     );
     assert!(
-        !restored_config.contains("PROXY_MANAGED"),
-        "restored live config must not keep the proxy placeholder"
+        !restored_config.contains(client_key) && !restored_config.contains("PROXY_MANAGED"),
+        "restored live config must not keep the local calling credential"
     );
 }
 
@@ -1832,9 +1838,26 @@ wire_api = "responses"
         live_config.contains("http://127.0.0.1:15721/v1"),
         "live config should remain pointed at the local proxy"
     );
-    assert!(
-        live_config.contains("PROXY_MANAGED"),
-        "live config should keep the proxy bearer placeholder"
+    let live_doc: toml_edit::DocumentMut = live_config.parse().expect("valid TOML");
+    let live_route = live_doc["model_provider"].as_str().expect("active route");
+    let client_key = live_doc["model_providers"][live_route]["experimental_bearer_token"]
+        .as_str()
+        .filter(|key| !key.is_empty())
+        .expect("takeover must project a calling credential");
+    assert_ne!(client_key, "PROXY_MANAGED");
+    assert_ne!(client_key, "new-key");
+    ProviderService::switch(&state, AppType::Codex, "new-provider")
+        .expect("reapply the selected provider while stopped");
+    let reapplied_config = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
+        .expect("read reapplied config");
+    let reapplied_doc: toml_edit::DocumentMut = reapplied_config.parse().expect("valid TOML");
+    let reapplied_route = reapplied_doc["model_provider"]
+        .as_str()
+        .expect("active reapplied route");
+    assert_eq!(
+        reapplied_doc["model_providers"][reapplied_route]["experimental_bearer_token"].as_str(),
+        Some(client_key),
+        "reapplying takeover must preserve the calling credential"
     );
     assert!(
         live_config.contains(r#"model_provider = "deepseek-new""#)

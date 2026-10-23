@@ -901,7 +901,7 @@ fn database_image(
     Ok(memory)
 }
 // Only the original authenticated journal can carry its exact recorded tuple.
-// Keep the explicitly supported historical binding; a schema bump must not
+// Keep supported historical bindings within the schema owner's range; a bump must not
 // reinterpret an already authenticated journal as a new-version operation.
 // A missing binding retains the legacy ceiling, including old recovery records.
 fn validate_database_version(
@@ -913,7 +913,9 @@ fn validate_database_version(
         return vault::preflight_connection(conn);
     };
     if binding.upstream != crate::database::UPSTREAM4_SCHEMA_VERSION
-        || ![24, 25, 26, 27].contains(&binding.loongport)
+        || !crate::database::loongport_schema::supports_authenticated_snapshot_version(
+            binding.loongport,
+        )
     {
         return Err(invalid());
     }
@@ -1656,7 +1658,25 @@ mod tests {
     // Explicit historical shapes: current fixture creation must not silently
     // turn a fixed historical identity test into the latest schema.
     fn set_test_checkpoint_version(conn: &Connection, version: i32) {
-        assert!([24, 25, 26, 27].contains(&version));
+        assert!(
+            crate::database::loongport_schema::supports_authenticated_snapshot_version(version)
+        );
+        if version < 28 {
+            conn.execute_batch("DROP TABLE IF EXISTS loongport_client_credentials")
+                .unwrap();
+            for column in ["client_id", "client_credential_id"] {
+                let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('proxy_request_logs') WHERE name=?1)", [column], |row| row.get(0)).unwrap();
+                if exists {
+                    conn.execute(
+                        &format!("ALTER TABLE proxy_request_logs DROP COLUMN {column}"),
+                        [],
+                    )
+                    .unwrap();
+                }
+            }
+        } else {
+            crate::proxy::client_access::create_schema(conn).unwrap();
+        }
         if version < 26 {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
@@ -1763,8 +1783,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn transition_publishes_exact_authenticated_v24_v25_v26_v27_targets() {
-        for version in [24, 25, 26, 27] {
+    fn transition_publishes_exact_authenticated_supported_schema_targets() {
+        for version in crate::database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION
+            ..=crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
             publish_native_checkpoint(version, version, version);
         }
     }
@@ -1780,6 +1802,11 @@ mod tests {
             (25, 26, 25),
             (26, 25, 26),
             (26, 26, 27),
+            (
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+                crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION - 1,
+            ),
         ] {
             publish_native_checkpoint(source, image, recorded);
         }
@@ -1789,7 +1816,9 @@ mod tests {
     fn recorded_database_binding_versions_survive_native_schema_bumps() {
         // Version admission only. MAC, roots, inode and content digest remain
         // enforced by the existing original-journal replay owner and its tests.
-        for version in [24, 25, 26, 27] {
+        for version in crate::database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION
+            ..=crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
             conn.execute(
@@ -1812,7 +1841,10 @@ mod tests {
             conn.execute_batch("PRAGMA user_version=19").unwrap();
             assert!(validate_database_version(&conn, Some(&binding), true).is_err());
         }
-        for version in [23, 28] {
+        for version in [
+            crate::database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION - 1,
+            crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1,
+        ] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20").unwrap();
             let binding = DatabaseBinding {

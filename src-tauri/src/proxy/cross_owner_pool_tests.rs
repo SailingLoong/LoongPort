@@ -148,7 +148,10 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
     let bearer = native["model_providers"][provider]["experimental_bearer_token"]
         .as_str()
         .expect("native proxy route must provide its local bearer token");
-    assert_eq!(bearer, crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER);
+    assert_eq!(bearer, db.managed_client_key("codex").unwrap().unwrap());
+    db.authenticate_client(bearer, "codex", Some("MiniMax-M2.7"))
+        .expect("the projected token must authenticate its Codex route");
+    assert!(db.authenticate_client(bearer, "claude", None).is_err());
     assert_eq!(
         native["model_providers"][provider]["wire_api"].as_str(),
         Some("responses")

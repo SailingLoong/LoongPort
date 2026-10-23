@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+mod clients;
+pub use clients::*;
+
 mod agents;
 pub use agents::*;
 

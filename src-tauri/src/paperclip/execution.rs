@@ -836,6 +836,28 @@ impl Owner {
                 serde_json::to_vec(&body).map_err(|_| unavailable())?,
             ))
             .map_err(|_| unavailable())?;
+        if self
+            .state
+            .db
+            .client_access_ready()
+            .map_err(|_| unavailable())?
+        {
+            let caller = self
+                .state
+                .db
+                .ensure_builtin_client_credential("loongport-agents", self.app.as_str(), &[])
+                .map_err(|_| unavailable())?;
+            let key = zeroize::Zeroizing::new(
+                self.state
+                    .db
+                    .resolve_client_credential(&caller.id, &caller.client_id, &caller.route_app)
+                    .map_err(|_| unavailable())?,
+            );
+            request.headers_mut().insert(
+                crate::proxy::client_access::CLIENT_KEY_HEADER,
+                http::HeaderValue::from_str(&key).map_err(|_| unavailable())?,
+            );
+        }
         request.extensions_mut().insert(route.clone());
         let response = self
             .state

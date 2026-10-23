@@ -3466,7 +3466,7 @@ fn default_install(installs: &[ToolInstallation]) -> Option<&ToolInstallation> {
     })
 }
 
-fn locate_default_tool(
+pub(crate) fn locate_default_tool(
     tool: &str,
     deadline: Option<CommandDeadline>,
 ) -> Result<std::path::PathBuf, String> {

@@ -15,6 +15,7 @@ export type ClientView =
   | "skills"
   | "skillsDiscovery"
   | "mcp"
+  | "clients"
   | "agents"
   | "universal"
   | "sessions"
@@ -38,6 +39,7 @@ export const CLIENT_VIEWS: ClientView[] = [
   "skills",
   "skillsDiscovery",
   "mcp",
+  "clients",
   "agents",
   "universal",
   "sessions",
@@ -57,6 +59,7 @@ const parentViews: Partial<Record<ClientView, ClientView>> = {
   skillsDiscovery: "skills",
   mcp: "resources",
   prompts: "resources",
+  clients: "resources",
   agents: "resources",
   universal: "resources",
   workspace: "resources",

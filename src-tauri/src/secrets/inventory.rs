@@ -7,6 +7,7 @@ pub(crate) fn is_protected_setting(key: &str) -> bool {
             | "global_proxy_url"
             | "claude_desktop_gateway_token"
             | "zcode_claim_v1"
+            | "client_access_migration_version"
     ) || key
         .strip_prefix("common_config_")
         .is_some_and(|app| crate::app_config::AppType::all().any(|kind| kind.as_str() == app))
@@ -31,6 +32,12 @@ enum ResetPolicy {
 }
 
 pub(crate) const TABLES: &[ProtectedTable] = &[
+    ProtectedTable {
+        name: "loongport_client_credentials",
+        identity_columns: &["id"],
+        columns: &["secret"],
+        reset: ResetPolicy::RemoveRows,
+    },
     ProtectedTable {
         name: "provider_endpoints",
         identity_columns: &["id", "provider_id", "app_type"],

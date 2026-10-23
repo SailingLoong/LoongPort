@@ -2370,6 +2370,15 @@ command = "legacy-cmd"
             serde_json::to_string(&stored_provider.settings_config).expect("serialize");
         assert_eq!(backup.original_config, expected_backup);
 
+        let client_key = db
+            .managed_client_key("claude")
+            .expect("resolve managed credential")
+            .expect("managed credential exists");
+        let caller = db
+            .authenticate_client(&client_key, "claude", Some("model-updated"))
+            .expect("managed credential authenticates");
+        assert_eq!(caller.client_id, "managed-claude");
+        assert_eq!(caller.route_app, "claude");
         let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
         assert_eq!(
             live.get("permissions"),
@@ -2380,8 +2389,8 @@ command = "legacy-cmd"
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_API_KEY"))
                 .and_then(|v| v.as_str()),
-            Some("PROXY_MANAGED"),
-            "takeover placeholder should stay intact"
+            Some(client_key.as_str()),
+            "takeover must project the credential supplied by its owner"
         );
         assert_eq!(
             live.get("env")

@@ -74,6 +74,9 @@ pub enum ProxyError {
     #[error("认证失败: {0}")]
     AuthError(String),
 
+    #[error("Client credential rejected")]
+    ClientAccessDenied,
+
     #[allow(dead_code)]
     #[error("内部错误: {0}")]
     Internal(String),
@@ -156,6 +159,7 @@ impl IntoResponse for ProxyError {
                         (StatusCode::GATEWAY_TIMEOUT, self.to_string())
                     }
                     ProxyError::AuthError(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
+                    ProxyError::ClientAccessDenied => (StatusCode::UNAUTHORIZED, self.to_string()),
                     ProxyError::Internal(_) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
                     }

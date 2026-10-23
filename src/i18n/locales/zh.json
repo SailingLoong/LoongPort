@@ -4058,7 +4058,8 @@
       "openclawTools": "工具权限",
       "openclawAgents": "Agent 默认设置",
       "hermesMemory": "Hermes 记忆",
-      "hermesDashboard": "Hermes 控制台"
+      "hermesDashboard": "Hermes 控制台",
+      "clients": "客户端接入"
     },
     "featureDescriptions": {
       "usage": "查看请求、Token 和费用",
@@ -4073,7 +4074,8 @@
       "openclawTools": "管理 OpenClaw 工具权限",
       "openclawAgents": "配置 OpenClaw 默认行为",
       "hermesMemory": "查看与编辑持久记忆",
-      "hermesDashboard": "打开本地管理界面"
+      "hermesDashboard": "打开本地管理界面",
+      "clients": "连接 WorkBuddy 等客户端"
     }
   },
   "applications": {
@@ -5137,5 +5139,60 @@
       "expires": "访问凭据到期：{{time}}",
       "reimport": "请在 CLI 重新登录，再明确重新导入此账号。"
     }
+  },
+  "clients": {
+    "description": "将其他客户端连接到 LoongPort 的已有路由。",
+    "configured": "配置已写入，实际对话尚未验证。",
+    "notConfigured": "尚未连接",
+    "sharedRoute": "共享 {{route}} 路由策略",
+    "route": "路由",
+    "models": "模型 ID（逗号分隔）",
+    "credential": "接入凭据",
+    "chooseCredential": "选择接入凭据",
+    "createCredential": "创建接入凭据",
+    "preview": "预览配置",
+    "previewDescription": "为 {{route}} 路由配置 {{count}} 个模型，保留其他模型和设置。",
+    "apply": "应用配置",
+    "disconnect": "断开连接",
+    "recover": "核对中断的操作",
+    "applied": "配置已写入。请在客户端选择模型并验证对话；若未出现，请重启客户端。",
+    "operationFailed": "操作未完成。请检查本地路由、凭据和配置是否有外部修改，再重试。",
+    "configurationChanged": "客户端配置已变更，请核对后再连接。",
+    "recoveryRequired": "有一次中断的操作需要核对。",
+    "revoke": "撤销凭据"
+  },
+  "codeAgents": {
+    "title": "代码任务",
+    "description": "在独立工作区运行 Codex。修改保留供你检查，不会自动合并。仅使用已授权的连接。",
+    "authorize": "授权代码任务",
+    "revoke": "撤销代码授权",
+    "grant": "代码授权",
+    "chooseGrant": "请选择授权",
+    "repository": "代码仓库",
+    "base": "基准版本",
+    "model": "代码模型",
+    "modelHint": "可选择已配置的模型，或填写模型 ID。实际可用性由运行结果确认。",
+    "run": "运行代码任务",
+    "refresh": "刷新代码状态",
+    "workspace": "工作区：",
+    "baseCommit": "基准：",
+    "headCommit": "结果版本：",
+    "lostOutput": "应用重启后正文不可恢复，工作区和执行状态仍保留。",
+    "interaction": "Codex 需要额外确认，任务已停止。",
+    "unfinished": "任务未完成，请检查工作区与执行状态。",
+    "processUnknown": "进程停止状态未确认。",
+    "cancel": "取消代码任务",
+    "readFailed": "无法读取代码任务。",
+    "modelsFailed": "无法读取已配置的模型。",
+    "createUncertain": "启动结果未确认；再次提交相同内容会读取已有任务。",
+    "operationFailed": "操作失败，请刷新状态后重试。",
+    "unknown": "结果未确认",
+    "running": "执行中",
+    "completed": "完成",
+    "cancelled": "已取消",
+    "failed": "失败",
+    "unknownStatus": "未知状态",
+    "routeUnsupported": "代码任务需要 API Key 连接。请在 Codex 中选择 API Key 连接并填写模型后重试。",
+    "accessDenied": "代码访问授权不可用。请刷新授权状态或重新授权后重试。"
   }
 }

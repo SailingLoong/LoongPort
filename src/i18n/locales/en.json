@@ -4058,7 +4058,8 @@
       "openclawTools": "Tool permissions",
       "openclawAgents": "Agent defaults",
       "hermesMemory": "Hermes memory",
-      "hermesDashboard": "Hermes dashboard"
+      "hermesDashboard": "Hermes dashboard",
+      "clients": "Client connections"
     },
     "featureDescriptions": {
       "usage": "Review requests, tokens, and costs",
@@ -4073,7 +4074,8 @@
       "openclawTools": "Manage OpenClaw tool permissions",
       "openclawAgents": "Configure OpenClaw defaults",
       "hermesMemory": "View and edit persistent memory",
-      "hermesDashboard": "Open the local management interface"
+      "hermesDashboard": "Open the local management interface",
+      "clients": "Connect WorkBuddy and other clients"
     }
   },
   "applications": {
@@ -5137,5 +5139,60 @@
       "expires": "Access credentials expire: {{time}}",
       "reimport": "Sign in again in the CLI, then explicitly reimport this account."
     }
+  },
+  "clients": {
+    "description": "Connect other clients to existing LoongPort routes.",
+    "configured": "Configuration written; a client conversation has not been verified.",
+    "notConfigured": "Not connected",
+    "sharedRoute": "Shares the {{route}} routing policy",
+    "route": "Route",
+    "models": "Model IDs (comma separated)",
+    "credential": "Access credential",
+    "chooseCredential": "Choose an access credential",
+    "createCredential": "Create access credential",
+    "preview": "Preview configuration",
+    "previewDescription": "Configure {{count}} models on the {{route}} route, preserving other models and settings.",
+    "apply": "Apply configuration",
+    "disconnect": "Disconnect",
+    "recover": "Check interrupted operation",
+    "applied": "Configuration written. Select a model in the client and verify a conversation. Restart the client if the model is missing.",
+    "operationFailed": "The operation did not complete. Check the local proxy, credential and external configuration changes, then try again.",
+    "configurationChanged": "The client configuration has changed. Review it before reconnecting.",
+    "recoveryRequired": "An interrupted operation needs to be checked.",
+    "revoke": "Revoke credential"
+  },
+  "codeAgents": {
+    "title": "Code tasks",
+    "description": "Run Codex in an isolated workspace. Changes stay available for review and are never merged automatically. Only authorized connections are used.",
+    "authorize": "Authorize code tasks",
+    "revoke": "Revoke code access",
+    "grant": "Code access",
+    "chooseGrant": "Choose access",
+    "repository": "Repository",
+    "base": "Base revision",
+    "model": "Code model",
+    "modelHint": "Choose a configured model or enter a model ID. Availability is confirmed when the task runs.",
+    "run": "Run code task",
+    "refresh": "Refresh code status",
+    "workspace": "Workspace: ",
+    "baseCommit": "Base: ",
+    "headCommit": "Result revision: ",
+    "lostOutput": "After a restart, response text is unavailable; the workspace and execution status remain.",
+    "interaction": "Codex requires additional confirmation. The task has stopped.",
+    "unfinished": "The task did not finish. Check its workspace and execution status.",
+    "processUnknown": "Process shutdown is unconfirmed.",
+    "cancel": "Cancel code task",
+    "readFailed": "Unable to read code tasks.",
+    "modelsFailed": "Unable to read configured models.",
+    "createUncertain": "Startup is unconfirmed. Submitting the same task again reads its existing status.",
+    "operationFailed": "The operation failed. Refresh the status and try again.",
+    "unknown": "Unconfirmed",
+    "running": "Running",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "failed": "Failed",
+    "unknownStatus": "Unknown status",
+    "routeUnsupported": "Code tasks require an API key connection. Select an API key connection in Codex and enter a model, then try again.",
+    "accessDenied": "Code access is unavailable. Refresh the access status or authorize again, then try again."
   }
 }

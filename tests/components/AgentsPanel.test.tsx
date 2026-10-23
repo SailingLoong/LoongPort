@@ -2,9 +2,21 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import type { AgentRun } from "@/lib/api/agents";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
+vi.mock("@/components/agents/CodeAgentsPanel", () => ({
+  CodeAgentsPanel: () => null,
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const call = vi.mocked(invoke);
+function groups(runs: AgentRun[], canCancel = true) {
+  return [...new Set(runs.map((run) => run.taskId))].map((taskId) => ({
+    taskId,
+    status: "accepted",
+    canCancel,
+    runs: runs.filter((run) => run.taskId === taskId),
+  }));
+}
 beforeEach(() => {
   call.mockReset();
   call.mockResolvedValue([]);
@@ -74,13 +86,14 @@ it("cancels through the owner without claiming the provider has stopped", async 
   const rows = [
     { taskId: "task-1", agentId: "analysis", result: { status: "accepted" } },
   ];
-  call.mockResolvedValue(rows);
+  call.mockResolvedValue(groups(rows));
   const user = userEvent.setup();
   render(<AgentsPanel />);
   await user.click(await screen.findByRole("button", { name: "取消任务" }));
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith("cancel_agents_task", {
       taskId: "task-1",
+      grouped: true,
     }),
   );
   expect(await screen.findByRole("status")).toHaveTextContent(
@@ -109,56 +122,62 @@ it("blocks rapid duplicate create while the first submission is pending", async 
 });
 
 it("surfaces only completed review as the final result", async () => {
-  call.mockResolvedValue([
-    {
-      taskId: "chain-1",
-      agentId: "analysis",
-      result: { status: "completed", output: "Initial analysis" },
-    },
-    {
-      taskId: "chain-1",
-      agentId: "review",
-      dependsOnAnalysis: true,
-      result: { status: "completed", output: "Reviewed answer" },
-    },
-  ]);
+  call.mockResolvedValue(
+    groups([
+      {
+        taskId: "chain-1",
+        agentId: "analysis",
+        result: { status: "completed", output: "Initial analysis" },
+      },
+      {
+        taskId: "chain-1",
+        agentId: "review",
+        dependsOnAnalysis: true,
+        result: { status: "completed", output: "Reviewed answer" },
+      },
+    ]),
+  );
   render(<AgentsPanel />);
   expect(
     await screen.findByRole("heading", { name: "最终结果" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Reviewed answer")).toBeInTheDocument();
-  expect(screen.getByText(/分析结果交给复核/)).toBeInTheDocument();
+  expect(screen.getByText(/多个分析并行执行/)).toBeInTheDocument();
 });
 it("does not turn partial analysis success into a final answer", async () => {
-  call.mockResolvedValue([
-    {
-      taskId: "chain-2",
-      agentId: "analysis",
-      result: { status: "completed", output: "Draft only" },
-    },
-    {
-      taskId: "chain-2",
-      agentId: "review",
-      dependsOnAnalysis: true,
-      result: { status: "failed", reason: "analysis_output_too_large" },
-    },
-  ]);
+  call.mockResolvedValue(
+    groups([
+      {
+        taskId: "chain-2",
+        agentId: "analysis",
+        result: { status: "completed", output: "Draft only" },
+      },
+      {
+        taskId: "chain-2",
+        agentId: "review",
+        dependsOnAnalysis: true,
+        result: { status: "failed", reason: "analysis_output_too_large" },
+      },
+    ]),
+  );
   render(<AgentsPanel />);
   expect(await screen.findByText("Draft only")).toBeInTheDocument();
   expect(
     screen.queryByRole("heading", { name: "最终结果" }),
   ).not.toBeInTheDocument();
-  expect(screen.getByText(/复核未完成，当前没有最终结果/)).toBeInTheDocument();
+  expect(screen.getByText(/汇总未完成，当前没有最终结果/)).toBeInTheDocument();
 });
 it("keeps restart output loss explicit without automatically resubmitting", async () => {
-  call.mockResolvedValue([
-    {
-      taskId: "chain-3",
-      agentId: "review",
-      dependsOnAnalysis: true,
-      result: { status: "completed", outputUnavailable: true },
-    },
-  ]);
+  call.mockResolvedValue(
+    groups([
+      {
+        taskId: "chain-3",
+        agentId: "review",
+        dependsOnAnalysis: true,
+        result: { status: "completed", outputUnavailable: true },
+      },
+    ]),
+  );
   render(<AgentsPanel />);
   expect(await screen.findByText(/正文不可恢复/)).toBeInTheDocument();
   expect(
@@ -169,19 +188,21 @@ it("keeps restart output loss explicit without automatically resubmitting", asyn
   ).toHaveLength(0);
 });
 it("allows cancellation while review is waiting for analysis", async () => {
-  call.mockResolvedValue([
-    {
-      taskId: "chain-4",
-      agentId: "analysis",
-      result: { status: "completed", output: "Draft" },
-    },
-    {
-      taskId: "chain-4",
-      agentId: "review",
-      dependsOnAnalysis: true,
-      result: { status: "waiting", reason: "waiting_for_analysis" },
-    },
-  ]);
+  call.mockResolvedValue(
+    groups([
+      {
+        taskId: "chain-4",
+        agentId: "analysis",
+        result: { status: "completed", output: "Draft" },
+      },
+      {
+        taskId: "chain-4",
+        agentId: "review",
+        dependsOnAnalysis: true,
+        result: { status: "waiting", reason: "waiting_for_analysis" },
+      },
+    ]),
+  );
   const user = userEvent.setup();
   render(<AgentsPanel />);
   const cancel = await screen.findByRole("button", { name: "取消任务" });
@@ -189,20 +210,64 @@ it("allows cancellation while review is waiting for analysis", async () => {
   await user.click(cancel);
   expect(call).toHaveBeenCalledWith("cancel_agents_task", {
     taskId: "chain-4",
+    grouped: true,
   });
 });
 
 it("does not relabel a legacy independent review as a chained final result", async () => {
-  call.mockResolvedValue([
-    {
-      taskId: "legacy",
-      agentId: "review",
-      result: { status: "completed", output: "Independent review" },
-    },
-  ]);
+  call.mockResolvedValue(
+    groups([
+      {
+        taskId: "legacy",
+        agentId: "review",
+        result: { status: "completed", output: "Independent review" },
+      },
+    ]),
+  );
   render(<AgentsPanel />);
   expect(await screen.findByText("Independent review")).toBeInTheDocument();
   expect(
     screen.queryByRole("heading", { name: "最终结果" }),
+  ).not.toBeInTheDocument();
+});
+
+it("uses group state owned by the backend and renders every analysis", async () => {
+  call.mockResolvedValue([
+    {
+      taskId: "group",
+      status: "failed",
+      canCancel: false,
+      runs: [
+        {
+          taskId: "group",
+          agentId: "analysis",
+          result: { status: "completed", output: "One" },
+        },
+        {
+          taskId: "group",
+          agentId: "analysis-2",
+          result: { status: "accepted", output: "Two" },
+        },
+      ],
+    },
+  ]);
+  render(<AgentsPanel />);
+  expect(await screen.findByText("Two")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "取消任务" })).toBeDisabled();
+});
+
+it("removes an accidental empty analysis without discarding the draft", async () => {
+  const user = userEvent.setup();
+  render(<AgentsPanel />);
+  await user.type(screen.getByLabelText("任务"), "Keep this objective");
+  await user.type(screen.getByLabelText("模型"), "test-model");
+  await user.click(screen.getByRole("button", { name: "添加分析" }));
+  expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "移除分析 3" }));
+  expect(screen.getByLabelText("任务")).toHaveValue("Keep this objective");
+  expect(screen.getByRole("button", { name: "创建任务" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "移除分析 2" }));
+  expect(
+    screen.queryByRole("button", { name: "移除分析 1" }),
   ).not.toBeInTheDocument();
 });

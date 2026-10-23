@@ -45,6 +45,7 @@ fn account_circuit_key(app_type: &str, provider: &Provider) -> Option<String> {
 pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
+    account_capacity: super::account_capacity::AccountCapacity,
     /// 熔断器管理器 - key 格式: "app_type:provider_id"
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
 }
@@ -52,10 +53,32 @@ pub struct ProviderRouter {
 impl ProviderRouter {
     /// 创建新的供应商路由器
     pub fn new(db: Arc<Database>) -> Self {
+        let account_capacity = super::account_capacity::AccountCapacity::from_database(&db);
         Self {
             db,
+            account_capacity,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn acquire_account_capacity(
+        &self,
+        provider: &Provider,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, super::ProxyError> {
+        self.account_capacity.acquire(provider).await
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) fn authorize_client_request(
+        &self,
+        caller: &super::client_access::CallerIdentity,
+        app: &str,
+        model: Option<&str>,
+    ) -> Result<(), super::ProxyError> {
+        self.db
+            .authorize_client_identity(caller, app, model)
+            .map_err(|_| super::ProxyError::ClientAccessDenied)
     }
 
     pub(crate) fn managed_secret_session(&self) -> Arc<crate::secrets::session::SecretSession> {
