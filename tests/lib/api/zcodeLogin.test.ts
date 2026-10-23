@@ -24,6 +24,37 @@ const progress: LoginProgress = {
 };
 
 describe("ZCode official login IPC", () => {
+  it.each([
+    "oauth_init_unavailable",
+    "oauth_poll_unavailable",
+    "oauth_normalize_unavailable",
+  ])(
+    "keeps safe login stage %s without forwarding provider details",
+    async (stage) => {
+      vi.mocked(invoke).mockResolvedValue({
+        ...progress,
+        phase: "failed",
+        error: {
+          code: `zcode.account.${stage}`,
+          remedy: "queryOriginal",
+          committed: false,
+          detail: "synthetic-private-provider-response",
+        },
+      });
+      const result = await zcodeLoginApi.progress("synthetic-flow");
+      expect(result.error).toEqual({
+        code: `zcode.account.${stage}`,
+        remedy: "queryOriginal",
+        committed: false,
+      });
+      expect(JSON.stringify(result)).not.toContain(
+        "synthetic-private-provider-response",
+      );
+      expect(result.account).toBeNull();
+      expect(result.saved).toBeNull();
+    },
+  );
+
   it("prepares the selected saved Coding account without invoking OAuth", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ...progress,
