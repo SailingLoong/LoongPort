@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLogin";
 import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
+import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
 import { ProviderActions } from "@/components/providers/ProviderActions";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -666,9 +667,16 @@ export function ProviderCard({
                       disabled={mutationsDisabled}
                     />
                   ) : (
-                    <span className="text-xs text-muted-foreground">
-                      CN 签到接口尚未验证
-                    </span>
+                    <>
+                      <QoderCnCampaigns
+                        providerId={provider.id}
+                        sourceGeneration={readQoderSourceGeneration(provider)}
+                        disabled={mutationsDisabled}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        CN 签到接口尚未验证
+                      </span>
+                    </>
                   )}
                 </div>
               )}

@@ -5,6 +5,7 @@ import { providersApi } from "@/lib/api/providers";
 import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
 import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLogin";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
+import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
 import type { Provider } from "@/types";
 
 function sourceGeneration(provider: Provider): string | undefined {
@@ -101,9 +102,14 @@ export function QoderAccountPanel() {
                       disabled={!active || query.isFetching}
                     />
                   ) : (
-                    <span>
-                      CN 签到仍未接通；独立 PAT 与本应用独立授权分别管理。
-                    </span>
+                    <>
+                      <QoderCnCampaigns
+                        providerId={provider.id}
+                        sourceGeneration={generation}
+                        disabled={!active || query.isFetching}
+                      />
+                      <span>CN 签到仍未接通；活动状态查询不会领取积分。</span>
+                    </>
                   )}
                 </div>
               </article>

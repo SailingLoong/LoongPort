@@ -32,6 +32,12 @@ The worker emits a bounded private head, base64 Chat chunks, and an end record. 
 
 Only a verified device authentication rejection can retire the matching snapshot generation. Qoder's queue/quota/request business errors can also use HTTP 403 and must retain credentials. Unclassifiable or oversized error bodies do not trigger revocation. A late rejection cannot delete a newer grant.
 
+## Explicit CN campaign status
+
+The existing CN account panel and Provider card can explicitly read the fixed CN campaign listing using the original encrypted credential owner. Opening a view does not make a service request. The read never establishes or refreshes credentials, sends a claim, changes the daily ledger, or reads official client files. It uses an existing CN PAT-derived job token or independently authorized device access token, with source/generation/UID/vault fences before and after the request. No International token fallback or caller-selected destination is allowed.
+
+Endpoint and listing field facts were checked against MIT Magpie `packages/qoder/index.mjs`, commit `08ff18a43853ccf23b30fc6dd39b3f10591331ee`, lines 1984–2061. No implementation code was copied in this slice. The existing MIT notices remain in `scripts/qoder/LICENSE`. `CLAIM_BENEFIT`, `CLAIMABLE` and `CLAIMED` describe generic activities, not proven daily eligibility. Activity start/end are not treated as daily claim rounds. Missing listing UID is permitted because the original authenticated owner binds the request; any returned UID must match. A successful GET neither proves desktop/runtime eligibility nor a daily reward. Automatic CN claim stays disabled until the daily activity and round semantics are evidenced.
+
 ## Validation boundary
 
 Synthetic owner/session, protocol, real Node subprocess, and focused Rust owner-to-worker tests cover these paths. Focused Rust harnesses reuse cached dependencies and do not replace the full locked Tauri build or complete product-router suite. No real CN OAuth/refresh/inference account acceptance was performed. Production service eligibility, entitlements and coexistence with other server sessions remain live acceptance questions, not claims made by this implementation. CN campaign check-in and copying/importing official credential files are not implemented by this slice.

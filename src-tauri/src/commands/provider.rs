@@ -2559,6 +2559,24 @@ pub(crate) async fn set_qoder_daily_automatic(
     .map_err(|_| "Qoder 自动领取设置结果未确认，请仅查询状态".to_owned())?
 }
 
+/// Explicit CN GET only, with the original credential owner's pre/post fences.
+#[tauri::command]
+pub(crate) async fn read_qoder_cn_campaigns<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    declaration: crate::services::provider::qoder_daily::http::PatDeclaration,
+) -> crate::services::provider::qoder_daily::cn_campaigns::ReadResult {
+    use crate::services::provider::qoder_daily::cn_campaigns;
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return cn_campaigns::ReadResult::Failed {
+                code: cn_campaigns::FailureCode::OwnerUnavailable,
+            }
+        }
+    };
+    cn_campaigns::read(&db, declaration).await
+}
+
 /// Safe original-Provider status only. Source and identity admission stays in
 /// the original credential owner, including direct IPC invocation.
 #[tauri::command]

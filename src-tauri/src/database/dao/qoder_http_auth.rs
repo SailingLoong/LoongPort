@@ -239,6 +239,36 @@ impl Database {
         Ok(result)
     }
 
+    /// Read existing Ready access without refreshing or reserving a new owner.
+    pub(crate) fn qoder_http_read_snapshot(
+        &self,
+        declaration: &crate::services::provider::qoder_daily::http::PatDeclaration,
+        now_ms: i64,
+    ) -> Result<RequestSnapshot, AppError> {
+        if now_ms < 0 {
+            return Err(denied("clock_invalid"));
+        }
+        self.with_qoder_http(
+            &declaration.provider_id,
+            |tx, vault, epoch, _, source, _| {
+                source.admit(declaration)?;
+                let (_, record) = read_on(tx, vault, &source.provider_id)?;
+                let record = record.ok_or_else(|| denied("identity_required"))?;
+                source_matches(&record, &source)?;
+                match &record.phase {
+                    Phase::Ready { tokens, .. } if tokens.expires_at_ms > now_ms => {
+                        snapshot(&record, epoch)
+                    }
+                    Phase::Ready { .. } => Err(denied("snapshot_expired")),
+                    Phase::Establishing { .. } | Phase::RefreshPending { .. } => {
+                        Err(denied("attempt_in_progress"))
+                    }
+                    Phase::Unknown { .. } => Err(denied("outcome_unknown_reestablish_required")),
+                }
+            },
+        )
+    }
+
     pub(crate) fn qoder_http_acquire(
         &self,
         expected: &SourceBinding,
@@ -617,3 +647,7 @@ impl Database {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "qoder_http_auth_read_tests.rs"]
+mod read_tests;
