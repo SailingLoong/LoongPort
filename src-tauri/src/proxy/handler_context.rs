@@ -220,7 +220,7 @@ impl RequestContext {
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
         let providers = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers_with_mode(app_type_str, app_config.auto_failover_enabled)
             .await
             .map_err(|e| match e {
                 crate::error::AppError::AllProvidersCircuitOpen => {
@@ -338,6 +338,7 @@ impl RequestContext {
             self.copilot_optimizer_config.clone(),
             max_retries,
             state.model_alignment.clone(),
+            self.app_config.auto_failover_enabled,
         )
         .with_request_identity(self.request_identity.clone())
     }

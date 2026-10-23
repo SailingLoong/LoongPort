@@ -233,6 +233,8 @@ impl Drop for ActiveConnectionGuard {
 }
 
 pub struct RequestForwarder {
+    /// Same request snapshot used to select the original candidate chain.
+    automatic_failover: bool,
     diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 共享的 ProviderRouter（持有熔断器状态）
@@ -419,11 +421,13 @@ impl RequestForwarder {
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
         model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
+        automatic_failover: bool,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            automatic_failover,
             diagnostic_id,
             request_identity: None,
             router,
@@ -565,6 +569,7 @@ impl RequestForwarder {
         // Provider 错误：本家上游/网络确实出问题，下一家 provider 可能可用 → 继续故障转移。
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
         let is_provider_error = !is_explicit_upstream_denial(&retry_err)
+            && !managed_account_outcome_unknown(provider, &retry_err)
             && match &retry_err {
                 ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => true,
                 ProxyError::UpstreamError { status, .. } => *status >= 500,
@@ -757,7 +762,11 @@ impl RequestForwarder {
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
-            if let Err(error) = super::managed_accounts::validate_capabilities(provider, &body) {
+            if let Err(error) = super::managed_accounts::validate_capabilities(
+                provider,
+                &body,
+                self.automatic_failover,
+            ) {
                 last_error = Some(error);
                 last_provider = Some(provider.clone());
                 continue;
@@ -953,6 +962,7 @@ impl RequestForwarder {
                     // Stop before media/tool/signature rectification can resend.
                     if budget_binding.is_some()
                         || matches!(e, ProxyError::ClientAccessDenied)
+                        || managed_account_outcome_unknown(provider, &e)
                         || super::providers::workbuddy_acp::enabled(provider)
                         || is_explicit_upstream_denial(&e)
                     {
@@ -3718,6 +3728,9 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        if managed_account_outcome_unknown(provider, error) {
+            return ErrorCategory::NonRetryable;
+        }
         if super::qoder_http::enabled(provider) {
             // Only these original local preflight exclusions may select the
             // next provider. Submitted HTTP errors, unknown outcomes, timeouts
@@ -3790,6 +3803,20 @@ impl RequestForwarder {
             _ => ErrorCategory::NonRetryable,
         }
     }
+}
+
+/// Private account transports can fail after the upstream accepted the request.
+/// Lack of response headers/output is not proof of non-acceptance. Keep the
+/// original owner's error terminal before rectifiers as well as provider retry.
+/// This does not change explicit HTTP-response or local acquisition policy.
+fn managed_account_outcome_unknown(provider: &Provider, error: &ProxyError) -> bool {
+    super::managed_accounts::selected(provider).is_some()
+        && matches!(
+            error,
+            ProxyError::Timeout(_)
+                | ProxyError::ForwardFailed(_)
+                | ProxyError::StreamIdleTimeout(_)
+        )
 }
 
 /// Only this local preflight result establishes that the next already-applied
@@ -5159,6 +5186,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            automatic_failover: false,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,
             router: Arc::new(ProviderRouter::new(db.clone())),
@@ -6400,6 +6428,82 @@ mod tests {
             super::super::error_mapper::map_proxy_error_to_status(&ProxyError::ClientAccessDenied),
             401
         );
+    }
+
+    #[test]
+    fn managed_account_unknown_dispatch_outcomes_are_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        for owner in ["minimax_code", "zcode_start_plan", "workbuddy", "trae"] {
+            let mut provider = test_provider_with_type(None);
+            provider.meta = Some(crate::provider::ProviderMeta {
+                auth_binding: Some(crate::provider::AuthBinding {
+                    source: crate::provider::AuthBindingSource::ManagedAccount,
+                    auth_provider: Some(owner.into()),
+                    account_id: Some("synthetic-account".into()),
+                }),
+                ..Default::default()
+            });
+            for error in [
+                ProxyError::Timeout("response headers not received".into()),
+                ProxyError::ForwardFailed("connection interrupted".into()),
+                ProxyError::StreamIdleTimeout(1),
+            ] {
+                assert_eq!(
+                    forwarder.categorize_proxy_error(&error, &provider),
+                    ErrorCategory::NonRetryable,
+                    "{owner}: unknown dispatch outcome must not replay"
+                );
+            }
+            // Existing owner preflight and explicit HTTP policy are unchanged.
+            for error in [
+                ProxyError::AuthError("local acquisition unavailable".into()),
+                ProxyError::UpstreamError {
+                    status: 429,
+                    body: None,
+                },
+            ] {
+                assert_eq!(
+                    forwarder.categorize_proxy_error(&error, &provider),
+                    ErrorCategory::Retryable
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_account_rectifier_unknown_outcome_is_terminal() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let mut provider = test_provider_with_type(None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            auth_binding: Some(crate::provider::AuthBinding {
+                source: crate::provider::AuthBindingSource::ManagedAccount,
+                auth_provider: Some("minimax_code".into()),
+                account_id: Some("synthetic-account".into()),
+            }),
+            ..Default::default()
+        });
+        for error in [
+            ProxyError::Timeout("unknown".into()),
+            ProxyError::ForwardFailed("unknown".into()),
+        ] {
+            let mut last_error = None;
+            let mut last_provider = None;
+            assert!(forwarder
+                .handle_rectifier_retry_failure(
+                    error,
+                    &provider,
+                    "codex",
+                    false,
+                    "synthetic",
+                    &mut last_error,
+                    &mut last_provider
+                )
+                .await
+                .is_some());
+            assert!(last_error.is_none());
+            assert!(last_provider.is_none());
+        }
+        assert_eq!(forwarder.status.read().await.failed_requests, 2);
     }
 
     #[test]

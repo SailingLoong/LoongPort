@@ -28,6 +28,9 @@ const STOP: &str = concat!(
 enum UpstreamBehavior {
     Complete,
     FirstRateLimited,
+    FirstRetiredAfterReceipt,
+    #[cfg(unix)]
+    FirstHeadersPending,
     FailAfterOutput,
     CleanEofAfterOutput,
     ErrorAfterMessageStop,
@@ -45,6 +48,7 @@ struct MiniMaxRouterFixture {
     proxy: ProxyServer,
     transport: FixtureTransport,
     calls: Arc<std::sync::Mutex<Vec<CapturedRequest>>>,
+    retirement_completed: Arc<std::sync::atomic::AtomicBool>,
     release_error: Arc<tokio::sync::Notify>,
     origin: String,
     upstream: tokio::task::JoinHandle<()>,
@@ -72,6 +76,9 @@ impl MiniMaxRouterFixture {
         .unwrap();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls_for_upstream = calls.clone();
+        let retirement_db = db.clone();
+        let retirement_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream_retirement = retirement_completed.clone();
         let release_error = Arc::new(tokio::sync::Notify::new());
         let gate = release_error.clone();
         let app = axum::Router::new().route(
@@ -79,9 +86,26 @@ impl MiniMaxRouterFixture {
             axum::routing::post(move |axum::extract::Path(region): axum::extract::Path<String>, headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
                 let calls = calls_for_upstream.clone();
                 let gate = gate.clone();
+                let retirement_db = retirement_db.clone();
+                let retirement_completed = upstream_retirement.clone();
                 async move {
                     let first = headers.get("authorization").unwrap().to_str().unwrap() == "Bearer synthetic-a-access";
                     calls.lock().unwrap().push(CapturedRequest {region, headers, body: body.clone()});
+                    #[cfg(unix)]
+                    if first && matches!(behavior, UpstreamBehavior::FirstHeadersPending) {
+                        // The original owner has submitted the complete request.
+                        // No response headers does not prove no work was accepted.
+                        std::future::pending::<()>().await;
+                    }
+                    if first && matches!(behavior, UpstreamBehavior::FirstRetiredAfterReceipt) {
+                        // Axum has received and decoded the entire request. Retire
+                        // through the real account owner before sending headers.
+                        crate::minimax_code::checkin::Engine {
+                            session: retirement_db.secret_session(),
+                            transport: &crate::minimax_code::http::OfficialHttp,
+                        }.retire("synthetic-a").await.unwrap();
+                        retirement_completed.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     if first && matches!(behavior, UpstreamBehavior::FirstRateLimited) {
                         return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], axum::Json(json!({"error":{"type":"rate_limit_error","message":"synthetic-a-access"}}))).into_response();
                     }
@@ -158,6 +182,7 @@ impl MiniMaxRouterFixture {
             proxy,
             transport,
             calls,
+            retirement_completed,
             release_error,
             origin,
             upstream,
@@ -589,4 +614,49 @@ async fn minimax_error_after_message_stop_never_escapes_as_converted_success() {
     assert_eq!(fixture.transport.attempts(), 1);
     assert_wire(&fixture.calls.lock().unwrap()[0], "synthetic-a", "cn");
     fixture.assert_idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn minimax_owner_retired_after_receipt_never_replays() {
+    let f = MiniMaxRouterFixture::new(UpstreamBehavior::FirstRetiredAfterReceipt).await;
+    let response = f.request(false).await;
+    assert!(
+        f.retirement_completed
+            .load(std::sync::atomic::Ordering::Acquire),
+        "upstream must complete persisted owner retirement, not merely drop the connection"
+    );
+    let calls = f.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls.len(),
+        1,
+        "retiring an owner after upstream receipt cannot replay on account B"
+    );
+    assert!(!response.status().is_success());
+    drop(response);
+    f.assert_idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn minimax_owner_retired_before_send_can_select_other_account() {
+    let f = MiniMaxRouterFixture::new(UpstreamBehavior::Complete).await;
+    crate::minimax_code::checkin::Engine {
+        session: f.db.secret_session(),
+        transport: &crate::minimax_code::http::OfficialHttp,
+    }
+    .retire("synthetic-a")
+    .await
+    .unwrap();
+    let response = f.request(false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = f.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].headers["authorization"],
+        "Bearer synthetic-b-access"
+    );
+    let body = collect(response).await;
+    assert!(String::from_utf8_lossy(&body).contains(TEXT));
+    f.assert_idle().await;
 }

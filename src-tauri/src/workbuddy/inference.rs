@@ -193,6 +193,11 @@ fn stream_error(auth: bool) -> std::io::Error {
 fn owner_error(_: Failure) -> ProxyError {
     ProxyError::AuthError("workbuddy.authorization_unavailable".into())
 }
+fn post_dispatch_owner_error(_: Failure) -> ProxyError {
+    // Rechecking the original owner after submission must still revoke access,
+    // but cannot authorize replay as a pre-send authentication failure.
+    ProxyError::Internal("workbuddy.authorization_changed_after_dispatch".into())
+}
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -1079,7 +1084,7 @@ impl Lease {
                 },
             )
             .await?;
-            self.check().await.map_err(owner_error)?;
+            self.check().await.map_err(post_dispatch_owner_error)?;
             // Never classify an opaque compressed 401 as refreshable: it may
             // contain an explicit denial. Identity was requested. Reject this
             // protocol response terminally (415) rather than retrying elsewhere.
@@ -1113,7 +1118,7 @@ impl Lease {
                     .await
                     .map_err(|_| ProxyError::Internal("workbuddy.error_body_timeout".into()))?
                     .map_err(|_| ProxyError::Internal("workbuddy.invalid_error_response".into()))?;
-                self.check().await.map_err(owner_error)?;
+                self.check().await.map_err(post_dispatch_owner_error)?;
                 let env: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 let upstream_code = upstream_error_code(&env);
                 let refusal = matches!(upstream_code, Some(11004 | 11140));
@@ -1334,6 +1339,32 @@ impl FixtureTransport {
     }
     pub(crate) fn attempts(&self) -> usize {
         self.attempts.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Test-only retirement through the original encrypted owner. Only a
+    /// previously seeded synthetic grant can be removed; no fabricated error.
+    pub(crate) async fn retire_fixture_grant(
+        session: &SecretSession,
+        uid: &str,
+    ) -> Result<(), Failure> {
+        let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
+        let binding = store::binding(session)?;
+        let mut rows = store::load(session, &binding)?;
+        let row = rows
+            .iter_mut()
+            .find(|row| row.account.uid == uid)
+            .ok_or(Failure::UnsupportedContext)?;
+        if !uid.starts_with("synthetic-")
+            || row.account.token != format!("fixture-checkin-{uid}")
+            || !row.inference.as_ref().is_some_and(|grant| {
+                grant.access == format!("fixture-access-{uid}")
+                    && grant.refresh == format!("fixture-refresh-{uid}")
+                    && grant.credential_version == 1
+            })
+        {
+            return Err(Failure::UnsupportedContext);
+        }
+        row.inference = None;
+        store::save(session, &binding, rows)
     }
     /// Generated synthetic credentials only, and ONLY an empty ephemeral owner.
     /// Existing accounts are never replaced by this test helper.

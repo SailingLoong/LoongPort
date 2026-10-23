@@ -19,6 +19,7 @@ const DONE:&str="data: {\"id\":\"chat-synthetic\",\"object\":\"chat.completion.c
 enum Behavior {
     Complete,
     FirstRateLimited,
+    FirstRetiredAfterReceipt,
     Refused(u16, i64),
     StreamRefusal,
     StreamFailure,
@@ -37,6 +38,7 @@ struct Fixture {
     proxy: ProxyServer,
     transport: FixtureTransport,
     calls: Arc<std::sync::Mutex<Vec<Captured>>>,
+    retirement_completed: Arc<std::sync::atomic::AtomicBool>,
     release: Arc<tokio::sync::Notify>,
     origin: String,
     upstream: tokio::task::JoinHandle<()>,
@@ -66,12 +68,20 @@ impl Fixture {
                 .unwrap();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let upstream_calls = calls.clone();
+        let retirement_db = db.clone();
+        let retirement_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream_retirement = retirement_completed.clone();
         let release = Arc::new(tokio::sync::Notify::new());
         let upstream_release = release.clone();
         let app=axum::Router::new().route("/v2/chat/completions",axum::routing::post(move |headers:HeaderMap,axum::Json(body):axum::Json<Value>|{
-            let calls=upstream_calls.clone();let release=upstream_release.clone();async move {
+            let calls=upstream_calls.clone();let release=upstream_release.clone();let retirement_db=retirement_db.clone();let retirement_completed=upstream_retirement.clone();async move {
                 let first=headers.get("authorization").unwrap()=="Bearer fixture-access-synthetic-a";
                 calls.lock().unwrap().push(Captured{headers,body});
+                if first && matches!(behavior, Behavior::FirstRetiredAfterReceipt) {
+                    // Complete request receipt is established by the JSON extractor.
+                    FixtureTransport::retire_fixture_grant(retirement_db.secret_session(), "synthetic-a").await.unwrap();
+                        retirement_completed.store(true, std::sync::atomic::Ordering::Release);
+                }
                 if first&&matches!(behavior,Behavior::FirstRateLimited){return(StatusCode::TOO_MANY_REQUESTS,[("retry-after","0")],axum::Json(json!({"code":429,"msg":"fixture-access-synthetic-a"}))).into_response();}
                 if let Behavior::Refused(status,code)=behavior{return(StatusCode::from_u16(status).unwrap(),axum::Json(json!({"error":{"data":{"code":code,"msg":"fixture-access-synthetic-a"}}}))).into_response();}
                 if first {
@@ -170,6 +180,7 @@ impl Fixture {
             proxy,
             transport,
             calls,
+            retirement_completed,
             release,
             origin,
             upstream,
@@ -673,4 +684,44 @@ async fn workbuddy_completion_then_error_cannot_escape_at_all_original_entries()
             f.idle().await;
         }
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn workbuddy_owner_retired_after_receipt_never_replays() {
+    let f = Fixture::new(Behavior::FirstRetiredAfterReceipt).await;
+    let response = f.request("/v1/chat/completions", chat(true)).await;
+    assert!(
+        f.retirement_completed
+            .load(std::sync::atomic::Ordering::Acquire),
+        "upstream must complete persisted owner retirement, not merely drop the connection"
+    );
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        1,
+        "post-send owner invalidation cannot select account B"
+    );
+    assert!(!response.status().is_success());
+    drop(response);
+    f.idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn workbuddy_owner_retired_before_send_can_select_other_account() {
+    let f = Fixture::new(Behavior::Complete).await;
+    FixtureTransport::retire_fixture_grant(f.db.secret_session(), "synthetic-a")
+        .await
+        .unwrap();
+    let response = f.request("/v1/chat/completions", chat(true)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = f.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].headers["authorization"],
+        "Bearer fixture-access-synthetic-b"
+    );
+    let body = collect(response).await;
+    assert!(String::from_utf8_lossy(&body).contains(TEXT));
+    f.idle().await;
 }

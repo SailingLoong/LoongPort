@@ -24,6 +24,16 @@ impl Fixture {
         Self::with_denial(false).await
     }
     async fn with_denial(deny: bool) -> Self {
+        Self::with_reply(deny, None).await
+    }
+    async fn with_reply(deny: bool, reply: Option<&'static str>) -> Self {
+        Self::with_response(deny, "text/event-stream", reply).await
+    }
+    async fn with_response(
+        deny: bool,
+        content_type: &'static str,
+        reply: Option<&'static str>,
+    ) -> Self {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -41,6 +51,7 @@ impl Fixture {
    let captured=captured.clone(); async move {
     captured.lock().unwrap().push(body);
                     if deny { return (StatusCode::FORBIDDEN, axum::Json(json!({"code":11004}))).into_response(); }
+                    if let Some(reply) = reply { return (StatusCode::OK, [("content-type", content_type)], reply).into_response(); }
     (StatusCode::OK,[("content-type","text/event-stream")], "event: output\ndata: {\"response\":\"synthetic TRAE answer\"}\n\nevent: done\ndata: {}\n\n").into_response()
    }
   }));
@@ -258,4 +269,378 @@ async fn trae_explicit_refusal_is_terminal_at_all_original_entries() {
             "denied owner must not trigger another account"
         );
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_unknown_success_response_never_tries_second_account() {
+    for reply in [
+        "",
+        "event: output\ndata: invalid-json\n\n",
+        "event: output\ndata: {\"response\":\"partial\"}\n\n",
+    ] {
+        let f = Fixture::with_reply(false, Some(reply)).await;
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            f.calls.lock().unwrap().len(),
+            1,
+            "an accepted but unknown response cannot select the next account"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_non_sse_partial_then_error_never_replays() {
+    let f = Fixture::with_response(false, "text/plain", Some(
+        "event: output\ndata: {\"response\":\"partial\"}\n\nevent: error\ndata: {\"code\":429}\n\n",
+    )).await;
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        1,
+        "successful headers and partial work cannot become a replayable HTTP429"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_success_headers_explicit_denial_stays_terminal() {
+    for content_type in ["text/event-stream", "text/plain"] {
+        let f = Fixture::with_response(
+            false,
+            content_type,
+            Some("event: error\ndata: {\"code\":11004}\n\n"),
+        )
+        .await;
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(f.calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_success_headers_business_error_never_tries_second_account() {
+    for content_type in ["text/event-stream", "text/plain"] {
+        for reply in [
+            "event: error\ndata: {\"code\":401}\n\n",
+            "event: error\ndata: {\"code\":429}\n\n",
+        ] {
+            let f = Fixture::with_response(false, content_type, Some(reply)).await;
+            let response = f
+                .request(
+                    "/v1/responses",
+                    json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(f.calls.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+fn automatic_semantic_case(case: &str) -> (&'static str, Value) {
+    let schema = json!({"type":"json_schema","name":"synthetic_shape","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}});
+    match case {
+        "responses_format" => (
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello","text":{"format":schema}}),
+        ),
+        "responses_cursor" => (
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello","previous_response_id":"synthetic-vendor-bound-response"}),
+        ),
+        "chat_format" => (
+            "/v1/chat/completions",
+            json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_schema","json_schema":{"name":"synthetic_shape","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}}}),
+        ),
+        _ => panic!("unknown synthetic semantic case"),
+    }
+}
+
+async fn assert_automatic_semantics_excluded(case: &str) {
+    let f = Fixture::new().await;
+    // Both original accounts are in the applied automatic chain, including the
+    // current first entry. No new scheduler or substitute admission harness.
+    assert!(
+        f.db.get_proxy_config_for_app("codex")
+            .await
+            .unwrap()
+            .auto_failover_enabled
+    );
+    let (path, body) = automatic_semantic_case(case);
+    let response = f.request(path, body).await;
+    let status = response.status();
+    let _body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        0,
+        "{case}: incompatible automatic candidate must not receive a request"
+    );
+    assert_eq!(
+        f.transport.attempts(),
+        0,
+        "excluded candidate must not enter owner transport"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{case}: no compatible candidate must be explicit, not lossy success"
+    );
+    assert!(
+        f.db.provider_attempt_error_rates("codex")
+            .unwrap()
+            .is_empty(),
+        "capability exclusion is not an account attempt"
+    );
+    for id in ["trae-0", "trae-1"] {
+        let health = f.db.get_provider_health(id, "codex").await.unwrap();
+        assert!(health.is_healthy);
+        assert_eq!(health.consecutive_failures, 0);
+        assert!(health.last_success_at.is_none());
+        assert!(health.last_failure_at.is_none());
+        assert!(health.last_error.is_none());
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.proxy.get_status().await.active_connections != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("excluded original request lease must release");
+    // Reuse the same original owners immediately after exclusion: no account
+    // capacity or response permit may be stranded by capability admission.
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+    assert_eq!(f.calls.lock().unwrap().len(), 1);
+    assert_eq!(f.transport.attempts(), 1);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_responses_format_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("responses_format").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_responses_cursor_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("responses_cursor").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_chat_format_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("chat_format").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_manual_semantic_compatibility_remains_outside_automatic_gate() {
+    for case in ["responses_format", "responses_cursor", "chat_format"] {
+        let f = Fixture::new().await;
+        for app in ["codex", "claude"] {
+            let mut config = f.db.get_proxy_config_for_app(app).await.unwrap();
+            config.auto_failover_enabled = false;
+            f.db.update_proxy_config_for_app(config).await.unwrap();
+        }
+        let (path, body) = automatic_semantic_case(case);
+        let response = f.request(path, body).await;
+        let expected_status = if case != "responses_cursor" {
+            // Structured-format conversion now preserves Responses text.format
+            // as well as native Chat response_format. The original strict TRAE
+            // wire must reject both, not silently return an unconstrained answer.
+            // This intentionally corrects the old Responses false-success while
+            // keeping manual selection separate from automatic eligibility.
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(response.status(), expected_status, "{case}");
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if case != "responses_cursor" {
+            assert!(!String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 0, "{case}");
+        } else {
+            assert!(String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 1, "{case}");
+        }
+    }
+    // The cursor's legacy manual behavior remains out of the automatic gate;
+    // its successful text answer is NOT proof of state portability. Structured
+    // formats instead explicitly fail now that conversion preserves their intent.
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_eligibility_uses_the_original_selection_mode_snapshot() {
+    use crate::{app_config::AppType, proxy::handler_context::RequestContext};
+    for selected_automatic in [true, false] {
+        let f = Fixture::new().await;
+        let mut config = f.db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = selected_automatic;
+        f.db.update_proxy_config_for_app(config.clone())
+            .await
+            .unwrap();
+        let (_, body) = automatic_semantic_case("responses_cursor");
+        let headers = http::HeaderMap::new();
+        let context = RequestContext::new(
+            &f.proxy.state,
+            &body,
+            &headers,
+            AppType::Codex,
+            "Codex",
+            "codex",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            context.get_providers().len(),
+            if selected_automatic { 2 } else { 1 }
+        );
+        // Deterministically change the setting after original selection but
+        // before creating/using its forwarder. Never infer mode from chain size.
+        config.auto_failover_enabled = !selected_automatic;
+        f.db.update_proxy_config_for_app(config).await.unwrap();
+        let mut extensions = http::Extensions::new();
+        extensions.insert(f.transport.clone());
+        let forwarder = context.create_forwarder(&f.proxy.state);
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            forwarder.forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                extensions,
+                context.get_providers(),
+            ),
+        )
+        .await
+        .expect("snapshot dispatch must complete within the original request budget");
+        if selected_automatic {
+            assert!(matches!(
+                result,
+                Err(crate::proxy::forwarder::ForwardError {
+                    error: ProxyError::InvalidRequest(_),
+                    ..
+                })
+            ));
+            assert_eq!(f.calls.lock().unwrap().len(), 0);
+            assert_eq!(f.transport.attempts(), 0);
+            assert!(f
+                .db
+                .provider_attempt_error_rates("codex")
+                .unwrap()
+                .is_empty());
+        } else {
+            let result = result
+                .unwrap_or_else(|_| panic!("later toggle must not reinterpret the manual request"));
+            assert_eq!(result.response.status(), StatusCode::OK);
+            let bytes = tokio::time::timeout(
+                Duration::from_secs(5),
+                result.response.bytes_with_limit(1024 * 1024),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_explicit_unconstrained_formats_respect_original_wire_limits() {
+    for automatic in [true, false] {
+        for (path, body) in [
+            (
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":true,"input":"hello","text":{"format":{"type":"text"}}}),
+            ),
+            (
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":true,"input":"hello","response_format":null}),
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":{"type":"text"}}),
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":null}),
+            ),
+        ] {
+            let f = Fixture::new().await;
+            let mut config = f.db.get_proxy_config_for_app("codex").await.unwrap();
+            config.auto_failover_enabled = automatic;
+            f.db.update_proxy_config_for_app(config).await.unwrap();
+            let response = f.request(path, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                axum::body::to_bytes(response.into_body(), 1024 * 1024),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(f.calls.lock().unwrap().len(), 0);
+            assert_eq!(f.transport.attempts(), 0);
+            if automatic {
+                assert!(f
+                    .db
+                    .provider_attempt_error_rates("codex")
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+    // These values are not structured constraints. They are excluded because
+    // TRAE's original strict wire accepts no response_format field at all.
+    // Unadorned plain text remains covered by the original three-entry control.
 }

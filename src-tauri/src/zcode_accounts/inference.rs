@@ -138,6 +138,12 @@ fn owner_error(error: Failure) -> ProxyError {
     )
 }
 
+fn post_dispatch_owner_error(_: Failure) -> ProxyError {
+    // The request has already been submitted. A stale original owner cannot
+    // establish non-acceptance, so never recover by selecting another account.
+    ProxyError::Internal("zcode.inference.authorization_changed_after_dispatch".into())
+}
+
 /// Parsing exp can reject an expired credential; it never authenticates a JWT.
 /// Opaque tokens/unknown expiry still require an actual upstream response.
 fn jwt_is_expired(token: &str, now: u64) -> bool {
@@ -407,7 +413,7 @@ impl Lease {
         } else {
             safe_error_response(response, timeout).await?
         };
-        self.check().await.map_err(owner_error)?;
+        self.check().await.map_err(post_dispatch_owner_error)?;
         if response.status() == http::StatusCode::UNAUTHORIZED && !denied {
             // Never refresh, replay, create a key, or silently select an account.
             // Late 401 after replacement may not contaminate a newer session.
@@ -416,7 +422,7 @@ impl Lease {
                     self.reject_current(store, native, snapshot)
                 })
                 .await
-                .map_err(owner_error)?;
+                .map_err(post_dispatch_owner_error)?;
             // This exact revision is the verified result of our own rejection
             // CAS, never a lookup of the latest catalog. All identity and epoch
             // facts stay unchanged, and only the response fence receives it.
@@ -426,7 +432,7 @@ impl Lease {
                 fence: ResponseFence { lease: self },
             });
         }
-        self.check().await.map_err(owner_error)?;
+        self.check().await.map_err(post_dispatch_owner_error)?;
         if !response.status().is_success() {
             return Ok(DispatchResponse {
                 response,
@@ -438,7 +444,7 @@ impl Lease {
         };
         let response = self.fence_response(
             response,
-            response_guard.ok_or_else(|| owner_error(Failure::StorageUnavailable))?,
+            response_guard.ok_or_else(|| post_dispatch_owner_error(Failure::StorageUnavailable))?,
         )?;
         Ok(DispatchResponse { response, fence })
     }

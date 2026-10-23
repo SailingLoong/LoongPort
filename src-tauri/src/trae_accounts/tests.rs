@@ -706,9 +706,13 @@ async fn original_raw_known_secret_guard_is_not_lost_during_projection() {
         .await
         .unwrap()
         .dispatch_with(chat(), Duration::from_secs(2), &wire)
-        .await
-        .unwrap();
-    assert_eq!(result.response.status().as_u16(), 502);
+        .await;
+    match result {
+        Err(error) => assert_sanitized_secret_terminal(&error),
+        Ok(_) => {
+            panic!("raw credential must terminate dispatch, not return a replayable HTTP error")
+        }
+    }
     assert_eq!(wire.calls.lock().unwrap().len(), 1);
 }
 #[tokio::test]
@@ -792,6 +796,18 @@ async fn contradictory_server_realm_or_client_identity_is_never_accepted() {
         assert!(super::auth::accepted(&s, &body).is_err());
     }
 }
+fn assert_sanitized_secret_terminal(error: &crate::proxy::error::ProxyError) {
+    // Exact fixed payload, not just any error: no credential-bearing upstream
+    // bytes may escape through the terminal error channel either.
+    match error {
+        crate::proxy::error::ProxyError::ForwardFailed(message) => {
+            assert_eq!(message, "trae.request_failed");
+        }
+        _ => panic!("expected sanitized terminal unknown outcome"),
+    }
+    assert!(!error.to_string().contains("synthetic-"));
+    assert!(!format!("{error:?}").contains("synthetic-"));
+}
 async fn projected_secret_is_blocked(stream: bool, split: bool, reasoning: bool) {
     let f = Fixture::new().await;
     let id = f.seed(Realm::Sg).await;
@@ -815,14 +831,29 @@ async fn projected_secret_is_blocked(stream: bool, split: bool, reasoning: bool)
         .push_back(upstream(200, vec![Ok(Bytes::from(raw))]));
     let mut body = chat();
     body["stream"] = json!(stream);
-    let response = Lease::acquire(f.session.clone(), &id, "s")
+    let result = Lease::acquire(f.session.clone(), &id, "s")
         .await
         .unwrap()
         .dispatch_with(body, Duration::from_secs(2), &wire)
-        .await
-        .unwrap()
-        .response;
-    let initial_error = !response.status().is_success();
+        .await;
+    assert_eq!(wire.calls.lock().unwrap().len(), 1);
+    let response = match result {
+        Err(error) => {
+            assert_sanitized_secret_terminal(&error);
+            return;
+        }
+        Ok(result) => {
+            assert!(
+                stream,
+                "buffered secret projection must terminate before a response escapes"
+            );
+            result.response
+        }
+    };
+    assert!(
+        response.status().is_success(),
+        "pre-output secret rejection must not become a replayable HTTP error"
+    );
     use futures::StreamExt;
     let mut bytes = Box::pin(response.bytes_stream());
     let mut terminal_error = false;
@@ -837,7 +868,7 @@ async fn projected_secret_is_blocked(stream: bool, split: bool, reasoning: bool)
         }
     }
     assert!(
-        initial_error || terminal_error,
+        terminal_error,
         "decoded credential was allowed through projection"
     );
     assert!(!String::from_utf8_lossy(&out).contains("synthetic-"));

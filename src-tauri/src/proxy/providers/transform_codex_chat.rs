@@ -33,7 +33,6 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
     "n",
     "parallel_tool_calls",
     "presence_penalty",
-    "response_format",
     "seed",
     "service_tier",
     "stop",
@@ -266,6 +265,9 @@ pub fn responses_to_chat_completions_with_reasoning(
     reasoning_config: Option<&CodexChatReasoningConfig>,
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
+    if let Some(format) = super::responses_output_format::chat_response_format(&body)? {
+        result["response_format"] = format;
+    }
     let tool_context = build_codex_tool_context_from_request(&body);
     let model = body.get("model").and_then(Value::as_str).unwrap_or("");
 

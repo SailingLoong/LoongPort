@@ -651,3 +651,31 @@ async fn cross_owner_midstream_failure_is_terminal_not_cross_owner_replay() {
         .contains("synthetic-a-access"));
     f.minimax.assert_idle().await;
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cross_owner_transport_failure_never_replays_submitted_request() {
+    let f = CrossOwnerFixture::new(UpstreamBehavior::FirstHeadersPending, ZCodeReply::Text).await;
+    let mut config = f
+        .minimax
+        .db
+        .get_proxy_config_for_app("codex")
+        .await
+        .unwrap();
+    config.non_streaming_timeout = 1;
+    f.minimax
+        .db
+        .update_proxy_config_for_app(config)
+        .await
+        .unwrap();
+    let response = f
+        .request(json!({"model":"MiniMax-M2.7","input":"synthetic question","stream":false}))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let calls = f.minimax.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_wire(&calls[0], "synthetic-a", "cn");
+    assert!(f.zcode_calls.lock().unwrap().is_empty());
+    assert_eq!(f.zcode.attempts(), 0);
+    f.minimax.assert_idle().await;
+}

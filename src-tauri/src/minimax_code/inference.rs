@@ -183,6 +183,13 @@ fn owner_error(_: Failure) -> ProxyError {
     ProxyError::AuthError("minimax_code.authorization_unavailable".into())
 }
 
+fn post_dispatch_owner_error(_: Failure) -> ProxyError {
+    // The upstream request has already completed its send. An invalidated
+    // original owner cannot prove non-acceptance; do not classify this as a
+    // recoverable pre-send authentication failure or select another account.
+    ProxyError::Internal("minimax_code.authorization_changed_after_dispatch".into())
+}
+
 fn check_snapshot(document: &mut catalog::Document, snapshot: &Snapshot) -> Result<(), Failure> {
     let account = catalog::matched(document, snapshot)?;
     account.usable()?;
@@ -290,7 +297,7 @@ impl Lease {
             } else {
                 safe_error_response(response, timeout).await?
             };
-            self.check().await.map_err(owner_error)?;
+            self.check().await.map_err(post_dispatch_owner_error)?;
             // Only an explicit HTTP 401 before any downstream output allows one
             // same-account refresh/replay, after inspecting its bounded error
             // envelope. No downstream output has been emitted. Expiry refresh
@@ -304,7 +311,7 @@ impl Lease {
                 refreshed = true;
                 continue;
             }
-            self.check().await.map_err(owner_error)?;
+            self.check().await.map_err(post_dispatch_owner_error)?;
             if !response.status().is_success() {
                 // Preserve the status for the ORIGINAL retry owner. 429 and a
                 // second 401 must never be treated as successful completions.
@@ -793,16 +800,17 @@ impl StreamTransport for FixtureTransport {
             } else {
                 catalog::Region::Global
             };
-            let response = self
+            let mut outbound = self
                 .client
                 .post(self.url(region, "/mavis/api/v1/llm/v1/messages"))
                 .headers(request.headers)
-                .body(request.body)
-                .send()
-                .await
-                .map_err(|_| {
-                    ProxyError::ForwardFailed("minimax_code.fixture_transport_failed".into())
-                })?;
+                .body(request.body);
+            if !request.timeout.is_zero() {
+                outbound = outbound.timeout(request.timeout);
+            }
+            let response = outbound.send().await.map_err(|_| {
+                ProxyError::ForwardFailed("minimax_code.fixture_transport_failed".into())
+            })?;
             Ok(ProxyResponse::Reqwest(response))
         })
     }
