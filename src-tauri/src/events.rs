@@ -24,6 +24,7 @@ use tauri::Emitter;
 use crate::app_config::AppType;
 
 /// 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。
+pub const AUTOMATIC_CLAIM_STATUS_UPDATED: &str = "automatic-claim-status-updated";
 pub const PROVIDER_SWITCHED: &str = "provider-switched";
 /// Remote provider model inventories changed; payload contains appType.
 pub const PROVIDER_MODELS_UPDATED: &str = "provider-models-updated";
@@ -188,6 +189,10 @@ mod consistency_tests {
             ),
             ("SITE_BALANCES_UPDATED", super::SITE_BALANCES_UPDATED),
             ("MODEL_MISMATCH", super::MODEL_MISMATCH),
+            (
+                "AUTOMATIC_CLAIM_STATUS_UPDATED",
+                super::AUTOMATIC_CLAIM_STATUS_UPDATED,
+            ),
         ];
 
         for (ts_name, rust_value) in pairs {

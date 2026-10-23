@@ -37,16 +37,31 @@ impl<T: Transport> Engine<'_, T> {
         };
         self.persist(&b, rows, i)
     }
-    pub async fn automatic_tick(&self) -> Result<(), Failure> {
+    pub async fn automatic_tick(&self) -> Result<usize, Failure> {
         let rows = self.list().await?;
+        let mut failures = 0;
         for row in rows.into_iter().filter(|r| {
             r.auto_claim_enabled && r.can_set_automatic && !r.auto_claim_blocked && r.can_claim
         }) {
             // The final dispatch barrier rechecks this exact identity and policy.
-            let _ = self
+            match self
                 .claim_with_policy(&row.id, Some((row.generation, row.auto_claim_revision)))
-                .await;
+                .await
+            {
+                // Read failures can be represented as an unconfirmed account,
+                // rather than an Err. Do not call that a successful check.
+                Ok(account)
+                    if matches!(
+                        account.claim_state,
+                        ClaimState::Unconfirmed | ClaimState::NeedsVerification
+                    ) =>
+                {
+                    failures += 1
+                }
+                Err(_) => failures += 1,
+                Ok(_) => {}
+            }
         }
-        Ok(())
+        Ok(failures)
     }
 }

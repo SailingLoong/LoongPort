@@ -410,7 +410,8 @@ impl<T: Transport> Engine<'_, T> {
     }
     /// No local midnight/reset/credit arithmetic. The existing owner consults the
     /// live panel, then applies its durable intent and same-day receipt protection.
-    pub async fn automatic_tick(&self) -> Result<(), Failure> {
+    pub async fn automatic_tick(&self) -> Result<usize, Failure> {
+        let mut failures = 0;
         for view in self.list().await? {
             if !view.auto_claim_enabled || !view.authorized {
                 continue;
@@ -419,6 +420,9 @@ impl<T: Transport> Engine<'_, T> {
                 .claim_with_policy(&view.id, Some(view.auto_claim_revision))
                 .await;
             let error = result.err();
+            if error.is_some() {
+                failures += 1;
+            }
             // Persist only an observation of this same policy and login, never overwrite
             // a policy edit/re-login that happened while the network call was pending.
             catalog::access(self.session, None, |d, _| {
@@ -436,7 +440,7 @@ impl<T: Transport> Engine<'_, T> {
             })
             .await?;
         }
-        Ok(())
+        Ok(failures)
     }
     pub async fn retire(&self, id: &str) -> Result<(), Failure> {
         catalog::access(self.session, None, |d, _| {

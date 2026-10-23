@@ -1931,3 +1931,31 @@ async fn refresh_waiting_to_merge_across_midnight_does_not_relabel_yesterday_dat
     assert_eq!(row.credits.total_remaining, None);
     assert_eq!(original, std::fs::read(s.root().join(store::FILE)).unwrap());
 }
+
+#[tokio::test]
+async fn automatic_failed_account_is_reported_without_starving_other_accounts() {
+    let (session, ids) = account_isolation_fixture();
+    let transport = Fake::new(vec![
+        (Endpoint::Status, Err(Failure::Unconfirmed)),
+        status(true),
+    ]);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&engine, &ids[0]).await;
+    enable(&engine, &ids[1]).await;
+    assert_eq!(engine.automatic_tick().await.unwrap(), 1);
+    assert!(transport.queue.lock().unwrap().is_empty());
+    let rows = engine.list().await.unwrap();
+    assert_eq!(
+        rows.iter().find(|r| r.id == ids[0]).unwrap().claim_state,
+        ClaimState::Unconfirmed
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.id == ids[1]).unwrap().claim_state,
+        ClaimState::AlreadyClaimed
+    );
+    assert!(!transport.calls.lock().unwrap().contains(&Endpoint::Claim));
+}

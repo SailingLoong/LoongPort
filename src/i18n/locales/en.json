@@ -4900,6 +4900,23 @@
       "alreadyClaimed": "Already claimed",
       "unavailable": "Currently unavailable",
       "needsVerification": "Verification required"
+    },
+    "inference": {
+      "authorization": "Inference authorization",
+      "authorize": "Authorize inference separately",
+      "availableModels": "Available inference models",
+      "cancel": "Cancel inference authorization",
+      "failed": "Inference authorization or model discovery did not complete. Select the matching account and try again; check-in login is unaffected.",
+      "finish": "I have authorized inference",
+      "identityNotice": "Authorize the same WorkBuddy account in the same region. The existing check-in login is retained.",
+      "models": "Discover inference models",
+      "open": "Open inference authorization",
+      "state": {
+        "needsAuthorization": "Separate inference authorization required (check-in is unaffected)",
+        "ready": "Inference authorization saved (actual consumption is not verified)",
+        "refreshRequired": "Inference authorization needs refresh",
+        "expired": "Inference authorization expired (authorize inference again)"
+      }
     }
   },
   "startupUpgrade": {
@@ -5194,5 +5211,37 @@
     "unknownStatus": "Unknown status",
     "routeUnsupported": "Code tasks require an API key connection. Select an API key connection in Codex and enter a model, then try again.",
     "accessDenied": "Code access is unavailable. Refresh the access status or authorize again, then try again."
+  },
+  "automaticStatus": {
+    "title": "Platform background checks",
+    "loading": "Reading background check status",
+    "unavailable": "Background check status is unavailable. Reload background status to check again.",
+    "reload": "Reload background status",
+    "waiting": "Waiting for the next check",
+    "checking": "Checking server eligibility",
+    "lastCheckedAt": "Last check: {{time}}",
+    "nextCheckAt": "Next planned check: {{time}} (app running and vault unlocked)",
+    "receiptNotice": "Eligibility is checked every 15 minutes; credits are not claimed every 15 minutes. A completed check does not mean a successful claim. Use this account’s claim record for the result.",
+    "result": {
+      "completed": "Last result: background check completed",
+      "failed": "Last result: background check did not complete",
+      "skipped": "Last result: check skipped"
+    },
+    "reason": {
+      "locked": "The credential vault is locked; this check did not run.",
+      "disabled": "No accounts on this platform have automatic check-in enabled.",
+      "pending": "An operation is already running; it is not repeated.",
+      "notEligible": "No accounts were eligible for an automatic claim in this check.",
+      "checkFailed": "The check did not complete. Review account status; this is not proof of a successful claim."
+    },
+    "enable": "Enable automatic check-in",
+    "disable": "Disable automatic check-in",
+    "enabled": "Automatic check-in enabled",
+    "disabled": "Automatic check-in disabled",
+    "notice": "While the app is running and the vault is unlocked, server eligibility is checked every 15 minutes, not claimed every time. Unconfirmed claims are not repeated; missed windows are not backfilled. Turning this off cannot cancel submitted claims. Check-in records reload after background completion; refresh separately for balances.",
+    "actionRequired": "Automatic check-in needs attention: ",
+    "inferenceUnverified": "Actual inference consumption has not been verified. A successful claim, saved authorization or discovered model does not prove actual inference consumption.",
+    "authorizationSaved": "Account authorization saved; actual inference consumption is not verified",
+    "reauthorize": "Reauthorization required"
   }
 }

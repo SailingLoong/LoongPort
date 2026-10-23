@@ -2086,6 +2086,7 @@ pub fn run() {
             commands::claim_workbuddy_today,
             commands::claim_all_workbuddy_today,
             commands::set_workbuddy_automatic_claim,
+            commands::get_automatic_claim_status,
             commands::begin_workbuddy_authorization,
             commands::finish_workbuddy_authorization,
             commands::cancel_workbuddy_authorization,

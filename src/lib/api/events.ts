@@ -54,3 +54,5 @@ export const ONBOARDING_REGISTER_COMPLETED = "onboarding-register-completed";
 export const SITE_BALANCES_UPDATED = "site-balances-updated";
 /** 模型对齐新告警（`ModelMismatchBanner` 监听）：客户端点名的模型 ≠ 实际计费模型。 */
 export const MODEL_MISMATCH = "model-mismatch";
+/** Background automatic checks changed; read local scheduler/account projections. */
+export const AUTOMATIC_CLAIM_STATUS_UPDATED = "automatic-claim-status-updated";

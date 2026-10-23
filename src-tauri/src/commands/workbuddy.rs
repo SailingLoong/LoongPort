@@ -19,13 +19,19 @@ pub(crate) async fn set_workbuddy_automatic_claim(
     policy_version: u32,
     enabled: bool,
 ) -> Result<AccountView, Failure> {
-    Engine {
+    let account = Engine {
         session: state.db.secret_session(),
         transport: &OfficialHttp,
         clock: &SystemClock,
     }
     .set_automatic(&id, generation, revision, policy_version, enabled)
-    .await
+    .await?;
+    if enabled {
+        crate::maintenance::wake_automatic_claim(
+            crate::maintenance::scheduler::AutomaticProvider::Workbuddy,
+        );
+    }
+    Ok(account)
 }
 #[tauri::command]
 pub(crate) async fn list_workbuddy_accounts(
@@ -162,4 +168,11 @@ pub(crate) fn cancel_workbuddy_authorization(
     flow_id: String,
 ) -> Result<(), Failure> {
     authorization::cancel(state.db.secret_session(), &flow_id)
+}
+
+#[tauri::command]
+pub(crate) fn get_automatic_claim_status(
+    provider: crate::maintenance::scheduler::AutomaticProvider,
+) -> crate::maintenance::scheduler::AutomaticStatus {
+    crate::maintenance::scheduler::automatic_registry().status(provider)
 }

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
 import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
 const api = vi.hoisted(() => ({
+  automaticStatus: vi.fn(),
   list: vi.fn(),
   refresh: vi.fn(),
   refreshAll: vi.fn(),
@@ -20,6 +21,9 @@ const api = vi.hoisted(() => ({
   cancelInferenceLogin: vi.fn(),
   discoverModels: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/api/automaticClaim", () => ({
+  automaticClaimApi: { status: api.automaticStatus },
 }));
 vi.mock("@/lib/api/workbuddy", () => ({ workbuddyApi: api }));
 vi.mock("@/lib/api/settings", () => ({
@@ -52,6 +56,14 @@ const row: WorkBuddyAccount = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  api.automaticStatus.mockResolvedValue({
+    provider: "workbuddy",
+    phase: "waiting",
+    lastCheckedAt: null,
+    nextCheckAt: null,
+    result: null,
+    reason: null,
+  });
   api.list.mockResolvedValue([row]);
   api.listInferenceAccounts.mockResolvedValue([
     { id: row.id, state: "needsAuthorization" },
@@ -201,7 +213,7 @@ it.each(["success", "failure"] as const)(
     expect(screen.getByText("Synthetic account")).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText("common.loading")).not.toBeInTheDocument();
-    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(api.list).toHaveBeenCalledTimes(3);
     expect(api.finishLogin).toHaveBeenCalledOnce();
     expect(api.claim).not.toHaveBeenCalled();
     expect(api.claimAll).not.toHaveBeenCalled();
@@ -218,6 +230,7 @@ it("keeps the newer authorization read pending when the initial read finishes", 
           (resolve) => (resolveInitial = resolve),
         ),
     )
+    .mockImplementationOnce(() => new Promise<WorkBuddyAccount[]>(() => {}))
     .mockImplementationOnce(
       () =>
         new Promise<WorkBuddyAccount[]>((resolve) => (resolveSaved = resolve)),
@@ -234,7 +247,7 @@ it("keeps the newer authorization read pending when the initial read finishes", 
       name: "workbuddy.finishAuthorization",
     }),
   );
-  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(3));
   await act(async () => resolveInitial([]));
   expect(screen.getByText("common.loading")).toBeVisible();
   expect(screen.queryByText("workbuddy.empty")).not.toBeInTheDocument();
@@ -261,20 +274,19 @@ it("ignores the retired mount read after StrictMode restarts the effect", async 
   expect(await screen.findByText("Synthetic account")).toBeVisible();
   await act(async () => resolveRetired([]));
   expect(screen.getByText("Synthetic account")).toBeVisible();
-  expect(api.list).toHaveBeenCalledTimes(2);
+  expect(api.list).toHaveBeenCalledTimes(3);
   expect(api.beginLogin).not.toHaveBeenCalled();
 });
 
 it("clears an initial read failure when authorization starts a replacement read", async () => {
   let rejectInitial!: (error: Error) => void;
   let resolveFinish!: (value: { state: "saved" }) => void;
+  const initial = new Promise<WorkBuddyAccount[]>(
+    (_, reject) => (rejectInitial = reject),
+  );
   api.list
-    .mockImplementationOnce(
-      () =>
-        new Promise<WorkBuddyAccount[]>(
-          (_, reject) => (rejectInitial = reject),
-        ),
-    )
+    .mockReturnValueOnce(initial)
+    .mockReturnValueOnce(initial)
     .mockResolvedValueOnce([row]);
   api.beginLogin.mockResolvedValue({
     flowId: "f1",
@@ -317,6 +329,7 @@ it("does not let a pending initial read hide a newer authorization failure", asy
 it("retains claim results if the saved authorization list cannot be read", async () => {
   api.claimAll.mockResolvedValueOnce([{ account: row, error: "busy" }]);
   api.list
+    .mockResolvedValueOnce([row])
     .mockResolvedValueOnce([row])
     .mockRejectedValueOnce(new Error("SYNTHETIC_LIST_FAILURE"));
   api.beginLogin.mockResolvedValue({
@@ -873,12 +886,15 @@ it("legacy save fences an older inference status read while its account reload i
         oldStatus = resolve;
       }),
   );
-  api.list.mockResolvedValueOnce([row]).mockImplementationOnce(
-    () =>
-      new Promise((resolve) => {
-        reloadAccounts = resolve;
-      }),
-  );
+  api.list
+    .mockResolvedValueOnce([row])
+    .mockResolvedValueOnce([row])
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          reloadAccounts = resolve;
+        }),
+    );
   api.beginLogin.mockResolvedValue({
     flowId: "legacy",
     verificationUri: "https://www.codebuddy.cn/login?state=synthetic",
@@ -891,7 +907,7 @@ it("legacy save fences an older inference status read while its account reload i
   await userEvent.click(
     screen.getByRole("button", { name: "workbuddy.finishAuthorization" }),
   );
-  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(3));
   await act(async () => oldStatus([{ id: row.id, state: "ready" }]));
   expect(
     screen.queryByText("workbuddy.inference.state.ready"),
@@ -920,7 +936,9 @@ it("places native authorization, claim and model actions in separate unified det
       name: "workbuddy.inference.models",
     }),
   ).toBeDisabled();
-  expect(within(inference).getByText(/尚未验收/)).toBeInTheDocument();
+  expect(
+    within(inference).getByText("automaticStatus.inferenceUnverified"),
+  ).toBeInTheDocument();
   await userEvent.click(
     within(rights).getByRole("button", { name: "workbuddy.claim" }),
   );
@@ -1084,6 +1102,7 @@ it("an older enabled refresh cannot restore a confirmed opt-out", async () => {
 it("lost enable response reads back the committed enabled policy instead of showing off", async () => {
   api.list
     .mockResolvedValueOnce([row])
+    .mockResolvedValueOnce([row])
     .mockResolvedValue([
       { ...row, autoClaimEnabled: true, autoClaimRevision: 1 },
     ]);
@@ -1094,10 +1113,13 @@ it("lost enable response reads back the committed enabled policy instead of show
   await waitFor(() =>
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true"),
   );
-  expect(api.list).toHaveBeenCalledTimes(2);
+  expect(api.list).toHaveBeenCalledTimes(3);
 });
 it("lost disable response and failed readback display unknown, never a false on or off", async () => {
   api.list
+    .mockResolvedValueOnce([
+      { ...row, autoClaimEnabled: true, autoClaimRevision: 1 },
+    ])
     .mockResolvedValueOnce([
       { ...row, autoClaimEnabled: true, autoClaimRevision: 1 },
     ])
@@ -1225,7 +1247,135 @@ it.each(["saved", "waiting", "failure"] as const)(
       screen.queryByText("workbuddy.authorizationWaiting"),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(api.list).toHaveBeenCalledTimes(1);
+    expect(api.list).toHaveBeenCalledTimes(2);
     expect(api.claim).not.toHaveBeenCalled();
+  },
+);
+
+it("reads background completion without claiming, refreshing, or authorizing inference", async () => {
+  const { emitTauriEvent } = await import("../../msw/tauriMocks");
+  const view = render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  api.list.mockResolvedValue([{ ...row, claimState: "claimed", credited: 10 }]);
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "minimaxCode",
+      phase: "waiting",
+    }),
+  );
+  expect(api.list).toHaveBeenCalledTimes(2);
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "workbuddy",
+      phase: "waiting",
+    }),
+  );
+  expect(await screen.findByText("workbuddy.state.claimed")).toBeVisible();
+  expect(api.refresh).not.toHaveBeenCalled();
+  expect(api.claim).not.toHaveBeenCalled();
+  expect(api.claimAll).not.toHaveBeenCalled();
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.discoverModels).not.toHaveBeenCalled();
+  view.unmount();
+  const reads = api.list.mock.calls.length;
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "workbuddy",
+      phase: "waiting",
+    }),
+  );
+  expect(api.list).toHaveBeenCalledTimes(reads);
+});
+
+it("background catalog reads preserve the manual batch receipt", async () => {
+  const { emitTauriEvent } = await import("../../msw/tauriMocks");
+  api.claimAll.mockResolvedValue([
+    { account: { ...row, claimState: "claimed" }, error: null },
+  ]);
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.claimAll" }),
+  );
+  await screen.findByRole("region", { name: "workbuddy.claimResults" });
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "workbuddy",
+      phase: "waiting",
+    }),
+  );
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(3));
+  expect(
+    screen.getByRole("region", { name: "workbuddy.claimResults" }),
+  ).toBeVisible();
+});
+
+it.each([
+  ["single", "before"],
+  ["single", "during"],
+  ["batch", "before"],
+  ["batch", "during"],
+] as const)(
+  "does not let a passive snapshot started %s %s manual completion regress its receipt",
+  async (kind, timing) => {
+    const { emitTauriEvent } = await import("../../msw/tauriMocks");
+    let finishList!: (rows: WorkBuddyAccount[]) => void;
+    let finishClaim!: (result: unknown) => void;
+    const claimed = {
+      ...row,
+      claimState: "claimed" as const,
+      canClaim: false,
+      credited: 10,
+    };
+    (kind === "batch" ? api.claimAll : api.claim).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishClaim = resolve;
+        }),
+    );
+    render(<WorkBuddyAccounts />);
+    await screen.findByText(row.label);
+    api.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishList = resolve;
+        }),
+    );
+    const emit = () =>
+      act(() =>
+        emitTauriEvent("automatic-claim-status-updated", {
+          provider: "workbuddy",
+          phase: "waiting",
+        }),
+      );
+    if (timing === "before") emit();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: kind === "batch" ? "workbuddy.claimAll" : "workbuddy.claim",
+      }),
+    );
+    if (timing === "during") emit();
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(3));
+    await act(async () =>
+      finishClaim(
+        kind === "batch" ? [{ account: claimed, error: null }] : claimed,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByText("workbuddy.state.claimed").length,
+      ).toBeGreaterThan(0),
+    );
+    await act(async () => finishList([row]));
+    expect(
+      screen.queryByText("workbuddy.state.available"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("workbuddy.state.claimed").length,
+    ).toBeGreaterThan(0);
+    if (kind === "batch")
+      expect(
+        screen.getByRole("region", { name: "workbuddy.claimResults" }),
+      ).toHaveTextContent("workbuddy.state.claimed");
   },
 );
