@@ -494,6 +494,49 @@ try {
             name: "服务平台",
             exact: true,
           });
+          // Exercise the real status hook for both providers. The fixture exposes
+          // only local synthetic snapshots/events; any unexpected IPC still fails below.
+          for (const [provider, name] of [
+            ["minimaxCode", "MiniMax Code 国内版"],
+            ["workbuddy", "WorkBuddy"],
+          ]) {
+            await platformTabs.getByRole("tab", { name, exact: true }).click();
+            const status = main.getByRole("region", {
+              name: t("automaticStatus.title"),
+              exact: true,
+            });
+            await status
+              .getByText(t("automaticStatus.waiting"), { exact: true })
+              .waitFor();
+            await page.waitForFunction(
+              (provider) =>
+                window.unifiedLayout.automaticStatusReads[provider] >= 2,
+              provider,
+            );
+            const before = await page.evaluate(
+              (provider) => window.unifiedLayout.automaticStatusReads[provider],
+              provider,
+            );
+            await page.evaluate(
+              (provider) =>
+                window.unifiedLayout.completeAutomaticCheck(provider),
+              provider,
+            );
+            await status
+              .getByText(t("automaticStatus.reason.disabled"), { exact: true })
+              .waitFor();
+            assert.ok(
+              await page.evaluate(
+                ({ provider, before }) =>
+                  window.unifiedLayout.automaticStatusReads[provider] > before,
+                { provider, before },
+              ),
+              `${provider} completion must re-read the native status DTO`,
+            );
+          }
+          await platformTabs
+            .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
+            .click();
           await platformTabs
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .focus();

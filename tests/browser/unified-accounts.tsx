@@ -2,6 +2,12 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
+import { AUTOMATIC_CLAIM_STATUS_UPDATED } from "@/lib/api/events";
+import type {
+  AutomaticClaimProvider,
+  AutomaticClaimSnapshot,
+} from "@/lib/api/automaticClaim";
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
@@ -12,6 +18,7 @@ import type { AccountPlatform } from "@/components/relay/accounts/accountPlatfor
 import type { RelayRow } from "@/lib/api/relay";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 import type { MiniMaxCodeAccount } from "@/lib/api/minimaxCode";
+import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
 import { Button } from "@/components/ui/button";
 import en from "@/i18n/locales/en.json";
 import zh from "@/i18n/locales/zh.json";
@@ -22,7 +29,32 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get("scenario") ?? "populated";
 const language = params.get("lang") === "zh" ? "zh" : "en";
 const rejectedCommands: string[] = [];
-Object.assign(window, { unifiedLayout: { rejectedCommands } });
+const automaticStatusReads = { workbuddy: 0, minimaxCode: 0 };
+const automaticSnapshots = Object.fromEntries(
+  (["workbuddy", "minimaxCode"] as const).map((provider) => [
+    provider,
+    {
+      provider,
+      phase: "waiting",
+      lastCheckedAt: null,
+      nextCheckAt: 1800000000000,
+      result: null,
+      reason: null,
+    },
+  ]),
+) as Record<AutomaticClaimProvider, AutomaticClaimSnapshot>;
+const completeAutomaticCheck = async (provider: AutomaticClaimProvider) => {
+  // Synthetic local observation only; never dispatch a claim or enable a policy.
+  automaticSnapshots[provider] = {
+    provider,
+    phase: "waiting",
+    lastCheckedAt: 1800000000000,
+    nextCheckAt: 1800000900000,
+    result: "skipped",
+    reason: "disabled",
+  };
+  await emit(AUTOMATIC_CLAIM_STATUS_UPDATED, automaticSnapshots[provider]);
+};
 const relay: RelayRow = {
   id: 1,
   siteOrigin: "https://relay.example",
@@ -49,6 +81,28 @@ const vendor: VendorAccountRow = {
   canDelete: true,
   plans: [],
 };
+const workbuddyAccounts: WorkBuddyAccount[] = [
+  {
+    id: "synthetic-workbuddy",
+    label: "Synthetic WorkBuddy account",
+    generation: 1,
+    autoClaimEnabled: false,
+    autoClaimRevision: 0,
+    autoClaimPolicyVersion: 1,
+    canSetAutomatic: false,
+    autoClaimBlocked: false,
+    canRefresh: false,
+    canClaim: false,
+    claimState: "unconfirmed",
+    credited: null,
+    credits: {
+      totalRemaining: null,
+      nearestExpiry: null,
+      updatedAt: null,
+      packages: [],
+    },
+  },
+];
 const nativeAccounts: MiniMaxCodeAccount[] = ["A", "B"].map((id) => ({
   id: `synthetic-${id}`,
   label: `Synthetic account ${id}`,
@@ -78,6 +132,20 @@ mockIPC(
           supported: true,
           accounts: scenario === "empty" ? [] : [vendor],
         };
+      case "get_automatic_claim_status": {
+        const provider = (payload as { provider?: string } | undefined)
+          ?.provider;
+        if (provider !== "workbuddy" && provider !== "minimaxCode") {
+          rejectedCommands.push(command);
+          throw new Error("Unsupported synthetic automatic-check provider");
+        }
+        automaticStatusReads[provider] += 1;
+        return { ...automaticSnapshots[provider] };
+      }
+      case "list_workbuddy_accounts":
+        return workbuddyAccounts;
+      case "list_workbuddy_inference_accounts":
+        return [];
       case "list_minimax_code_accounts":
         return nativeAccounts;
       case "auth_get_status":
@@ -144,7 +212,12 @@ const client = new QueryClient({
 });
 
 Object.assign(window, {
-  unifiedLayout: { rejectedCommands, settled: () => client.isFetching() === 0 },
+  unifiedLayout: {
+    rejectedCommands,
+    automaticStatusReads,
+    completeAutomaticCheck,
+    settled: () => client.isFetching() === 0,
+  },
 });
 
 function Fixture() {
