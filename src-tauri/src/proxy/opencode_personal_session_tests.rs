@@ -31,6 +31,8 @@ impl Drop for PersonalFixture {
 }
 impl PersonalFixture {
     async fn new(app: AppType) -> Self {
+        // Match application startup before the original native hyper client.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let owner = FixtureOwner::personal_go();
         let state = owner.state();
         let calls = Arc::new(Mutex::new(Vec::new()));
