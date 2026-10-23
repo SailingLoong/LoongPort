@@ -77,8 +77,18 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         common_config_enabled: Some(false),
         ..Default::default()
     });
-    crate::services::ProviderService::add(&app, AppType::Codex, original, false).unwrap();
-    crate::services::ProviderService::switch(&app, AppType::Codex, "synthetic-original").unwrap();
+    // These are synchronous native writers, like the desktop's blocking
+    // command body. Their Codex owner uses rt::block_on internally, so do not
+    // call them on the async listener/client runtime's execution thread.
+    let native_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::services::ProviderService::add(&native_app, AppType::Codex, original, false)
+            .unwrap();
+        crate::services::ProviderService::switch(&native_app, AppType::Codex, "synthetic-original")
+            .unwrap();
+    })
+    .await
+    .unwrap();
     let snapshot = || {
         controller::files(&AppType::Codex)
             .unwrap()
@@ -104,11 +114,16 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         .switch_proxy_target("codex", "synthetic-a")
         .await
         .unwrap();
-    crate::services::application_selection::apply_current_order_change(
-        &app,
-        &AppType::Codex,
-        &["synthetic-a".into(), "synthetic-b".into()],
-    )
+    let order_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::services::application_selection::apply_current_order_change(
+            &order_app,
+            &AppType::Codex,
+            &["synthetic-a".into(), "synthetic-b".into()],
+        )
+        .unwrap();
+    })
+    .await
     .unwrap();
     app.proxy_service
         .set_failover_for_app("codex", true)
