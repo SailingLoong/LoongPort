@@ -5822,6 +5822,9 @@ mod native_recovery_tests;
 #[path = "upgrade_attached_recovery_tests.rs"]
 mod attached_recovery_tests;
 
+#[path = "upgrade_client_recovery_tests.rs"]
+mod client_recovery_tests;
+
 #[test]
 #[serial_test::serial]
 fn u03_completion_archive_survives_original_key_rotation_without_source_key() {

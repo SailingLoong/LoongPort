@@ -27,7 +27,7 @@ fn health_at(address: &str, port: u16) {
     );
 }
 
-fn assert_no_recovery_writes(
+pub(super) fn assert_no_recovery_writes(
     before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
     after: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
     label: &str,
