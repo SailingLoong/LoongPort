@@ -462,6 +462,12 @@ export const accountErrorText = {
     "Choose a saved personal account in the inspected source's account family.",
   vault_unavailable:
     "Unlock the local LoongPort vault, then refresh account status.",
+  oauth_init_unavailable:
+    "The official authorization page could not be prepared. Check the original login status before starting another sign-in.",
+  oauth_poll_unavailable:
+    "The official authorization result could not be read. Check this login again; do not create another authorization or Key automatically.",
+  oauth_normalize_unavailable:
+    "The authorized provider credential could not be prepared for use. Check this login again; no account has been saved by this step.",
   official_unavailable:
     "The official service could not complete this step. Check the current login status before continuing.",
   key_result_unknown:
