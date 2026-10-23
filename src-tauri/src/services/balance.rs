@@ -286,9 +286,16 @@ async fn query_siliconflow(api_key: &str, is_cn: bool) -> Result<UsageResult, St
 
 async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
     let client = crate::proxy::http_client::get_authenticated()?;
+    query_openrouter_with_client(&client, api_key, "https://openrouter.ai/api/v1").await
+}
 
+async fn query_openrouter_with_client(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+) -> Result<UsageResult, String> {
     let resp = client
-        .get("https://openrouter.ai/api/v1/credits")
+        .get(format!("{base_url}/credits"))
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(15))
@@ -301,7 +308,10 @@ async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return verify_openrouter_key(client, api_key, base_url).await;
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
@@ -321,9 +331,20 @@ async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let data = body.get("data").unwrap_or(&body);
-    let total_credits = parse_f64_field(data, "total_credits").unwrap_or(0.0);
-    let total_usage = parse_f64_field(data, "total_usage").unwrap_or(0.0);
+    let (Some(total_credits), Some(total_usage)) = (
+        parse_f64_field(data, "total_credits").filter(|value| value.is_finite()),
+        parse_f64_field(data, "total_usage").filter(|value| value.is_finite()),
+    ) else {
+        return Ok(make_error(
+            "Invalid OpenRouter credits response".to_string(),
+        ));
+    };
     let remaining = total_credits - total_usage;
+    if !remaining.is_finite() {
+        return Ok(make_error(
+            "Invalid OpenRouter credits response".to_string(),
+        ));
+    }
 
     Ok(UsageResult {
         success: true,
@@ -340,6 +361,77 @@ async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
                 None
             },
             extra: None,
+        }]),
+        error: None,
+    })
+}
+
+// /credits requires a management key; an inference key can still be valid.
+// https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits
+// https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key
+// This stays in the original balance owner: no new key store or login state.
+async fn verify_openrouter_key(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+) -> Result<UsageResult, String> {
+    let response = client
+        .get(format!("{base_url}/key"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "OpenRouter key verification unavailable: {}",
+                error.without_url()
+            )
+        })?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(make_auth_error(status));
+    }
+    // A permission denial or transient response does not prove key expiry.
+    // Keep the unknown state on the existing retry/keep-last-good channel.
+    if !status.is_success() {
+        return Err(format!(
+            "OpenRouter key verification unavailable (HTTP {status})"
+        ));
+    }
+    let raw = response.bytes().await.map_err(|error| {
+        format!(
+            "OpenRouter key verification unavailable: {}",
+            error.without_url()
+        )
+    })?;
+    let body: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|_| "Invalid OpenRouter key verification response".to_string())?;
+    if body
+        .get("data")
+        .and_then(|data| data.get("label"))
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|label| label.trim().is_empty())
+    {
+        return Err("Invalid OpenRouter key verification response".to_string());
+    }
+    Ok(UsageResult {
+        success: true,
+        data: Some(vec![UsageData {
+            plan_name: Some("OpenRouter".to_string()),
+            // /key limit_remaining is a key spending limit, NOT account credits.
+            // Relay consumers also read remaining as account balance: omit all
+            // monetary fields, and do not claim inference availability.
+            remaining: None,
+            total: None,
+            used: None,
+            unit: None,
+            is_valid: None,
+            invalid_message: None,
+            extra: Some(
+                "API key verified; account balance unavailable (management key required)."
+                    .to_string(),
+            ),
         }]),
         error: None,
     })
@@ -491,3 +583,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "balance_openrouter_tests.rs"]
+mod openrouter_tests;
