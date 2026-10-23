@@ -30,7 +30,11 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         )
         .unwrap();
     Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
-    crate::settings::reload_settings().unwrap();
+    // TestHome resets the settings owner; Database::memory only opens the DB
+    // vault. Native provider writes need the same session published to settings,
+    // just as the existing ProviderService and auto-mode fixtures initialize it.
+    crate::settings::unlock_settings_for_test(db.secrets.clone())
+        .expect("unlock isolated settings with the account fixture session");
     let app = crate::store::AppState::new(db.clone()).unwrap();
     state::update(
         &DeviceStore::for_device(),
