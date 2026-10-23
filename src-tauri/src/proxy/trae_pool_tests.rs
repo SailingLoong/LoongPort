@@ -356,3 +356,156 @@ async fn trae_success_headers_business_error_never_tries_second_account() {
         }
     }
 }
+
+fn automatic_semantic_case(case: &str) -> (&'static str, Value) {
+    let schema = json!({"type":"json_schema","name":"synthetic_shape","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}});
+    match case {
+        "responses_format" => (
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello","text":{"format":schema}}),
+        ),
+        "responses_cursor" => (
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello","previous_response_id":"synthetic-vendor-bound-response"}),
+        ),
+        "chat_format" => (
+            "/v1/chat/completions",
+            json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_schema","json_schema":{"name":"synthetic_shape","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}}}),
+        ),
+        _ => panic!("unknown synthetic semantic case"),
+    }
+}
+
+async fn assert_automatic_semantics_excluded(case: &str) {
+    let f = Fixture::new().await;
+    // Both original accounts are in the applied automatic chain, including the
+    // current first entry. No new scheduler or substitute admission harness.
+    assert!(
+        f.db.get_proxy_config_for_app("codex")
+            .await
+            .unwrap()
+            .auto_failover_enabled
+    );
+    let (path, body) = automatic_semantic_case(case);
+    let response = f.request(path, body).await;
+    let status = response.status();
+    let _body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        0,
+        "{case}: incompatible automatic candidate must not receive a request"
+    );
+    assert_eq!(
+        f.transport.attempts(),
+        0,
+        "excluded candidate must not enter owner transport"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{case}: no compatible candidate must be explicit, not lossy success"
+    );
+    assert!(
+        f.db.provider_attempt_error_rates("codex")
+            .unwrap()
+            .is_empty(),
+        "capability exclusion is not an account attempt"
+    );
+    for id in ["trae-0", "trae-1"] {
+        let health = f.db.get_provider_health(id, "codex").await.unwrap();
+        assert!(health.is_healthy);
+        assert_eq!(health.consecutive_failures, 0);
+        assert!(health.last_success_at.is_none());
+        assert!(health.last_failure_at.is_none());
+        assert!(health.last_error.is_none());
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.proxy.get_status().await.active_connections != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("excluded original request lease must release");
+    // Reuse the same original owners immediately after exclusion: no account
+    // capacity or response permit may be stranded by capability admission.
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":true,"input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+    assert_eq!(f.calls.lock().unwrap().len(), 1);
+    assert_eq!(f.transport.attempts(), 1);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_responses_format_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("responses_format").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_responses_cursor_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("responses_cursor").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_chat_format_excludes_every_candidate_before_send() {
+    assert_automatic_semantics_excluded("chat_format").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_manual_semantic_compatibility_remains_outside_automatic_gate() {
+    for case in ["responses_format", "responses_cursor", "chat_format"] {
+        let f = Fixture::new().await;
+        for app in ["codex", "claude"] {
+            let mut config = f.db.get_proxy_config_for_app(app).await.unwrap();
+            config.auto_failover_enabled = false;
+            f.db.update_proxy_config_for_app(config).await.unwrap();
+        }
+        let (path, body) = automatic_semantic_case(case);
+        let response = f.request(path, body).await;
+        let expected_status = if case == "chat_format" {
+            // The native Chat field survives to the original strict TRAE wire
+            // validator, which already rejects it. Preserve that behavior too.
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(response.status(), expected_status, "{case}");
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if case == "chat_format" {
+            assert!(!String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 0, "{case}");
+        } else {
+            assert!(String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 1, "{case}");
+        }
+    }
+    // This deliberately preserves the old manual compatibility boundary; a
+    // successful text answer is NOT proof of structured-output/state fidelity.
+}

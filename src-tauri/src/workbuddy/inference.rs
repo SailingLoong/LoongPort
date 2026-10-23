@@ -1335,6 +1335,32 @@ impl FixtureTransport {
     pub(crate) fn attempts(&self) -> usize {
         self.attempts.load(std::sync::atomic::Ordering::Acquire)
     }
+    /// Test-only retirement through the original encrypted owner. Only a
+    /// previously seeded synthetic grant can be removed; no fabricated error.
+    pub(crate) async fn retire_fixture_grant(
+        session: &SecretSession,
+        uid: &str,
+    ) -> Result<(), Failure> {
+        let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
+        let binding = store::binding(session)?;
+        let mut rows = store::load(session, &binding)?;
+        let row = rows
+            .iter_mut()
+            .find(|row| row.account.uid == uid)
+            .ok_or(Failure::UnsupportedContext)?;
+        if !uid.starts_with("synthetic-")
+            || row.account.token != format!("fixture-checkin-{uid}")
+            || !row.inference.as_ref().is_some_and(|grant| {
+                grant.access == format!("fixture-access-{uid}")
+                    && grant.refresh == format!("fixture-refresh-{uid}")
+                    && grant.credential_version == 1
+            })
+        {
+            return Err(Failure::UnsupportedContext);
+        }
+        row.inference = None;
+        store::save(session, &binding, rows)
+    }
     /// Generated synthetic credentials only, and ONLY an empty ephemeral owner.
     /// Existing accounts are never replaced by this test helper.
     pub(crate) async fn seed_accounts(

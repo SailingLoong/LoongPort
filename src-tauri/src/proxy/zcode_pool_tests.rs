@@ -29,6 +29,7 @@ enum UpstreamBehavior {
     Complete,
     FirstRateLimited,
     FirstUnauthorized,
+    FirstRetiredAfterReceipt,
     FailAfterOutput,
 }
 
@@ -43,6 +44,7 @@ struct ZCodeRouterFixture {
     proxy: ProxyServer,
     transport: FixtureTransport,
     calls: Arc<std::sync::Mutex<Vec<CapturedRequest>>>,
+    retirement_completed: Arc<std::sync::atomic::AtomicBool>,
     release_error: Arc<tokio::sync::Notify>,
     origin: String,
     account_ids: Vec<String>,
@@ -76,6 +78,11 @@ impl ZCodeRouterFixture {
         let first_token = synthetic_tokens[0].clone();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls_for_upstream = calls.clone();
+        let retirement_db = db.clone();
+        let retirement_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream_retirement = retirement_completed.clone();
+        let retirement_transport = Arc::new(std::sync::OnceLock::<FixtureTransport>::new());
+        let retire_on_receipt = retirement_transport.clone();
         let release_error = Arc::new(tokio::sync::Notify::new());
         let gate = release_error.clone();
         let app = axum::Router::new().route(
@@ -84,9 +91,17 @@ impl ZCodeRouterFixture {
                 let calls = calls_for_upstream.clone();
                 let gate = gate.clone();
                 let first_token = first_token.clone();
+                let retirement_db = retirement_db.clone();
+                let retirement_completed = upstream_retirement.clone();
+                let retire_on_receipt = retire_on_receipt.clone();
                 async move {
                     let first = headers.get("x-api-key").unwrap().to_str().unwrap() == first_token;
                     calls.lock().unwrap().push(CapturedRequest {headers, body: body.clone()});
+                    if first && matches!(behavior, UpstreamBehavior::FirstRetiredAfterReceipt) {
+                        retire_on_receipt.get().expect("fixture installed before request")
+                            .retire_first_fixture_account(retirement_db.secret_session()).await.unwrap();
+                        retirement_completed.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     if first && matches!(behavior, UpstreamBehavior::FirstUnauthorized) {
                         return (StatusCode::UNAUTHORIZED, axum::Json(json!({"error":{"type":"authentication_error","message":first_token}}))).into_response();
                     }
@@ -117,6 +132,7 @@ impl ZCodeRouterFixture {
             axum::serve(listener, app).await.unwrap();
         });
         let transport = FixtureTransport::loopback(&owner, &origin).unwrap();
+        assert!(retirement_transport.set(transport.clone()).is_ok());
         for (position, id) in ["synthetic-a", "synthetic-b"].iter().enumerate() {
             let mut provider = Provider::with_id(
                 (*id).into(),
@@ -160,6 +176,7 @@ impl ZCodeRouterFixture {
             proxy,
             transport,
             calls,
+            retirement_completed,
             release_error,
             origin,
             account_ids,
@@ -494,4 +511,42 @@ async fn zcode_401_marks_only_selected_original_owner_needs_login_then_falls_bac
         assert_eq!(fixture.transport.attempts(), 2);
         fixture.assert_idle().await;
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn zcode_owner_retired_after_receipt_never_replays() {
+    let f = ZCodeRouterFixture::new(UpstreamBehavior::FirstRetiredAfterReceipt).await;
+    let response = f.request(false).await;
+    assert!(
+        f.retirement_completed
+            .load(std::sync::atomic::Ordering::Acquire),
+        "upstream must complete persisted owner retirement, not merely drop the connection"
+    );
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        1,
+        "post-send owner retirement cannot replay on account B"
+    );
+    assert!(!response.status().is_success());
+    drop(response);
+    f.assert_idle().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn zcode_owner_retired_before_send_can_select_other_account() {
+    let f = ZCodeRouterFixture::new(UpstreamBehavior::Complete).await;
+    f.transport
+        .retire_first_fixture_account(f.db.secret_session())
+        .await
+        .unwrap();
+    let response = f.request(false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = f.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].headers["x-api-key"], f.synthetic_tokens[1]);
+    let body = collect(response).await;
+    assert!(String::from_utf8_lossy(&body).contains(TEXT));
+    f.assert_idle().await;
 }

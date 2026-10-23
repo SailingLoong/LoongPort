@@ -207,6 +207,20 @@ impl FixtureTransport {
         &self,
         session: &SecretSession,
     ) -> Result<(), Failure> {
+        self.retire_fixture_selection(session, None).await
+    }
+    pub(crate) async fn retire_first_fixture_account(
+        &self,
+        session: &SecretSession,
+    ) -> Result<(), Failure> {
+        self.retire_fixture_selection(session, Some(&self.seal.accounts[0].0))
+            .await
+    }
+    async fn retire_fixture_selection(
+        &self,
+        session: &SecretSession,
+        selected: Option<&str>,
+    ) -> Result<(), Failure> {
         self.matches_session(session)?;
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
         self.matches_session(session)?;
@@ -233,7 +247,16 @@ impl FixtureTransport {
                 return Err(Failure::StaleIdentity);
             }
         }
-        let sealed = ProfileCatalog::default()
+        let mut remaining = ProfileCatalog::default();
+        if let Some(selected) = selected {
+            for snapshot in catalog.profiles() {
+                if snapshot.identity().opaque_id() != selected {
+                    // This fixture seeds native-captured synthetic profiles only.
+                    remaining.upsert(snapshot.clone());
+                }
+            }
+        }
+        let sealed = remaining
             .seal(&vault, &native)
             .map_err(|_| Failure::StorageUnavailable)?;
         crate::config_file_io::write_durable(&self.seal.root.join(PROFILE_FILE), sealed.as_bytes())

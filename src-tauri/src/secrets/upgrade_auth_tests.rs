@@ -30,9 +30,9 @@ impl Fixture {
         Database::create_tables_on_conn(&conn).unwrap();
         Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         database::loongport_schema::apply(&conn).unwrap();
-        // This fixture represents the deployed authenticated v24 source, before
-        // native task bindings existed. The current-v25 cases are separate.
-        conn.execute_batch("DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
+        // Frozen deployed v24 shape, not a current database with an old stamp.
+        conn.execute_batch(include_str!("test_fixtures/authenticated_v24.sql"))
+            .unwrap();
         database::vault::stamp(&conn, &vault).unwrap();
         drop(conn);
         if complete {
@@ -5822,6 +5822,9 @@ mod native_recovery_tests;
 #[path = "upgrade_attached_recovery_tests.rs"]
 mod attached_recovery_tests;
 
+#[path = "upgrade_client_recovery_tests.rs"]
+mod client_recovery_tests;
+
 #[test]
 #[serial_test::serial]
 fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
@@ -6194,73 +6197,270 @@ fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
 
 #[test]
 #[serial_test::serial]
+fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live_to_v29() {
+    fn table_rows(conn: &rusqlite::Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns).map(|column| row.get(column)).collect()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+    fn assert_v28(conn: &rusqlite::Connection) {
+        assert_eq!(
+            database::loongport_schema::read_stored_version(conn).unwrap(),
+            28
+        );
+        let columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 9);
+    }
+
+    let f = Fixture::new();
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    crate::paperclip::bindings::ensure_schema(&source).unwrap();
+    crate::database::create_qoder_http_auth_column(&source).unwrap();
+    source
+        .execute_batch(include_str!(
+            "test_fixtures/qoder_campaign_operations_v27.sql"
+        ))
+        .unwrap();
+    source
+        .execute_batch(include_str!("test_fixtures/client_credentials_v28.sql"))
+        .unwrap();
+    source.execute_batch("UPDATE loongport_schema_version SET version=28 WHERE id=1; INSERT INTO qoder_campaign_operations VALUES('synthetic-v28-attempt','synthetic-subject','international','synthetic-campaign','synthetic-key',100,200,'synthetic-generation','unknown')").unwrap();
+    let sealed = crate::secrets::inventory::seal_db(
+        &f.vault,
+        "loongport_client_credentials",
+        "secret",
+        &["synthetic-v28-credential"],
+        "synthetic-v28-secret",
+    )
+    .unwrap();
+    source.execute("INSERT INTO loongport_client_credentials(id,client_id,route_app,allowed_models,secret,secret_digest) VALUES('synthetic-v28-credential','synthetic-client','codex','[]',?1,'synthetic-digest')", [&sealed]).unwrap();
+    // This row witnesses migration preservation, not normal retention expiry.
+    source.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,status_code,created_at,client_id,client_credential_id) VALUES('synthetic-v28-request','synthetic-provider','codex','synthetic-model',1,200,?1,'synthetic-client','synthetic-v28-credential')", [chrono::Utc::now().timestamp()]).unwrap();
+    let clients = table_rows(&source, "loongport_client_credentials");
+    let logs = table_rows(&source, "proxy_request_logs");
+    let receipts = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
+    let source_digest = Database::content_digest(&source).unwrap();
+    assert_v28(&source);
+    drop(source);
+
+    let mut inspected = inspect(&f.root, &f.device).unwrap();
+    let mut review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let token = review.view(&inspected).unwrap().review_token.unwrap();
+    let id = review
+        .prepare_checkpoint(&mut inspected, &token)
+        .unwrap()
+        .checkpoint_id
+        .unwrap();
+    let staged = checkpoint::stage(&f.root, &f.device, &f.vault, &id).unwrap();
+    assert_v28(&staged);
+    assert_eq!(table_rows(&staged, "loongport_client_credentials"), clients);
+    assert_eq!(table_rows(&staged, "proxy_request_logs"), logs);
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    assert_eq!(Database::content_digest(&source).unwrap(), source_digest);
+    drop(source);
+    drop(staged);
+    let db = Database::from_connection(
+        rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+        review.session_for_test(),
+    );
+    checkpoint::publish_database_with_hook(&db, &f.device, &f.store, &id, &mut |_| Ok(()), None)
+        .unwrap();
+    assert_v28(&db.conn.lock().unwrap());
+    assert_eq!(
+        table_rows(&db.conn.lock().unwrap(), "loongport_client_credentials"),
+        clients
+    );
+    assert_eq!(
+        table_rows(&db.conn.lock().unwrap(), "proxy_request_logs"),
+        logs
+    );
+    drop(db);
+    drop(review);
+
+    // Reopening an authenticated, published checkpoint must not eagerly migrate it.
+    let inspected = inspect(&f.root, &f.device).unwrap();
+    let review =
+        AuthenticatedUpgrade::authenticate(&f.root, &f.device, &inspected, &f.store, None).unwrap();
+    let session = review.session_for_test();
+    crate::settings::unlock_settings(session.clone()).unwrap();
+    let db = Database::init_with_secrets(session.clone()).unwrap();
+    assert_v28(&db.conn.lock().unwrap());
+    assert_eq!(
+        table_rows(&db.conn.lock().unwrap(), "proxy_request_logs"),
+        logs,
+        "reopen must preserve the unexpired synthetic request"
+    );
+    assert_eq!(
+        checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some(id.as_str())
+    );
+    assert!(checkpoint::archive_and_release(
+        &db,
+        &f.device,
+        &session.read().unwrap(),
+        &id,
+        &mut |at| {
+            if at == checkpoint::CompletionBoundary::BeforeRelease {
+                Err(AppError::Config(
+                    "synthetic.pause-before-checkpoint-release".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    )
+    .is_err());
+    assert_v28(&db.conn.lock().unwrap());
+    let archive_path = f.root.join("backups").join(format!("upgrade_{id}.db"));
+    let archive_bytes = std::fs::read(&archive_path).unwrap();
+    let archived =
+        checkpoint::archived_database(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    assert_v28(&archived);
+    assert_eq!(Database::get_user_version(&archived).unwrap(), 17);
+    assert_eq!(
+        table_rows(&archived, "loongport_client_credentials"),
+        clients
+    );
+    assert_eq!(table_rows(&archived, "proxy_request_logs"), logs);
+    assert_eq!(Database::content_digest(&archived).unwrap(), source_digest);
+    drop(archived);
+
+    checkpoint::archive_and_release(&db, &f.device, &session.read().unwrap(), &id, &mut |_| {
+        Ok(())
+    })
+    .unwrap();
+    let live = db.conn.lock().unwrap();
+    assert_eq!(
+        database::loongport_schema::read_stored_version(&live).unwrap(),
+        29
+    );
+    assert_eq!(
+        crate::database::read_qoder_campaign_operation_rows(&live).unwrap(),
+        receipts
+    );
+    assert_eq!(table_rows(&live, "loongport_client_credentials"), clients);
+    assert_eq!(table_rows(&live, "proxy_request_logs"), logs);
+    drop(live);
+    assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+    let restored =
+        checkpoint::archived_database(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    assert_v28(&restored);
+    assert_eq!(
+        table_rows(&restored, "loongport_client_credentials"),
+        clients
+    );
+    assert_eq!(table_rows(&restored, "proxy_request_logs"), logs);
+    assert_eq!(Database::content_digest(&restored).unwrap(), source_digest);
+}
+
+#[test]
+#[serial_test::serial]
 fn native_historical_schema_classification_requires_authenticated_publication() {
-    for case in [
-        "published",
-        "missing",
-        "corrupt",
-        "unpublished",
-        "target25",
-        "forged25",
-        "future",
-        "wrong_root",
-    ] {
-        let f = Fixture::new();
-        publish_resume_fixture(&f);
-        let path = f.device.root().join(checkpoint::FILE);
-        match case {
-            "missing" => std::fs::remove_file(&path).unwrap(),
-            "corrupt" => std::fs::write(&path, b"synthetic-corrupt-checkpoint").unwrap(),
-            "unpublished" | "target25" | "forged25" => {
-                let file =
-                    crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE).unwrap();
-                let plain = file
-                    .decode(&f.vault, &std::fs::read(&path).unwrap())
-                    .unwrap();
-                let mut value: serde_json::Value = serde_json::from_slice(&plain).unwrap();
-                match case {
-                    "unpublished" => value["published_database"] = serde_json::Value::Null,
-                    "target25" => value["target_versions"]["loongport"] = serde_json::json!(25),
-                    "forged25" => {
-                        value["source_versions"]["loongport"] = serde_json::json!(25);
-                        value["target_versions"]["loongport"] = serde_json::json!(25);
-                    }
-                    _ => unreachable!(),
+    for version in [24, 27, 28] {
+        for case in [
+            "published",
+            "missing",
+            "corrupt",
+            "unpublished",
+            "target25",
+            "forged25",
+            "future",
+            "wrong_root",
+        ] {
+            let f = Fixture::new();
+            if [27, 28].contains(&version) {
+                let conn =
+                    rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+                crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+                crate::database::create_qoder_http_auth_column(&conn).unwrap();
+                if version == 28 {
+                    conn.execute_batch(include_str!("test_fixtures/client_credentials_v28.sql"))
+                        .unwrap();
                 }
-                std::fs::write(
-                    &path,
-                    file.encode(&f.vault, &serde_json::to_vec(&value).unwrap())
-                        .unwrap(),
+                conn.execute(
+                    "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                    [version],
+                )
+                .unwrap();
+                conn.execute_batch(include_str!(
+                    "test_fixtures/qoder_campaign_operations_v27.sql"
+                ))
+                .unwrap();
+            }
+            publish_resume_fixture(&f);
+            let path = f.device.root().join(checkpoint::FILE);
+            match case {
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "corrupt" => std::fs::write(&path, b"synthetic-corrupt-checkpoint").unwrap(),
+                "unpublished" | "target25" | "forged25" => {
+                    let file = crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE)
+                        .unwrap();
+                    let plain = file
+                        .decode(&f.vault, &std::fs::read(&path).unwrap())
+                        .unwrap();
+                    let mut value: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+                    match case {
+                        "unpublished" => value["published_database"] = serde_json::Value::Null,
+                        "target25" => value["target_versions"]["loongport"] = serde_json::json!(25),
+                        "forged25" => {
+                            value["source_versions"]["loongport"] = serde_json::json!(25);
+                            value["target_versions"]["loongport"] = serde_json::json!(25);
+                        }
+                        _ => unreachable!(),
+                    }
+                    std::fs::write(
+                        &path,
+                        file.encode(&f.vault, &serde_json::to_vec(&value).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+            let conn =
+                rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            if case == "future" {
+                conn.execute(
+                    "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                    [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
                 )
                 .unwrap();
             }
-            _ => {}
+            let root = if case == "wrong_root" {
+                f.root.join("synthetic-other-root")
+            } else {
+                f.root.clone()
+            };
+            let db = Database::from_connection(
+                conn,
+                session::SecretSession::from_context(root, f.vault.clone()),
+            );
+            let before = snapshot(f.home.path());
+            let result = crate::mode::operation::uses_upstream4_schema(&db);
+            if case == "published" {
+                assert!(result.unwrap(), "{case}");
+            } else {
+                assert!(result.is_err(), "{case} must fail closed");
+            }
+            assert_eq!(snapshot(f.home.path()), before, "{case} must be read-only");
         }
-        let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        if case == "future" {
-            conn.execute(
-                "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
-                [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
-            )
-            .unwrap();
-        }
-        let root = if case == "wrong_root" {
-            f.root.join("synthetic-other-root")
-        } else {
-            f.root.clone()
-        };
-        let db = Database::from_connection(
-            conn,
-            session::SecretSession::from_context(root, f.vault.clone()),
-        );
-        let before = snapshot(f.home.path());
-        let result = crate::mode::operation::uses_upstream4_schema(&db);
-        if case == "published" {
-            assert!(result.unwrap(), "{case}");
-        } else {
-            assert!(result.is_err(), "{case} must fail closed");
-        }
-        assert_eq!(snapshot(f.home.path()), before, "{case} must be read-only");
     }
 }
 

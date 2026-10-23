@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { QoderAutomaticContext } from "./qoderDaily";
 
 export interface QoderCnCampaignDeclaration {
   providerId: string;
@@ -37,13 +38,54 @@ export type QoderCnCampaignReadResult =
         endAt: number | null;
         benefitAmount: number | null;
       }>;
-      automaticClaimEnabled: false;
-      blockedReason: "daily_contract_unverified";
       runtimeIdentity: "not_requested";
     })
   | { status: "failed"; code: QoderCnCampaignFailure };
 
+export type QoderCnBenefitRunResult =
+  | {
+      status: "completed";
+      providerId: string;
+      credentialGeneration: string;
+      activities: Array<{
+        campaignId: string;
+        outcome:
+          "claimedDeltaUnknown" | "observedClaimed" | "unknown" | "skipped";
+        reason: string | null;
+        /** Reported amount, never an increment attributed to this request. */
+        benefitAmount: number | null;
+      }>;
+    }
+  | { status: "failed"; code: QoderCnCampaignFailure };
+
 export const qoderCnCampaignsApi = {
+  automaticContext: (providerId: string): Promise<QoderAutomaticContext> =>
+    invoke("qoder_daily_automatic_context", { providerId }),
+  setAutomatic: (
+    context: QoderAutomaticContext,
+    enabled: boolean,
+    source: QoderCnCampaignDeclaration["source"],
+  ): Promise<QoderAutomaticContext> =>
+    invoke("set_qoder_daily_automatic", {
+      request: {
+        providerId: context.providerId,
+        credentialGeneration: context.credentialGeneration,
+        expectedRevision: context.revision,
+        policyVersion: context.policyVersion,
+        enabled,
+        source: enabled ? source : null,
+      },
+    }),
+  claim: (
+    declaration: QoderCnCampaignDeclaration,
+  ): Promise<QoderCnBenefitRunResult> =>
+    invoke("claim_qoder_cn_benefits", {
+      declaration: {
+        providerId: declaration.providerId,
+        credentialGeneration: declaration.credentialGeneration,
+        source: declaration.source,
+      },
+    }),
   read: (
     declaration: QoderCnCampaignDeclaration,
   ): Promise<QoderCnCampaignReadResult> =>

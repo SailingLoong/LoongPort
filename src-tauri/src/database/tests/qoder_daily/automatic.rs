@@ -614,7 +614,7 @@ fn cn_type_cannot_consume_or_reset_an_unresolved_international_receipt() {
     );
     let view = automatic::context(&db, &changed.id).unwrap();
     assert!(!view.enabled && !view.can_enable);
-    assert_eq!(view.reason.as_deref(), Some("SourceUnavailable"));
+    assert_eq!(view.reason.as_deref(), Some("IdentityUnavailable"));
     let still = db
         .qoder_operations(&identity("synthetic-provider"))
         .unwrap();

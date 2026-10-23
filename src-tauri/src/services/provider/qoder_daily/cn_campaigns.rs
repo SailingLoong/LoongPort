@@ -21,8 +21,6 @@ pub(crate) enum ReadResult {
         credential_generation: String,
         source: CredentialSource,
         campaigns: Vec<Campaign>,
-        automatic_claim_enabled: bool,
-        blocked_reason: &'static str,
         runtime_identity: &'static str,
     },
     Failed {
@@ -209,8 +207,6 @@ async fn read_using(
             credential_generation: snapshot.stamp.source.credential_generation.clone(),
             source: snapshot.stamp.source.source.declaration(),
             campaigns,
-            automatic_claim_enabled: false,
-            blocked_reason: "daily_contract_unverified",
             runtime_identity: "not_requested",
         },
         Err(code) => ReadResult::Failed { code },
@@ -223,7 +219,7 @@ fn network_failure(error: reqwest::Error) -> FailureCode {
         FailureCode::NetworkError
     }
 }
-fn owner_failure(error: &AppError) -> FailureCode {
+pub(super) fn owner_failure(error: &AppError) -> FailureCode {
     match error {
         AppError::Config(code) => match code.strip_prefix("qoder.http_auth.") {
             Some("source_changed" | "source_declaration_required" | "selected_source_changed") => {

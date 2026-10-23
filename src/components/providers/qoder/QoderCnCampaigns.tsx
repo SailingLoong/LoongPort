@@ -9,12 +9,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import type { QoderAutomaticContext } from "@/lib/api/qoderDaily";
 import { qoderHttpAuthApi } from "@/lib/api/qoderHttpAuth";
 import {
   qoderCnCampaignsApi,
   type QoderCnCampaignDeclaration,
   type QoderCnCampaignFailure,
   type QoderCnCampaignReadResult,
+  type QoderCnBenefitRunResult,
 } from "@/lib/api/qoderCnCampaigns";
 
 const changedDefault = "账号或凭据状态已变化，请重新打开查询。";
@@ -46,13 +48,35 @@ const failures: Record<QoderCnCampaignFailure, string> = {
   timeout: "活动查询超时，请稍后手动查询。",
   network_error: "活动服务连接失败，请检查网络后手动查询。",
 };
+const benefitReasons: Record<string, string> = {
+  invalid_activity: "活动信息不完整或无法安全识别。",
+  identity_mismatch: "服务返回的账号身份不一致。",
+  unsupported_action: "此活动不是直接领取福利。",
+  unavailable: "服务提示此活动当前不可用。",
+  achievement_required: "需先完成额外任务，本应用不会自动完成。",
+  additional_condition:
+    "存在额外条件，本应用不会购买、订阅、扣积分或代为同意。",
+  ambiguous_campaign: "同一活动返回了互相冲突的信息。",
+  not_claimable: "此活动当前不是可领取状态。",
+  campaign_not_started: "活动尚未开始。",
+  campaign_ended: "活动已经结束。",
+  clock_unverified: "当前时间无法确认，未发送领取。",
+  previous_unknown: "已有未确认请求，只查询原活动，不会重复领取。",
+  prior_owner_changed:
+    "原账号或凭据来源已改变，旧活动记录仅供查询，未自动重新领取。",
+  same_campaign_no_new_window: "尚未观察到新的可领取状态，未重复领取。",
+  reconciled_no_new_round:
+    "先前领取曾结果未知，虽已查到已领取，但缺少明确新活动区间，不能自动重新领取。",
+  reconciliation_mismatch: "活动信息已改变，不能确认先前请求的结果。",
+  claim_outcome_unknown: "领取结果未确认，只查询恢复，不会重发。",
+};
 const labels = {
   claimable: "可领取（活动状态）",
   claimed: "已领取（活动状态）",
   unknown: "活动状态未知",
 };
 
-/** Explicit read only. Uses the original encrypted owner and never starts a grant or claim. */
+/** View activation is local only; claims and continuing consent require explicit actions. */
 export function QoderCnCampaigns({
   providerId,
   sourceGeneration,
@@ -80,6 +104,13 @@ export function QoderCnCampaigns({
     QoderCnCampaignReadResult,
     { status: "observed" }
   > | null>(null);
+  const [benefits, setBenefits] = useState<Extract<
+    QoderCnBenefitRunResult,
+    { status: "completed" }
+  > | null>(null);
+  const [policy, setPolicy] = useState<QoderAutomaticContext | null>(null);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const policyInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
@@ -95,6 +126,8 @@ export function QoderCnCampaigns({
     const current = ++epoch.current;
     setDeclaration(null);
     setResult(null);
+    setBenefits(null);
+    setPolicy(null);
     setError(null);
     if (open && !disabled) {
       // Local original-owner context only. No network refresh on view activation.
@@ -123,6 +156,24 @@ export function QoderCnCampaigns({
             credentialGeneration: context.credentialGeneration,
             source: context.source,
           });
+          // Original local policy only: opening this dialog never enrolls or contacts Qoder.
+          void qoderCnCampaignsApi
+            .automaticContext(providerId)
+            .then((value) => {
+              if (epoch.current !== current) return;
+              if (
+                value.providerId !== providerId ||
+                value.credentialGeneration !== context.credentialGeneration ||
+                value.policyVersion !== 2
+              ) {
+                setError(changed);
+                return;
+              }
+              setPolicy(value);
+            })
+            .catch(() => {
+              if (epoch.current === current) setError(unavailable);
+            });
         })
         .catch(() => {
           if (epoch.current === current) setError(unavailable);
@@ -139,6 +190,7 @@ export function QoderCnCampaigns({
     inFlight.current = true;
     setBusy(true);
     setResult(null);
+    setBenefits(null);
     setError(null);
     try {
       const value = await qoderCnCampaignsApi.read(declaration);
@@ -167,6 +219,88 @@ export function QoderCnCampaigns({
       if (mounted.current) setBusy(false);
     }
   }
+  async function claim() {
+    if (!declaration || disabled || inFlight.current) return;
+    const current = epoch.current;
+    inFlight.current = true;
+    setBusy(true);
+    setBenefits(null);
+    setResult(null);
+    setError(null);
+    try {
+      const value = await qoderCnCampaignsApi.claim(declaration);
+      if (epoch.current !== current) return;
+      if (value.status === "failed") {
+        setError(
+          t(`qoderCnCampaigns.errors.${value.code}`, {
+            defaultValue: failures[value.code] ?? uncertain,
+          }),
+        );
+      } else if (
+        value.providerId !== declaration.providerId ||
+        value.credentialGeneration !== declaration.credentialGeneration
+      ) {
+        setError(changed);
+      } else {
+        setBenefits(value);
+      }
+    } catch {
+      if (epoch.current === current)
+        setError(
+          t("qoderCnCampaigns.claimUnknown", {
+            defaultValue:
+              "领取结果未确认。下次操作只会查询未确认活动，不会重复发送领取。",
+          }),
+        );
+    } finally {
+      inFlight.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  }
+  async function setAutomatic() {
+    if (!policy || !declaration || disabled || policyInFlight.current) return;
+    const current = epoch.current;
+    policyInFlight.current = true;
+    setPolicyBusy(true);
+    setError(null);
+    try {
+      const value = await qoderCnCampaignsApi.setAutomatic(
+        policy,
+        !policy.enabled,
+        declaration.source,
+      );
+      if (epoch.current !== current) return;
+      if (
+        value.providerId !== declaration.providerId ||
+        value.credentialGeneration !== declaration.credentialGeneration ||
+        value.policyVersion !== 2
+      ) {
+        setPolicy(null);
+        setError(changed);
+      } else {
+        ++epoch.current;
+        setPolicy(value);
+        setBenefits(null);
+        setResult(null);
+      }
+    } catch {
+      if (epoch.current === current) {
+        ++epoch.current;
+        setPolicy(null);
+        setBenefits(null);
+        setResult(null);
+        setError(
+          t("qoderCnCampaigns.policyUnknown", {
+            defaultValue:
+              "自动领取设置结果未确认，请重新打开查询状态；不会重发设置。",
+          }),
+        );
+      }
+    } finally {
+      policyInFlight.current = false;
+      if (mounted.current) setPolicyBusy(false);
+    }
+  }
   return (
     <Dialog
       open={open && !disabled}
@@ -192,14 +326,14 @@ export function QoderCnCampaigns({
           <DialogDescription>
             {t("qoderCnCampaigns.description", {
               defaultValue:
-                "仅查询当前账号的通用福利活动，不领取、不刷新凭据，也不启用自动签到。未读取或提交官方客户端运行时身份；查询成功不代表满足活动资格。",
+                "可查询或领取此账号当前可领取的免费福利。不会购买、订阅、扣积分或完成额外任务；遇到额外条件会跳过。未读取或提交官方客户端运行时身份，服务要求验证时会停止。",
             })}
           </DialogDescription>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
           {t("qoderCnCampaigns.boundary", {
             defaultValue:
-              "每日活动标识与轮次尚未确认，自动签到保持关闭。活动“已领取”不代表今日签到成功或本次新增积分。",
+              "自动领取默认关闭，需为此账号单独开启。应用运行且保管库可用时定期检查；关闭后不再派发后续领取，但不能撤回已经发送的请求。活动“已领取”不代表今日签到成功或本次新增积分。",
           })}
         </p>
         <Button
@@ -208,17 +342,93 @@ export function QoderCnCampaigns({
           onClick={() => void read()}
         >
           {busy
-            ? t("qoderCnCampaigns.loading", { defaultValue: "正在查询…" })
+            ? t("qoderCnCampaigns.loading", { defaultValue: "正在处理…" })
             : t("qoderCnCampaigns.query", { defaultValue: "查询活动状态" })}
         </Button>
+        <Button
+          type="button"
+          disabled={!declaration || disabled || busy}
+          onClick={() => void claim()}
+        >
+          {t("qoderCnCampaigns.claim", { defaultValue: "领取免费福利" })}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={
+            !policy ||
+            !declaration ||
+            disabled ||
+            policyBusy ||
+            (!policy.enabled && !policy.canEnable)
+          }
+          onClick={() => void setAutomatic()}
+        >
+          {policy?.enabled
+            ? t("qoderCnCampaigns.disableAutomatic", {
+                defaultValue: "关闭自动领取免费福利",
+              })
+            : t("qoderCnCampaigns.enableAutomatic", {
+                defaultValue: "开启自动领取免费福利",
+              })}
+        </Button>
+        {policy && !policy.enabled && !policy.canEnable && (
+          <p role="status">
+            {t("qoderCnCampaigns.policyUnavailable", {
+              defaultValue:
+                "当前无法开启自动领取，请先检查原账号身份和凭据保管状态。",
+            })}
+          </p>
+        )}
         {busy && (
           <p role="status">
             {t("qoderCnCampaigns.inFlight", {
-              defaultValue: "查询已提交；关闭窗口不会撤回已发送的只读请求。",
+              defaultValue:
+                "操作已提交；关闭窗口不会撤回已经发送的请求。未确认领取只查询恢复，不会重发。",
             })}
           </p>
         )}
         {error && <p role="alert">{error}</p>}
+        {benefits &&
+          (benefits.activities.length === 0 ? (
+            <p role="status">
+              {t("qoderCnCampaigns.noBenefits", {
+                defaultValue: "当前没有可处理的免费福利。",
+              })}
+            </p>
+          ) : (
+            <ul
+              className="max-h-64 space-y-2 overflow-auto"
+              aria-label={t("qoderCnCampaigns.claimResults", {
+                defaultValue: "免费福利领取结果",
+              })}
+            >
+              {benefits.activities.map((activity) => (
+                <li key={activity.campaignId} className="rounded border p-2">
+                  <p className="break-all">{activity.campaignId}</p>
+                  <p>
+                    {t(`qoderCnCampaigns.outcomes.${activity.outcome}`, {
+                      defaultValue: {
+                        claimedDeltaUnknown: "已确认领取状态，本次新增数量未知",
+                        observedClaimed: "活动显示已领取，未重复发送领取",
+                        unknown: "结果未确认，仅查询恢复，不会重复领取",
+                        skipped: "已跳过：活动不满足领取条件或含额外要求",
+                      }[activity.outcome],
+                    })}
+                  </p>
+                  {activity.reason && (
+                    <p className="text-sm text-muted-foreground">
+                      {t(`qoderCnCampaigns.reasons.${activity.reason}`, {
+                        defaultValue:
+                          benefitReasons[activity.reason] ??
+                          "活动条件或结果尚未确认，未追加操作。",
+                      })}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ))}
         {result &&
           (result.campaigns.length === 0 ? (
             <p role="status">

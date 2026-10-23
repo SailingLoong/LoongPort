@@ -68,6 +68,55 @@ fn lookup(conn: &Connection, id: &str) -> Result<(CredentialRef, String), AppErr
 }
 
 impl Database {
+    /// Retained native checkpoints keep their authenticated historical layout.
+    /// This is classification, not write admission: callers must run before an
+    /// AppWrite/session guard, and the original writer still proves every IO.
+    pub(crate) fn retained_legacy_client_projection(&self) -> Result<bool, AppError> {
+        let session = self.secret_session();
+        let epoch = session.lifecycle_epoch();
+        let stored = {
+            let conn = lock_conn!(self.conn);
+            crate::database::loongport_schema::read_stored_version(&conn)?
+        };
+        if !(24..28).contains(&stored) {
+            return Ok(false);
+        }
+        if !crate::mode::operation::uses_upstream4_schema(self)? {
+            return Err(denied());
+        }
+        // Authentication above holds vault -> connection, and drops both before
+        // this recheck. A lock/reunlock must never revive that classification.
+        let _vault = session.read()?;
+        let conn = lock_conn!(self.conn);
+        if session.lifecycle_epoch() != epoch
+            || crate::database::loongport_schema::read_stored_version(&conn)? != stored
+            || Database::get_user_version(&conn)? != crate::database::UPSTREAM4_SCHEMA_VERSION
+        {
+            return Err(denied());
+        }
+        let marker: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='client_access_migration_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+            [TABLE],
+            |row| row.get(0),
+        )?;
+        // Neither a damaged marker nor a new table is a legacy witness.
+        if marker.is_some() || table {
+            return Err(denied());
+        }
+        session.ensure_available()?;
+        if session.lifecycle_epoch() != epoch {
+            return Err(denied());
+        }
+        Ok(true)
+    }
+
     /// Published only after every managed CLI projection has been migrated.
     /// New client configuration must remain unavailable until this admission succeeds.
     pub(crate) fn client_access_ready(&self) -> Result<bool, AppError> {
@@ -163,6 +212,12 @@ impl Database {
         &self,
         route_app: &str,
     ) -> Result<(), AppError> {
+        if self.retained_legacy_client_projection()? {
+            if !super::managed::CLI_APPS.contains(&route_app) {
+                return Err(denied());
+            }
+            return Ok(());
+        }
         self.ensure_builtin_client_credential(&format!("managed-{route_app}"), route_app, &[])
             .map(|_| ())
     }
@@ -170,6 +225,12 @@ impl Database {
     /// An absent credential identifies the pre-migration projection. Once admitted,
     /// missing/revoked credentials are errors and never restore legacy access.
     pub(crate) fn managed_client_key(&self, route_app: &str) -> Result<Option<String>, AppError> {
+        if self.retained_legacy_client_projection()? {
+            if !super::managed::CLI_APPS.contains(&route_app) {
+                return Err(denied());
+            }
+            return Ok(Some(super::managed::LEGACY_KEY.into()));
+        }
         let client_id = format!("managed-{route_app}");
         let identity = format!("builtin:{client_id}:{route_app}");
         let present = {
@@ -198,6 +259,13 @@ impl Database {
         route_app: &str,
         key: &str,
     ) -> Result<bool, AppError> {
+        if self.retained_legacy_client_projection()? {
+            if !super::managed::CLI_APPS.contains(&route_app) {
+                return Err(denied());
+            }
+            // Recognition is not authentication; no historical grant owns this key.
+            return Ok(false);
+        }
         let id = format!("builtin:managed-{route_app}:{route_app}");
         let digest = hex::encode(<Sha256 as sha2::Digest>::digest(key.as_bytes()));
         let conn = lock_conn!(self.conn);

@@ -27,7 +27,7 @@ fn health_at(address: &str, port: u16) {
     );
 }
 
-fn assert_no_recovery_writes(
+pub(super) fn assert_no_recovery_writes(
     before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
     after: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
     label: &str,
@@ -541,13 +541,16 @@ fn retained_checkpoint_attached_recovery_rejects_dead_accept_loop() {
 
 // Generate the original controller's v1 journal without admitting an
 // unauthenticated historical database in production. Only fixture construction
-// borrows the real current schema inside a rollback-only savepoint; all review
-// and recovery still consume the original authenticated 20/24 database.
+// EXIT/DETACH may borrow the current schema inside a rollback-only savepoint.
+// ROUTE/SAVE instead use a pre-client plan and the original journal primitive:
+// borrowing current client issuance would leave a new-key journal after rollback.
+// All review/recovery still consume the original authenticated 20/24 database.
 fn original_attached_journal(
     f: &Fixture,
     runtime: &crate::store::AppState,
     app: &AppType,
     point: &str,
+    historical_plan: Option<crate::mode::controller::SaveRowPlan>,
     mut owner: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     let db = &runtime.db;
@@ -597,7 +600,30 @@ fn original_attached_journal(
         &snapshot(f.home.path()),
         "missing checkpoint owner",
     );
-    {
+    let historical = historical_plan.is_some();
+    let expected_contract = historical_plan.as_ref().and_then(|plan| {
+        plan.target
+            .state
+            .as_ref()
+            .and_then(|state| state.contract.clone())
+    });
+    if historical {
+        assert_eq!(point, "marked", "historical ROUTE/SAVE boundary");
+        // Attached completion is not ordinary write admission. Keep that refusal
+        // and construct only this historical interrupted v1 journal below.
+        std::fs::rename(&parked, &checkpoint_path).unwrap();
+        let before = snapshot(f.home.path());
+        assert_eq!(
+            owner(),
+            Err(AppError::Config("mode.verification_required".into()).to_string())
+        );
+        assert!(!pending_exists(f, runtime, app));
+        assert_no_recovery_writes(
+            &before,
+            &snapshot(f.home.path()),
+            "attached owner admission",
+        );
+    } else {
         let conn = db.conn.lock().unwrap();
         conn.execute_batch("SAVEPOINT synthetic_attached_owner")
             .unwrap();
@@ -607,9 +633,37 @@ fn original_attached_journal(
             database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
     }
-    // Release the connection mutex before entering the unchanged native owner.
     operation::failpoint::crash_at(Some(point));
-    let result = owner();
+    let result = if let Some(plan) = historical_plan {
+        let guard = crate::live::engine::lock_app(app.as_str());
+        let vault = db.secret_session().read().unwrap();
+        let changes = plan
+            .files
+            .iter()
+            .map(|(file, patch)| operation::FileChange {
+                file: file.clone(),
+                patch,
+            })
+            .collect::<Vec<_>>();
+        let op = if plan.target.saved_row.is_some() {
+            crate::mode::state::op::APPLY
+        } else {
+            crate::mode::state::op::ROUTE
+        };
+        operation::run(
+            &f.device,
+            &vault,
+            &guard,
+            op,
+            &changes,
+            plan.target,
+            &|_| panic!("historical fixture must stop before target commit"),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    } else {
+        owner()
+    };
     operation::failpoint::crash_at(None);
     let journal_bytes = std::fs::read(f.device.state_path()).unwrap();
     let pending = crate::mode::state::pending(
@@ -620,10 +674,12 @@ fn original_attached_journal(
     .unwrap();
     {
         let conn = db.conn.lock().unwrap();
-        conn.execute_batch(
-            "ROLLBACK TO synthetic_attached_owner; RELEASE synthetic_attached_owner",
-        )
-        .unwrap();
+        if !historical {
+            conn.execute_batch(
+                "ROLLBACK TO synthetic_attached_owner; RELEASE synthetic_attached_owner",
+            )
+            .unwrap();
+        }
         assert_eq!(Database::get_user_version(&conn).unwrap(), 20);
         assert_eq!(
             database::loongport_schema::read_stored_version(&conn).unwrap(),
@@ -641,7 +697,9 @@ fn original_attached_journal(
         );
         database::inspection::verify_connection_primary_identity(&conn, &identity).unwrap();
     }
-    std::fs::rename(&parked, &checkpoint_path).unwrap();
+    if !historical {
+        std::fs::rename(&parked, &checkpoint_path).unwrap();
+    }
     assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_bytes);
     assert_eq!(
         checkpoint::verified_database_id(&f.root, &f.device, &db.secret_session().read().unwrap())
@@ -651,9 +709,9 @@ fn original_attached_journal(
     );
     assert_eq!(result, Err(format!("injected crash at {point}")));
 
-    // Schema rollback never rewrites the authenticated v1 journal or its
+    // Fixture construction never rewrites the authenticated v1 journal or its
     // original pre/planned digests. Validate those same bytes and saved-row
-    // fingerprints against the restored v24 inputs before recovery begins.
+    // fingerprints against the original v24 inputs before recovery begins.
     assert_eq!(std::fs::read(f.device.state_path()).unwrap(), journal_bytes);
     let vault = db.secret_session().read().unwrap();
     let live = crate::mode::state::load_app(&f.device, &vault, app.as_str()).unwrap();
@@ -663,7 +721,43 @@ fn original_attached_journal(
         crate::mode::state::pending(&f.device, &vault, app.as_str()).unwrap(),
         pending
     );
-    let pending = pending.expect("original native owner journal");
+    let pending = pending.expect("original v1 journal");
+    if historical {
+        assert!(matches!(
+            pending.op.as_str(),
+            crate::mode::state::op::ROUTE | crate::mode::state::op::APPLY
+        ));
+        assert_eq!(
+            pending
+                .target
+                .state
+                .as_ref()
+                .and_then(|state| state.contract.as_ref()),
+            expected_contract.as_ref()
+        );
+        assert!(db
+            .get_setting("client_access_migration_version")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name='loongport_client_credentials'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+    if !historical {
+        assert!(matches!(
+            pending.op.as_str(),
+            crate::mode::state::op::EXIT | crate::mode::state::op::DETACH
+        ));
+    }
     assert_eq!(pending.published, point == "marked");
     assert!(pending.target.save_request.is_none());
     if let Some(contract) = pending
@@ -724,7 +818,7 @@ fn retained_checkpoint_recovers_attached_exit_and_detach() {
                 .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
                 .unwrap();
             drop(context);
-            let result = original_attached_journal(&f, &runtime, &app, point, || {
+            let result = original_attached_journal(&f, &runtime, &app, point, None, || {
                 let _locks =
                     reactor.block_on(runtime.proxy_service.lock_recovery_for_app(app.as_str()));
                 // This is the synchronous owner; do not wrap its Codex bridge
@@ -939,26 +1033,78 @@ fn retained_checkpoint_recovers_attached_route_and_row_owners() {
             if effect == "save" {
                 planned.id = "a".into();
             }
-            let result = original_attached_journal(&f, &runtime, &app, "marked", || {
-                let _locks =
-                    reactor.block_on(runtime.proxy_service.lock_recovery_for_app(app.as_str()));
-                if effect == "route" {
-                    reactor.block_on(crate::mode::controller::switch_route_locked(
-                        &runtime.proxy_service,
-                        &app,
-                        planned.clone(),
-                    ))
-                } else {
-                    crate::mode::controller::save_row_locked(
-                        &runtime.proxy_service,
-                        &app,
-                        &previous,
-                        &planned,
-                        false,
-                    )
-                    .map_err(|error| error.to_string())
+            // A pre-client v1 journal uses the historical projection,
+            // never a current-schema grant that vanishes when a fixture rolls back.
+            let mut historical_row = planned.clone();
+            historical_row.id = previous.id.clone();
+            let mut plan = crate::mode::controller::plan_row_save(
+                &runtime.proxy_service,
+                &app,
+                &previous,
+                &historical_row,
+                "synthetic-historical-v1",
+                None,
+            )
+            .unwrap();
+            assert!(!plan.files.is_empty());
+            assert!(plan.target.save_request.is_none());
+            if effect == "route" {
+                plan.target.saved_row = None;
+                plan.target.state.as_mut().unwrap().proxy_route = Some(planned.id.clone());
+            } else {
+                plan.target
+                    .saved_row
+                    .as_mut()
+                    .unwrap()
+                    .clear_model_preference = false;
+            }
+            // Retain only the same file ownership metadata that the original
+            // Grok/Codex route owner writes. No editor receipt or save-only action.
+            assert!(plan.target.pointer.is_none());
+            assert!(plan.target.save_request.is_none());
+            assert!(plan.target.model_preference.is_none());
+            assert!(plan.target.routing_order.is_none());
+            assert!(plan.target.stack.is_none());
+            assert!(plan.target.extra.is_empty());
+            if effect == "route" {
+                assert!(plan.target.saved_row.is_none());
+            }
+            let mut legacy_auth = false;
+            for (_, patch) in &plan.files {
+                if let crate::live::patch::WholeFile::Write(bytes) = &patch.then {
+                    let text = String::from_utf8_lossy(bytes);
+                    assert!(
+                        !text.contains("lp_client_"),
+                        "historical staged client grant"
+                    );
+                    legacy_auth |= text.contains(crate::proxy::client_access::managed::LEGACY_KEY);
                 }
-            });
+            }
+            assert!(
+                legacy_auth,
+                "historical native projection must carry its original auth"
+            );
+            let result =
+                original_attached_journal(&f, &runtime, &app, "marked", Some(plan), || {
+                    let _locks =
+                        reactor.block_on(runtime.proxy_service.lock_recovery_for_app(app.as_str()));
+                    if effect == "route" {
+                        reactor.block_on(crate::mode::controller::switch_route_locked(
+                            &runtime.proxy_service,
+                            &app,
+                            planned.clone(),
+                        ))
+                    } else {
+                        crate::mode::controller::save_row_locked(
+                            &runtime.proxy_service,
+                            &app,
+                            &previous,
+                            &planned,
+                            false,
+                        )
+                        .map_err(|error| error.to_string())
+                    }
+                });
             assert!(
                 result.is_err() && pending_exists(&f, &runtime, &app),
                 "{app:?}/{effect}: original journal missed: {result:?}"
