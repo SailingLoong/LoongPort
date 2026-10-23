@@ -149,9 +149,13 @@ impl PersonalFixture {
         .unwrap();
         let missing_personal_session = String::from_utf8_lossy(&body)
             .contains("OpenCode Go requires a stable conversation ID from the calling application");
+        let fixture_transport_unavailable =
+            String::from_utf8_lossy(&body).contains("synthetic_vendor_transport_unavailable");
+        let calls = self.calls.lock().unwrap().len();
         assert_eq!(
             status, expected,
-            "missing_personal_session={missing_personal_session}"
+            "app={} missing_personal_session={missing_personal_session} fixture_transport_unavailable={fixture_transport_unavailable} calls={calls}",
+            self.app.as_str(),
         );
         if expected == StatusCode::OK {
             assert!(String::from_utf8_lossy(&body).contains("synthetic personal answer"));

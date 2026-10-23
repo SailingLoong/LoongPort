@@ -3201,12 +3201,6 @@ impl RequestForwarder {
             &url,
             app_type,
         )?;
-        #[cfg(all(test, feature = "gui"))]
-        if vendor_fixture.is_some() && !is_socks_proxy && preserve_exact_header_case {
-            return Err(ProxyError::ConfigError(
-                "synthetic_vendor_transport_unavailable".into(),
-            ));
-        }
 
         // 发送请求
         if let Some(fence) = &vendor_fence {
@@ -3287,6 +3281,18 @@ impl RequestForwarder {
         } else {
             // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
             // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
+            // The sealed fixture has already checked the exact official path,
+            // account, vault and epoch. Keep the original native transport and
+            // header-case behavior, changing only its test destination. Never
+            // send synthetic credentials through a configured external proxy.
+            #[cfg(all(test, feature = "gui"))]
+            let url = vendor_fixture.as_ref().map_or(url.as_str(), |fixture| fixture.url());
+            #[cfg(all(test, feature = "gui"))]
+            let upstream_proxy_url = if vendor_fixture.is_some() {
+                None
+            } else {
+                upstream_proxy_url
+            };
             let uri: http::Uri = url.parse().map_err(|e| {
                 ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
             })?;
