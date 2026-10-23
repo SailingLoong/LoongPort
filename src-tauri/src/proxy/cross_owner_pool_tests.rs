@@ -153,9 +153,14 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
         native["model_providers"][provider]["wire_api"].as_str(),
         Some("responses")
     );
-    assert!(native["model_providers"][provider]
-        .get("requires_openai_auth")
-        .is_none());
+    // The native writer stamps this explicitly after proxy projection. With no
+    // ChatGPT login in this fixture it must be false, not omitted or true.
+    assert_eq!(
+        native["model_providers"][provider]
+            .get("requires_openai_auth")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
