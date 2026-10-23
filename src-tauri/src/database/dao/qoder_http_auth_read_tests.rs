@@ -626,3 +626,122 @@ fn cn_consent_context_is_default_off_and_enable_requires_exact_source_revision_v
         assert!(!automatic::context(&db, &d.provider_id).unwrap().enabled);
     }
 }
+
+// These unit fixtures model only retire_on's column/version contract. The full
+// authenticated historical save is covered by the Codex native recovery test.
+fn retirement_fixture(version: i32, column: Option<&str>) -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY, version INTEGER NOT NULL); CREATE TABLE providers(id TEXT NOT NULL, app_type TEXT NOT NULL, settings_config TEXT NOT NULL, PRIMARY KEY(id,app_type)); INSERT INTO providers VALUES('selected','codex','synthetic'),('other','codex','synthetic'),('selected','claude','synthetic');").unwrap();
+    conn.execute(
+        "INSERT INTO loongport_schema_version VALUES(1,?1)",
+        [version],
+    )
+    .unwrap();
+    if let Some(column) = column {
+        conn.execute_batch(&format!("ALTER TABLE providers ADD COLUMN {column}"))
+            .unwrap();
+    }
+    conn
+}
+
+#[test]
+fn retire_absent_pre_http_column_is_readonly_without_schema_upgrade() {
+    for version in [24, 25, 26] {
+        let conn = retirement_fixture(version, None);
+        let changes = conn.total_changes();
+        retire_on(&conn, "codex", "selected").unwrap();
+        assert_eq!(conn.total_changes(), changes);
+        assert!(!has_column(&conn).unwrap());
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+            version
+        );
+    }
+}
+
+#[test]
+fn retire_missing_current_or_unknown_schema_stays_rejected_without_writes() {
+    for version in [-1, 0, 23, 27, 28, 29, 30] {
+        let conn = retirement_fixture(version, None);
+        let changes = conn.total_changes();
+        assert!(
+            retire_on(&conn, "codex", "selected").is_err(),
+            "version {version}"
+        );
+        assert_eq!(conn.total_changes(), changes);
+        assert!(!has_column(&conn).unwrap());
+    }
+    let conn = retirement_fixture(24, None);
+    conn.execute_batch("DROP TABLE loongport_schema_version")
+        .unwrap();
+    let changes = conn.total_changes();
+    assert!(retire_on(&conn, "codex", "selected").is_err());
+    assert_eq!(conn.total_changes(), changes);
+}
+
+#[test]
+fn retire_present_column_never_uses_old_version_as_a_skip() {
+    for version in [24, 26, 27, 28, 29] {
+        let conn = retirement_fixture(version, Some("qoder_http_secret TEXT NOT NULL DEFAULT ''"));
+        conn.execute(
+            "UPDATE providers SET qoder_http_secret='synthetic-derived-owner'",
+            [],
+        )
+        .unwrap();
+        retire_on(&conn, "codex", "selected").unwrap();
+        let values = conn
+            .prepare("SELECT id,app_type,qoder_http_secret FROM providers ORDER BY id,app_type")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            values,
+            vec![
+                (
+                    "other".into(),
+                    "codex".into(),
+                    "synthetic-derived-owner".into()
+                ),
+                (
+                    "selected".into(),
+                    "claude".into(),
+                    "synthetic-derived-owner".into()
+                ),
+                ("selected".into(), "codex".into(), String::new())
+            ]
+        );
+    }
+}
+
+#[test]
+fn retire_malformed_existing_column_is_not_a_legacy_escape() {
+    for version in [24, 27, 29] {
+        for declaration in [
+            "qoder_http_secret BLOB",
+            "qoder_http_secret TEXT",
+            "qoder_http_secret TEXT NOT NULL DEFAULT 'wrong'",
+            "qoder_http_secret TEXT GENERATED ALWAYS AS ('synthetic-derived-owner') VIRTUAL",
+        ] {
+            let conn = retirement_fixture(version, Some(declaration));
+            if !declaration.contains("GENERATED") {
+                conn.execute(
+                    "UPDATE providers SET qoder_http_secret='synthetic-derived-owner'",
+                    [],
+                )
+                .unwrap();
+            }
+            let changes = conn.total_changes();
+            assert!(retire_on(&conn, "codex", "selected").is_err());
+            assert_eq!(conn.total_changes(), changes);
+            assert_eq!(conn.query_row("SELECT qoder_http_secret FROM providers WHERE id='selected' AND app_type='codex'",[],|r|r.get::<_,String>(0)).unwrap(),"synthetic-derived-owner");
+        }
+    }
+}

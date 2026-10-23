@@ -6248,7 +6248,8 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     )
     .unwrap();
     source.execute("INSERT INTO loongport_client_credentials(id,client_id,route_app,allowed_models,secret,secret_digest) VALUES('synthetic-v28-credential','synthetic-client','codex','[]',?1,'synthetic-digest')", [&sealed]).unwrap();
-    source.execute_batch("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,status_code,created_at,client_id,client_credential_id) VALUES('synthetic-v28-request','synthetic-provider','codex','synthetic-model',1,200,1,'synthetic-client','synthetic-v28-credential')").unwrap();
+    // This row witnesses migration preservation, not normal retention expiry.
+    source.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,status_code,created_at,client_id,client_credential_id) VALUES('synthetic-v28-request','synthetic-provider','codex','synthetic-model',1,200,?1,'synthetic-client','synthetic-v28-credential')", [chrono::Utc::now().timestamp()]).unwrap();
     let clients = table_rows(&source, "loongport_client_credentials");
     let logs = table_rows(&source, "proxy_request_logs");
     let receipts = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
@@ -6299,6 +6300,11 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     crate::settings::unlock_settings(session.clone()).unwrap();
     let db = Database::init_with_secrets(session.clone()).unwrap();
     assert_v28(&db.conn.lock().unwrap());
+    assert_eq!(
+        table_rows(&db.conn.lock().unwrap(), "proxy_request_logs"),
+        logs,
+        "reopen must preserve the unexpired synthetic request"
+    );
     assert_eq!(
         checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap())
             .unwrap()

@@ -69,6 +69,18 @@ pub(crate) fn retire_all_on(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 pub(crate) fn retire_on(conn: &Connection, app: &str, id: &str) -> Result<(), AppError> {
+    if !has_column(conn)? {
+        let version = crate::database::loongport_schema::read_stored_version(conn)?;
+        if crate::database::loongport_schema::supports_authenticated_snapshot_version(version)
+            && version < INTRODUCED_VERSION
+        {
+            // Retained pre-HTTP snapshots have no derived owner to retire.
+            // This is not credential/read admission and must not migrate them.
+            return Ok(());
+        }
+    }
+    // Installed or unexpected layouts must never silently retain credentials.
+    validate_column(conn)?;
     conn.execute(
         "UPDATE providers SET qoder_http_secret='' WHERE id=?1 AND app_type=?2",
         params![id, app],
