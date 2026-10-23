@@ -640,6 +640,11 @@ fn bind_proxy_client_key(
     planned: &mut Planned,
     base_url: &str,
 ) -> Result<(), AppError> {
+    if db.retained_legacy_client_projection()? {
+        // Keep the authenticated original projection, including OfficialProxy.
+        // Binding a legacy placeholder as a new client header changes its owner.
+        return Ok(());
+    }
     let key = crate::proxy::client_access::managed::key(db, "codex")?;
     if planned.official {
         let mut table = official_mirror_table(Some(base_url), false);

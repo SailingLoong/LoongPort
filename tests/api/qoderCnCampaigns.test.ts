@@ -59,3 +59,86 @@ it("uses an actually registered Tauri command, not a frontend-only placeholder",
   expect(commands).toContain("cn_campaigns::read(&db, declaration).await");
   expect(registry).toContain("commands::read_qoder_cn_campaigns,");
 });
+
+it.each(["chinaQoderPat", "chinaQoderDevice"] as const)(
+  "claims %s only through the fixed backend entry and original owner declaration",
+  async (source) => {
+    const declaration = {
+      providerId: "cn",
+      credentialGeneration: "g1",
+      source,
+    };
+    await qoderCnCampaignsApi.claim({
+      ...declaration,
+      token: "SYNTHETIC",
+      campaignId: "injected",
+    } as typeof declaration);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("claim_qoder_cn_benefits", {
+      declaration,
+    });
+  },
+);
+it("saves explicit CN consent with the backend policy revision and actual source", async () => {
+  const context = {
+    providerId: "cn",
+    credentialGeneration: "g1",
+    revision: 3,
+    policyVersion: 2,
+    enabled: false,
+    canEnable: true,
+    reason: null,
+    subject: "synthetic",
+  };
+  await qoderCnCampaignsApi.setAutomatic(context, true, "chinaQoderDevice");
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("set_qoder_daily_automatic", {
+    request: {
+      providerId: "cn",
+      credentialGeneration: "g1",
+      expectedRevision: 3,
+      policyVersion: 2,
+      enabled: true,
+      source: "chinaQoderDevice",
+    },
+  });
+});
+it("registers the real CN batch service command", () => {
+  const commands = readFileSync("src-tauri/src/commands/provider.rs", "utf8");
+  const registry = readFileSync("src-tauri/src/lib.rs", "utf8");
+  expect(commands).toContain("async fn claim_qoder_cn_benefits");
+  expect(commands).toContain("cn_benefits::run(&db, declaration, None).await");
+  expect(registry).toContain("commands::claim_qoder_cn_benefits,");
+});
+
+it("keeps the database DAO private and uses only its narrow CN operation exports", () => {
+  const database = readFileSync("src-tauri/src/database/mod.rs", "utf8");
+  expect(database).toMatch(/^mod dao;/m);
+  const exports =
+    database.match(
+      /pub\(crate\) use dao::qoder_campaign_operations::\{([^}]+)\};/g,
+    ) ?? [];
+  const boundary = exports.join(" ");
+  for (const symbol of [
+    "CnOperation",
+    "CnTarget",
+    "read_qoder_cn_operations_on",
+    "reserve_qoder_cn_operation_on",
+    "finish_qoder_cn_operation_on",
+    "reconcile_qoder_cn_operation_on",
+    "observe_qoder_cn_claimed_on",
+  ]) {
+    expect(boundary).toContain(symbol);
+  }
+  for (const path of [
+    "cn_benefits.rs",
+    "cn_benefits_contract.rs",
+    "cn_benefits_tests.rs",
+  ]) {
+    const service = readFileSync(
+      `src-tauri/src/services/provider/qoder_daily/${path}`,
+      "utf8",
+    );
+    expect(service).not.toMatch(
+      /(?:database::dao|dao::qoder_campaign_operations)/,
+    );
+  }
+});

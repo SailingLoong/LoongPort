@@ -2577,6 +2577,25 @@ pub(crate) async fn read_qoder_cn_campaigns<R: tauri::Runtime>(
     cn_campaigns::read(&db, declaration).await
 }
 
+/// Explicit CN free-benefit batch. Targets and credentials are selected by the
+/// original backend owner; callers cannot provide URLs, tokens or campaign IDs.
+#[tauri::command]
+pub(crate) async fn claim_qoder_cn_benefits<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    declaration: crate::services::provider::qoder_daily::http::PatDeclaration,
+) -> crate::services::provider::qoder_daily::cn_benefits::RunResult {
+    use crate::services::provider::qoder_daily::{cn_benefits, cn_campaigns};
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return cn_benefits::RunResult::Failed {
+                code: cn_campaigns::FailureCode::OwnerUnavailable,
+            }
+        }
+    };
+    cn_benefits::run(&db, declaration, None).await
+}
+
 /// Safe original-Provider status only. Source and identity admission stays in
 /// the original credential owner, including direct IPC invocation.
 #[tauri::command]

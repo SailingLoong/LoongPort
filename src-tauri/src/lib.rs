@@ -1978,6 +1978,7 @@ pub fn run() {
             commands::set_qoder_daily_automatic,
             commands::qoder_http_identity_context,
             commands::read_qoder_cn_campaigns,
+            commands::claim_qoder_cn_benefits,
             commands::qoder_http_identity_action,
             commands::qoder_cn_device_login_start,
             commands::qoder_cn_device_login_poll,

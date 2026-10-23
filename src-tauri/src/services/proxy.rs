@@ -3315,6 +3315,15 @@ impl ProxyService {
     /// Partial failures remain retryable using the existing app operation journals/backups.
     pub(crate) async fn complete_client_access_migration(&self) -> Result<(), String> {
         let _lifecycle = self.takeover_lock.lock().await;
+        if self
+            .db
+            .retained_legacy_client_projection()
+            .map_err(|e| e.to_string())?
+        {
+            // Finish/archive the original checkpoint first. Never issue/adopt a
+            // client grant or publish readiness into its historical identity.
+            return Err(AppError::Config("upgrade.checkpoint_pending".into()).to_string());
+        }
         crate::proxy::client_access::managed::provision(&self.db).map_err(|e| e.to_string())?;
         crate::claude_desktop_config::migrate_gateway_credential(&self.db)
             .map_err(|e| e.to_string())?;

@@ -576,6 +576,8 @@ fn codex_outgoing_completion_validates_native_api_key_payload() {
     for preserve in [true, false] {
         let f = Fixture::new();
         let (inspected, review, token, runtime) = managed_native_runtime(&f);
+        let checkpoint_path = f.device.root().join(checkpoint::FILE);
+        let original_checkpoint = std::fs::read(&checkpoint_path).unwrap();
         let settings_path = crate::settings::settings_path();
         let mut settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
@@ -684,6 +686,27 @@ fn codex_outgoing_completion_validates_native_api_key_payload() {
             .unwrap();
             assert_outgoing_managed_placement_is_proven(&f, &inspected, &review, &token, &runtime);
         }
+        // Ordinary historical row updates must not manufacture current HTTP
+        // credentials or migrate the retained checkpoint to make them succeed.
+        let conn = runtime.db.conn.lock().unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            24
+        );
+        assert!(!database::has_qoder_http_auth_column(&conn).unwrap());
+        drop(conn);
+        assert_eq!(
+            std::fs::read(&checkpoint_path).unwrap(),
+            original_checkpoint
+        );
+        assert!(checkpoint::verified_database_id(
+            &f.root,
+            &f.device,
+            &runtime.db.secret_session().read().unwrap()
+        )
+        .unwrap()
+        .is_some());
+        assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
     }
     assert!(
         unexpected.is_empty(),

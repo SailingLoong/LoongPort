@@ -1680,7 +1680,16 @@ mod tests {
         if version < 26 {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
+        } else if version < 29 {
+            conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
+                .unwrap();
+            conn.execute_batch(include_str!(
+                "test_fixtures/qoder_campaign_operations_v27.sql"
+            ))
+            .unwrap();
         } else {
+            conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
+                .unwrap();
             crate::database::create_qoder_campaign_operations_schema(conn).unwrap();
         }
         if version < 27 {
@@ -1702,6 +1711,37 @@ mod tests {
             [version],
         )
         .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checkpoint_fixtures_keep_the_published_v27_v28_and_current_v29_shapes() {
+        for (version, client_columns, ledger_columns) in [(27, 0, 9), (28, 2, 9), (29, 2, 10)] {
+            let fixture = Fixture::new();
+            let conn = fixture.db.conn.lock().unwrap();
+            set_test_checkpoint_version(&conn, version);
+            let clients: i64 = conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('proxy_request_logs') WHERE name IN ('client_id','client_credential_id')",
+                [], |row| row.get(0),
+            ).unwrap();
+            let ledger: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(clients, client_columns, "v{version} client log shape");
+            assert_eq!(
+                Database::table_exists(&conn, "loongport_client_credentials").unwrap(),
+                version >= 28
+            );
+            assert_eq!(ledger, ledger_columns, "v{version} receipt shape");
+            assert_eq!(
+                crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+                version
+            );
+        }
     }
 
     fn publish_native_checkpoint(source_version: i32, image_version: i32, recorded_version: i32) {
@@ -1802,6 +1842,13 @@ mod tests {
             (25, 26, 25),
             (26, 25, 26),
             (26, 26, 27),
+            (27, 28, 27),
+            (28, 27, 28),
+            (28, 28, 27),
+            (28, 29, 28),
+            (29, 28, 29),
+            (28, 28, 29),
+            (29, 29, 30),
             (
                 crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
                 crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
@@ -1810,6 +1857,30 @@ mod tests {
         ] {
             publish_native_checkpoint(source, image, recorded);
         }
+    }
+
+    #[test]
+    fn current_database_binding_is_admitted_without_rewriting_its_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
+        let current = crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION;
+        conn.execute(
+            "INSERT INTO loongport_schema_version VALUES(1,?1)",
+            [current],
+        )
+        .unwrap();
+        let binding = DatabaseBinding {
+            upstream: crate::database::UPSTREAM4_SCHEMA_VERSION,
+            loongport: current,
+            source_database: "synthetic-current-version-gate".into(),
+        };
+        validate_database_version(&conn, Some(&binding), true).unwrap();
+        conn.execute(
+            "UPDATE loongport_schema_version SET version=?1",
+            [current - 1],
+        )
+        .unwrap();
+        assert!(validate_database_version(&conn, Some(&binding), true).is_err());
     }
 
     #[test]
