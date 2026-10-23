@@ -269,3 +269,62 @@ async fn adapter_fixture_global_wire_reaches_real_loopback_consumer() {
         assert_eq!(fixture.attempts(), 1);
     }
 }
+
+#[tokio::test]
+async fn adapter_unknown_success_outcomes_are_terminal_not_synthetic_http_failures() {
+    for (headers, reply) in [
+        ("Content-Type: text/event-stream\r\n", ""),
+        (
+            "Content-Type: text/event-stream\r\n",
+            "event: output\ndata: invalid-json\n\n",
+        ),
+        (
+            "Content-Type: text/event-stream\r\nContent-Encoding: gzip\r\n",
+            "opaque",
+        ),
+        ("Content-Type: application/json\r\n", "{}"),
+        (
+            "Content-Type: text/event-stream\r\n",
+            "event: output\ndata: {\"response\":\"partial\"}\n\n",
+        ),
+        (
+            "Content-Type: text/event-stream\r\n",
+            "event: output\ndata: {\"response\":\"partial\"}\n\nevent: error\ndata: {\"code\":429}\n\n",
+        ),
+    ] {
+        let f = Owner::new().await;
+        let (origin, worker) = server("200 OK", headers, reply);
+        let fixture = FixtureTransport::loopback(&f.seal, &origin).unwrap();
+        let result = Lease::acquire(f.session.clone(), "synthetic-sg", "s")
+            .await
+            .unwrap()
+            .dispatch_fixture(body(), Duration::from_secs(2), &fixture)
+            .await;
+        assert!(
+            matches!(result, Err(ProxyError::ForwardFailed(_))),
+            "unknown accepted response must remain a terminal transport error"
+        );
+        assert_eq!(fixture.attempts(), 1);
+        worker.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn adapter_real_http_502_keeps_explicit_response_policy() {
+    let f = Owner::new().await;
+    let (origin, worker) = server(
+        "502 Bad Gateway",
+        "Content-Type: application/json\r\n",
+        "{}",
+    );
+    let fixture = FixtureTransport::loopback(&f.seal, &origin).unwrap();
+    let result = Lease::acquire(f.session.clone(), "synthetic-sg", "s")
+        .await
+        .unwrap()
+        .dispatch_fixture(body(), Duration::from_secs(2), &fixture)
+        .await
+        .unwrap();
+    assert_eq!(result.response.status(), http::StatusCode::BAD_GATEWAY);
+    assert_eq!(fixture.attempts(), 1);
+    worker.join().unwrap();
+}

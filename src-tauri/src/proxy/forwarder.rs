@@ -6403,6 +6403,82 @@ mod tests {
     }
 
     #[test]
+    fn managed_account_unknown_dispatch_outcomes_are_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        for owner in ["minimax_code", "zcode_start_plan", "workbuddy", "trae"] {
+            let mut provider = test_provider_with_type(None);
+            provider.meta = Some(crate::provider::ProviderMeta {
+                auth_binding: Some(crate::provider::AuthBinding {
+                    source: crate::provider::AuthBindingSource::ManagedAccount,
+                    auth_provider: Some(owner.into()),
+                    account_id: Some("synthetic-account".into()),
+                }),
+                ..Default::default()
+            });
+            for error in [
+                ProxyError::Timeout("response headers not received".into()),
+                ProxyError::ForwardFailed("connection interrupted".into()),
+                ProxyError::StreamIdleTimeout(1),
+            ] {
+                assert_eq!(
+                    forwarder.categorize_proxy_error(&error, &provider),
+                    ErrorCategory::NonRetryable,
+                    "{owner}: unknown dispatch outcome must not replay"
+                );
+            }
+            // Existing owner preflight and explicit HTTP policy are unchanged.
+            for error in [
+                ProxyError::AuthError("local acquisition unavailable".into()),
+                ProxyError::UpstreamError {
+                    status: 429,
+                    body: None,
+                },
+            ] {
+                assert_eq!(
+                    forwarder.categorize_proxy_error(&error, &provider),
+                    ErrorCategory::Retryable
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_account_rectifier_unknown_outcome_is_terminal() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let mut provider = test_provider_with_type(None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            auth_binding: Some(crate::provider::AuthBinding {
+                source: crate::provider::AuthBindingSource::ManagedAccount,
+                auth_provider: Some("minimax_code".into()),
+                account_id: Some("synthetic-account".into()),
+            }),
+            ..Default::default()
+        });
+        for error in [
+            ProxyError::Timeout("unknown".into()),
+            ProxyError::ForwardFailed("unknown".into()),
+        ] {
+            let mut last_error = None;
+            let mut last_provider = None;
+            assert!(forwarder
+                .handle_rectifier_retry_failure(
+                    error,
+                    &provider,
+                    "codex",
+                    false,
+                    "synthetic",
+                    &mut last_error,
+                    &mut last_provider
+                )
+                .await
+                .is_some());
+            assert!(last_error.is_none());
+            assert!(last_provider.is_none());
+        }
+        assert_eq!(forwarder.status.read().await.failed_requests, 2);
+    }
+
+    #[test]
     fn official_codex_failures_are_not_retryable() {
         let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
         let mut provider = test_provider_with_type(None);

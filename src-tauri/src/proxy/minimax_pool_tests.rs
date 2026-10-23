@@ -28,6 +28,7 @@ const STOP: &str = concat!(
 enum UpstreamBehavior {
     Complete,
     FirstRateLimited,
+    FirstHeadersPending,
     FailAfterOutput,
     CleanEofAfterOutput,
     ErrorAfterMessageStop,
@@ -82,6 +83,11 @@ impl MiniMaxRouterFixture {
                 async move {
                     let first = headers.get("authorization").unwrap().to_str().unwrap() == "Bearer synthetic-a-access";
                     calls.lock().unwrap().push(CapturedRequest {region, headers, body: body.clone()});
+                    if first && matches!(behavior, UpstreamBehavior::FirstHeadersPending) {
+                        // The original owner has submitted the complete request.
+                        // No response headers does not prove no work was accepted.
+                        std::future::pending::<()>().await;
+                    }
                     if first && matches!(behavior, UpstreamBehavior::FirstRateLimited) {
                         return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "0")], axum::Json(json!({"error":{"type":"rate_limit_error","message":"synthetic-a-access"}}))).into_response();
                     }

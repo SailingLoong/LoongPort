@@ -793,16 +793,17 @@ impl StreamTransport for FixtureTransport {
             } else {
                 catalog::Region::Global
             };
-            let response = self
+            let mut outbound = self
                 .client
                 .post(self.url(region, "/mavis/api/v1/llm/v1/messages"))
                 .headers(request.headers)
-                .body(request.body)
-                .send()
-                .await
-                .map_err(|_| {
-                    ProxyError::ForwardFailed("minimax_code.fixture_transport_failed".into())
-                })?;
+                .body(request.body);
+            if !request.timeout.is_zero() {
+                outbound = outbound.timeout(request.timeout);
+            }
+            let response = outbound.send().await.map_err(|_| {
+                ProxyError::ForwardFailed("minimax_code.fixture_transport_failed".into())
+            })?;
             Ok(ProxyResponse::Reqwest(response))
         })
     }

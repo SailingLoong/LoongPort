@@ -24,6 +24,9 @@ impl Fixture {
         Self::with_denial(false).await
     }
     async fn with_denial(deny: bool) -> Self {
+        Self::with_reply(deny, None).await
+    }
+    async fn with_reply(deny: bool, reply: Option<&'static str>) -> Self {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -41,6 +44,7 @@ impl Fixture {
    let captured=captured.clone(); async move {
     captured.lock().unwrap().push(body);
                     if deny { return (StatusCode::FORBIDDEN, axum::Json(json!({"code":11004}))).into_response(); }
+                    if let Some(reply) = reply { return (StatusCode::OK, [("content-type", "text/event-stream")], reply).into_response(); }
     (StatusCode::OK,[("content-type","text/event-stream")], "event: output\ndata: {\"response\":\"synthetic TRAE answer\"}\n\nevent: done\ndata: {}\n\n").into_response()
    }
   }));
@@ -256,6 +260,30 @@ async fn trae_explicit_refusal_is_terminal_at_all_original_entries() {
             f.calls.lock().unwrap().len(),
             1,
             "denied owner must not trigger another account"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_unknown_success_response_never_tries_second_account() {
+    for reply in [
+        "",
+        "event: output\ndata: invalid-json\n\n",
+        "event: output\ndata: {\"response\":\"partial\"}\n\n",
+    ] {
+        let f = Fixture::with_reply(false, Some(reply)).await;
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            f.calls.lock().unwrap().len(),
+            1,
+            "an accepted but unknown response cannot select the next account"
         );
     }
 }
