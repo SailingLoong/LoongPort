@@ -24,6 +24,12 @@ import {
   type TraeInstallation,
 } from "@/lib/api/traeAccounts";
 
+import {
+  TRAE_AUTHORIZATION_FAILURE_MESSAGES,
+  traeAuthorizationFailure,
+  type TraeAuthorizationFailure,
+} from "@/lib/traeAuthorizationError";
+
 function isSelectedFile(path: unknown, filename: string): path is string {
   return typeof path === "string" && path.split(/[\\/]/).pop() === filename;
 }
@@ -38,7 +44,7 @@ export function TraeAccounts({
   const [accounts, setAccounts] = useState<TraeAccountView[]>([]);
   const [loading, setLoading] = useState(true);
   const [listFailed, setListFailed] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<TraeAuthorizationFailure | null>(null);
   const [cancelUncertain, setCancelUncertain] = useState(false);
   const [saved, setSaved] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -320,13 +326,14 @@ export function TraeAccounts({
     setConsent(false);
     setAttempted(false);
     setBusy(null);
-    setFailed(false);
+    setFailed(null);
     setSaved(false);
     setDialogOpen(true);
   };
 
   const closeDialog = () => {
     if (!dialogActive.current) return;
+    const review = confirmationAttempted.current && !activeFlow.current;
     dialogActive.current = false;
     ++generation.current;
     operation.current = null;
@@ -340,6 +347,8 @@ export function TraeAccounts({
     if (abandoned) {
       invalidateList();
       void cancelFlow(abandoned.flowId);
+    } else if (review) {
+      void loadAccounts();
     }
   };
 
@@ -356,7 +365,7 @@ export function TraeAccounts({
       alive.current && dialogActive.current && request === generation.current;
     operation.current = request;
     setBusy("selecting");
-    setFailed(false);
+    setFailed(null);
     try {
       const storagePath =
         installation?.storagePath ??
@@ -368,7 +377,7 @@ export function TraeAccounts({
         }));
       if (!isCurrent() || storagePath === null) return;
       if (!isSelectedFile(storagePath, "storage.json")) {
-        setFailed(true);
+        setFailed("invalidSelection");
         return;
       }
       const productPath =
@@ -383,7 +392,7 @@ export function TraeAccounts({
         }));
       if (!isCurrent() || productPath === null) return;
       if (!isSelectedFile(productPath, "product.json")) {
-        setFailed(true);
+        setFailed("invalidSelection");
         return;
       }
       const selected = await traeAccountsApi.begin({
@@ -402,13 +411,13 @@ export function TraeAccounts({
         selected.authHost !== traeAuthHost(realm)
       ) {
         if (selected.flowId) void cancelFlow(selected.flowId);
-        setFailed(true);
+        setFailed("unknown");
         return;
       }
       activeFlow.current = selected;
       setFlow(selected);
-    } catch {
-      if (isCurrent()) setFailed(true);
+    } catch (error) {
+      if (isCurrent()) setFailed(traeAuthorizationFailure(error));
     } finally {
       if (operation.current === request) {
         operation.current = null;
@@ -430,7 +439,7 @@ export function TraeAccounts({
       alive.current && dialogActive.current && request === generation.current;
     operation.current = request;
     setBusy("selecting");
-    setFailed(false);
+    setFailed(null);
     setInstallations([]);
     setDiscoveryDone(false);
     let single: TraeInstallation | undefined;
@@ -440,8 +449,8 @@ export function TraeAccounts({
       setDiscoveryDone(true);
       setInstallations(found);
       if (found.length === 1) single = found[0];
-    } catch {
-      if (isCurrent()) setFailed(true);
+    } catch (error) {
+      if (isCurrent()) setFailed(traeAuthorizationFailure(error));
     } finally {
       if (operation.current === request) {
         operation.current = null;
@@ -468,18 +477,21 @@ export function TraeAccounts({
     confirmationAttempted.current = true;
     setAttempted(true);
     setBusy("confirming");
-    setFailed(false);
+    setFailed(null);
     invalidateList();
     try {
       const account = await traeAccountsApi.confirm(selected.flowId);
       if (!isCurrent()) return;
       if (
+        !account ||
         typeof account.id !== "string" ||
         !account.id.trim() ||
         account.realm !== selected.realm ||
         account.status !== "stored"
       ) {
-        setFailed(true);
+        activeFlow.current = null;
+        consentGiven.current = false;
+        setFailed("receiptUnknown");
         return;
       }
       invalidateList();
@@ -499,8 +511,14 @@ export function TraeAccounts({
       setBusy(null);
       setDialogOpen(false);
       setSaved(true);
-    } catch {
-      if (isCurrent()) setFailed(true);
+    } catch (error) {
+      if (isCurrent()) {
+        // A settled IPC failure is not permission to revoke a possibly saved
+        // grant. Review is read-only; running/unmounted flows still use cancel.
+        activeFlow.current = null;
+        consentGiven.current = false;
+        setFailed(traeAuthorizationFailure(error));
+      }
     } finally {
       if (operation.current === request) {
         operation.current = null;
@@ -513,14 +531,14 @@ export function TraeAccounts({
     if (retireActive.current || dialogActive.current) return;
     retireActive.current = true;
     setRetiring(id);
-    setFailed(false);
+    setFailed(null);
     setSaved(false);
     invalidateList();
     try {
       await traeAccountsApi.retire(id);
       if (alive.current) await loadAccounts();
     } catch {
-      if (alive.current) setFailed(true);
+      if (alive.current) setFailed("unknown");
     } finally {
       retireActive.current = false;
       if (alive.current) setRetiring(null);
@@ -529,10 +547,13 @@ export function TraeAccounts({
 
   const failureNotice = failed && (
     <p role="alert" className="text-sm text-destructive">
-      {t("trae.failed", {
-        defaultValue:
-          "未能确认操作结果。请检查所选官方安装文件，并重新载入列表核对。",
+      {t(`trae.failure.${failed}`, {
+        defaultValue: TRAE_AUTHORIZATION_FAILURE_MESSAGES[failed],
       })}
+      <span className="mt-1 block text-xs">
+        {t("trae.diagnosticCode", { defaultValue: "诊断代码" })}：
+        <span>{failed}</span>
+      </span>
     </p>
   );
   const cancellationNotice = cancelUncertain && (
@@ -878,9 +899,9 @@ export function TraeAccounts({
             {failureNotice}
             {attempted && !busy && (
               <p>
-                {t("trae.flowConsumed", {
+                {t("trae.reviewAfterAttempt", {
                   defaultValue:
-                    "本次授权已结束，不会自动重试。请取消并核对列表；需要重试时重新选择文件。",
+                    "本次尝试已结束，不会自动重试。关闭并核对列表只会读取本地状态，不会撤销可能已保存的账号；如需停用，请在列表中明确操作。",
                 })}
               </p>
             )}
@@ -889,7 +910,7 @@ export function TraeAccounts({
           <DialogFooter>
             <Button variant="outline" onClick={closeDialog}>
               {attempted && !busy
-                ? t("trae.cancelAndReview", { defaultValue: "取消并核对列表" })
+                ? t("trae.closeAndReview", { defaultValue: "关闭并核对列表" })
                 : t("trae.cancel", { defaultValue: "取消" })}
             </Button>
             <Button
