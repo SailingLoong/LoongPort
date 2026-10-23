@@ -12,6 +12,8 @@ use contract::{BoundCampaign, Identity, Outcome, Region, Target};
 pub(crate) mod automatic;
 #[path = "qoder_daily/clock.rs"]
 pub(crate) mod clock;
+#[path = "qoder_daily/cn_campaigns.rs"]
+pub(crate) mod cn_campaigns;
 #[path = "qoder_daily/device.rs"]
 pub(crate) mod device;
 #[path = "qoder_daily/http.rs"]

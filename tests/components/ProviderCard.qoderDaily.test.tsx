@@ -12,6 +12,10 @@ const deviceApi = vi.hoisted(() => ({
   cancel: vi.fn().mockResolvedValue({ status: "cancelled" }),
 }));
 const deviceContext = vi.hoisted(() => vi.fn());
+const campaignRead = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/api/qoderCnCampaigns", () => ({
+  qoderCnCampaignsApi: { read: campaignRead },
+}));
 vi.mock("@/lib/api/qoderCnDeviceLogin", () => ({
   qoderCnDeviceLoginApi: deviceApi,
 }));
@@ -187,3 +191,46 @@ it("keeps CN device login limited to the original Codex Provider route", () => {
     screen.queryByRole("button", { name: "登录 / 重新授权" }),
   ).not.toBeInTheDocument();
 });
+
+it.each(["qoder_cn", "qoder_cn_device"])(
+  "wires the actual read-only campaign dialog for %s without international claim",
+  async (type) => {
+    const source = type === "qoder_cn" ? "chinaQoderPat" : "chinaQoderDevice";
+    deviceContext.mockResolvedValue({
+      providerId: "qoder-fixture",
+      credentialGeneration: "g1",
+      source,
+      status: "ready",
+    });
+    campaignRead.mockResolvedValue({
+      status: "failed",
+      code: "identity_expired",
+    });
+    render(card(type, "codex", "g1", false));
+    expect(screen.queryByText("qoder-explicit-entry")).not.toBeInTheDocument();
+    expect(campaignRead).not.toHaveBeenCalled();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "CN 活动状态" })),
+    );
+    expect(campaignRead).not.toHaveBeenCalled();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "查询活动状态" })),
+    );
+    expect(campaignRead).toHaveBeenCalledExactlyOnceWith({
+      providerId: "qoder-fixture",
+      credentialGeneration: "g1",
+      source,
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("已过期");
+  },
+);
+
+it.each(["qoder_sdk", "generic"])(
+  "does not expose the CN campaign query for %s",
+  (type) => {
+    render(card(type));
+    expect(
+      screen.queryByRole("button", { name: "CN 活动状态" }),
+    ).not.toBeInTheDocument();
+  },
+);
