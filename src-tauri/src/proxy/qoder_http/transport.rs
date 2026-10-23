@@ -407,6 +407,13 @@ mod tests {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             });
+            let started = std::time::Instant::now();
+            let context = || {
+                format!(
+                    "mode={mode} streaming={streaming} elapsed={:?}",
+                    started.elapsed()
+                )
+            };
             let result = forward(
                 &config,
                 &input,
@@ -421,31 +428,49 @@ mod tests {
                 Ok(crate::proxy::hyper_client::ProxyResponse::Streamed { mut stream, .. }) => {
                     let mut bytes = Vec::new();
                     let mut failed = false;
+                    let mut failure_code = None;
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(chunk) => bytes.extend_from_slice(&chunk),
-                            Err(_) => {
+                            Err(error) => {
                                 failed = true;
+                                failure_code = Some(error.to_string());
                             }
                         }
                     }
-                    assert_eq!(failed, mode != "ok", "mode={mode}");
+                    assert_eq!(
+                        failed,
+                        mode != "ok",
+                        "{} stream_code={failure_code:?}",
+                        context()
+                    );
                     assert_eq!(
                         String::from_utf8_lossy(&bytes).contains("[DONE]"),
-                        mode == "ok"
+                        mode == "ok",
+                        "{} stream_code={failure_code:?}",
+                        context()
                     );
                 }
                 Ok(crate::proxy::hyper_client::ProxyResponse::Buffered { body, .. }) => {
-                    assert_eq!(mode, "ok");
-                    assert!(String::from_utf8_lossy(&body).contains("synthetic CN success"));
+                    assert_eq!(mode, "ok", "{}", context());
+                    assert!(
+                        String::from_utf8_lossy(&body).contains("synthetic CN success"),
+                        "{}",
+                        context()
+                    );
                 }
                 Err(ProxyError::ForwardFailed(code)) => {
-                    assert_ne!(mode, "ok");
-                    assert_eq!(code == REAUTHORIZE, retired == 1, "mode={mode}");
+                    assert_ne!(mode, "ok", "{} forward_code={code}", context());
+                    assert_eq!(
+                        code == REAUTHORIZE,
+                        retired == 1,
+                        "{} forward_code={code}",
+                        context()
+                    );
                 }
-                _ => panic!("unexpected response for mode={mode}"),
+                _ => panic!("unexpected response: {}", context()),
             }
-            assert_eq!(calls.load(Ordering::SeqCst), retired, "mode={mode}");
+            assert_eq!(calls.load(Ordering::SeqCst), retired, "{}", context());
         }
     }
 }

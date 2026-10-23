@@ -5,6 +5,276 @@ use super::*;
 use crate::zcode_accounts::inference::FixtureTransport as ZCodeTransport;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// This regression intentionally joins the previously separate bootstrap and
+// owner-router fixtures. Removing the original failover worker's logical switch
+// must fail the selected-route assertion, not be hidden by a test DB reset.
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
+#[tokio::test]
+#[serial_test::serial]
+async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files() {
+    use crate::app_config::AppType;
+    use crate::live::engine::DeviceStore;
+    use crate::mode::{controller, current, state};
+
+    let f =
+        CrossOwnerFixture::new(UpstreamBehavior::FirstRateLimited, ZCodeReply::ToolThenText).await;
+    let db = f.minimax.db.clone();
+    // The router-only fixture seeds a legacy direct pointer. It is not a
+    // legitimate native direct account, so remove it only during fixture setup.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE providers SET is_current = 0 WHERE app_type = 'codex'",
+            [],
+        )
+        .unwrap();
+    Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
+    // TestHome resets the settings owner; Database::memory only opens the DB
+    // vault. Native provider writes need the same session published to settings,
+    // just as the existing ProviderService and auto-mode fixtures initialize it.
+    crate::settings::unlock_settings_for_test(db.secrets.clone())
+        .expect("unlock isolated settings with the account fixture session");
+    let app = crate::store::AppState::new(db.clone()).unwrap();
+    state::update(
+        &DeviceStore::for_device(),
+        &db.secret_session().read().unwrap(),
+        |live| {
+            for known in controller::PROXY_APPS {
+                live.apps.entry(known.as_str().into()).or_default().mode =
+                    Some(state::Mode::Direct);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    // The original router-only fixture has no native Codex settings. Supply the
+    // normal provider shape, without replacing either private account binding.
+    db.update_provider_settings_config(
+        "codex",
+        "synthetic-a",
+        &json!({"auth":{},"config":"model = \"MiniMax-M2.7\"\n"}),
+    )
+    .unwrap();
+    let config_path = crate::codex_config::get_codex_config_path();
+    let mut original = Provider::with_id(
+        "synthetic-original".into(),
+        "Synthetic original direct configuration".into(),
+        json!({"auth":{"OPENAI_API_KEY":"synthetic-original-only"},"config":concat!(
+            "model_provider = \"synthetic_original\"\n",
+            "model = \"original-model\"\n",
+            "[model_providers.synthetic_original]\n",
+            "name = \"Original\"\n",
+            "base_url = \"https://synthetic.invalid/v1\"\n",
+            "wire_api = \"responses\"\n"
+        )}),
+        None,
+    );
+    original.category = Some("custom".into());
+    original.meta = Some(ProviderMeta {
+        common_config_enabled: Some(false),
+        ..Default::default()
+    });
+    // These are synchronous native writers, like the desktop's blocking
+    // command body. Their Codex owner uses rt::block_on internally, so do not
+    // call them on the async listener/client runtime's execution thread.
+    let native_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::services::ProviderService::add(&native_app, AppType::Codex, original, false)
+            .unwrap();
+        crate::services::ProviderService::switch(&native_app, AppType::Codex, "synthetic-original")
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let snapshot = || {
+        controller::files(&AppType::Codex)
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.path.clone(), std::fs::read(&file.path).ok()))
+            .collect::<Vec<_>>()
+    };
+    let original_files = snapshot();
+    let mut config = db.get_proxy_config().await.unwrap();
+    config.listen_address = "127.0.0.1".into();
+    config.listen_port = 0;
+    db.update_proxy_config(config).await.unwrap();
+    let info = app
+        .proxy_service
+        .start_account_fixture_server(f.minimax.transport.clone(), f.zcode.clone())
+        .await
+        .unwrap();
+    app.proxy_service
+        .set_takeover_for_app("codex", true)
+        .await
+        .unwrap();
+    app.proxy_service
+        .switch_proxy_target("codex", "synthetic-a")
+        .await
+        .unwrap();
+    let order_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::services::application_selection::apply_current_order_change(
+            &order_app,
+            &AppType::Codex,
+            &["synthetic-a".into(), "synthetic-b".into()],
+        )
+        .unwrap();
+    })
+    .await
+    .unwrap();
+    app.proxy_service
+        .set_failover_for_app("codex", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::proxy::application_routing::chain_ids(&db, "codex").unwrap(),
+        ["synthetic-a", "synthetic-b"]
+    );
+
+    // Consume the generated client endpoint, rather than invent a second router
+    // or bypass the listener with tower::oneshot. This is a protocol-level TCP
+    // client, not a claim that an installed Codex binary or real account ran.
+    let native: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    let provider = native["model_provider"].as_str().unwrap();
+    let endpoint = native["model_providers"][provider]["base_url"]
+        .as_str()
+        .unwrap();
+    assert_eq!(endpoint, format!("http://127.0.0.1:{}/v1", info.port));
+    // Current Codex proxy routes use provider-scoped bearer auth, not an
+    // OPENAI_API_KEY in auth.json. Read the same generated route the client uses.
+    let bearer = native["model_providers"][provider]["experimental_bearer_token"]
+        .as_str()
+        .expect("native proxy route must provide its local bearer token");
+    assert_eq!(bearer, crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER);
+    assert_eq!(
+        native["model_providers"][provider]["wire_api"].as_str(),
+        Some("responses")
+    );
+    // The native writer stamps this explicitly after proxy projection. With no
+    // ChatGPT login in this fixture it must be false, not omitted or true.
+    assert_eq!(
+        native["model_providers"][provider]
+            .get("requires_openai_auth")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap();
+    let mut body = json!({"model":"MiniMax-M2.7","stream":false,
+        "input":[{"role":"user","content":"synthetic lookup"}],
+        "tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]});
+    let response = client
+        .post(format!("{endpoint}/responses"))
+        .bearer_auth(bearer)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: Value = response.json().await.unwrap();
+    let call = first["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap()
+        .clone();
+    assert_eq!(call["call_id"], "call_cross_owner");
+    let manager = app.proxy_service.active_failover_manager_for_test().await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), manager.join_spawned_for_test())
+            .await
+            .unwrap(),
+        1,
+        "the original failover worker must run, not a test's DB mutation"
+    );
+    let selected = current::validate_known_mode(
+        &DeviceStore::for_device(),
+        &db.secret_session().read().unwrap(),
+        &AppType::Codex,
+    )
+    .unwrap();
+    assert!(selected.routes_to("synthetic-b"));
+    assert!(selected.attached);
+
+    body["input"].as_array_mut().unwrap().extend([
+        call.clone(),
+        json!({"type":"function_call_output","call_id":call["call_id"],"output":"synthetic tool result"}),
+        json!({"role":"user","content":"synthetic followup"}),
+    ]);
+    // No set_current_provider, route selection or re-ENTER between turns.
+    let response = client
+        .post(format!("{endpoint}/responses"))
+        .bearer_auth(bearer)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .contains("synthetic second-owner answer"));
+    assert_eq!(f.minimax.calls.lock().unwrap().len(), 1);
+    assert_wire(&f.minimax.calls.lock().unwrap()[0], "synthetic-a", "cn");
+    let calls = f.zcode_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    for (headers, _) in &calls {
+        assert_eq!(
+            headers["authorization"],
+            format!("Bearer {}", f.zcode_token)
+        );
+        assert!(!headers.contains_key("x-mavis-session-id"));
+    }
+    let messages = calls[1].1["messages"].as_array().unwrap();
+    let blocks: Vec<&Value> = messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .collect();
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_use" && block["id"] == "call_cross_owner")
+            .count(),
+        1
+    );
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_result"
+                && block["tool_use_id"] == "call_cross_owner"
+                && block["content"] == "synthetic tool result")
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.usage_rows(2)
+            .await
+            .iter()
+            .map(|row| (row.1.as_str(), row.2, row.3))
+            .collect::<Vec<_>>(),
+        vec![("synthetic-b", 3, 5), ("synthetic-b", 4, 6)]
+    );
+    app.proxy_service
+        .set_takeover_for_app("codex", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot(),
+        original_files,
+        "EXIT must restore the exact original native bytes and missing files"
+    );
+    assert!(!app.proxy_service.is_running().await);
+}
+
 #[derive(Clone, Copy)]
 enum ZCodeReply {
     Text,

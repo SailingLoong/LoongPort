@@ -4797,6 +4797,55 @@ impl ProxyService {
             "paperclip.runtime_unavailable".into(),
         ))
     }
+    // Test-only upstream routing. The real server, listener, service owner,
+    // mode journal and failover worker remain in use; no real credentials.
+    #[cfg(all(test, unix, any(feature = "gui", feature = "test-hooks")))]
+    pub(crate) async fn start_account_fixture_server(
+        &self,
+        minimax: crate::minimax_code::inference::FixtureTransport,
+        zcode: crate::zcode_accounts::inference::FixtureTransport,
+    ) -> Result<ProxyServerInfo, String> {
+        let mut slot = self.server.write().await;
+        assert!(slot.is_none());
+        let config = self
+            .db
+            .get_proxy_config()
+            .await
+            .map_err(|e| e.to_string())?;
+        assert_eq!(config.listen_address, "127.0.0.1");
+        assert_eq!(config.listen_port, 0);
+        let server = ProxyServer::new(
+            config.clone(),
+            self.db.clone(),
+            #[cfg(feature = "gui")]
+            None,
+            self.passive_ingress.clone(),
+            self.model_alignment.clone(),
+        )
+        .with_service_owner(self.owner.clone())
+        .with_account_fixture_transports(minimax, zcode);
+        let info = server.start().await.map_err(|e| e.to_string())?;
+        if let Err(error) = self
+            .persist_ephemeral_listen_port_if_needed(&config, info.port)
+            .await
+        {
+            server
+                .stop()
+                .await
+                .map_err(|cleanup| format!("{error}; {cleanup}"))?;
+            return Err(error);
+        }
+        if let Err(error) = self.db.set_proxy_enabled(true) {
+            server
+                .stop()
+                .await
+                .map_err(|cleanup| format!("{error}; {cleanup}"))?;
+            return Err(error.to_string());
+        }
+        *slot = Some(server);
+        Ok(info)
+    }
+
     #[cfg(all(test, any(feature = "gui", feature = "test-hooks")))]
     pub(crate) async fn paperclip_install_original_test_server(&self, enable_logging: bool) {
         let mut slot = self.server.write().await;

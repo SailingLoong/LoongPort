@@ -2069,6 +2069,7 @@ pub fn run() {
             commands::set_workbuddy_automatic_claim,
             commands::begin_workbuddy_authorization,
             commands::finish_workbuddy_authorization,
+            commands::cancel_workbuddy_authorization,
             commands::list_workbuddy_inference_accounts,
             commands::begin_workbuddy_inference_authorization,
             commands::poll_workbuddy_inference_authorization,

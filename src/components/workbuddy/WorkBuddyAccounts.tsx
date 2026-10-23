@@ -157,6 +157,24 @@ export function WorkBuddyAccounts({
   };
   const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
   const [waiting, setWaiting] = useState(false);
+  const loginGeneration = useRef(0);
+  const loginFlow = useRef<WorkBuddyLogin | null>(null);
+  const loginOperation = useRef<string | null>(null);
+  const closeLogin = () => {
+    const generation = ++loginGeneration.current;
+    const flow = loginFlow.current;
+    loginFlow.current = null;
+    const hadLoginOperation = loginOperation.current !== null;
+    loginOperation.current = null;
+    setLogin(null);
+    setWaiting(false);
+    if (hadLoginOperation) setBusy(null);
+    if (flow)
+      void workbuddyApi.cancelLogin(flow.flowId).catch(() => {
+        if (alive.current && generation === loginGeneration.current)
+          setFailed(true);
+      });
+  };
   const [inferenceAccounts, setInferenceAccounts] = useState<
     WorkBuddyInferenceAccount[]
   >([]);
@@ -330,6 +348,12 @@ export function WorkBuddyAccounts({
     void loadInferenceAccounts();
     return () => {
       alive.current = false;
+      loginGeneration.current += 1;
+      const pendingLogin = loginFlow.current;
+      loginFlow.current = null;
+      loginOperation.current = null;
+      if (pendingLogin)
+        void workbuddyApi.cancelLogin(pendingLogin.flowId).catch(() => {});
       policyLifecycle.current += 1;
       listGeneration.current += 1;
       inferenceGeneration.current += 1;
@@ -341,7 +365,7 @@ export function WorkBuddyAccounts({
     };
   }, [loadAccounts, loadInferenceAccounts]);
   const run = async (key: string, operation: () => Promise<void>) => {
-    if (active.current) return;
+    if (active.current || loginOperation.current) return;
     active.current = true;
     setBusy(key);
     setFailed(false);
@@ -352,6 +376,75 @@ export function WorkBuddyAccounts({
     } finally {
       active.current = false;
       if (alive.current) setBusy(null);
+    }
+  };
+  const beginLogin = async () => {
+    if (active.current || loginOperation.current) return;
+    const generation = ++loginGeneration.current;
+    const current = () =>
+      alive.current && generation === loginGeneration.current;
+    const previous = loginFlow.current;
+    loginFlow.current = null;
+    loginOperation.current = "begin";
+    setLogin(null);
+    setWaiting(false);
+    setBusy("login");
+    setFailed(false);
+    try {
+      if (previous) await workbuddyApi.cancelLogin(previous.flowId);
+      if (!current()) return;
+      const flow = await workbuddyApi.beginLogin();
+      if (!current()) {
+        await workbuddyApi.cancelLogin(flow.flowId);
+        return;
+      }
+      loginFlow.current = flow;
+      setLogin(flow);
+    } catch {
+      if (current()) setFailed(true);
+    } finally {
+      if (current()) {
+        loginOperation.current = null;
+        setBusy(null);
+      }
+    }
+  };
+  const finishLogin = async () => {
+    const flow = loginFlow.current;
+    if (!flow || active.current || loginOperation.current) return;
+    const generation = loginGeneration.current;
+    const current = () =>
+      alive.current && generation === loginGeneration.current;
+    loginOperation.current = "finish";
+    setBusy("finish");
+    setFailed(false);
+    try {
+      const result = await workbuddyApi.finishLogin(flow.flowId);
+      if (!current()) return;
+      if (result.state === "saved") {
+        loginFlow.current = null;
+        setLogin(null);
+        setWaiting(false);
+        policyLifecycle.current += 1;
+        setAutomaticBusy(false);
+        setAutomaticFailed(false);
+        setAutomaticUncertain({});
+        // A legacy login may replace the row and clear its inference grant.
+        closeInference();
+        inferenceStatusGeneration.current += 1;
+        setInferenceAccounts([]);
+        setInferenceFailed(false);
+        setModels({});
+        await loadAccounts();
+        if (current()) await loadInferenceAccounts();
+      } else setWaiting(true);
+    } catch {
+      if (current()) setFailed(true);
+    } finally {
+      if (current()) {
+        loginOperation.current = null;
+        setBusy(null);
+      }
     }
   };
   const update = (row: WorkBuddyAccount) => {
@@ -434,15 +527,7 @@ export function WorkBuddyAccounts({
             size="sm"
             variant="outline"
             disabled={busy !== null}
-            onClick={() =>
-              void run("login", async () => {
-                const flow = await workbuddyApi.beginLogin();
-                if (alive.current) {
-                  setLogin(flow);
-                  setWaiting(false);
-                }
-              })
-            }
+            onClick={() => void beginLogin()}
           >
             <Plus className="h-3.5 w-3.5" />
             {t("workbuddy.add")}
@@ -537,6 +622,11 @@ export function WorkBuddyAccounts({
           )}
         </div>
       )}
+      {(login || busy === "login") && (
+        <Button size="sm" variant="ghost" onClick={closeLogin}>
+          {t("common.cancel")}
+        </Button>
+      )}
       {login && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border p-3 text-sm">
           <a
@@ -544,8 +634,10 @@ export function WorkBuddyAccounts({
             href={login.verificationUri}
             onClick={(event) => {
               event.preventDefault();
+              const generation = loginGeneration.current;
               void settingsApi.openExternal(login.verificationUri).catch(() => {
-                if (alive.current) setFailed(true);
+                if (alive.current && generation === loginGeneration.current)
+                  setFailed(true);
               });
             }}
           >
@@ -555,29 +647,7 @@ export function WorkBuddyAccounts({
             size="sm"
             variant="outline"
             disabled={busy !== null}
-            onClick={() =>
-              void run("finish", async () => {
-                const result = await workbuddyApi.finishLogin(login.flowId);
-                if (!alive.current) return;
-                if (result.state === "saved") {
-                  policyLifecycle.current += 1;
-                  setAutomaticBusy(false);
-                  setAutomaticFailed(false);
-                  setAutomaticUncertain({});
-                  setLogin(null);
-                  // The legacy owner may replace this row and clear its inference
-                  // grant. Retire all transient reads/flows before either reload;
-                  // late IPC completions must not restore the previous grant's UI.
-                  closeInference();
-                  inferenceStatusGeneration.current += 1;
-                  setInferenceAccounts([]);
-                  setInferenceFailed(false);
-                  setModels({});
-                  await loadAccounts();
-                  await loadInferenceAccounts();
-                } else setWaiting(true);
-              })
-            }
+            onClick={() => void finishLogin()}
           >
             {t("workbuddy.finishAuthorization")}
           </Button>

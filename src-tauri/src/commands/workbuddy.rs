@@ -155,3 +155,11 @@ pub(crate) async fn discover_workbuddy_inference_models(
 ) -> Result<Vec<crate::workbuddy::inference::Model>, Failure> {
     crate::workbuddy::inference_commands::models(state.db.secrets.clone(), &id).await
 }
+
+#[tauri::command]
+pub(crate) fn cancel_workbuddy_authorization(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<(), Failure> {
+    authorization::cancel(state.db.secret_session(), &flow_id)
+}
