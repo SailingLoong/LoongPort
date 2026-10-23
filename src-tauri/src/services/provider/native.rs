@@ -70,6 +70,7 @@ pub(crate) fn service_configuration_revision(
         AppType::OpenCode => vec![crate::opencode_config::get_opencode_config_path()],
         AppType::OpenClaw => vec![crate::openclaw_config::get_openclaw_config_path()],
         AppType::Hermes => vec![crate::hermes_config::get_hermes_config_path()],
+        AppType::Mcode => vec![crate::mcode_config::config_path()],
         AppType::Pi => vec![
             crate::pi_config::get_pi_models_path()?,
             crate::pi_config::get_pi_settings_path()?,

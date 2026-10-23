@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Layers } from "lucide-react";
 import { toast } from "sonner";
@@ -29,13 +29,21 @@ export function UniversalProviderPanel() {
     name: string;
   }>({ open: false, id: "", name: "" });
 
+  const mountedRef = useRef(false);
+  const loadRequestRef = useRef(0);
+
   // 加载数据
   const loadProviders = useCallback(async () => {
+    if (!mountedRef.current) return;
+    const requestId = ++loadRequestRef.current;
+    const isCurrent = () =>
+      mountedRef.current && loadRequestRef.current === requestId;
     try {
       setLoading(true);
       const data = await universalProvidersApi.getAll();
-      setProviders(data);
+      if (isCurrent()) setProviders(data);
     } catch (error) {
+      if (!isCurrent()) return;
       console.error("Failed to load universal providers:", error);
       toast.error(
         t("universalProvider.loadError", {
@@ -43,12 +51,17 @@ export function UniversalProviderPanel() {
         }),
       );
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [t]);
 
   useEffect(() => {
-    loadProviders();
+    mountedRef.current = true;
+    void loadProviders();
+    return () => {
+      mountedRef.current = false;
+      loadRequestRef.current += 1;
+    };
   }, [loadProviders]);
 
   // 添加/编辑供应商

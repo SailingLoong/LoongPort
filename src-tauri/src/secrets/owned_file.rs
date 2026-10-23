@@ -53,13 +53,14 @@ const ZCODE_FILES: [&str; 6] = [
 ];
 
 const LEGACY_CONFIG_FILES: [&str; 3] = ["config.json", "config.json.bak", "config.json.migrated"];
-pub(super) const BACKUP_PATTERNS: [(&str, &str, &str); 6] = [
+pub(super) const BACKUP_PATTERNS: [(&str, &str, &str); 7] = [
     ("backups", "backup_", ".json"),
     ("backups", "codex-auth-", ".json"),
     ("backups", "env-backup-", ".json"),
     ("backups/hermes", "hermes_", ".yaml"),
     ("backups/hermes", "hermes_", ".yml"),
     ("backups/openclaw", "openclaw_", ".json5"),
+    ("backups/mcode", "mcode_", ".json"),
 ];
 
 impl OwnedFile {
@@ -94,6 +95,9 @@ impl OwnedFile {
     }
 
     pub(crate) fn allows_legacy_plaintext(&self) -> bool {
+        if self.relative.starts_with("backups/mcode") {
+            return false;
+        }
         !ZCODE_FILES
             .iter()
             .chain(ENCRYPTED_FILES.iter())
@@ -554,6 +558,75 @@ mod device_tests {
         );
         assert!(
             matches!(file.decode(&vault, encoded.as_bytes()), Err(AppError::Config(code)) if code == "secret.authentication_failed")
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcode_backup_tests {
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    #[test]
+    fn mcode_backup_registry_is_bounded_and_never_accepts_legacy_plaintext() {
+        let file = OwnedFile::registered("backups/mcode/mcode_20261022_123456.json").unwrap();
+        assert!(!file.allows_legacy_plaintext());
+        assert!(file
+            .decode(
+                &VaultContext::generate().unwrap(),
+                b"{\"token\":\"plaintext\"}"
+            )
+            .is_err());
+        for path in [
+            "backups/mcode/mcode_.json",
+            "backups/mcode/mcode_named.json",
+            "backups/mcode/other_123.json",
+            "backups/mcode/mcode_123.yaml",
+            "backups/mcode/nested/mcode_123.json",
+            "backups/mcode/../mcode_123.json",
+        ] {
+            assert!(OwnedFile::registered(path).is_err(), "accepted {path}");
+        }
+        assert!(OwnedFile::registered("backups/openclaw/openclaw_123.json5")
+            .unwrap()
+            .allows_legacy_plaintext());
+    }
+
+    #[test]
+    fn mcode_backups_are_encrypted_authenticated_and_rekeyable() {
+        let vault = VaultContext::generate().unwrap();
+        let file = OwnedFile::registered("backups/mcode/mcode_20261022_123456.json").unwrap();
+        let canary = b"mcode-secret-canary";
+        let ciphertext = file.encode(&vault, canary).unwrap();
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("mcode-secret-canary"));
+        assert_eq!(&*file.decode(&vault, &ciphertext).unwrap(), canary);
+        let other = OwnedFile::registered("backups/mcode/mcode_20261022_123457.json").unwrap();
+        assert!(other.decode(&vault, &ciphertext).is_err());
+        let rotated = vault.rotate_key().unwrap();
+        assert!(file.decode(&rotated, &ciphertext).is_err());
+        let migrated = file
+            .encode(&rotated, &file.decode(&vault, &ciphertext).unwrap())
+            .unwrap();
+        assert_eq!(&*file.decode(&rotated, &migrated).unwrap(), canary);
+        assert!(file.decode(&vault, &migrated).is_err());
+
+        let encoded = String::from_utf8(ciphertext).unwrap();
+        let body = URL_SAFE_NO_PAD
+            .decode(encoded.strip_prefix("lpenc1.").unwrap())
+            .unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut payload = URL_SAFE_NO_PAD
+            .decode(envelope["payload"]["ciphertext"].as_str().unwrap())
+            .unwrap();
+        payload[0] ^= 1;
+        envelope["payload"]["ciphertext"] =
+            serde_json::Value::String(URL_SAFE_NO_PAD.encode(payload));
+        let tampered = format!(
+            "lpenc1.{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&envelope).unwrap())
+        );
+        assert!(
+            matches!(file.decode(&vault, tampered.as_bytes()), Err(AppError::Config(code)) if code == "secret.authentication_failed")
         );
     }
 }

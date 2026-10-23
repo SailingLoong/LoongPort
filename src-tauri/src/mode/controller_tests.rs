@@ -3137,6 +3137,9 @@ fn r3_selection_reports_preserved_external_codex_catalog() {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn r3_target_readback_finishes_with_a_waiting_vault_writer() {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let (committed_tx, committed_rx) = std::sync::mpsc::channel();
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let operation = std::thread::spawn(move || {
         let fixture = selection_fixture();
@@ -3179,10 +3182,19 @@ fn r3_target_readback_finishes_with_a_waiting_vault_writer() {
             let _write = session.write().unwrap();
             acquired_tx.send(()).unwrap();
         });
-        waiting_rx.recv().unwrap();
-        assert!(acquired_rx
-            .recv_timeout(std::time::Duration::from_millis(100))
-            .is_err());
+        waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("R3 vault writer did not announce its acquisition attempt");
+        assert!(matches!(
+            acquired_rx.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        // Fixture I/O and writer scheduling are not part of the deadlock budget.
+        // Keep the same pinned vault across readiness and the actual readback.
+        ready_tx.send(()).unwrap();
+        start_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("R3 commit/readback start signal was not received");
         super::operation::commit_target(
             db,
             db.secret_session(),
@@ -3202,16 +3214,25 @@ fn r3_target_readback_finishes_with_a_waiting_vault_writer() {
             crate::proxy::application_routing::chain_ids(db, "claude").unwrap(),
             vec!["b", "a"]
         );
+        committed_tx.send(()).unwrap();
         drop(vault);
         acquired_rx
             .recv_timeout(std::time::Duration::from_secs(3))
-            .unwrap();
+            .expect("R3 vault writer did not acquire after the read guard was released");
         writer.join().unwrap();
+        drop(fixture);
         finished_tx.send(()).unwrap();
     });
-    finished_rx
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("R3 synthetic fixture and waiting vault writer setup did not become ready");
+    start_tx.send(()).unwrap();
+    committed_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("R3 commit/readback cannot recursively acquire the queued vault guard");
+    finished_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("R3 vault writer and synthetic fixture cleanup did not finish");
     operation.join().unwrap();
 }
 

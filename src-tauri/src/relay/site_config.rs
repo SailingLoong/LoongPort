@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn unsupported_apps_are_rejected_loudly() {
         let mut settings = claude_settings();
-        for app in [AppType::OpenCode, AppType::Pi] {
+        for app in [AppType::OpenCode, AppType::Pi, AppType::Mcode] {
             assert!(
                 apply_segment_to_app(&app, &serde_json::json!({ "a": 1 }), &mut settings).is_err()
             );

@@ -10,7 +10,9 @@ const api = vi.hoisted(() => ({
   refreshAll: vi.fn(),
   claim: vi.fn(),
   claimAll: vi.fn(),
+  setAutomatic: vi.fn(),
   beginLogin: vi.fn(),
+  cancelLogin: vi.fn(),
   finishLogin: vi.fn(),
   listInferenceAccounts: vi.fn(),
   beginInferenceLogin: vi.fn(),
@@ -27,6 +29,12 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 const row: WorkBuddyAccount = {
+  generation: 0,
+  autoClaimEnabled: false,
+  autoClaimRevision: 0,
+  autoClaimPolicyVersion: 1,
+  canSetAutomatic: true,
+  autoClaimBlocked: false,
   id: "cn-account-a",
   label: "Synthetic account",
   canRefresh: true,
@@ -55,6 +63,7 @@ beforeEach(() => {
   });
   api.pollInferenceLogin.mockResolvedValue({ state: "waiting" });
   api.cancelInferenceLogin.mockResolvedValue(undefined);
+  api.cancelLogin.mockResolvedValue(undefined);
   api.discoverModels.mockResolvedValue([
     { id: "live-cli-model", name: "Live model" },
   ]);
@@ -66,6 +75,11 @@ beforeEach(() => {
     canClaim: false,
   });
   api.claimAll.mockResolvedValue([]);
+  api.setAutomatic.mockResolvedValue({
+    ...row,
+    autoClaimEnabled: true,
+    autoClaimRevision: 1,
+  });
 });
 it("mount and refresh never claim, and unknown balance is not zero", async () => {
   render(<WorkBuddyAccounts />);
@@ -913,3 +927,305 @@ it("places native authorization, claim and model actions in separate unified det
   await waitFor(() => expect(api.claim).toHaveBeenCalledWith(row.id));
   expect(api.beginInferenceLogin).not.toHaveBeenCalled();
 });
+
+it("automatic claim remains off until an explicit account opt-in", async () => {
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  expect(api.setAutomatic).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("switch", { name: "workbuddy.auto.label" }),
+  ).toHaveAttribute("aria-checked", "false");
+  expect(screen.getByText("workbuddy.auto.notice")).toBeVisible();
+});
+it("setter success is not discarded by a list refresh started while it is pending", async () => {
+  let resolveSetter!: (value: WorkBuddyAccount) => void;
+  api.setAutomatic.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveSetter = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(
+    screen.getByRole("switch", { name: "workbuddy.auto.label" }),
+  );
+  expect(api.setAutomatic).toHaveBeenCalledWith(row, true);
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.refreshAll" }),
+  );
+  await waitFor(() => expect(api.refreshAll).toHaveBeenCalledOnce());
+  await act(async () =>
+    resolveSetter({ ...row, autoClaimEnabled: true, autoClaimRevision: 1 }),
+  );
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
+});
+it("a late old refresh cannot display off after a successful enable", async () => {
+  let resolveSetter!: (value: WorkBuddyAccount) => void;
+  let resolveRefresh!: (value: WorkBuddyAccount[]) => void;
+  api.setAutomatic.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveSetter = resolve;
+      }),
+  );
+  api.refreshAll.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("switch"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.refreshAll" }),
+  );
+  await act(async () =>
+    resolveSetter({ ...row, autoClaimEnabled: true, autoClaimRevision: 1 }),
+  );
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
+  await act(async () => resolveRefresh([row]));
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
+});
+it("newer account generation wins over an older successful enable response", async () => {
+  let resolveSetter!: (value: WorkBuddyAccount) => void;
+  api.setAutomatic.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveSetter = resolve;
+      }),
+  );
+  api.refreshAll.mockResolvedValue([
+    { ...row, generation: 1, autoClaimRevision: 2, autoClaimEnabled: false },
+  ]);
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("switch"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.refreshAll" }),
+  );
+  await waitFor(() => expect(api.refreshAll).toHaveBeenCalledOnce());
+  await act(async () =>
+    resolveSetter({ ...row, autoClaimEnabled: true, autoClaimRevision: 1 }),
+  );
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+});
+it("uncertain opt-in is not displayed as off and repeated clicks do not duplicate setters", async () => {
+  let rejectSetter!: (error: Error) => void;
+  api.setAutomatic.mockImplementation(
+    () =>
+      new Promise((_, reject) => {
+        rejectSetter = reject;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.dblClick(screen.getByRole("switch"));
+  expect(api.setAutomatic).toHaveBeenCalledOnce();
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+  await act(async () => rejectSetter(new Error("uncertain")));
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "workbuddy.auto.unknown" }),
+  ).toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("workbuddy.auto.failed");
+});
+it("unknown claims display a pause and stale DTOs cannot opt in", async () => {
+  api.list.mockResolvedValue([
+    { ...row, autoClaimBlocked: true, canClaim: false },
+  ]);
+  const { unmount } = render(<WorkBuddyAccounts />);
+  expect(await screen.findByText("workbuddy.auto.blocked")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "workbuddy.claim" }),
+  ).toBeDisabled();
+  unmount();
+  const legacy = {
+    ...row,
+    generation: undefined,
+    autoClaimRevision: undefined,
+  };
+  api.list.mockResolvedValue([legacy]);
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  expect(screen.getByRole("switch")).toBeDisabled();
+  expect(api.setAutomatic).not.toHaveBeenCalled();
+});
+it("an older enabled refresh cannot restore a confirmed opt-out", async () => {
+  const enabled = { ...row, autoClaimEnabled: true, autoClaimRevision: 2 };
+  let resolveSetter!: (value: WorkBuddyAccount) => void;
+  let resolveRefresh!: (value: WorkBuddyAccount[]) => void;
+  api.list.mockResolvedValue([enabled]);
+  api.setAutomatic.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveSetter = resolve;
+      }),
+  );
+  api.refreshAll.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+  );
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("switch"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.refreshAll" }),
+  );
+  await act(async () => resolveSetter({ ...row, autoClaimRevision: 3 }));
+  await act(async () => resolveRefresh([enabled]));
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+  expect(api.setAutomatic).toHaveBeenCalledWith(enabled, false);
+});
+
+it("lost enable response reads back the committed enabled policy instead of showing off", async () => {
+  api.list
+    .mockResolvedValueOnce([row])
+    .mockResolvedValue([
+      { ...row, autoClaimEnabled: true, autoClaimRevision: 1 },
+    ]);
+  api.setAutomatic.mockRejectedValue(new Error("response lost"));
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("switch"));
+  await waitFor(() =>
+    expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true"),
+  );
+  expect(api.list).toHaveBeenCalledTimes(2);
+});
+it("lost disable response and failed readback display unknown, never a false on or off", async () => {
+  api.list
+    .mockResolvedValueOnce([
+      { ...row, autoClaimEnabled: true, autoClaimRevision: 1 },
+    ])
+    .mockRejectedValue(new Error("readback unavailable"));
+  api.setAutomatic.mockRejectedValue(new Error("response lost"));
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("switch"));
+  await screen.findByRole("button", { name: "workbuddy.auto.unknown" });
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+});
+
+it.each(["cancel", "unmount"] as const)(
+  "retires a late account login after %s without showing it",
+  async (action) => {
+    let resolve!: (flow: { flowId: string; verificationUri: string }) => void;
+    api.beginLogin.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const view = render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    if (action === "cancel")
+      await userEvent.click(
+        screen.getByRole("button", { name: "common.cancel" }),
+      );
+    else view.unmount();
+    await act(async () =>
+      resolve({
+        flowId: "late-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=late",
+      }),
+    );
+    await waitFor(() =>
+      expect(api.cancelLogin).toHaveBeenCalledWith("late-login"),
+    );
+    expect(
+      screen.queryByRole("link", { name: "workbuddy.authorize" }),
+    ).not.toBeInTheDocument();
+    expect(api.finishLogin).not.toHaveBeenCalled();
+  },
+);
+
+it("cancels the exact previous login when adding another account", async () => {
+  api.beginLogin
+    .mockResolvedValueOnce({
+      flowId: "old-login",
+      verificationUri: "https://www.codebuddy.cn/login?state=old",
+    })
+    .mockResolvedValueOnce({
+      flowId: "new-login",
+      verificationUri: "https://www.codebuddy.cn/login?state=new",
+    });
+  const view = render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await screen.findByRole("link", { name: "workbuddy.authorize" });
+  await userEvent.click(screen.getByRole("button", { name: "workbuddy.add" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("link", { name: "workbuddy.authorize" }),
+    ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new"),
+  );
+  expect(api.cancelLogin).toHaveBeenCalledWith("old-login");
+  view.unmount();
+  expect(api.cancelLogin).toHaveBeenCalledWith("new-login");
+});
+
+it.each(["saved", "waiting", "failure"] as const)(
+  "ignores a retired account finish %s after cancel and a new login",
+  async (outcome) => {
+    let resolve!: (value: { state: string }) => void;
+    let reject!: (error: Error) => void;
+    api.beginLogin
+      .mockResolvedValueOnce({
+        flowId: "old-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=old",
+      })
+      .mockResolvedValueOnce({
+        flowId: "new-login",
+        verificationUri: "https://www.codebuddy.cn/login?state=new",
+      });
+    api.finishLogin.mockImplementationOnce(
+      () =>
+        new Promise((done, fail) => {
+          resolve = done;
+          reject = fail;
+        }),
+    );
+    render(<WorkBuddyAccounts />);
+    await screen.findByText("Synthetic account");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "workbuddy.finishAuthorization",
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "common.cancel" }),
+    );
+    expect(api.cancelLogin).toHaveBeenCalledWith("old-login");
+    await userEvent.click(
+      screen.getByRole("button", { name: "workbuddy.add" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: "workbuddy.authorize" }),
+      ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new"),
+    );
+    await act(async () => {
+      if (outcome === "failure") reject(new Error("SYNTHETIC_RETIRED_FAILURE"));
+      else resolve({ state: outcome });
+    });
+    expect(
+      screen.getByRole("link", { name: "workbuddy.authorize" }),
+    ).toHaveAttribute("href", "https://www.codebuddy.cn/login?state=new");
+    expect(
+      screen.queryByText("workbuddy.authorizationWaiting"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.list).toHaveBeenCalledTimes(1);
+    expect(api.claim).not.toHaveBeenCalled();
+  },
+);

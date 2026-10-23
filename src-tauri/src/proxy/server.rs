@@ -64,6 +64,11 @@ pub struct ProxyState {
 
 /// 代理HTTP服务器
 pub struct ProxyServer {
+    #[cfg(all(test, unix))]
+    account_fixture_transports: Option<(
+        crate::minimax_code::inference::FixtureTransport,
+        crate::zcode_accounts::inference::FixtureTransport,
+    )>,
     config: ProxyConfig,
     state: ProxyState,
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
@@ -107,6 +112,8 @@ impl ProxyServer {
         };
 
         Self {
+            #[cfg(all(test, unix))]
+            account_fixture_transports: None,
             config,
             state,
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -122,6 +129,16 @@ impl ProxyServer {
         Arc::get_mut(&mut self.state.failover_manager)
             .expect("unpublished failover owner")
             .set_service_owner(owner);
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_account_fixture_transports(
+        mut self,
+        minimax: crate::minimax_code::inference::FixtureTransport,
+        zcode: crate::zcode_accounts::inference::FixtureTransport,
+    ) -> Self {
+        self.account_fixture_transports = Some((minimax, zcode));
         self
     }
 
@@ -146,6 +163,13 @@ impl ProxyServer {
 
         // 构建路由
         let app = self.build_router();
+        #[cfg(all(test, unix))]
+        let app = if let Some((minimax, zcode)) = &self.account_fixture_transports {
+            app.layer(axum::Extension(minimax.clone()))
+                .layer(axum::Extension(zcode.clone()))
+        } else {
+            app
+        };
 
         // 绑定监听器
         let listener = tokio::net::TcpListener::bind(&addr)

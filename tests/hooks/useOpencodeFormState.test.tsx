@@ -129,4 +129,57 @@ describe("useOpencodeFormState", () => {
       timeout: 200,
     });
   });
+  it("preserves untouched JSON-looking strings while explicitly parsing edited JSON values", () => {
+    const original = {
+      flagText: "false",
+      numberText: "123",
+      nullText: "null",
+      objectText: '{"keep":true}',
+      timeout: 100,
+    };
+    const { result, getSettingsConfig } = renderOpencodeFormState({
+      options: original,
+      models: {},
+    });
+    act(() =>
+      result.current.handleOpencodeExtraOptionsChange({
+        ...result.current.opencodeExtraOptions,
+        timeout: "200",
+        typedBoolean: "false",
+        quotedString: '"123"',
+        typedObject: '{"keep":true}',
+      }),
+    );
+    expect(JSON.parse(getSettingsConfig()).options).toEqual({
+      ...original,
+      timeout: 200,
+      typedBoolean: false,
+      quotedString: "123",
+      typedObject: { keep: true },
+    });
+  });
+
+  it("never lets extra-option rows overwrite dedicated connection fields", () => {
+    const original = {
+      baseURL: "https://example.invalid/v1",
+      apiKey: "synthetic-key",
+      headers: { "X-Test": "keep" },
+    };
+    const { result, getSettingsConfig } = renderOpencodeFormState({
+      options: original,
+      models: {},
+    });
+    act(() =>
+      result.current.handleOpencodeExtraOptionsChange({
+        apiKey: "123",
+        " baseURL ": "false",
+        headers: "123",
+        timeout: "200",
+      }),
+    );
+    expect(JSON.parse(getSettingsConfig()).options).toEqual({
+      ...original,
+      timeout: 200,
+    });
+  });
 });

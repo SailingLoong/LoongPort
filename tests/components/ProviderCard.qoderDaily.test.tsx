@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { expect, it, vi } from "vitest";
 import { ProviderCard } from "@/components/providers/ProviderCard";
@@ -6,6 +6,25 @@ import type { Provider } from "@/types";
 import { createTestQueryClient } from "../utils/testQueryClient";
 const entry = vi.hoisted(() => vi.fn());
 const identityEntry = vi.hoisted(() => vi.fn());
+const deviceApi = vi.hoisted(() => ({
+  start: vi.fn(),
+  poll: vi.fn(),
+  cancel: vi.fn().mockResolvedValue({ status: "cancelled" }),
+}));
+const deviceContext = vi.hoisted(() => vi.fn());
+const campaignRead = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/api/qoderCnCampaigns", () => ({
+  qoderCnCampaignsApi: { read: campaignRead },
+}));
+vi.mock("@/lib/api/qoderCnDeviceLogin", () => ({
+  qoderCnDeviceLoginApi: deviceApi,
+}));
+vi.mock("@/lib/api/qoderHttpAuth", () => ({
+  qoderHttpAuthApi: { context: deviceContext },
+}));
+vi.mock("@/lib/api/settings", () => ({
+  settingsApi: { openExternal: vi.fn().mockResolvedValue(undefined) },
+}));
 vi.mock("@/components/providers/qoder/QoderInferenceIdentity", () => ({
   QoderInferenceIdentity: (props: unknown) => {
     identityEntry(props);
@@ -39,6 +58,7 @@ function card(
   providerType: string,
   appId: "codex" | "claude" = "codex",
   generation?: string,
+  mutationsDisabled = true,
 ) {
   const meta = {
     providerType,
@@ -57,7 +77,7 @@ function card(
         appId={appId}
         isCurrent={false}
         isProxyRunning={false}
-        mutationsDisabled={true}
+        mutationsDisabled={mutationsDisabled}
         onSwitch={vi.fn()}
         onEdit={vi.fn()}
         onDelete={vi.fn()}
@@ -117,3 +137,100 @@ it("passes only the non-secret original source generation as an invalidation sig
     disabled: true,
   });
 });
+
+it("mounts the actual independent device entry on the original CN device Provider card without claiming international daily support", async () => {
+  deviceContext.mockResolvedValue({
+    providerId: "qoder-fixture",
+    credentialGeneration: "backend-generation",
+    source: "chinaQoderDevice",
+    status: "ready",
+    allowedActions: [],
+    allowedDeviceActions: ["login"],
+  });
+  deviceApi.start.mockResolvedValue({ status: "failed", code: "unavailable" });
+  render(card("qoder_cn_device", "codex", "original-generation", false));
+  expect(screen.queryByText("qoder-explicit-entry")).not.toBeInTheDocument();
+  expect(screen.getByText("qoder-identity-entry")).toBeInTheDocument();
+  expect(deviceApi.start).not.toHaveBeenCalled();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "登录 / 重新授权" }));
+  });
+  expect(screen.getByRole("dialog")).toHaveTextContent("不读取官方认证文件");
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "在浏览器中授权" }));
+  });
+  expect(deviceApi.start).toHaveBeenCalledExactlyOnceWith({
+    providerId: "qoder-fixture",
+    credentialGeneration: "backend-generation",
+    rebind: false,
+  });
+});
+
+it("keeps CN device authorization inert when Provider mutations are blocked", () => {
+  render(card("qoder_cn_device"));
+  expect(
+    screen.getByRole("button", { name: "登录 / 重新授权" }),
+  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "更换绑定账号" })).toBeDisabled();
+  expect(deviceApi.start).not.toHaveBeenCalled();
+});
+
+it.each(["qoder_cn", "qoder_sdk", "generic"])(
+  "does not add device login to a %s source",
+  (source) => {
+    render(card(source));
+    expect(
+      screen.queryByRole("button", { name: "登录 / 重新授权" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it("keeps CN device login limited to the original Codex Provider route", () => {
+  render(card("qoder_cn_device", "claude"));
+  expect(
+    screen.queryByRole("button", { name: "登录 / 重新授权" }),
+  ).not.toBeInTheDocument();
+});
+
+it.each(["qoder_cn", "qoder_cn_device"])(
+  "wires the actual read-only campaign dialog for %s without international claim",
+  async (type) => {
+    const source = type === "qoder_cn" ? "chinaQoderPat" : "chinaQoderDevice";
+    deviceContext.mockResolvedValue({
+      providerId: "qoder-fixture",
+      credentialGeneration: "g1",
+      source,
+      status: "ready",
+    });
+    campaignRead.mockResolvedValue({
+      status: "failed",
+      code: "identity_expired",
+    });
+    render(card(type, "codex", "g1", false));
+    expect(screen.queryByText("qoder-explicit-entry")).not.toBeInTheDocument();
+    expect(campaignRead).not.toHaveBeenCalled();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "CN 活动状态" })),
+    );
+    expect(campaignRead).not.toHaveBeenCalled();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "查询活动状态" })),
+    );
+    expect(campaignRead).toHaveBeenCalledExactlyOnceWith({
+      providerId: "qoder-fixture",
+      credentialGeneration: "g1",
+      source,
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("已过期");
+  },
+);
+
+it.each(["qoder_sdk", "generic"])(
+  "does not expose the CN campaign query for %s",
+  (type) => {
+    render(card(type));
+    expect(
+      screen.queryByRole("button", { name: "CN 活动状态" }),
+    ).not.toBeInTheDocument();
+  },
+);

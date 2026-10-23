@@ -33,19 +33,41 @@ pub(crate) struct SourceBinding {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SourceKind {
     InternationalQoderPat,
+    ChinaQoderPat,
+    ChinaQoderDevice,
+}
+impl SourceKind {
+    pub(crate) fn from_provider(provider: &Provider) -> Result<Self, AppError> {
+        match provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.provider_type.as_deref())
+        {
+            Some("qoder_sdk") => Ok(Self::InternationalQoderPat),
+            Some("qoder_cn") => Ok(Self::ChinaQoderPat),
+            Some("qoder_cn_device") => Ok(Self::ChinaQoderDevice),
+            _ => Err(denied("unsupported_source")),
+        }
+    }
+    pub(crate) fn origin(&self) -> &'static str {
+        match self {
+            Self::InternationalQoderPat => ORIGIN,
+            Self::ChinaQoderPat | Self::ChinaQoderDevice => "https://openapi.qoder.com.cn",
+        }
+    }
+    pub(crate) fn declaration(&self) -> CredentialSource {
+        match self {
+            Self::InternationalQoderPat => CredentialSource::InternationalQoderPat,
+            Self::ChinaQoderPat => CredentialSource::ChinaQoderPat,
+            Self::ChinaQoderDevice => CredentialSource::ChinaQoderDevice,
+        }
+    }
 }
 impl SourceBinding {
     pub(crate) fn from_provider(
         provider: &Provider,
     ) -> Result<(Self, Zeroizing<String>), AppError> {
-        if provider
-            .meta
-            .as_ref()
-            .and_then(|m| m.provider_type.as_deref())
-            != Some("qoder_sdk")
-        {
-            return Err(denied("unsupported_source"));
-        }
+        let source = SourceKind::from_provider(provider)?;
         if crate::services::vendor_source_binding::is_reference(provider) {
             return Err(denied("external_source_untracked"));
         }
@@ -56,21 +78,36 @@ impl SourceBinding {
             .map(|s| s.generation.clone())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| denied("source_generation_required"))?;
-        let pat = Zeroizing::new(
+        let candidate = Zeroizing::new(
             qoder_daily::credential_candidate(provider)
                 .map_err(|_| denied("external_source_untracked"))?
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| denied("source_required"))?,
+                .unwrap_or_default(),
         );
         let mut digest = Sha256::new();
-        digest.update(b"loongport.qoder-http.pat.v1\0");
-        digest.update(pat.as_bytes());
+        let pat = if source == SourceKind::ChinaQoderDevice {
+            // Native tokens belong only to the existing encrypted subordinate owner.
+            if !candidate.trim().is_empty() {
+                return Err(denied("device_source_has_api_key"));
+            }
+            digest.update(b"loongport.qoder-http.device.v1\0");
+            digest.update(provider.id.as_bytes());
+            digest.update(b"\0");
+            digest.update(generation.as_bytes());
+            Zeroizing::new(String::new())
+        } else {
+            if candidate.trim().is_empty() {
+                return Err(denied("source_required"));
+            }
+            digest.update(b"loongport.qoder-http.pat.v1\0");
+            digest.update(candidate.as_bytes());
+            candidate
+        };
         Ok((
             Self {
                 provider_id: provider.id.clone(),
                 app_type: "codex".into(),
-                source: SourceKind::InternationalQoderPat,
-                origin: ORIGIN.into(),
+                origin: source.origin().into(),
+                source,
                 credential_generation: generation,
                 credential_digest: hex::encode(digest.finalize()),
             },
@@ -80,7 +117,7 @@ impl SourceBinding {
     pub(crate) fn admit(&self, declaration: &PatDeclaration) -> Result<(), AppError> {
         if declaration.provider_id != self.provider_id
             || declaration.credential_generation != self.credential_generation
-            || declaration.source != CredentialSource::InternationalQoderPat
+            || declaration.source != self.source.declaration()
         {
             return Err(denied("source_declaration_required"));
         }
@@ -88,7 +125,7 @@ impl SourceBinding {
     }
     fn validate(&self) -> bool {
         self.app_type == "codex"
-            && self.origin == ORIGIN
+            && self.origin == self.source.origin()
             && !self.provider_id.is_empty()
             && !self.credential_generation.is_empty()
             && self.credential_digest.len() == 64
@@ -294,7 +331,17 @@ impl RequestSnapshot {
         &self.identity.machine_id
     }
     pub(crate) fn region(&self) -> &'static str {
-        "international"
+        match self.stamp.source.source {
+            SourceKind::InternationalQoderPat => "international",
+            SourceKind::ChinaQoderPat | SourceKind::ChinaQoderDevice => "cn",
+        }
+    }
+    pub(crate) fn credential_kind(&self) -> &'static str {
+        match self.stamp.source.source {
+            SourceKind::InternationalQoderPat => "international_qoder_pat",
+            SourceKind::ChinaQoderPat => "china_qoder_pat",
+            SourceKind::ChinaQoderDevice => "china_qoder_device",
+        }
     }
     pub(crate) fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
@@ -308,6 +355,9 @@ pub(crate) enum Acquisition {
 /// Implemented only by the original backend service's authenticated transport.
 /// The network worker used for inference must never implement this trait.
 pub(crate) trait AuthTransport: Send + Sync {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::InternationalQoderPat
+    }
     fn exchange_and_identify<'a>(
         &'a self,
         pat: &'a str,
@@ -357,6 +407,9 @@ pub(crate) async fn acquire(
     now_ms: impl Fn() -> i64,
 ) -> Result<RequestSnapshot, AcquireError> {
     let (expected, _) = SourceBinding::from_provider(selected).map_err(AcquireError::preflight)?;
+    if transport.source_kind() != expected.source {
+        return Err(AcquireError::NonRetryable);
+    }
     // Only these synchronous source/acquisition checks may classify a
     // zero-network preflight failure. Never reuse the classifier for
     // publication, cleanup or snapshot fences.
@@ -448,24 +501,50 @@ pub(crate) enum IdentityStatus {
     Pending,
     Unknown,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DeviceIdentityAction {
+    Login,
+    Rebind,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentityContext {
     pub(crate) provider_id: String,
     pub(crate) credential_generation: String,
+    pub(crate) source: Option<CredentialSource>,
     pub(crate) status: IdentityStatus,
     pub(crate) expires_at_ms: Option<i64>,
     pub(crate) allowed_actions: Vec<IdentityAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allowed_device_actions: Vec<DeviceIdentityAction>,
 }
 impl IdentityContext {
     pub(crate) fn unavailable(provider_id: impl Into<String>) -> Self {
         Self {
             provider_id: provider_id.into(),
             credential_generation: String::new(),
+            source: None,
             status: IdentityStatus::Unavailable,
             expires_at_ms: None,
             allowed_actions: Vec::new(),
+            allowed_device_actions: Vec::new(),
         }
+    }
+    fn project_device_actions(mut self) -> Self {
+        if self.source == Some(CredentialSource::ChinaQoderDevice) {
+            self.allowed_device_actions = self
+                .allowed_actions
+                .drain(..)
+                .map(|action| match action {
+                    IdentityAction::Establish | IdentityAction::Recover => {
+                        DeviceIdentityAction::Login
+                    }
+                    IdentityAction::Rebind => DeviceIdentityAction::Rebind,
+                })
+                .collect();
+        }
+        self
     }
     fn ready(source: &SourceBinding, expires_at_ms: i64, refreshable: bool, now_ms: i64) -> Self {
         let status = if expires_at_ms > now_ms.saturating_add(REFRESH_MARGIN_MS) {
@@ -484,10 +563,13 @@ impl IdentityContext {
         Self {
             provider_id: source.provider_id.clone(),
             credential_generation: source.credential_generation.clone(),
+            source: Some(source.source.declaration()),
             status,
             expires_at_ms: Some(expires_at_ms),
             allowed_actions,
+            allowed_device_actions: Vec::new(),
         }
+        .project_device_actions()
     }
     pub(crate) fn from_record(
         source: &SourceBinding,
@@ -521,10 +603,13 @@ impl IdentityContext {
         Self {
             provider_id: source.provider_id.clone(),
             credential_generation: source.credential_generation.clone(),
+            source: Some(source.source.declaration()),
             status,
             expires_at_ms,
             allowed_actions,
+            allowed_device_actions: Vec::new(),
         }
+        .project_device_actions()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -663,6 +748,12 @@ where
     C: FnOnce(IdentityConfirmation) -> F,
     F: Future<Output = bool>,
 {
+    if request.declaration.source == CredentialSource::ChinaQoderDevice {
+        // The independent browser grant, never PAT exchange, owns device login.
+        return IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource,
+        };
+    }
     let prepared = match db.qoder_http_prepare_identity_action(&request, now_ms()) {
         Ok(prepared) => prepared,
         Err(error) => return IdentityActionResult::error(&error),
@@ -679,6 +770,11 @@ where
             confirmation,
         } => (receipt, confirmation),
     };
+    if transport.source_kind() != receipt.source.source {
+        return IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource,
+        };
+    }
     // Preparation released every guard. No refresh/PAT is in the confirmation.
     if let Some(summary) = confirmation {
         if !confirm(summary).await {

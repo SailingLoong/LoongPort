@@ -1134,7 +1134,8 @@
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
     "pi": "Pi",
-    "zcode": "ZCode"
+    "zcode": "ZCode",
+    "mcode": "MiniMax Code"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -1646,7 +1647,9 @@
     "removeHeader": "删除请求头",
     "noHeaders": "暂无自定义请求头",
     "extraOptions": "额外选项",
-    "extraOptionsHint": "配置额外的 SDK 选项，如 timeout、setCacheKey 等。值会自动解析类型（数字、布尔值等）。",
+    "extraOptionsHint": "按 JSON 明确类型：false、123 是布尔值和数字；字符串请填写 \"false\"、\"123\"。其他普通文本保留为字符串。",
+    "reservedOptionKey": "baseURL、apiKey 和 headers 请使用对应的专用字段，不可作为额外选项覆盖。",
+    "duplicateOptionKey": "已存在同名额外选项，请使用不同名称。",
     "addExtraOption": "添加",
     "extraOptionKey": "键名",
     "extraOptionValue": "值",
@@ -4389,6 +4392,14 @@
     "adopt": "改用 {{requested}}",
     "switchFailed": "切换模型失败"
   },
+  "mcode": {
+    "restore": "恢复上次配置",
+    "restoreConfirm": "恢复到上次 LoongPort 写入前的原生 config.yaml？恢复后请在 MiniMax Code 中检查。不会强制覆盖外部改动。",
+    "restoreFailed": "无法恢复配置。",
+    "restored": "已恢复配置，请在 MiniMax Code 中检查。",
+    "rereadHint": "请取消并重新读取后再试；不会强制覆盖外部变化。",
+    "nativeDefaultsHint": "这里管理自定义供应商；默认模型和轻量模型请在 MiniMax Code 中选择。导入只读取已有的自定义供应商。"
+  },
   "zcode": {
     "description": "配置个人供应商和模型，管理已保存的个人 ZCode 账号。默认模型请在 ZCode 中选择。",
     "refresh": "刷新",
@@ -4592,6 +4603,7 @@
         "confirmKey": "授权创建并保存此 Key",
         "save": "保存到加密账号库",
         "addAnother": "再添加一个",
+        "importLocal": "改为从本机 ZCode 导入",
         "restart": "开始新的登录"
       },
       "refreshed": "已在本地更新保存的账号。",
@@ -4614,7 +4626,17 @@
       "latestQueryFailed": "官方版本查询在 {{time}} 失败，当前没有可用查询结果。",
       "latestQueried": "官方最新版本：{{version}} · 查询时间 {{time}}",
       "queryLatest": "查询官方最新版本",
-      "supportedBuilds": "已验证可操作范围：macOS 3.14.4，build 3.14.4.7912，仅接受已验证产物的完整指纹。",
+      "localImport": {
+        "open": "从本机 ZCode 导入",
+        "title": "导入 ZCode 已登录账号",
+        "close": "关闭本机导入",
+        "intro": "复用这台电脑上官方 ZCode 已登录的账号。不搬走任何文件夹，也不会改变 ZCode 当前登录。",
+        "stepLogin": "先在官方 ZCode 中登录，然后正常退出 ZCode。",
+        "stepInspect": "核对下方发现的安装位置和数据目录，选择标准本机密钥，再检查所选来源。",
+        "stepPreview": "预览本机账号，再单独确认保存。不支持或已变化的来源仍会被拦截。",
+        "preview": "预览本机账号"
+      },
+      "supportedBuilds": "已验证操作范围：macOS 3.14.4（构建 3.14.4.7912）和 3.16.2 arm64（构建 3.16.2.8769），仅限精确匹配的已接受构建产物。",
       "officialGuide": "官方安装 / 更新说明",
       "bootstrapSource": "数据来源按官方桌面 bootstrap 中的数据基础目录发现。",
       "homeSource": "默认数据来源使用 OS 账号 home，也可在下方手动选择来源。",
@@ -4736,6 +4758,9 @@
         "operation_already_known": "此切换请求已存在。请查询原操作并刷新，再进行新的确认。",
         "committed_result_unknown": "本地切换已提交，但最终结果尚不完整。请查询原操作，勿自动重复切换。",
         "official_unavailable": "官方服务未能完成这一步。请查看当前登录状态后继续。",
+        "oauth_init_unavailable": "未能获取官方授权页面。请先查看原登录状态，再决定是否重新登录。",
+        "oauth_poll_unavailable": "未能读取官方授权结果。请再次查看本次登录状态，勿自动重开授权或创建 Key。",
+        "oauth_normalize_unavailable": "未能将已授权凭据准备为可用连接。请再次查看本次登录状态；这一步没有保存账号。",
         "key_result_unknown": "官方 Key 可能已经创建。请先查询原项目结果，不要重复创建。",
         "key_cleanup_pending": "本地 Key 操作记录仍待处理。请先查询原结果，避免重复创建 Key。",
         "request_not_sent": "写入请求尚未发送。请核对当前账号与项目，再明确确认。",
@@ -4837,6 +4862,15 @@
     }
   },
   "workbuddy": {
+    "auto": {
+      "unknown": "自动领取：状态待确认",
+      "label": "此账号自动领取",
+      "on": "自动领取：开",
+      "off": "自动领取：关",
+      "notice": "逐账号自愿开启，仅在 LoongPort 运行且保险库已解锁时检查和领取；是否可领以官方状态为准，不保证每日奖励。重新授权后需再次开启。",
+      "blocked": "之前的领取结果未确认，已暂停重复领取。",
+      "failed": "无法确认自动领取设置，请重新载入账号核对。"
+    },
     "title": "WorkBuddy 国内版",
     "add": "添加 WorkBuddy 账号",
     "refreshAll": "刷新全部",
@@ -5078,6 +5112,32 @@
       "expiredAuthorization": "设备授权已过期，请取消后重新登录。",
       "notClaimable": "该账号当前不允许领取，请刷新状态。",
       "authorizationCompleted": "授权已完成，账号已保存；本次取消未生效。请查看账号列表。"
+    },
+    "nativeImport": {
+      "open": "导入本机 MiniMax CLI 账号",
+      "title": "导入公共 CLI 会话",
+      "description": "选择公共 MiniMax CLI OAuth v1 的 auth.json：中国区为 CLI 认证目录下的 prod/cn/mcode-public/auth.json，国际区为 prod/en/mcode-public/auth.json。选择文件不会读取内容；本地读取、联网验证账号资料和加密保存都需要分别确认。暂不支持 MiniMax Desktop 会话。",
+      "choose": "选择 auth.json",
+      "fileFilter": "MiniMax CLI OAuth 文件",
+      "source": "已选来源文件",
+      "readConsent": "允许在本地读取所选文件",
+      "read": "读取本地预览",
+      "unverified": "未经验证的本地身份声明",
+      "expires": "原始访问凭据到期时间",
+      "verified": "已验证的账号 ID",
+      "verifyConsent": "允许将此账号的访问令牌发送至所选地区的 MiniMax 官方服务以验证账号资料",
+      "verify": "联网验证账号",
+      "accessOnly": "仅导入访问令牌，保留原始有效期；不会导入 refresh token，也不会自动续期凭据。到期后需在 CLI 重新登录并明确重新导入。保存账号不会开启自动签到。",
+      "expired": "访问令牌已过期，请在 CLI 重新登录后再次导入。",
+      "saveConsent": "将此访问令牌的副本保存至 LoongPort 加密账号保管库",
+      "save": "加密保存仅访问账号",
+      "error": "无法完成此步骤，请检查来源、地区、有效期、网络和保管库访问权限。若需确认是否已保存，请重新读取账号。",
+      "cancel": "取消导入"
+    },
+    "credentials": {
+      "accessOnly": "仅访问凭据，不会自动续期；到期后请在 CLI 重新登录并明确重新导入。",
+      "expires": "访问凭据到期：{{time}}",
+      "reimport": "请在 CLI 重新登录，再明确重新导入此账号。"
     }
   },
   "clients": {

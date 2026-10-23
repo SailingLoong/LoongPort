@@ -294,15 +294,7 @@ where
                 })
                 .ok_or(Failure::Retired)?;
             state.phase = Phase::Saved;
-            Ok((
-                AccountView {
-                    id: a.id.clone(),
-                    realm: a.realm,
-                    native_source_supported: store::native_source_supported(a),
-                    status: store::AccountStatus::Stored,
-                },
-                false,
-            ))
+            Ok((a.view(), false))
         })
         .await
         .map_err(|_| Error::Cancelled)
@@ -330,6 +322,11 @@ pub(crate) async fn cancel(session: &SecretSession, id: &str) -> Result<(), Erro
                 .find(|a| &a.id == id && a.generation == *generation)
             {
                 row.generation = row.generation.checked_add(1).ok_or(Failure::Storage)?;
+                row.auto_checkin_enabled = false;
+                row.auto_checkin_revision = row
+                    .auto_checkin_revision
+                    .checked_add(1)
+                    .ok_or(Failure::Storage)?;
                 row.grant = None;
                 row.refresh_pending = false;
                 dirty = true;

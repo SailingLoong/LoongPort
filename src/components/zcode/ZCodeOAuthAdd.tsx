@@ -41,12 +41,14 @@ export function ZCodeOAuthAdd({
   open,
   onClose,
   onSaved,
+  onImportLocal,
   libraryDataRoot,
   savedAccount,
 }: {
   open: boolean;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  onImportLocal?: () => void;
   libraryDataRoot?: string;
   savedAccount?: { id: string; catalogRevision: string };
 }) {
@@ -770,6 +772,25 @@ export function ZCodeOAuthAdd({
                     })}
             </p>
           )}
+          {onImportLocal &&
+            !savedAccount &&
+            !completeCoding &&
+            !previousReadFailed &&
+            !uncertain &&
+            !progress?.keyCreated &&
+            !progress?.keyMayExist &&
+            (phase === "failed" || (!progress && !!error)) && (
+              <Button
+                variant="outline"
+                disabled={blocked}
+                onClick={() => {
+                  close();
+                  onImportLocal();
+                }}
+              >
+                {copy("importLocal", "Import from local ZCode instead")}
+              </Button>
+            )}
           {uncertain && (
             <p className="text-sm">
               {copy(

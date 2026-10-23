@@ -144,7 +144,10 @@ function EditSession({
           !Object.hasOwn(value, "modeState") ||
           !value.settingsConfig ||
           typeof value.settingsConfig !== "object" ||
-          Array.isArray(value.settingsConfig)
+          Array.isArray(value.settingsConfig) ||
+          (appId === "mcode" &&
+            (typeof value.mcodeConfigRevision !== "string" ||
+              !value.mcodeConfigRevision.trim()))
         ) {
           setReadFailed(true);
           return;
@@ -199,12 +202,21 @@ function EditSession({
   const initialData = useMemo(() => {
     if (!provider || !initialSettingsConfig) return null;
     return {
-      name: provider.name,
+      name:
+        appId === "mcode" && typeof initialSettingsConfig.name === "string"
+          ? initialSettingsConfig.name
+          : provider.name,
       notes: provider.notes,
       websiteUrl: provider.websiteUrl,
       settingsConfig: initialSettingsConfig,
       category: provider.category,
-      meta: provider.meta,
+      meta:
+        appId === "mcode"
+          ? {
+              ...provider.meta,
+              mcodeConfigRevision: editRead?.mcodeConfigRevision,
+            }
+          : provider.meta,
       icon: provider.icon,
       iconColor: provider.iconColor,
     };
@@ -213,6 +225,8 @@ function EditSession({
     provider?.id, // 只依赖 ID，provider 对象更新不会触发重新计算
     provider?.meta, // 供应商元数据变化时重新初始化表单
     initialSettingsConfig,
+    appId,
+    editRead?.mcodeConfigRevision,
   ]);
 
   const controlled = editRead?.modeState != null;

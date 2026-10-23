@@ -5,6 +5,16 @@ export interface QoderClaimContext {
   credentialGeneration: string;
   deviceDependency: string | null;
 }
+export interface QoderAutomaticContext {
+  providerId: string;
+  credentialGeneration: string;
+  revision: number;
+  policyVersion: number;
+  enabled: boolean;
+  canEnable: boolean;
+  reason: string | null;
+  subject: string | null;
+}
 export type QoderClaimResult =
   | { Unavailable: string }
   | {
@@ -22,6 +32,22 @@ export type QoderClaimResult =
       };
     };
 export const qoderDailyApi = {
+  automaticContext: (providerId: string): Promise<QoderAutomaticContext> =>
+    invoke("qoder_daily_automatic_context", { providerId }),
+  setAutomatic: (
+    context: QoderAutomaticContext,
+    enabled: boolean,
+  ): Promise<QoderAutomaticContext> =>
+    invoke("set_qoder_daily_automatic", {
+      request: {
+        providerId: context.providerId,
+        credentialGeneration: context.credentialGeneration,
+        expectedRevision: context.revision,
+        policyVersion: context.policyVersion,
+        enabled,
+        source: enabled ? "internationalQoderPat" : null,
+      },
+    }),
   context: (providerId: string): Promise<QoderClaimContext> =>
     invoke("qoder_daily_claim_context", { providerId }),
   claim: (context: QoderClaimContext): Promise<QoderClaimResult> =>

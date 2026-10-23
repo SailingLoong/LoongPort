@@ -54,6 +54,76 @@ fn check() -> Result<(), OfficialError> {
 }
 
 #[test]
+fn poll_token_preserves_all_32_entropy_bytes_as_lowercase_hex() {
+    let token = PollToken::generate_with(|bytes| {
+        assert_eq!(bytes.len(), 32);
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert_eq!(
+        token.expose(),
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    );
+    assert!(!token.expose().contains('-'));
+    assert!(!format!("{token:?}").contains(token.expose()));
+}
+
+#[test]
+fn poll_token_fails_closed_when_entropy_source_fails_after_partial_fill() {
+    let mut calls = 0;
+    let result = PollToken::generate_with(|bytes| {
+        calls += 1;
+        bytes[..8].fill(0xab);
+        Err(())
+    });
+    assert_eq!(calls, 1);
+    assert_eq!(result.unwrap_err(), OfficialError::EntropyUnavailable);
+}
+
+#[test]
+fn generated_poll_tokens_have_official_shape_and_are_not_reused() {
+    let first = PollToken::generate().unwrap();
+    let second = PollToken::generate().unwrap();
+    for token in [&first, &second] {
+        assert_eq!(token.expose().len(), 64);
+        assert!(token
+            .expose()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+    assert_ne!(first.expose(), second.expose());
+}
+
+#[test]
+fn init_and_poll_reuse_the_same_generated_poll_token() {
+    let token = PollToken::generate_with(|bytes| {
+        bytes.fill(0xab);
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    let client = OfficialClient::new(Fixture::new(&[
+        r#"{"code":0,"data":{"authorize_url":"https://zcode.z.ai/authorize?flow=test","flow_id":"synthetic-flow","expires_at":1234567,"poll_interval_sec":2}}"#,
+        r#"{"code":0,"data":{"status":"pending"}}"#,
+    ]));
+    let init = run(client.init(OAuthFamily::BigModel, &token, &check)).unwrap();
+    assert!(matches!(
+        run(client.poll(OAuthFamily::BigModel, &init.flow_id, &token, &check)),
+        Ok(OAuthPoll::Pending)
+    ));
+    let requests = client.transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            request.authorization.as_ref().unwrap().expose(),
+            format!("Bearer {}", "ab".repeat(32))
+        );
+    }
+}
+
+#[test]
 fn cli_init_uses_official_endpoint_and_bearer_poll_token() {
     let client = OfficialClient::new(Fixture::new(&[
         r#"{"code":0,"data":{"authorize_url":"https://zcode.z.ai/authorize?flow=test","flow_id":"synthetic-flow","expires_at":1234567,"poll_interval_sec":2}}"#,

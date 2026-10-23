@@ -13,7 +13,7 @@ import {
   type CSSProperties,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Search, X } from "lucide-react";
+import { AlertTriangle, Download, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -373,7 +373,7 @@ export function ProviderList({
       <div className="mt-4 space-y-4">
         {piStateErrorNotice}
         <ProviderEmptyState
-          importDisabled={mutationsDisabled}
+          importDisabled={mutationsDisabled || importMutation.isPending}
           appId={appId}
           onCreate={appId === "pi" ? undefined : onCreate}
           onImport={appId === "pi" ? undefined : () => importMutation.mutate()}
@@ -475,7 +475,7 @@ export function ProviderList({
                     ? false
                     : appId === "hermes"
                       ? provider.presentation?.isCurrent === true
-                      : appId === "openclaw"
+                      : appId === "openclaw" || appId === "mcode"
                         ? provider.presentation?.isDefaultModel === true
                         : false
                 }
@@ -501,6 +501,16 @@ export function ProviderList({
   return (
     <div className="mt-4 space-y-4">
       {piStateErrorNotice}
+      {appId === "mcode" && (
+        <Button
+          variant="outline"
+          disabled={mutationsDisabled || importMutation.isPending}
+          onClick={() => importMutation.mutate()}
+        >
+          <Download className="mr-2 h-4 w-4" />
+          {t("provider.importCurrent")}
+        </Button>
+      )}
       {claudeDesktopStatusMessages.length > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
           <div className="flex items-center gap-2 font-medium">

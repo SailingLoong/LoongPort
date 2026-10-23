@@ -31,7 +31,7 @@ export interface CodexProviderPreset {
   // Codex API 格式
   apiFormat?: CodexApiFormat;
   // 仅用于区分预设来源；ChatGPT/Codex 与 xAI/Grok 的认证流程彼此独立。
-  providerType?: "codex_oauth" | "xai_oauth" | "qoder_sdk";
+  providerType?: "codex_oauth" | "xai_oauth" | "qoder_sdk" | "qoder_cn";
   // OAuth 预设：隐藏 API Key 输入，保存前要求已登录托管账号
   requiresOAuth?: boolean;
   // Codex Chat 本地路由模式下的模型目录
@@ -1975,5 +1975,17 @@ base_url = "https://cc-api.pipellm.ai/v1"`,
     category: "third_party",
     auth: generateThirdPartyAuth(""),
     config: generateThirdPartyConfig("Qoder", "https://openapi.qoder.sh", ""),
+  },
+  {
+    name: "Qoder CN",
+    websiteUrl: "https://qoder.cn",
+    providerType: "qoder_cn",
+    category: "third_party",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "QoderCN",
+      "https://openapi.qoder.com.cn",
+      "",
+    ),
   },
 ];

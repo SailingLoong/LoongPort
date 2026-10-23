@@ -8,6 +8,8 @@ use crate::secrets::{
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
+#[path = "providers/qoder_automatic.rs"]
+mod qoder_automatic;
 
 /// Delete one row in a caller-owned inventory mutation. The final inventory
 /// must be reconciled before that mutation is committed or published.
@@ -528,6 +530,7 @@ impl Database {
                 || expected.is_none()
                 || state.generation != operation.generation
                 || state.generation != next.generation
+                || state.automatic != next.automatic
                 || qoder_daily::authentication_changed(previous, &replacement)
                 || next.pending.as_ref().map(|p| (&p.id, &p.generation))
                     != Some((&operation.id, &operation.generation))
@@ -717,7 +720,10 @@ impl Database {
     ) {
         use crate::services::provider::qoder_daily::{self, State};
         let is_qoder = app_type == "codex"
-            && next.meta.as_ref().and_then(|m| m.provider_type.as_deref()) == Some("qoder_sdk");
+            && matches!(
+                next.meta.as_ref().and_then(|m| m.provider_type.as_deref()),
+                Some("qoder_sdk" | "qoder_cn" | "qoder_cn_device")
+            );
         let owned = current
             .and_then(|p| p.meta.as_ref())
             .and_then(|m| m.qoder_campaign_state.clone());
@@ -725,6 +731,7 @@ impl Database {
             (Some(previous), Some(mut state)) => {
                 if qoder_daily::authentication_changed(previous, next) {
                     state.generation = State::fresh().generation;
+                    state.automatic.revoke();
                 }
                 Some(state)
             }
@@ -870,6 +877,14 @@ impl Database {
         super::qoder_http_auth::retire_all_on(&tx)?;
         for (id, mut provider) in incoming {
             Self::preserve_qoder_state_on_save("codex", current.get(&id), &mut provider);
+            // Restoring any image is not renewed continuous user consent.
+            if let Some(state) = provider
+                .meta
+                .as_mut()
+                .and_then(|m| m.qoder_campaign_state.as_mut())
+            {
+                state.automatic.revoke();
+            }
             if let Some(pending) = provider
                 .meta
                 .as_ref()

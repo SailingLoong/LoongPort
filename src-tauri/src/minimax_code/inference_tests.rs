@@ -1,5 +1,6 @@
 //! These tests use synthetic encrypted accounts and the real MiniMax owner.
 //! They are module/transport tests, not ProxyServer/pool integration evidence.
+use super::super::catalog;
 use super::super::inference::{Lease, StreamRequest, StreamTransport};
 use super::*;
 use crate::proxy::{hyper_client::ProxyResponse, ProxyError};
@@ -43,8 +44,12 @@ fn success() -> ProxyResponse {
     stream_response(
         200,
         vec![
-            Ok(Bytes::from_static(b"event: message_start\ndata: {}\n\n")),
-            Ok(Bytes::from_static(b"event: message_stop\ndata: {}\n\n")),
+            Ok(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
         ],
     )
 }
@@ -58,7 +63,8 @@ fn two_accounts(f: &Fixture) {
         second.real_user_id = "synthetic-user-second".into();
         second.region = Region::Global;
         second.credentials.as_mut().unwrap().access_token = "synthetic-access-second".into();
-        second.credentials.as_mut().unwrap().refresh_token = "synthetic-refresh-second".into();
+        second.credentials.as_mut().unwrap().refresh_token =
+            Some("synthetic-refresh-second".into());
         d.accounts.push(second);
     });
 }
@@ -705,26 +711,31 @@ async fn inference_preserves_near_matches_and_flushes_normal_eof_tail() {
     f.seed(|_| {});
     let transport = StreamFixture::default();
     let chunks = ["normal ", "synt", "hetic-accesX ", "synthetic-acces"];
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/octet-stream"),
+    );
     transport
         .responses
         .lock()
         .unwrap()
-        .push_back(stream_response(
-            200,
-            chunks
-                .iter()
-                .map(|chunk| Ok(Bytes::copy_from_slice(chunk.as_bytes())))
-                .collect(),
+        .push_back(ProxyResponse::streamed(
+            http::StatusCode::OK,
+            headers,
+            futures::stream::iter(
+                chunks
+                    .iter()
+                    .map(|chunk| Ok(Bytes::copy_from_slice(chunk.as_bytes())))
+                    .collect::<Vec<_>>(),
+            ),
         ));
+    let mut body = request_body();
+    body["stream"] = json!(false);
     let dispatch = Lease::acquire(f.session.clone(), "synthetic-account", "body-near-match")
         .await
         .unwrap()
-        .dispatch_with(
-            request_body(),
-            Duration::from_secs(3),
-            &Fake::default(),
-            &transport,
-        )
+        .dispatch_with(body, Duration::from_secs(3), &Fake::default(), &transport)
         .await
         .unwrap();
     assert_eq!(
@@ -887,4 +898,283 @@ async fn error_body_epoch_change_cannot_refresh_original_account() {
         .is_err());
     assert!(auth.calls.lock().unwrap().is_empty());
     assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+async fn completion_case(chunks: Vec<Bytes>, interrupted: bool) -> Vec<u8> {
+    let f = Fixture::new().await;
+    f.seed(|_| {});
+    let transport = StreamFixture::default();
+    transport
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(stream_response(200, chunks.into_iter().map(Ok).collect()));
+    let auth = RefreshFixture::default();
+    let dispatch = Lease::acquire(f.session.clone(), "synthetic-account", "completion-case")
+        .await
+        .unwrap()
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &transport)
+        .await
+        .unwrap();
+    let mut stream = Box::pin(dispatch.response.bytes_stream());
+    let mut output = Vec::new();
+    let mut failed = false;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(chunk) => output.extend_from_slice(&chunk),
+            Err(e) => {
+                assert!(!e.to_string().contains("synthetic-access"));
+                failed = true;
+                assert!(stream.next().await.is_none());
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        failed, interrupted,
+        "missing native message_stop must not become successful EOF"
+    );
+    assert_eq!(
+        dispatch.fence.check().await.is_err(),
+        interrupted,
+        "final converted body must retain incomplete upstream state"
+    );
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    assert!(auth.calls.lock().unwrap().is_empty());
+    output
+}
+#[tokio::test]
+async fn minimax_native_eof_requires_complete_matching_message_stop() {
+    for wire in [
+        "",
+        ": heartbeat\n\n",
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial output\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n",
+        "event: message_stop\ndata: {\"type\":\"content_block_delta\"}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"message_stop\"}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: {",
+    ] {
+        completion_case(vec![Bytes::copy_from_slice(wire.as_bytes())], true).await;
+    }
+}
+#[tokio::test]
+async fn minimax_native_completion_preserves_tools_usage_and_split_wire_bytes() {
+    let prefix = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_0\",\"name\":\"lookup\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":2}}\n\n"
+    );
+    for terminal in [
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        "event:message_stop\r\ndata:{\r\ndata: \"type\": \"message_stop\"}\r\n\r\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    ] {
+        let wire = format!("{prefix}{terminal}");
+        // Exercise every byte boundary, including CRLF and JSON token boundaries.
+        let chunks = wire
+            .as_bytes()
+            .chunks(1)
+            .map(Bytes::copy_from_slice)
+            .collect();
+        assert_eq!(completion_case(chunks, false).await, wire.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn minimax_completion_observer_preserves_large_tool_frames_and_ignores_nested_stop() {
+    let delta = json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"value":"文".repeat(20000),"type":"message_stop"}).to_string()}});
+    let prefix = format!("event: content_block_delta\r\ndata: {delta}\r\n\r\n");
+    let complete = format!("{prefix}event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n");
+    for (wire, interrupted) in [(&prefix, true), (&complete, false)] {
+        for size in [701, wire.len()] {
+            let chunks = wire
+                .as_bytes()
+                .chunks(size)
+                .map(Bytes::copy_from_slice)
+                .collect();
+            assert_eq!(completion_case(chunks, interrupted).await, wire.as_bytes());
+        }
+    }
+}
+
+#[tokio::test]
+async fn minimax_complete_frames_after_message_stop_cannot_be_successful_eof() {
+    let stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    for tail in [
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic failure\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"forbidden late output\"}}\n\n",
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"late\"}}\n\n",
+        "event: error\ndata: {\"type\":\"error\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ] {
+        completion_case(vec![Bytes::from_static(stop.as_bytes()), Bytes::copy_from_slice(tail.as_bytes())], true).await;
+    }
+}
+#[tokio::test]
+async fn minimax_native_terminal_keeps_comments_whitespace_ping_and_unknown_extensions() {
+    let stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    for tail in [
+        "\n\r\n",
+        ": keepalive\r\n\r\n",
+        ": final comment without a blank-line delimiter",
+        "event: error\n\n",
+        "id: synthetic-event\nretry: 1000\n\n",
+        "event: content_block_delta\n",
+        "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+        "event: future_extension\ndata: {\"type\":\"future_extension\",\"metadata\":true}\n\n",
+    ] {
+        let chunks = vec![
+            Bytes::from_static(stop.as_bytes()),
+            Bytes::copy_from_slice(tail.as_bytes()),
+        ];
+        assert_eq!(
+            completion_case(chunks, false).await,
+            format!("{stop}{tail}").as_bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_inference_near_expiry_uses_access_only_without_proactive_refresh() {
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 30_000)));
+    let t = StreamFixture::default();
+    t.responses.lock().unwrap().push_back(success());
+    let auth = RefreshFixture::default();
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+        .await
+        .unwrap();
+    let response = lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+        .await
+        .unwrap();
+    assert!(!response
+        .response
+        .bytes_with_limit(4096)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(t.calls.lock().unwrap().len(), 1);
+    assert!(auth.calls.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn native_inference_401_never_refreshes_or_replays_and_403_does_not_revoke() {
+    for status in [401, 403] {
+        let f = Fixture::new().await;
+        f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+        let t = StreamFixture::default();
+        t.responses
+            .lock()
+            .unwrap()
+            .push_back(stream_response(status, vec![]));
+        let auth = RefreshFixture::default();
+        let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+            .await
+            .unwrap();
+        let result = lease
+            .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+            .await;
+        if status == 401 {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().response.status().as_u16(), 403);
+        }
+        assert_eq!(t.calls.lock().unwrap().len(), 1);
+        assert!(auth.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            catalog::list(&f.session).await.unwrap()[0].requires_reimport,
+            status == 401
+        );
+    }
+}
+#[tokio::test]
+async fn native_inference_expiry_between_lease_and_dispatch_never_sends() {
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-request")
+        .await
+        .unwrap();
+    catalog::access(&f.session, None, |d, _| {
+        d.accounts[0].credentials.as_mut().unwrap().expires_at = now_ms() - 1;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    let t = StreamFixture::default();
+    let auth = RefreshFixture::default();
+    assert!(lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &t)
+        .await
+        .is_err());
+    assert!(t.calls.lock().unwrap().is_empty() && auth.calls.lock().unwrap().is_empty());
+    assert!(
+        Lease::acquire(f.session.clone(), "synthetic-account", "native-next")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn native_late_status_success_cannot_resurrect_401_rejected_access() {
+    struct DelayedStatus {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl Transport for DelayedStatus {
+        fn request(
+            &self,
+            r: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                assert_eq!(r.endpoint, Endpoint::Status);
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(response(panel(2)))
+            })
+        }
+    }
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].credentials = Some(native_credentials(now_ms() + 3600000)));
+    let status = Arc::new(DelayedStatus {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let s = f.session.clone();
+    let t = status.clone();
+    let task = tokio::spawn(async move {
+        Engine {
+            session: &s,
+            transport: &*t,
+        }
+        .refresh("synthetic-account")
+        .await
+    });
+    status.started.notified().await;
+    let stream = StreamFixture::default();
+    stream
+        .responses
+        .lock()
+        .unwrap()
+        .push_back(stream_response(401, vec![]));
+    let auth = RefreshFixture::default();
+    let lease = Lease::acquire(f.session.clone(), "synthetic-account", "native-401")
+        .await
+        .unwrap();
+    assert!(lease
+        .dispatch_with(request_body(), Duration::from_secs(3), &auth, &stream)
+        .await
+        .is_err());
+    status.release.notify_one();
+    let view = task.await.unwrap().unwrap();
+    assert!(view.requires_reimport && !view.authorized);
+    assert!(catalog::list(&f.session).await.unwrap()[0].requires_reimport);
+    assert!(auth.calls.lock().unwrap().is_empty());
 }

@@ -58,6 +58,9 @@ fn account(id: &str, realm: Realm) -> Account {
         }),
         refresh_pending: false,
         checkin_day: None,
+        checkin_attempt: None,
+        auto_checkin_enabled: false,
+        auto_checkin_revision: 0,
         imported_refresh_hash: {
             use sha2::{Digest, Sha256};
             hex::encode(Sha256::digest(b"synthetic-refresh"))
@@ -528,7 +531,7 @@ fn checkin_reply(body: Value) -> ProxyResponse {
     )
 }
 #[tokio::test]
-async fn checkin_entry_rejects_cn_before_transport_or_claim_admission() {
+async fn checkin_entry_rejects_legacy_cn_source_before_transport_or_claim_admission() {
     let f = Fixture::new().await;
     let id = f.seed(Realm::Cn).await;
     assert!(matches!(
@@ -556,7 +559,9 @@ async fn cn_checkin_uses_original_device_and_persists_claim_admission() {
         super::checkin::run_with(lease, Duration::from_secs(2), &wire)
             .await
             .unwrap(),
-        super::checkin::Outcome::Claimed
+        super::checkin::Outcome::Accepted {
+            reported_credits: 100.0
+        }
     );
     {
         let calls = wire.calls.lock().unwrap();
@@ -564,10 +569,13 @@ async fn cn_checkin_uses_original_device_and_persists_claim_admission() {
         assert!(calls[0].url.ends_with("/checkin_credits/status"));
         assert!(calls[1].url.ends_with("/checkin_credits/claim"));
         assert_eq!(calls[1].headers["x-device-id"], "synthetic-device");
-        assert_eq!(calls[1].body, json!({"req_source":1}));
+        assert_eq!(calls[1].body, json!({}));
     }
     let restart =
         SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    wire.responses.lock().unwrap().push_back(checkin_reply(
+        json!({"code":0,"enable":true,"checked_in":false}),
+    ));
     let lease = Lease::checkin_fixture(restart, &id).await.unwrap();
     assert_eq!(
         super::checkin::run_with(lease, Duration::from_secs(2), &wire)
@@ -575,7 +583,16 @@ async fn cn_checkin_uses_original_device_and_persists_claim_admission() {
             .unwrap(),
         super::checkin::Outcome::AlreadyAttempted
     );
-    assert_eq!(wire.calls.lock().unwrap().len(), 2);
+    assert_eq!(wire.calls.lock().unwrap().len(), 3);
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.url.ends_with("/claim"))
+            .count(),
+        1
+    );
 }
 #[tokio::test]
 async fn checkin_global_done_disabled_and_invalid_status_never_claim() {
@@ -599,7 +616,7 @@ async fn checkin_global_done_disabled_and_invalid_status_never_claim() {
             Some(super::checkin::Outcome::Done),
         ),
         (
-            json!({"code":0,"enable":false}),
+            json!({"code":0,"enable":false,"checked_in":false}),
             Some(super::checkin::Outcome::Inactive),
         ),
         (json!({"notStatus":true}), None),
@@ -634,6 +651,7 @@ async fn checkin_restriction_is_terminal_without_device_or_auth_retry() {
     for code in [9074, 9095] {
         access(&f.session, None, |d, _| {
             d.accounts[0].checkin_day = None;
+            d.accounts[0].checkin_attempt = None;
             Ok(((), true))
         })
         .await
@@ -652,6 +670,9 @@ async fn checkin_restriction_is_terminal_without_device_or_auth_retry() {
                 .unwrap(),
             super::checkin::Outcome::Ineligible
         );
+        wire.responses.lock().unwrap().push_back(checkin_reply(
+            json!({"code":0,"enable":true,"checked_in":false}),
+        ));
         let lease = Lease::checkin_fixture(f.session.clone(), &id)
             .await
             .unwrap();
@@ -661,7 +682,16 @@ async fn checkin_restriction_is_terminal_without_device_or_auth_retry() {
                 .unwrap(),
             super::checkin::Outcome::AlreadyAttempted
         );
-        assert_eq!(wire.calls.lock().unwrap().len(), 2);
+        assert_eq!(wire.calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            wire.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.url.ends_with("/claim"))
+                .count(),
+            1
+        );
     }
 }
 #[tokio::test]
@@ -1029,6 +1059,11 @@ async fn account_projection_exposes_only_opaque_id_realm_and_local_status() {
             realm: Realm::Cn,
             status: AccountStatus::Stored,
             native_source_supported: false,
+            generation: 1,
+            auto_checkin_enabled: false,
+            auto_checkin_revision: 0,
+            can_set_automatic: false,
+            checkin_attempt_status: None,
         }]
     );
     let encoded = serde_json::to_string(&views).unwrap();
@@ -1557,4 +1592,1007 @@ async fn safe_view_distinguishes_native_cn_source_from_legacy_without_claiming_i
             .auth_host,
         Realm::Cn.auth()
     );
+}
+
+async fn native_cn_checkin_account(f: &Fixture) -> String {
+    let id = f.seed(Realm::Cn).await;
+    access(&f.session, None, |d, _| {
+        let a = d.accounts.iter_mut().find(|a| a.id == id).unwrap();
+        a.device.native_package = Some("TRAE_CN".into());
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    id
+}
+#[tokio::test]
+async fn cn_checkin_native_posts_empty_body_and_keeps_original_identity() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false,"credits":17.5})),
+        checkin_reply(json!({"code":0,"credits":17.5})),
+    ]);
+    let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+        .await
+        .unwrap();
+    assert!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .is_ok()
+    );
+    let calls = wire.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    for (call, suffix) in calls.iter().zip(["status", "claim"]) {
+        assert_eq!(
+            call.url,
+            format!("https://api.trae.cn/trae/api/v2/ug/checkin_credits/{suffix}")
+        );
+        assert_eq!(call.body, json!({}));
+        assert_eq!(
+            call.headers["authorization"],
+            "Cloud-IDE-JWT synthetic-access"
+        );
+        assert!(call.headers["authorization"].is_sensitive());
+        assert_eq!(call.headers["x-device-id"], "synthetic-device");
+        assert_eq!(call.headers["x-machine-id"], "synthetic-machine");
+        assert!(!call.headers.contains_key("x-device-brand"));
+        assert!(!call.headers.contains_key("user-agent"));
+    }
+}
+#[tokio::test]
+async fn cn_checkin_claim_without_code_has_explicit_acceptance_evidence() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"credits":17.5})),
+    ]);
+    let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+        .await
+        .unwrap();
+    let result = super::checkin::run_with(lease, Duration::from_secs(2), &wire).await;
+    assert_eq!(
+        result.unwrap(),
+        super::checkin::Outcome::Accepted {
+            reported_credits: 17.5
+        }
+    );
+    assert_eq!(wire.calls.lock().unwrap().len(), 2);
+}
+#[tokio::test]
+async fn cn_checkin_followup_status_confirms_account_without_a_second_claim() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"code":0,"enable":true,"checked_in":false})),
+        checkin_reply(json!({"code":0,"credits":17.5})),
+        checkin_reply(json!({"code":0,"enable":true,"checked_in":true})),
+    ]);
+    let before = snapshot(&f.session, &id).await.unwrap();
+    let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+        .await
+        .unwrap();
+    assert!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .is_ok()
+    );
+    let restart =
+        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let lease = Lease::acquire(restart, &id, "cn-followup").await.unwrap();
+    assert_eq!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .unwrap(),
+        super::checkin::Outcome::Done
+    );
+    {
+        let calls = wire.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls.iter().filter(|c| c.url.ends_with("/claim")).count(),
+            1
+        );
+    }
+    let after = snapshot(&f.session, &id).await.unwrap();
+    assert_eq!(after.account.version, before.account.version);
+    assert_eq!(after.account.device.id, before.account.device.id);
+    assert_eq!(
+        after.account.grant.unwrap().access,
+        before.account.grant.unwrap().access
+    );
+}
+#[tokio::test]
+async fn cn_checkin_invalid_business_code_cannot_confirm_a_status() {
+    for code in [
+        json!("not-a-code"),
+        Value::Null,
+        json!(true),
+        json!(9095),
+        json!(9074),
+    ] {
+        let f = Fixture::new().await;
+        let id = native_cn_checkin_account(&f).await;
+        let wire = Http::default();
+        wire.responses.lock().unwrap().push_back(checkin_reply(
+            json!({"code":code,"enable":true,"checked_in":true}),
+        ));
+        let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+            .await
+            .unwrap();
+        assert!(
+            super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+                .await
+                .is_err()
+        );
+        assert_eq!(wire.calls.lock().unwrap().len(), 1);
+        assert!(snapshot(&f.session, &id)
+            .await
+            .unwrap()
+            .account
+            .checkin_day
+            .is_none());
+    }
+}
+#[tokio::test]
+async fn cn_checkin_http200_empty_claim_has_no_acceptance_evidence() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({})),
+    ]);
+    let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+        .await
+        .unwrap();
+    assert!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .is_err()
+    );
+    assert!(snapshot(&f.session, &id)
+        .await
+        .unwrap()
+        .account
+        .checkin_day
+        .is_some());
+    assert_eq!(wire.calls.lock().unwrap().len(), 2);
+}
+
+struct CheckinConcurrentHttp {
+    calls: Mutex<Vec<Request>>,
+    status_barrier: tokio::sync::Barrier,
+}
+impl Transport for CheckinConcurrentHttp {
+    fn send(
+        &self,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<ProxyResponse, ProxyError>> + Send + '_>> {
+        Box::pin(async move {
+            let status = request.url.ends_with("/status");
+            self.calls.lock().unwrap().push(request);
+            if status {
+                // Both original leases observe false before either may claim.
+                self.status_barrier.wait().await;
+                Ok(checkin_reply(json!({"enable":true,"checked_in":false})))
+            } else {
+                Ok(checkin_reply(json!({"credits":17.5})))
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn cn_checkin_concurrent_status_reads_admit_only_one_claim() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = CheckinConcurrentHttp {
+        calls: Mutex::new(Vec::new()),
+        status_barrier: tokio::sync::Barrier::new(2),
+    };
+    let first = Lease::acquire(f.session.clone(), &id, "first-click")
+        .await
+        .unwrap();
+    let second = Lease::acquire(f.session.clone(), &id, "second-click")
+        .await
+        .unwrap();
+    let (a, b) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            super::checkin::run_with(first, Duration::from_secs(2), &wire),
+            super::checkin::run_with(second, Duration::from_secs(2), &wire)
+        )
+    })
+    .await
+    .expect("concurrent check-in must finish");
+    let results = [a.unwrap(), b.unwrap()];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(
+                r,
+                super::checkin::Outcome::Accepted {
+                    reported_credits: 17.5
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| **r == super::checkin::Outcome::AlreadyAttempted)
+            .count(),
+        1
+    );
+    let calls = wire.calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().filter(|c| c.url.ends_with("/status")).count(),
+        2
+    );
+    assert_eq!(
+        calls.iter().filter(|c| c.url.ends_with("/claim")).count(),
+        1
+    );
+    assert!(calls
+        .iter()
+        .all(|c| c.headers["x-device-id"] == "synthetic-device" && c.body == json!({})));
+}
+#[tokio::test]
+async fn cn_checkin_denied_or_unknown_claim_stays_nonreplayable_after_a_status_read() {
+    for reply in [
+        json!({"code":9074}),
+        json!({"code":9095}),
+        json!({}),
+        json!({"code":0,"credits":-1}),
+    ] {
+        let f = Fixture::new().await;
+        let id = native_cn_checkin_account(&f).await;
+        let wire = Http::default();
+        wire.responses.lock().unwrap().extend([
+            checkin_reply(json!({"enable":true,"checked_in":false})),
+            checkin_reply(reply.clone()),
+            checkin_reply(json!({"enable":true,"checked_in":false})),
+        ]);
+        let lease = Lease::acquire(f.session.clone(), &id, "cn-checkin")
+            .await
+            .unwrap();
+        let result = super::checkin::run_with(lease, Duration::from_secs(2), &wire).await;
+        if matches!(reply["code"].as_i64(), Some(9074 | 9095)) {
+            assert_eq!(result.unwrap(), super::checkin::Outcome::Ineligible);
+        } else {
+            assert!(result.is_err());
+        }
+        let lease = Lease::acquire(f.session.clone(), &id, "cn-followup")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+                .await
+                .unwrap(),
+            super::checkin::Outcome::AlreadyAttempted
+        );
+        let current = snapshot(&f.session, &id).await.unwrap();
+        assert!(current.account.checkin_day.is_some());
+        assert_eq!(current.account.device.id, "synthetic-device");
+        assert_eq!(current.account.grant.unwrap().access, "synthetic-access");
+        let calls = wire.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls.iter().filter(|c| c.url.ends_with("/claim")).count(),
+            1
+        );
+        assert!(calls
+            .iter()
+            .all(|c| c.headers["x-device-id"] == "synthetic-device"));
+    }
+}
+
+#[tokio::test]
+async fn cn_checkin_unknown_does_not_replay_after_cross_day_restart() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({})),
+    ]);
+    let lease = Lease::acquire(f.session.clone(), &id, "checkin")
+        .await
+        .unwrap();
+    assert!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .is_err()
+    );
+    access(&f.session, None, |d, _| {
+        d.accounts[0].checkin_day = Some((now() / 1000 + 8 * 3600).div_euclid(86400) - 1);
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    let restart =
+        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"credits":17.5})),
+    ]);
+    let lease = Lease::acquire(restart, &id, "checkin").await.unwrap();
+    assert_eq!(
+        super::checkin::run_with(lease, Duration::from_secs(2), &wire)
+            .await
+            .unwrap(),
+        super::checkin::Outcome::AlreadyAttempted
+    );
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.ends_with("/claim"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cn_automatic_default_off_and_per_account_policy_is_fenced() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    let wire = Http::default();
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert!(wire.calls.lock().unwrap().is_empty());
+    let enabled = super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    assert!(enabled.auto_checkin_enabled);
+    assert_eq!(enabled.auto_checkin_revision, 1);
+    assert!(super::checkin::set_automatic(&f.session, &id, 1, 0, false)
+        .await
+        .is_err());
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"credits":17.5})),
+    ]);
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.ends_with("/claim"))
+            .count(),
+        1
+    );
+    let row = list(&f.session).await.unwrap().remove(0);
+    assert_eq!(
+        row.checkin_attempt_status,
+        Some(CheckinAttemptStatus::Accepted)
+    );
+    assert!(row.auto_checkin_enabled);
+}
+
+#[tokio::test]
+async fn cn_automatic_legacy_day_is_unknown_even_after_new_day_and_toggle() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    access(&f.session, None, |d, _| {
+        d.accounts[0].checkin_day = Some(1);
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    let wire = Http::default();
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":true})));
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    super::checkin::set_automatic(&f.session, &id, 1, 1, false)
+        .await
+        .unwrap();
+    super::checkin::set_automatic(&f.session, &id, 1, 2, true)
+        .await
+        .unwrap();
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&f.session).await.unwrap()[0].checkin_attempt_status,
+        Some(CheckinAttemptStatus::Unknown)
+    );
+    assert!(!wire
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.url.ends_with("/claim")));
+}
+
+#[test]
+fn cn_automatic_old_records_default_to_disabled_and_unknown_day() {
+    let mut value = serde_json::to_value(account("synthetic-old", Realm::Cn)).unwrap();
+    for key in [
+        "checkin_attempt",
+        "auto_checkin_enabled",
+        "auto_checkin_revision",
+    ] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    value["checkin_day"] = json!(1);
+    let old: Account = serde_json::from_value(value).unwrap();
+    assert!(!old.auto_checkin_enabled);
+    assert_eq!(old.auto_checkin_revision, 0);
+    assert!(old.checkin_unresolved());
+}
+
+struct CheckinPause {
+    root: std::path::PathBuf,
+    reached: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+static CHECKIN_PAUSE: Mutex<Option<CheckinPause>> = Mutex::new(None);
+pub(super) async fn before_checkin_dispatch(session: &SecretSession) {
+    let gate = {
+        let mut gate = CHECKIN_PAUSE.lock().unwrap();
+        if gate.as_ref().is_some_and(|g| g.root == session.root()) {
+            gate.take()
+        } else {
+            None
+        }
+    };
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
+}
+fn pause_checkin(f: &Fixture) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    *CHECKIN_PAUSE.lock().unwrap() = Some(CheckinPause {
+        root: f.root.path().into(),
+        reached: reached.clone(),
+        resume: resume.clone(),
+    });
+    (reached, resume)
+}
+
+#[tokio::test]
+async fn cn_automatic_disable_at_dispatch_rolls_back_only_unsent_intent() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Arc::new(Http::default());
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    let (reached, resume) = pause_checkin(&f);
+    let session = f.session.clone();
+    let transport = wire.clone();
+    let task = tokio::spawn(async move {
+        super::checkin::automatic_tick_with(session, transport.as_ref()).await
+    });
+    reached.notified().await;
+    assert_eq!(
+        list(&f.session).await.unwrap()[0].checkin_attempt_status,
+        Some(CheckinAttemptStatus::Pending)
+    );
+    super::checkin::set_automatic(&f.session, &id, 1, 1, false)
+        .await
+        .unwrap();
+    resume.notify_one();
+    task.await.unwrap().unwrap();
+    let current = snapshot(&f.session, &id).await.unwrap();
+    assert!(current.account.checkin_attempt.is_none());
+    assert!(current.account.checkin_day.is_none());
+    assert!(!wire
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.url.ends_with("/claim")));
+}
+
+#[tokio::test]
+async fn cn_automatic_multiact_opt_ins_regions_unsupported_pending_and_lock_are_isolated() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    access(&f.session, None, |d, _| {
+        for (name, realm, native, pending) in [
+            ("synthetic-off", Realm::Cn, true, false),
+            ("synthetic-legacy", Realm::Cn, false, false),
+            ("synthetic-pending", Realm::Cn, true, true),
+            ("synthetic-sg", Realm::Sg, true, false),
+            ("synthetic-us", Realm::Us, true, false),
+        ] {
+            let mut a = account(name, realm);
+            if native {
+                a.device.native_package = Some("TRAE_CN".into());
+            }
+            a.refresh_pending = pending;
+            d.accounts.push(a);
+        }
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    for unsupported in [
+        "synthetic-legacy",
+        "synthetic-pending",
+        "synthetic-sg",
+        "synthetic-us",
+    ] {
+        assert!(
+            super::checkin::set_automatic(&f.session, unsupported, 1, 0, true)
+                .await
+                .is_err()
+        );
+    }
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Http::default();
+    f.session.set_blocked(true);
+    assert!(
+        super::checkin::automatic_tick_with(f.session.clone(), &wire)
+            .await
+            .is_err()
+    );
+    assert!(wire.calls.lock().unwrap().is_empty());
+    f.session.set_blocked(false);
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"credits":0})),
+    ]);
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(wire.calls.lock().unwrap().len(), 2);
+    assert!(wire
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.url.starts_with(Realm::Cn.auth())));
+}
+
+#[tokio::test]
+async fn cn_automatic_and_manual_share_one_pending_admission() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Arc::new(Http::default());
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({"credits":17.5})),
+    ]);
+    let (reached, resume) = pause_checkin(&f);
+    let session = f.session.clone();
+    let transport = wire.clone();
+    let task = tokio::spawn(async move {
+        super::checkin::automatic_tick_with(session, transport.as_ref()).await
+    });
+    reached.notified().await;
+    let manual = Lease::acquire(f.session.clone(), &id, "manual")
+        .await
+        .unwrap();
+    assert_eq!(
+        super::checkin::run_with(manual, Duration::from_secs(2), wire.as_ref())
+            .await
+            .unwrap(),
+        super::checkin::Outcome::AlreadyAttempted
+    );
+    resume.notify_one();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.ends_with("/claim"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cn_automatic_cancelled_pending_survives_restart_day_toggle_and_retire() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Arc::new(Http::default());
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    let (reached, _resume) = pause_checkin(&f);
+    let session = f.session.clone();
+    let transport = wire.clone();
+    let task = tokio::spawn(async move {
+        super::checkin::automatic_tick_with(session, transport.as_ref()).await
+    });
+    reached.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    access(&f.session, None, |d, _| {
+        d.accounts[0].checkin_day = Some(1);
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    super::checkin::set_automatic(&f.session, &id, 1, 1, false)
+        .await
+        .unwrap();
+    super::checkin::set_automatic(&f.session, &id, 1, 2, true)
+        .await
+        .unwrap();
+    let restart =
+        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    super::checkin::automatic_tick_with(restart.clone(), wire.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&restart).await.unwrap()[0].checkin_attempt_status,
+        Some(CheckinAttemptStatus::Pending)
+    );
+    retire(&restart, &id).await.unwrap();
+    let row = list(&restart).await.unwrap().remove(0);
+    assert!(!row.auto_checkin_enabled);
+    assert_eq!(row.auto_checkin_revision, 4);
+    assert_eq!(
+        row.checkin_attempt_status,
+        Some(CheckinAttemptStatus::Pending)
+    );
+    assert!(!wire
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.url.ends_with("/claim")));
+}
+
+#[tokio::test]
+async fn cn_automatic_reauthorization_disables_policy_and_preserves_unknown() {
+    let f = Fixture::new().await;
+    let wire = Http::default();
+    wire.responses.lock().unwrap().extend([
+        cn_exchange_response(),
+        profile_response("synthetic-user", "CN"),
+    ]);
+    let id = super::auth::activate_with(
+        f.session.clone(),
+        super::import::synthetic_material(),
+        Duration::from_secs(2),
+        &wire,
+    )
+    .await
+    .unwrap();
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    wire.responses.lock().unwrap().extend([
+        checkin_reply(json!({"enable":true,"checked_in":false})),
+        checkin_reply(json!({})),
+    ]);
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    let before = snapshot(&f.session, &id).await.unwrap().account;
+    let mut material = super::import::synthetic_material();
+    material.account.grant.as_mut().unwrap().refresh = "synthetic-new-login".into();
+    material.account.imported_refresh_hash = "c".repeat(64);
+    wire.responses.lock().unwrap().extend([
+        cn_exchange_response(),
+        profile_response("synthetic-user", "CN"),
+    ]);
+    let reimported =
+        super::auth::activate_with(f.session.clone(), material, Duration::from_secs(2), &wire)
+            .await
+            .unwrap();
+    assert_eq!(reimported, id);
+    let current = snapshot(&f.session, &id).await.unwrap().account;
+    assert_eq!(current.checkin_day, before.checkin_day);
+    assert_eq!(
+        current.checkin_attempt.as_ref().unwrap().id,
+        before.checkin_attempt.as_ref().unwrap().id
+    );
+    assert!(current.checkin_unresolved());
+    assert!(!current.auto_checkin_enabled);
+    assert_eq!(current.auto_checkin_revision, 2);
+    assert_eq!(current.generation, 2);
+    assert!(super::checkin::set_automatic(&f.session, &id, 1, 1, true)
+        .await
+        .is_err());
+    super::checkin::set_automatic(&f.session, &id, 2, 2, true)
+        .await
+        .unwrap();
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.ends_with("/claim"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cn_automatic_durable_failure_never_dispatches_claim() {
+    for fault in [
+        WriteFault::BeforePublication,
+        WriteFault::PostRenameSync,
+        WriteFault::Readback,
+    ] {
+        let f = Fixture::new().await;
+        let id = native_cn_checkin_account(&f).await;
+        super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+            .await
+            .unwrap();
+        let wire = Http::default();
+        wire.responses
+            .lock()
+            .unwrap()
+            .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+        arm_write_fault(f.root.path().join("trae_accounts.json"), fault);
+        super::checkin::automatic_tick_with(f.session.clone(), &wire)
+            .await
+            .unwrap();
+        assert!(!wire
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.url.ends_with("/claim")));
+        let row = snapshot(&f.session, &id).await.unwrap().account;
+        assert_eq!(
+            row.checkin_attempt.is_none(),
+            fault == WriteFault::BeforePublication
+        );
+    }
+}
+
+#[tokio::test]
+async fn cn_automatic_policy_change_cannot_rollback_a_new_generation() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Arc::new(Http::default());
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    let (reached, resume) = pause_checkin(&f);
+    let session = f.session.clone();
+    let transport = wire.clone();
+    let task = tokio::spawn(async move {
+        super::checkin::automatic_tick_with(session, transport.as_ref()).await
+    });
+    reached.notified().await;
+    retire(&f.session, &id).await.unwrap();
+    resume.notify_one();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        list(&f.session).await.unwrap()[0].checkin_attempt_status,
+        Some(CheckinAttemptStatus::Pending)
+    );
+    assert!(!wire
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.url.ends_with("/claim")));
+}
+
+#[test]
+fn cn_automatic_command_and_safe_policy_dto_match_frontend_contract() {
+    let frontend = include_str!("../../../src/lib/api/traeAccounts.ts");
+    let commands = include_str!("../commands/trae_accounts.rs");
+    let registration = include_str!("../lib.rs");
+    let maintenance = include_str!("../maintenance/mod.rs");
+    let command = "set_trae_automatic_checkin";
+    assert!(
+        frontend.contains(command) && commands.contains(command) && registration.contains(command)
+    );
+    for key in [
+        "generation",
+        "autoCheckinEnabled",
+        "autoCheckinRevision",
+        "canSetAutomatic",
+        "checkinAttemptStatus",
+    ] {
+        assert!(frontend.contains(key));
+        assert!(
+            serde_json::to_value(account("synthetic-wire", Realm::Cn).view())
+                .unwrap()
+                .get(key)
+                .is_some()
+        );
+    }
+    assert!(frontend.contains("policyRevision: account.autoCheckinRevision"));
+    assert!(maintenance.contains("start_trae_automatic_checkin(app.clone())"));
+    let runtime = maintenance
+        .split("fn start_trae_automatic_checkin")
+        .nth(1)
+        .unwrap();
+    assert!(runtime.contains("scheduler::spawn_periodic("));
+    assert!(runtime.contains("Duration::from_secs(30)"));
+    assert!(runtime.contains("Duration::from_secs(15 * 60)"));
+    assert!(runtime.contains("crate::trae_accounts::checkin::automatic_tick(db.secrets.clone())"));
+}
+
+#[tokio::test]
+async fn cn_automatic_transport_error_is_unknown_and_never_replayed() {
+    let f = Fixture::new().await;
+    let id = native_cn_checkin_account(&f).await;
+    super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+        .await
+        .unwrap();
+    let wire = Http::default();
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&f.session).await.unwrap()[0].checkin_attempt_status,
+        Some(CheckinAttemptStatus::Unknown)
+    );
+    access(&f.session, None, |d, _| {
+        d.accounts[0].checkin_day = Some(1);
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    wire.responses
+        .lock()
+        .unwrap()
+        .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+    super::checkin::automatic_tick_with(f.session.clone(), &wire)
+        .await
+        .unwrap();
+    assert_eq!(
+        wire.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.ends_with("/claim"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cn_automatic_dispatch_fences_credential_version_and_reenabled_policy() {
+    for change_version in [false, true] {
+        let f = Fixture::new().await;
+        let id = native_cn_checkin_account(&f).await;
+        super::checkin::set_automatic(&f.session, &id, 1, 0, true)
+            .await
+            .unwrap();
+        let wire = Arc::new(Http::default());
+        wire.responses
+            .lock()
+            .unwrap()
+            .push_back(checkin_reply(json!({"enable":true,"checked_in":false})));
+        let (reached, resume) = pause_checkin(&f);
+        let session = f.session.clone();
+        let transport = wire.clone();
+        let task = tokio::spawn(async move {
+            super::checkin::automatic_tick_with(session, transport.as_ref()).await
+        });
+        reached.notified().await;
+        if change_version {
+            access(&f.session, None, |d, _| {
+                d.accounts[0].version += 1;
+                Ok(((), true))
+            })
+            .await
+            .unwrap();
+        } else {
+            super::checkin::set_automatic(&f.session, &id, 1, 1, false)
+                .await
+                .unwrap();
+            super::checkin::set_automatic(&f.session, &id, 1, 2, true)
+                .await
+                .unwrap();
+        }
+        resume.notify_one();
+        task.await.unwrap().unwrap();
+        let current = snapshot(&f.session, &id).await.unwrap().account;
+        assert_eq!(current.checkin_attempt.is_some(), change_version,
+            "a newer credential version must retain the old attempt; a definitely unsent exact attempt may roll back");
+        assert!(!wire
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.url.ends_with("/claim")));
+    }
+}
+
+#[test]
+fn lease_snapshot_has_bounded_inline_size_for_managed_account_enum() {
+    assert!(
+        std::mem::size_of::<super::inference::Lease>() <= 128,
+        "TRAE Lease must not inline the growing account document: {} bytes",
+        std::mem::size_of::<super::inference::Lease>()
+    );
+}
+
+#[tokio::test]
+async fn lease_snapshot_clone_fence_and_mutable_refresh_keep_owned_identity() {
+    let f = Fixture::new().await;
+    let id = f.seed(Realm::Sg).await;
+    let mut lease = super::inference::Lease::acquire(f.session.clone(), &id, "snapshot-test")
+        .await
+        .unwrap();
+    let saved = lease.snapshot.clone();
+    let fence = lease.fence();
+    lease.snapshot.account.grant.as_mut().unwrap().access = "local-only-change".into();
+    assert_eq!(
+        saved.account.grant.as_ref().unwrap().access,
+        "synthetic-access"
+    );
+    assert!(fence.check().await.is_ok());
+    super::auth::synchronize(&f.session, &mut lease.snapshot)
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.snapshot.account.grant.as_ref().unwrap().access,
+        "synthetic-access"
+    );
+    access(&f.session, None, |d, _| {
+        d.accounts[0].version += 1;
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+    assert!(fence.check().await.is_err());
+    super::auth::synchronize(&f.session, &mut lease.snapshot)
+        .await
+        .unwrap();
+    assert_eq!(lease.snapshot.account.version, 2);
+    assert_eq!(saved.account.version, 1);
+    assert_eq!(lease.snapshot.account.id, saved.account.id);
+    assert_eq!(lease.snapshot.account.generation, saved.account.generation);
 }

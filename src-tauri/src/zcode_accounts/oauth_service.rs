@@ -117,17 +117,18 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
             .await
         {
             Ok(init) => {
+                // Anchor once, before reading wall time: mapping cannot extend
+                // the provider's absolute expiry by rounding or later retries.
+                let monotonic_now = Instant::now();
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| FlowError::Expired)?
-                    .as_secs();
-                let remaining = init.expires_at.saturating_sub(now).min(300);
-                if remaining == 0 {
+                    .map_err(|_| FlowError::Expired)?;
+                let remaining = official_poll_remaining(init.expires_at, now);
+                if remaining.is_zero() {
                     return lease.finish(FlowStage::Expired, |_| {});
                 }
                 lease.update(|draft, display| {
-                    draft.poll_deadline =
-                        Some(Instant::now() + std::time::Duration::from_secs(remaining));
+                    draft.poll_deadline = Some(monotonic_now + remaining);
                     display.authorization = Some(Authorization {
                         url: init.authorize_url.clone(),
                         expires_at: init.expires_at,
@@ -139,7 +140,7 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
             Err(_) => self.error(
                 &lease,
                 FlowStage::Failed,
-                "zcode.account.official_unavailable",
+                "zcode.account.oauth_init_unavailable",
                 "queryOriginal",
             ),
         }
@@ -156,16 +157,25 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
         }
         let init = draft.init.as_ref().ok_or(FlowError::WrongStage)?;
         let check = || self.check(&lease, &binding);
-        match self
-            .client
-            .poll(
+        let deadline = draft.poll_deadline.ok_or(FlowError::Expired)?;
+        // The provider's authorization window can end while HTTP is in flight.
+        // Bound the existing read by that window, not just the transport timeout
+        // or the longer local flow lifetime; never admit a late ready identity.
+        let response = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            self.client.poll(
                 draft.family,
                 &init.flow_id,
                 draft.poll_token.as_ref().ok_or(FlowError::WrongStage)?,
                 &check,
-            )
-            .await
-        {
+            ),
+        )
+        .await;
+        if response.is_err() || Instant::now() >= deadline {
+            lease.finish(FlowStage::Expired, |_| {})?;
+            return Ok(false);
+        }
+        match response.map_err(|_| FlowError::Expired)? {
             Ok(OAuthPoll::Pending) => {
                 lease.update(|_, display| display.error = None)?;
                 lease.finish(FlowStage::Waiting, |_| {})?;
@@ -185,7 +195,7 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
                 self.error(
                     &lease,
                     FlowStage::Waiting,
-                    "zcode.account.official_unavailable",
+                    "zcode.account.oauth_poll_unavailable",
                     "queryOriginal",
                 )?;
                 Ok(false)
@@ -194,7 +204,7 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
                 self.error(
                     &lease,
                     FlowStage::Failed,
-                    "zcode.account.official_unavailable",
+                    "zcode.account.oauth_poll_unavailable",
                     "queryOriginal",
                 )?;
                 Ok(false)
@@ -257,7 +267,7 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
                         } else {
                             FlowStage::Failed
                         },
-                        "zcode.account.official_unavailable",
+                        "zcode.account.oauth_normalize_unavailable",
                         "queryOriginal",
                     )
                 }
@@ -875,6 +885,14 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
             Err(_) => lease.save_query_unavailable(),
         }
     }
+}
+
+// The provider timestamp is whole epoch seconds, but the current clock is not.
+// Keep its fractional part so a 100.900s -> 101s window stays 100ms, not 1s.
+fn official_poll_remaining(expires_at: u64, now: std::time::Duration) -> std::time::Duration {
+    std::time::Duration::from_secs(expires_at)
+        .saturating_sub(now)
+        .min(std::time::Duration::from_secs(300))
 }
 
 #[cfg(test)]

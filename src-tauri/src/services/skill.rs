@@ -607,6 +607,7 @@ impl SkillService {
                 }
             }
             AppType::ClaudeDesktop => {}
+            AppType::Mcode => anyhow::bail!("Mcode does not support Skills synchronization"),
             // 生图栏没有 skills 目录：它不是一个能读 SKILL.md 的 CLI。
             AppType::CodexImage => {}
             AppType::Codex => {
@@ -661,6 +662,7 @@ impl SkillService {
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
             AppType::Pi => crate::pi_config::get_pi_agent_dir()?.join("skills"),
+            AppType::Mcode => anyhow::bail!("Mcode does not support Skills synchronization"),
         })
     }
 
@@ -718,7 +720,7 @@ impl SkillService {
 
     fn validate_skill_storage_destination(ssot_dir: &Path) -> Result<()> {
         for app in AppType::all() {
-            if matches!(app, AppType::ClaudeDesktop) {
+            if matches!(app, AppType::ClaudeDesktop | AppType::Mcode) {
                 continue;
             }
             let app_dir = Self::get_app_skills_dir(&app)?;
@@ -1071,7 +1073,7 @@ impl SkillService {
 
                     // 其他应用沿用既有的逐项容错行为。
                     for app in AppType::all() {
-                        if matches!(app, AppType::Pi) {
+                        if matches!(app, AppType::Pi | AppType::Mcode) {
                             continue;
                         }
                         Self::remove_from_app_preserving(
@@ -2546,14 +2548,14 @@ impl SkillService {
         Self::sync_to_app_unlocked(db, app)
     }
 
-    /// Skills 不由 `sync_to_app` 投影的应用：Claude Desktop、OpenClaw 不支持 Skills，
+    /// Skills 不由 `sync_to_app` 投影的应用：Claude Desktop、OpenClaw、Mcode 不支持 Skills，
     /// Pi 没有数据库列、按目录是否存在现算。这些应用的 skills 目录不归本应用管，
     /// 同步时一个字节都不能碰——否则 OpenClaw 自己的 `~/.openclaw/skills` 里和受管
     /// Skill 同名的真实目录，会被当成「已关掉的投影」删掉。
     fn is_sync_managed_app(app: &AppType) -> bool {
         !matches!(
             app,
-            AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Pi
+            AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Pi | AppType::Mcode
         )
     }
 
@@ -4494,6 +4496,21 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn mcode_has_no_managed_skills_directory() {
+        assert!(SkillService::get_app_skills_dir(&AppType::Mcode).is_err());
+        assert!(!SkillService::is_sync_managed_app(&AppType::Mcode));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn skill_storage_validation_skips_mcode() {
+        let temp = tempdir().expect("tempdir");
+        let _home = TestHomeGuard::set(temp.path());
+        SkillService::validate_skill_storage_destination(&temp.path().join("new-skill-store"))
+            .expect("adding Mcode must not block skill storage migration");
+    }
 
     fn installed_skill(directory: &str, owner: Option<&str>, repo: Option<&str>) -> InstalledSkill {
         InstalledSkill {

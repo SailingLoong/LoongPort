@@ -326,8 +326,7 @@ pub(crate) async fn begin(
     .await
     .map_err(PublicError::from)?;
     let service = service(db)?;
-    let token = PollToken::new(&uuid::Uuid::new_v4().to_string())
-        .map_err(|_| flow_error(FlowError::Capacity))?;
+    let token = PollToken::generate().map_err(|_| flow_error(FlowError::Capacity))?;
     let id = service
         .flows
         .begin(bound, family, token, Instant::now())

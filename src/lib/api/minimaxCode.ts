@@ -26,7 +26,25 @@ export interface MiniMaxCodeEntitlement {
   hasTokenPlan: boolean | null;
   tokenPlanExpiresAt: number | null;
 }
+export interface MiniMaxCodeNativePreview {
+  previewId: string;
+  source: "publicCliOAuthV1";
+  region: MiniMaxCodeRegion;
+  maskedSubject: string | null;
+  expiresAtMs: number;
+  stage: "preview" | "verified";
+  verifiedUserId: string | null;
+  label: string | null;
+  canSave: boolean;
+}
 export interface MiniMaxCodeAccount {
+  credentialKind?: "deviceOAuth" | "nativeAccessOnly" | null;
+  credentialExpiresAt?: number | null;
+  requiresReimport?: boolean;
+  canRefreshCredentials?: boolean;
+  autoClaimEnabled?: boolean;
+  autoClaimRevision?: number;
+  autoClaimFailure?: MiniMaxCodeFailure | null;
   /** Informational snapshot from explicit refresh; absent/unknown is not zero. */
   entitlement?: MiniMaxCodeEntitlement | null;
   id: string;
@@ -79,7 +97,37 @@ export type MiniMaxCodeFailure =
 
 /** Safe projections of the sole encrypted Code catalog; never API-key accounts. */
 export const minimaxCodeApi = {
+  previewNativeFile: (
+    path: string,
+    region: MiniMaxCodeRegion,
+    confirmed: boolean,
+  ) =>
+    invoke<MiniMaxCodeNativePreview>("preview_minimax_native_file", {
+      path,
+      region,
+      source: "publicCliOAuthV1",
+      confirmed,
+    }),
+  verifyNativeImport: (previewId: string, confirmed: boolean) =>
+    invoke<MiniMaxCodeNativePreview>("verify_minimax_native_import", {
+      previewId,
+      confirmed,
+    }),
+  saveNativeImport: (previewId: string, confirmed: boolean) =>
+    invoke<MiniMaxCodeAccount>("save_minimax_native_import", {
+      previewId,
+      confirmed,
+    }),
+  cancelNativeImport: (previewId: string) =>
+    invoke<void>("cancel_minimax_native_import", { previewId }),
   list: () => invoke<MiniMaxCodeAccount[]>("list_minimax_code_accounts"),
+  setAutomatic: (account: MiniMaxCodeAccount, enabled: boolean) =>
+    invoke<MiniMaxCodeAccount>("set_minimax_code_automatic_claim", {
+      id: account.id,
+      authGeneration: account.authGeneration,
+      policyRevision: account.autoClaimRevision ?? 0,
+      enabled,
+    }),
   refresh: (id: string) =>
     invoke<MiniMaxCodeAccount>("refresh_minimax_code_account", { id }),
   claim: (id: string) =>

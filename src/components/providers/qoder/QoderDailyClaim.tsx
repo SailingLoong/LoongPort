@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  QoderAutomaticClaim,
+  useQoderAutomaticClaim,
+} from "./QoderAutomaticClaim";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -25,6 +29,7 @@ export function QoderDailyClaim({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const automatic = useQoderAutomaticClaim(providerId, open, disabled);
   const [declared, setDeclared] = useState(false);
   const [context, setContext] = useState<QoderClaimContext | null>(null);
   const [result, setResult] = useState<QoderClaimResult | null>(null);
@@ -119,7 +124,10 @@ export function QoderDailyClaim({
           {t("qoderDaily.title", { defaultValue: "Qoder 每日积分" })}
         </Button>
       </DialogTrigger>
-      <DialogContent onClick={(event) => event.stopPropagation()}>
+      <DialogContent
+        className="overflow-y-auto"
+        onClick={(event) => event.stopPropagation()}
+      >
         <DialogHeader>
           <DialogTitle>
             {t("qoderDaily.title", { defaultValue: "Qoder 每日积分" })}
@@ -186,6 +194,7 @@ export function QoderDailyClaim({
             ? t("qoderDaily.pending", { defaultValue: "正在处理…" })
             : t("qoderDaily.claim", { defaultValue: "查询并领取" })}
         </Button>
+        <QoderAutomaticClaim state={automatic} />
       </DialogContent>
     </Dialog>
   );

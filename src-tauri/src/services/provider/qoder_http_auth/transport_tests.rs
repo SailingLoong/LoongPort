@@ -103,8 +103,8 @@ impl LocalServer {
             thread: Some(thread),
         }
     }
-    fn transport(&self) -> FixedInternationalTransport {
-        FixedInternationalTransport::synthetic_server(self.url.clone()).unwrap()
+    fn transport(&self) -> FixedRegionTransport {
+        FixedRegionTransport::synthetic_server(self.url.clone()).unwrap()
     }
     async fn finish(mut self) -> Vec<Seen> {
         // Let the current-thread runtime finish dropping rejected HTTP responses.
@@ -444,6 +444,234 @@ fn test_origin_factory_cannot_target_an_external_host_or_url_credentials() {
         "http://127.0.0.1/path",
         "http://127.0.0.1/?query=1",
     ] {
-        assert!(FixedInternationalTransport::synthetic_server(Url::parse(url).unwrap()).is_err());
+        assert!(FixedRegionTransport::synthetic_server(Url::parse(url).unwrap()).is_err());
     }
+}
+
+#[test]
+fn cn_exchange_rejects_native_aliases_without_changing_international_compatibility() {
+    let now = 1_000_000;
+    for field in ["device_token", "access_token"] {
+        let mut body = serde_json::json!({ "expires_in": 600000 });
+        body[field] = serde_json::json!("synthetic-alias");
+        assert!(
+            parse_exchange_for_source(&SourceKind::ChinaQoderPat, &body, now).is_err(),
+            "CN PAT exchange must not infer a native credential family from {field}"
+        );
+        assert!(parse_exchange_for_source(&SourceKind::InternationalQoderPat, &body, now).is_ok());
+    }
+    let body = serde_json::json!({"token":"synthetic-job", "refresh_token":"synthetic-job-refresh", "expires_in":600000});
+    let cn = parse_exchange_for_source(&SourceKind::ChinaQoderPat, &body, now).unwrap();
+    assert_eq!(cn.access_token, "synthetic-job");
+    assert_eq!(cn.refresh_token, "synthetic-job-refresh");
+    let alias_refresh = serde_json::json!({"token":"synthetic-job", "refreshToken":"native-alias", "expires_in":600000});
+    let cn = parse_exchange_for_source(&SourceKind::ChinaQoderPat, &alias_refresh, now).unwrap();
+    assert!(cn.refresh_token.is_empty());
+}
+
+#[test]
+fn device_poll_requires_top_level_token_uid_and_explicit_lifetime() {
+    let body = serde_json::json!({"token":"synthetic-device", "user_id":"synthetic-cn", "refresh_token":"synthetic-refresh", "expires_at":"2030-01-01T00:00:00Z"});
+    let (uid, tokens) = parse_device_poll(&body, 1000).unwrap();
+    assert_eq!(uid, "synthetic-cn");
+    assert_eq!(tokens.access_token, "synthetic-device");
+    assert_eq!(tokens.expires_at_ms, 1893456000000);
+    for field in ["token", "user_id", "expires_at"] {
+        let mut invalid = body.clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(
+            parse_device_poll(&invalid, 1000).is_err(),
+            "must reject missing {field}"
+        );
+    }
+    for token_field in ["device_token", "access_token"] {
+        let mut invalid = body.clone();
+        invalid.as_object_mut().unwrap().remove("token");
+        invalid[token_field] = serde_json::json!("synthetic-alias");
+        assert!(parse_device_poll(&invalid, 1000).is_err());
+    }
+    let relative =
+        serde_json::json!({"token":"synthetic-device", "user_id":"synthetic-cn", "expires_in":60});
+    let (_, tokens) = parse_device_poll(&relative, 1000).unwrap();
+    assert_eq!(tokens.expires_at_ms, 61000);
+    assert!(tokens.refresh_token.is_empty());
+    for duration in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(i64::MAX),
+        serde_json::json!("60"),
+    ] {
+        let mut invalid = relative.clone();
+        invalid["expires_in"] = duration;
+        assert!(parse_device_poll(&invalid, 1000).is_err());
+    }
+}
+
+#[test]
+fn device_refresh_requires_expiry_and_preserves_the_device_credential_family() {
+    let body = serde_json::json!({"device_token":"synthetic-device", "refresh_token":"synthetic-refresh", "expires_at":"2030-01-01T00:00:00Z"});
+    let tokens = parse_device_refresh(&body, 1000).unwrap();
+    assert_eq!(tokens.access_token, "synthetic-device");
+    assert_eq!(tokens.expires_at_ms, 1893456000000);
+    for expiry in [
+        serde_json::json!(1893456000i64),
+        serde_json::json!(1893456000000i64),
+    ] {
+        let mut numeric = body.clone();
+        numeric["expires_at"] = expiry;
+        assert_eq!(
+            parse_device_refresh(&numeric, 1000).unwrap().expires_at_ms,
+            1893456000000
+        );
+    }
+    for field in ["device_token", "refresh_token", "expires_at"] {
+        let mut invalid = body.clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        invalid["expires_in"] = serde_json::json!(600000);
+        assert!(parse_device_refresh(&invalid, 1000).is_err());
+    }
+    for expiry in [
+        serde_json::Value::Null,
+        serde_json::json!("2030-01-01T00:00:00"),
+        serde_json::json!("invalid"),
+        serde_json::json!(0),
+        serde_json::json!(i64::MAX),
+    ] {
+        let mut invalid = body.clone();
+        invalid["expires_at"] = expiry;
+        assert!(parse_device_refresh(&invalid, 1000).is_err());
+    }
+}
+
+#[test]
+fn device_identity_verification_requires_matching_authenticated_userinfo() {
+    let tokens = || TokenPair {
+        access_token: "synthetic-device".into(),
+        refresh_token: "synthetic-refresh".into(),
+        expires_at_ms: 1893456000000,
+    };
+    let result = verify_device_identity(
+        "synthetic-cn",
+        tokens(),
+        &serde_json::json!({"id":"synthetic-cn"}),
+    )
+    .unwrap();
+    assert_eq!(result.uid, "synthetic-cn");
+    for info in [
+        serde_json::json!({}),
+        serde_json::json!({"id":"other-cn"}),
+        serde_json::json!({"id":"", "user_id":"synthetic-cn"}),
+    ] {
+        assert!(verify_device_identity("synthetic-cn", tokens(), &info).is_err());
+    }
+}
+
+#[test]
+fn device_poll_request_is_fixed_cn_pkce_get_without_credentials_or_aliases() {
+    let nonce = "2c1a2bcf-ea47-44f1-9fc8-1f033fe183cf";
+    let verifier = "synthetic-verifier-12345678901234567890123456789";
+    let transport = FixedRegionTransport::for_source(SourceKind::ChinaQoderDevice).unwrap();
+    let request = transport.device_poll_request(nonce, verifier).unwrap();
+    assert_eq!(request.method(), Method::GET);
+    assert_eq!(
+        request.url().origin().ascii_serialization(),
+        "https://openapi.qoder.com.cn"
+    );
+    assert_eq!(request.url().path(), "/api/v1/deviceToken/poll");
+    assert_eq!(
+        request
+            .url()
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        [
+            ("nonce".into(), nonce.into()),
+            ("verifier".into(), verifier.into()),
+            ("challenge_method".into(), "S256".into())
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(request.body().is_none());
+    assert!(request.headers().get(header::AUTHORIZATION).is_none());
+    for source in [SourceKind::InternationalQoderPat, SourceKind::ChinaQoderPat] {
+        let transport = FixedRegionTransport::for_source(source).unwrap();
+        assert!(transport.device_poll_request(nonce, verifier).is_err());
+    }
+    for (nonce, verifier) in [
+        ("bad-nonce", verifier),
+        (nonce, "short"),
+        (nonce, "invalid+verifier-1234567890123456789012345678901"),
+    ] {
+        assert!(transport.device_poll_request(nonce, verifier).is_err());
+    }
+}
+
+#[test]
+fn device_refresh_request_uses_the_owned_machine_without_client_or_machine_token() {
+    let identity = Identity {
+        uid: "synthetic-cn".into(),
+        machine_id: "2c1a2bcf-ea47-44f1-9fc8-1f033fe183cf".into(),
+    };
+    for source in [
+        SourceKind::InternationalQoderPat,
+        SourceKind::ChinaQoderPat,
+        SourceKind::ChinaQoderDevice,
+    ] {
+        let native = source == SourceKind::ChinaQoderDevice;
+        let transport = FixedRegionTransport::for_source(source.clone()).unwrap();
+        let request = transport
+            .refresh_request("synthetic-refresh", &identity)
+            .unwrap();
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(
+            request.url().as_str(),
+            format!(
+                "{}{}",
+                source.origin(),
+                if native {
+                    "/api/v1/deviceToken/refresh"
+                } else {
+                    "/api/v1/jobToken/refresh"
+                }
+            )
+        );
+        assert!(request.headers().get(header::AUTHORIZATION).is_none());
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            if native {
+                serde_json::json!({"refresh_token":"synthetic-refresh", "machine_id":identity.machine_id})
+            } else {
+                serde_json::json!({"refresh_token":"synthetic-refresh"})
+            }
+        );
+    }
+}
+
+#[test]
+fn device_poll_numeric_expiry_is_not_interpreted_as_refresh_seconds() {
+    let poll = serde_json::json!({"token":"synthetic-device", "user_id":"synthetic-cn", "expires_at":1893456000i64});
+    assert!(parse_device_poll(&poll, 10000000000).is_err());
+}
+
+#[test]
+fn device_poll_only_404_is_pending_and_other_non200_responses_fail_closed() {
+    for status in 100..=599 {
+        let status = reqwest::StatusCode::from_u16(status).unwrap();
+        let result = response_status(Endpoint::DevicePoll, status);
+        if status == reqwest::StatusCode::NOT_FOUND {
+            assert_eq!(result, Ok(true));
+        } else if status == reqwest::StatusCode::OK {
+            assert_eq!(result, Ok(false));
+        } else {
+            assert!(result.is_err());
+        }
+    }
+    assert!(response_status(Endpoint::DeviceRefresh, reqwest::StatusCode::NOT_FOUND).is_err());
+    assert!(response_status(Endpoint::Refresh, reqwest::StatusCode::NOT_FOUND).is_err());
+    assert_eq!(
+        response_status(Endpoint::Userinfo, reqwest::StatusCode::CREATED),
+        Ok(false)
+    );
 }

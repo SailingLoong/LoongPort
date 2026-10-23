@@ -19,7 +19,12 @@ import type {
 } from "@/lib/api/minimaxCode";
 import zh from "@/i18n/locales/zh.json";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openExternal: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  openExternal: vi.fn(),
+  open: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: mocks.openExternal },
@@ -128,6 +133,9 @@ beforeEach(async () => {
   catalog = [account()];
   handlers = {};
   mocks.invoke.mockReset();
+  mocks.open
+    .mockReset()
+    .mockResolvedValue("/fixture/.minimax/auth/prod/cn/mcode-public/auth.json");
   mocks.openExternal.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockImplementation(
     async (command: string, payload: Record<string, string> = {}) => {
@@ -601,7 +609,133 @@ describe("MiniMax Code in the original authentication center", () => {
   });
 });
 
+it("exposes a staged import entry through the existing account workspace without reading credentials", async () => {
+  await mount();
+  fireEvent.click(
+    miniMax.getByRole("button", { name: "导入本机 MiniMax CLI 账号" }),
+  );
+  expect(page.getByRole("dialog")).toHaveTextContent("导入公共 CLI 会话");
+  expect(page.getByRole("button", { name: "读取本地预览" })).toBeDisabled();
+  expect(
+    page.getByRole("button", { name: "加密保存仅访问账号" }),
+  ).toBeDisabled();
+  expect(calls("preview_minimax_native_file")).toHaveLength(0);
+  expect(calls("begin_minimax_code_authorization")).toHaveLength(0);
+});
+
 afterEach(() => {
   cleanup();
   queryClient.clear();
+});
+
+it("enables automatic claiming only for the chosen account without claiming immediately", async () => {
+  catalog = [account("code-a"), account("code-b", { region: "global" })];
+  handlers.set_minimax_code_automatic_claim = () => {
+    catalog[0] = {
+      ...catalog[0],
+      autoClaimEnabled: true,
+      autoClaimRevision: 1,
+    };
+    return catalog[0];
+  };
+  await mount();
+  fireEvent.click(button("开启自动签到", "code-a"));
+  await waitFor(() => expect(button("关闭自动签到", "code-a")).toBeEnabled());
+  expect(button("开启自动签到", "code-b")).toBeEnabled();
+  expect(calls("set_minimax_code_automatic_claim")).toEqual([
+    [
+      "set_minimax_code_automatic_claim",
+      { id: "code-a", authGeneration: 1, policyRevision: 0, enabled: true },
+    ],
+  ]);
+  expect(calls("claim_minimax_code_today")).toEqual([]);
+});
+
+it("re-reads the authoritative account catalog after native save and preserves automatic controls", async () => {
+  catalog = [];
+  const preview = {
+    previewId: "synthetic-native",
+    source: "publicCliOAuthV1",
+    region: "cn",
+    maskedSubject: null,
+    expiresAtMs: 1900000000000,
+    stage: "preview",
+    verifiedUserId: null,
+    label: null,
+    canSave: false,
+  };
+  handlers.preview_minimax_native_file = () => preview;
+  handlers.verify_minimax_native_import = () => ({
+    ...preview,
+    stage: "verified",
+    verifiedUserId: "verified-code-a",
+    label: "Code code-a",
+    canSave: true,
+  });
+  handlers.save_minimax_native_import = () => {
+    catalog = [
+      account("code-a", {
+        credentialKind: "nativeAccessOnly",
+        credentialExpiresAt: 1900000000000,
+        requiresReimport: false,
+        canRefreshCredentials: false,
+      }),
+    ];
+    return account("wrong-save-response");
+  };
+  await mount();
+  fireEvent.click(
+    miniMax.getByRole("button", { name: "导入本机 MiniMax CLI 账号" }),
+  );
+  fireEvent.click(page.getByRole("button", { name: "选择 auth.json" }));
+  await page.findByDisplayValue(
+    "/fixture/.minimax/auth/prod/cn/mcode-public/auth.json",
+  );
+  fireEvent.click(
+    page.getByRole("checkbox", { name: "允许在本地读取所选文件" }),
+  );
+  fireEvent.click(page.getByRole("button", { name: "读取本地预览" }));
+  await waitFor(() =>
+    expect(
+      page.getByRole("checkbox", {
+        name: "允许将此账号的访问令牌发送至所选地区的 MiniMax 官方服务以验证账号资料",
+      }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(
+    page.getByRole("checkbox", {
+      name: "允许将此账号的访问令牌发送至所选地区的 MiniMax 官方服务以验证账号资料",
+    }),
+  );
+  fireEvent.click(page.getByRole("button", { name: "联网验证账号" }));
+  await page.findByText("verified-code-a");
+  fireEvent.click(
+    page.getByRole("checkbox", {
+      name: "将此访问令牌的副本保存至 LoongPort 加密账号保管库",
+    }),
+  );
+  fireEvent.click(page.getByRole("button", { name: "加密保存仅访问账号" }));
+  await waitFor(() => expect(row()).toBeInTheDocument());
+  expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+  expect(
+    miniMax.queryByText("Code wrong-save-response"),
+  ).not.toBeInTheDocument();
+  expect(button("开启自动签到")).toBeEnabled();
+  expect(calls("set_minimax_code_automatic_claim")).toHaveLength(0);
+  expect(calls("claim_minimax_code_today")).toHaveLength(0);
+  expect(mocks.openExternal).not.toHaveBeenCalled();
+});
+it("displays native access expiry and backend reimport capability without promising credential renewal", async () => {
+  catalog = [
+    account("code-a", {
+      credentialKind: "nativeAccessOnly",
+      credentialExpiresAt: 1900000000000,
+      requiresReimport: true,
+      canRefreshCredentials: false,
+    }),
+  ];
+  await mount();
+  expect(row()).toHaveTextContent("仅访问凭据，不会自动续期");
+  expect(row()).toHaveTextContent("访问凭据到期：");
+  expect(row()).toHaveTextContent("请在 CLI 重新登录，再明确重新导入此账号。");
 });

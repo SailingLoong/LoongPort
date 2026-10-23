@@ -192,6 +192,125 @@ describe("ZCode official login dialog", () => {
     expect(zcodeLoginApi.begin).toHaveBeenCalledTimes(2);
   });
 
+  it("offers local import after a terminal login failure without restarting OAuth", async () => {
+    const onImportLocal = vi.fn();
+    const onClose = vi.fn();
+    vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(
+      result("failed", {
+        authorization: null,
+        error: {
+          code: "zcode.account.official_unavailable",
+          remedy: "queryOriginal",
+          committed: false,
+        },
+      }),
+    );
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={onClose}
+        onSaved={vi.fn()}
+        onImportLocal={onImportLocal}
+      />,
+    );
+    const local = await screen.findByRole("button", {
+      name: "Import from local ZCode instead",
+    });
+    await waitFor(() => expect(local).toBeEnabled());
+    fireEvent.click(local);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onImportLocal).toHaveBeenCalledOnce();
+    expect(zcodeLoginApi.cancel).toHaveBeenCalledExactlyOnceWith("flow-one");
+    expect(zcodeLoginApi.begin).not.toHaveBeenCalled();
+    expect(zcodeLoginApi.save).not.toHaveBeenCalled();
+  });
+
+  it("offers local import when starting official authorization fails before a flow exists", async () => {
+    const onImportLocal = vi.fn();
+    vi.mocked(zcodeLoginApi.begin).mockRejectedValue({
+      code: "zcode.account.official_unavailable",
+      remedy: "queryOriginal",
+      committed: false,
+    });
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+        onImportLocal={onImportLocal}
+      />,
+    );
+    const begin = screen.getByRole("button", {
+      name: "Continue official sign-in",
+    });
+    await waitFor(() => expect(begin).toBeEnabled());
+    expect(
+      screen.queryByRole("button", { name: "Import from local ZCode instead" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(begin);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Import from local ZCode instead",
+      }),
+    );
+    expect(onImportLocal).toHaveBeenCalledOnce();
+    expect(zcodeLoginApi.cancel).not.toHaveBeenCalled();
+    expect(zcodeLoginApi.confirmKey).not.toHaveBeenCalled();
+    expect(zcodeLoginApi.save).not.toHaveBeenCalled();
+  });
+
+  it("does not offer local import when a Key was already created", async () => {
+    vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(
+      result("failed", {
+        keyCreated: true,
+        error: {
+          code: "zcode.account.official_unavailable",
+          remedy: "queryOriginal",
+          committed: false,
+        },
+      }),
+    );
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+        onImportLocal={vi.fn()}
+      />,
+    );
+    await screen.findByRole("heading", {
+      name: "Official sign-in could not complete",
+    });
+    expect(
+      screen.queryByRole("button", { name: "Import from local ZCode instead" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer local import when a login Key write may still need reconciliation", async () => {
+    vi.mocked(zcodeLoginApi.lastProgress).mockResolvedValue(
+      result("failed", {
+        keyMayExist: true,
+        error: {
+          code: "zcode.account.key_result_unknown",
+          remedy: "queryOriginal",
+          committed: false,
+        },
+      }),
+    );
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+        onImportLocal={vi.fn()}
+      />,
+    );
+    await screen.findAllByText(/The official Key may already exist/);
+    expect(
+      screen.queryByRole("button", { name: "Import from local ZCode instead" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("requires specific account and personal project consent before creating a Key", async () => {
     mount();
     await begin();

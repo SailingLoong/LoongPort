@@ -55,6 +55,11 @@ impl PromptService {
         state: &AppState,
         app: AppType,
     ) -> Result<IndexMap<String, Prompt>, AppError> {
+        if !app.supports_prompts() {
+            return Err(AppError::InvalidInput(
+                "This app does not support Prompts".into(),
+            ));
+        }
         if matches!(app, AppType::Pi) {
             return get_pi_prompts(state);
         }
@@ -89,6 +94,11 @@ impl PromptService {
         id: &str,
         prompt: Prompt,
     ) -> Result<(), AppError> {
+        if !app.supports_prompts() {
+            return Err(AppError::InvalidInput(
+                "This app does not support Prompts".into(),
+            ));
+        }
         if matches!(app, AppType::Pi) {
             return upsert_pi_prompt(state, id, prompt);
         }
@@ -547,6 +557,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcode_prompt_management_rejects_before_database_mutation() {
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().expect("create in-memory database"),
+        ))
+        .unwrap();
+        let app = crate::app_config::AppType::Mcode;
+        assert!(super::PromptService::upsert_prompt(
+            &state,
+            app.clone(),
+            "mcode-prompt",
+            prompt("mcode-prompt", "unused", false)
+        )
+        .is_err());
+        assert!(state.db.get_prompts(app.as_str()).unwrap().is_empty());
+        assert!(super::PromptService::get_prompts(&state, app).is_err());
+    }
+
     /// ⭐ **导入 / 云同步恢复不该把生图栏报成 Prompt 同步失败。**
     ///
     /// `run_post_import_sync` 走 `sync_all_to_live` 扫全部 app；生图栏没有
@@ -563,6 +591,8 @@ mod tests {
             .expect("生图栏没有提示词文件，该是 Ok 而不是失败");
         super::PromptService::sync_to_live(&state, crate::app_config::AppType::ClaudeDesktop)
             .expect("Claude Desktop 该被跳过");
+        super::PromptService::sync_to_live(&state, crate::app_config::AppType::Mcode)
+            .expect("Mcode has no managed prompt file");
     }
 
     #[test]

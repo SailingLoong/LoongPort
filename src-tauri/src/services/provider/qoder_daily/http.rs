@@ -19,10 +19,12 @@ pub struct PatDeclaration {
     pub credential_generation: String,
     pub source: CredentialSource,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CredentialSource {
     InternationalQoderPat,
+    ChinaQoderPat,
+    ChinaQoderDevice,
 }
 
 pub(super) struct Session {
@@ -33,6 +35,7 @@ pub(super) struct HttpAdapter {
     client: reqwest::Client,
     origin: Url,
     declaration: Option<PatDeclaration>,
+    continuous: Option<automatic::Lease>,
     device: Box<dyn DeviceSource>,
 }
 impl HttpAdapter {
@@ -42,6 +45,12 @@ impl HttpAdapter {
             declaration,
             Box::new(InstalledApp),
         )
+    }
+    /// Backend-only persisted consent, distinct from a foreground declaration.
+    pub(super) fn continuous(lease: automatic::Lease) -> Result<Self, AppError> {
+        let mut adapter = Self::production(None)?;
+        adapter.continuous = Some(lease);
+        Ok(adapter)
     }
     fn new(
         origin: Url,
@@ -63,6 +72,7 @@ impl HttpAdapter {
             client,
             origin,
             declaration,
+            continuous: None,
             device,
         })
     }
@@ -73,6 +83,22 @@ impl HttpAdapter {
         bearer: Option<&str>,
         device: Option<&DeviceIdentity>,
         body: Option<Value>,
+    ) -> Result<HttpResponse, AppError> {
+        self.request_admitted(method, path, bearer, device, body, None)
+    }
+    fn request_admitted(
+        &self,
+        method: Method,
+        path: &str,
+        bearer: Option<&str>,
+        device: Option<&DeviceIdentity>,
+        body: Option<Value>,
+        admission: Option<(
+            &automatic::Admission<'_>,
+            &VerifiedContext,
+            &BoundCampaign,
+            &clock::Observation,
+        )>,
     ) -> Result<HttpResponse, AppError> {
         let url = self.origin.join(path).map_err(|_| unavailable())?;
         let mut request = self
@@ -99,7 +125,14 @@ impl HttpAdapter {
         }
         let started = Instant::now();
         let response = crate::rt::block_on(async {
-            let response = request.send().await.map_err(|_| unavailable())?;
+            let response = match admission {
+                Some((admission, context, binding, observation)) => {
+                    admission
+                        .send(context, binding, observation, || request.send())
+                        .await?
+                }
+                None => request.send().await.map_err(|_| unavailable())?,
+            };
             Ok::<_, AppError>(HttpResponse::read(response, started).await)
         })?;
         if !self.matches(&response.response) {
@@ -150,13 +183,16 @@ impl HttpAdapter {
 }
 impl CampaignAdapter for HttpAdapter {
     fn verify(&self, provider: &Provider, generation: &str) -> Result<VerifiedContext, Dependency> {
-        let Some(declaration) = &self.declaration else {
-            return Err(Dependency::AuthFamilyUnverified);
-        };
-        if declaration.provider_id != provider.id
-            || declaration.credential_generation != generation
-            || declaration.source != CredentialSource::InternationalQoderPat
-        {
+        let declared = self.declaration.as_ref().is_some_and(|declaration| {
+            declaration.provider_id == provider.id
+                && declaration.credential_generation == generation
+                && declaration.source == CredentialSource::InternationalQoderPat
+        });
+        let continuous = self
+            .continuous
+            .as_ref()
+            .is_some_and(|lease| lease.matches(provider) && lease.generation == generation);
+        if (!declared && !continuous) || (self.declaration.is_some() && self.continuous.is_some()) {
             return Err(Dependency::AuthFamilyUnverified);
         }
         self.device.availability()?;
@@ -205,6 +241,13 @@ impl CampaignAdapter for HttpAdapter {
             .and_then(contract::listing_subject)
             .ok_or(Dependency::IdentityUnavailable)?
             .to_owned();
+        if self
+            .continuous
+            .as_ref()
+            .is_some_and(|lease| lease.subject != uid)
+        {
+            return Err(Dependency::IdentityMismatch);
+        }
         let device = self.device.resolve(&uid)?;
         Ok(VerifiedContext {
             identity: Identity {
@@ -253,6 +296,33 @@ impl CampaignAdapter for HttpAdapter {
                 binding.target().campaign_id
             ),
         )
+    }
+    fn post_admitted(
+        &self,
+        context: &VerifiedContext,
+        binding: &BoundCampaign,
+        observation: &clock::Observation,
+        admission: &automatic::Admission<'_>,
+    ) -> Result<Response, AppError> {
+        let session = context.session.as_ref().ok_or_else(unavailable)?;
+        if context.origin != self.origin || !admission.matches(context) {
+            return Err(unavailable());
+        }
+        let http = self.request_admitted(
+            Method::POST,
+            &format!(
+                "/sash/api/v1/me/campaigns/{}/claim",
+                binding.target().campaign_id
+            ),
+            Some(&session.bearer),
+            Some(&session.device),
+            Some(serde_json::json!({})),
+            Some((admission, context, binding, observation)),
+        )?;
+        Ok(Response {
+            identity: context.identity.clone(),
+            http,
+        })
     }
 }
 #[cfg(test)]

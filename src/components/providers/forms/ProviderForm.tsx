@@ -93,6 +93,7 @@ import { GrokBuildProviderForm } from "./GrokBuildProviderForm";
 import { CodexFormFields } from "./CodexFormFields";
 import { GeminiFormFields } from "./GeminiFormFields";
 import { PiProviderForm } from "./PiProviderForm";
+import { McodeProviderForm } from "./McodeProviderForm";
 import { OmoFormFields } from "./OmoFormFields";
 import { parseOmoOtherFieldsObject } from "@/types/omo";
 import {
@@ -149,12 +150,19 @@ type PresetEntry = {
 
 function getPresetProviderType(
   preset: PresetEntry["preset"] | null | undefined,
-): "github_copilot" | "codex_oauth" | "xai_oauth" | "qoder_sdk" | undefined {
+):
+  | "github_copilot"
+  | "codex_oauth"
+  | "xai_oauth"
+  | "qoder_sdk"
+  | "qoder_cn"
+  | undefined {
   if (!preset || !("providerType" in preset)) return undefined;
   return preset.providerType === "github_copilot" ||
     preset.providerType === "codex_oauth" ||
     preset.providerType === "xai_oauth" ||
-    preset.providerType === "qoder_sdk"
+    preset.providerType === "qoder_sdk" ||
+    preset.providerType === "qoder_cn"
     ? preset.providerType
     : undefined;
 }
@@ -266,6 +274,7 @@ export interface ProviderFormProps {
 }
 
 export function ProviderForm(props: ProviderFormProps) {
+  if (props.appId === "mcode") return <McodeProviderForm {...props} />;
   if (props.appId === "pi") {
     return <PiProviderForm {...props} />;
   }
@@ -857,8 +866,9 @@ function ProviderFormFull({
   const initialProviderType = initialData?.meta?.providerType;
   const isQoderProvider =
     appId === "codex" &&
-    (presetProviderType === "qoder_sdk" ||
-      (!selectedPresetEntry && initialProviderType === "qoder_sdk"));
+    (["qoder_sdk", "qoder_cn"].includes(presetProviderType ?? "") ||
+      (!selectedPresetEntry &&
+        ["qoder_sdk", "qoder_cn"].includes(initialProviderType ?? "")));
   const isCopilotProvider =
     appId === "claude" &&
     (presetProviderType === "github_copilot" ||
@@ -1766,7 +1776,7 @@ function ProviderFormFull({
         : isXaiOauthProvider
           ? "xai_oauth"
           : isQoderProvider
-            ? "qoder_sdk"
+            ? (presetProviderType ?? initialProviderType)
             : undefined;
 
     const nextMeta: ProviderMeta = {
@@ -2453,7 +2463,7 @@ function ProviderFormFull({
             <p className="text-sm text-muted-foreground">
               {t("qoderHttpIdentity.configNotice", {
                 defaultValue:
-                  "Qoder 国际版类型保留原供应商路由与独立积分入口。保存配置不会自动交换凭据；推理身份需在供应商卡片中明确声明国际版 PAT 后主动建立，旧 SDK Token 不会自动转换为 PAT。建立身份后，HTTP 推理仍需按实际模型与账号权益验证。积分领取仍需独立声明与已验证的设备组件。模型请按实际可用配置填写。",
+                  "Qoder 按所选国际版或 CN 类型隔离凭据与端点。保存配置不会自动交换凭据；需在卡片声明本人独立授权的对应区域 PAT 并建立身份，旧 SDK Token 不会自动转换为 PAT。CN 原生浏览器登录与签到尚未接通，不能使用官方客户端复制的登录态。HTTP 推理仍需按实际模型与账号权益验证；积分权益分别验收。模型请按实际可用配置填写。",
               })}
             </p>
           )}

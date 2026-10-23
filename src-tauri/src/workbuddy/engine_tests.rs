@@ -256,45 +256,21 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
         .unwrap()
         .contains(&Endpoint::Claim));
 
-    let mut q = vec![status(false)];
-    q.extend(resource(10.0));
-    let reconciled = Fake::new(q);
-    let e = Engine {
-        session: &s,
-        transport: &reconciled,
-        clock: &super::clock::FixedClock(NOW),
-    };
-    assert_eq!(
-        e.claim(&id).await.unwrap().claim_state,
-        ClaimState::Available
-    );
-    assert!(store::load(&s, &b).unwrap()[0].pending.is_none());
-    assert!(!reconciled.calls.lock().unwrap().contains(&Endpoint::Claim));
-
-    let mut q = vec![status(false)];
-    q.extend(resource(10.0));
-    q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
-    q.push(status(true));
-    q.extend(resource(30.0));
-    let explicit_retry = Fake::new(q);
-    let e = Engine {
-        session: &s,
-        transport: &explicit_retry,
-        clock: &super::clock::FixedClock(NOW),
-    };
-    assert_eq!(e.claim(&id).await.unwrap().claim_state, ClaimState::Claimed);
-    for transport in [&f, &explicit_retry] {
+    for _ in 0..2 {
+        let mut q = vec![status(false)];
+        q.extend(resource(10.0));
+        let reconciled = Fake::new(q);
+        let e = Engine {
+            session: &s,
+            transport: &reconciled,
+            clock: &super::clock::FixedClock(NOW),
+        };
         assert_eq!(
-            transport
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|endpoint| **endpoint == Endpoint::Claim)
-                .count(),
-            1
+            e.claim(&id).await.unwrap().claim_state,
+            ClaimState::Unconfirmed
         );
-        assert!(transport.queue.lock().unwrap().is_empty());
+        assert!(store::load(&s, &b).unwrap()[0].pending.is_some());
+        assert!(!reconciled.calls.lock().unwrap().contains(&Endpoint::Claim));
     }
 }
 
@@ -448,7 +424,7 @@ fn identities_are_bound_to_owner_and_official_cn_domain() {
     }
 }
 #[tokio::test]
-async fn pending_unclaimed_is_unlocked_for_next_explicit_click_without_same_click_submit() {
+async fn pending_unclaimed_remains_blocked_without_an_authoritative_receipt() {
     let (s, id) = setup();
     let b = store::binding(&s).unwrap();
     let mut rows = store::load(&s, &b).unwrap();
@@ -469,10 +445,10 @@ async fn pending_unclaimed_is_unlocked_for_next_explicit_click_without_same_clic
     };
     assert_eq!(
         e.claim(&id).await.unwrap().claim_state,
-        ClaimState::Available
+        ClaimState::Unconfirmed
     );
     assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
-    assert!(store::load(&s, &b).unwrap()[0].pending.is_none());
+    assert!(store::load(&s, &b).unwrap()[0].pending.is_some());
 }
 struct MovingClock(std::sync::atomic::AtomicI64);
 impl super::clock::Clock for MovingClock {
@@ -964,7 +940,7 @@ async fn batch_verification_failure_does_not_submit_or_stop_other_accounts() {
 }
 
 #[tokio::test]
-async fn batch_cancellation_keeps_pending_and_next_explicit_batch_reconciles_before_retry() {
+async fn batch_cancellation_keeps_pending_and_later_batches_skip_unresolved_account() {
     let (session, ids) = account_isolation_fixture();
     let mut initial = batch_a();
     initial.truncate(5);
@@ -983,15 +959,8 @@ async fn batch_cancellation_keeps_pending_and_next_explicit_batch_reconciles_bef
     assert!(store::load(&session, &binding).unwrap()[0]
         .pending
         .is_some());
-    let mut recovery = vec![status(false)];
-    recovery.extend(resource(10.0));
-    let mut queue: Vec<_> = recovery
-        .into_iter()
-        .map(|(e, r)| (Domain::CodeBuddy, "same-uid", "SYNTHETIC_CODE_A", e, r))
-        .collect();
-    queue.extend(batch_b());
+    let mut queue = batch_b();
     queue.extend(batch_c());
-    queue.extend(batch_a());
     let transport = BatchFake::new(queue, false);
     let restarted = Engine {
         session: &session,
@@ -999,47 +968,68 @@ async fn batch_cancellation_keeps_pending_and_next_explicit_batch_reconciles_bef
         clock: &super::clock::FixedClock(NOW),
     };
     let results = restarted.claim_all().await.unwrap();
-    assert_eq!(results[0].account.claim_state, ClaimState::Available);
-    assert!(results[0].error.is_none());
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].account.id, ids[1]);
+    assert_eq!(results[1].account.id, ids[2]);
+    assert!(results
+        .iter()
+        .all(|r| r.error.is_none() && r.account.claim_state == ClaimState::Claimed));
     assert!(!transport
         .calls
         .lock()
         .unwrap()
         .iter()
         .any(|c| c.0 == Domain::CodeBuddy && c.1 == "same-uid" && c.2 == Endpoint::Claim));
-    let retried = restarted.claim_all().await.unwrap();
-    assert_eq!(retried.len(), 1);
-    assert_eq!(retried[0].account.id, ids[0]);
-    assert_eq!(retried[0].account.claim_state, ClaimState::Claimed);
+    assert!(restarted.claim_all().await.unwrap().is_empty());
+    assert!(store::load(&session, &binding).unwrap()[0]
+        .pending
+        .is_some());
     assert!(transport.queue.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn batch_busy_account_is_reported_while_other_accounts_finish_and_next_batch_recovers() {
+    struct WaitingStatus(tokio::sync::Notify);
+    impl Transport for WaitingStatus {
+        fn request<'a>(
+            &'a self,
+            e: Endpoint,
+            _: Option<&'a Account>,
+            _: Option<&'a str>,
+            _: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+            Box::pin(async move {
+                assert_eq!(e, Endpoint::Status);
+                self.0.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
     let (session, ids) = account_isolation_fixture();
+    let manual_transport = WaitingStatus(tokio::sync::Notify::new());
+    let manual_engine = Engine {
+        session: &session,
+        transport: &manual_transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut manual = Box::pin(manual_engine.claim(&ids[1]));
+    tokio::select! { _ = &mut manual => panic!("manual must be in flight"), _ = manual_transport.0.notified() => {} }
     let mut queue = batch_a();
     queue.extend(batch_c());
     queue.extend(batch_b());
-    let transport = BatchFake::new(queue, true);
+    let transport = BatchFake::new(queue, false);
     let engine = Engine {
         session: &session,
         transport: &transport,
         clock: &super::clock::FixedClock(NOW),
     };
-    let mut batch = Box::pin(engine.claim_all());
-    tokio::select! { _ = &mut batch => panic!("batch must be in flight"), _ = transport.started.notified() => {} }
-    let mut manual = Box::pin(engine.claim(&ids[1]));
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(manual.as_mut().poll(&mut context).is_pending());
-    transport.release.notify_one();
-    assert!(batch.as_mut().poll(&mut context).is_pending());
-    drop(manual);
-    let results = batch.await.unwrap();
+    let results = engine.claim_all().await.unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[1].error, Some(Failure::Busy));
     assert_eq!(results[1].account.id, ids[1]);
     assert_eq!(results[0].account.claim_state, ClaimState::Claimed);
     assert_eq!(results[2].account.claim_state, ClaimState::Claimed);
+    drop(manual);
     let retry = engine.claim_all().await.unwrap();
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].account.id, ids[1]);
@@ -1088,4 +1078,856 @@ async fn batch_empty_vault_has_no_network_effects() {
     };
     assert!(engine.claim_all().await.unwrap().is_empty());
     assert!(transport.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unresolved_attempt_never_reopens_on_read_or_next_day() {
+    for offset in [0, 86400000] {
+        let (s, id) = setup();
+        let b = store::binding(&s).unwrap();
+        let mut rows = store::load(&s, &b).unwrap();
+        rows[0].pending = Some(Attempt {
+            day: today(NOW),
+            before: Some(10.0),
+            expected: None,
+            receipt: ClaimState::Unconfirmed,
+        });
+        store::save(&s, &b, rows).unwrap();
+        for _ in 0..2 {
+            let mut q = vec![status(false)];
+            q.extend(resource(10.0));
+            let f = Fake::new(q);
+            let e = Engine {
+                session: &s,
+                transport: &f,
+                clock: &super::clock::FixedClock(NOW + offset),
+            };
+            let row = e.claim(&id).await.unwrap();
+            assert!(
+                store::load(&s, &b).unwrap()[0].pending.is_some(),
+                "unknown POST must survive day and repeated reconciliation"
+            );
+            assert!(!row.can_claim);
+            assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
+        }
+    }
+}
+
+// Root-scoped offline dispatch rendezvous: no live network or global test ordering.
+struct DispatchGate {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+fn gates(
+) -> &'static Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<DispatchGate>>> {
+    static GATES: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Arc<DispatchGate>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+pub(super) async fn before_claim_dispatch(session: &SecretSession) {
+    let gate = gates().lock().unwrap().remove(session.root());
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
+}
+fn gate(session: &SecretSession) -> std::sync::Arc<DispatchGate> {
+    let gate = std::sync::Arc::new(DispatchGate {
+        reached: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    });
+    gates()
+        .lock()
+        .unwrap()
+        .insert(session.root().into(), gate.clone());
+    gate
+}
+async fn enable(e: &Engine<'_, impl Transport>, id: &str) -> AccountView {
+    let row = e
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap();
+    e.set_automatic(
+        id,
+        row.generation,
+        row.auto_claim_revision,
+        row.auto_claim_policy_version,
+        true,
+    )
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn automatic_defaults_off_optin_bound_and_stale_setter_rejected() {
+    let (s, id) = setup();
+    let f = Fake::new(vec![]);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    e.automatic_tick().await.unwrap();
+    let before = e.list().await.unwrap().remove(0);
+    assert!(!before.auto_claim_enabled);
+    let after = enable(&e, &id).await;
+    assert!(after.auto_claim_enabled);
+    assert_eq!(after.auto_claim_revision, before.auto_claim_revision + 1);
+    assert!(e
+        .set_automatic(
+            &id,
+            before.generation,
+            before.auto_claim_revision,
+            before.auto_claim_policy_version,
+            false
+        )
+        .await
+        .is_err());
+    assert!(e
+        .set_automatic(&id, after.generation, after.auto_claim_revision, 999, true)
+        .await
+        .is_err());
+    let b = store::binding(&s).unwrap();
+    let mut rows = store::load(&s, &b).unwrap();
+    rows[0].account.token = "SYNTHETIC_REPLACEMENT".into();
+    store::save(&s, &b, rows).unwrap();
+    e.automatic_tick().await.unwrap();
+    assert!(!e.list().await.unwrap()[0].auto_claim_enabled);
+    assert!(f.calls.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn opted_in_account_claims_once_and_never_infers_award() {
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":7}))));
+    q.push(status(true));
+    q.extend(resource(17.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    e.automatic_tick().await.unwrap();
+    let row = e.list().await.unwrap().remove(0);
+    assert_eq!(row.credited, Some(7.0));
+    assert!(row.auto_claim_enabled);
+    assert_eq!(
+        f.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
+}
+#[tokio::test]
+async fn disable_after_persist_before_dispatch_clears_only_proven_unsent_intent() {
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let on = enable(&e, &id).await;
+    let gate = gate(&s);
+    let mut tick = Box::pin(e.automatic_tick());
+    tokio::select! { _ = &mut tick => panic!("must pause after persistence"), _ = gate.reached.notified() => {} }
+    assert!(store::load(&s, &store::binding(&s).unwrap()).unwrap()[0]
+        .pending
+        .is_some());
+    let off = e
+        .set_automatic(
+            &id,
+            on.generation,
+            on.auto_claim_revision,
+            on.auto_claim_policy_version,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(!off.auto_claim_enabled);
+    gate.resume.notify_one();
+    tick.await.unwrap();
+    assert!(store::load(&s, &store::binding(&s).unwrap()).unwrap()[0]
+        .pending
+        .is_none());
+    assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+#[tokio::test]
+async fn lock_unblock_before_dispatch_invalidates_old_lease_without_write() {
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    let gate = gate(&s);
+    let mut tick = Box::pin(e.automatic_tick());
+    tokio::select! { _ = &mut tick => panic!("must pause"), _ = gate.reached.notified() => {} }
+    s.set_blocked(true);
+    s.set_blocked(false);
+    gate.resume.notify_one();
+    tick.await.unwrap();
+    assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
+    s.set_blocked(true);
+    assert!(e.automatic_tick().await.is_err());
+    s.set_blocked(false);
+}
+#[tokio::test]
+async fn pending_survives_optout_reenable_and_future_automatic_ticks_without_reads() {
+    let (s, id) = setup();
+    let b = store::binding(&s).unwrap();
+    let mut rows = store::load(&s, &b).unwrap();
+    rows[0].pending = Some(Attempt {
+        day: today(NOW),
+        before: Some(10.0),
+        expected: None,
+        receipt: ClaimState::Unconfirmed,
+    });
+    store::save(&s, &b, rows).unwrap();
+    let f = Fake::new(vec![]);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW + 86400000),
+    };
+    let on = enable(&e, &id).await;
+    e.set_automatic(
+        &id,
+        on.generation,
+        on.auto_claim_revision,
+        on.auto_claim_policy_version,
+        false,
+    )
+    .await
+    .unwrap();
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    assert!(e.list().await.unwrap()[0].auto_claim_blocked);
+    assert!(store::load(&s, &b).unwrap()[0].pending.is_some());
+    assert!(f.calls.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn reauthorization_revokes_automatic_consent_even_for_same_token() {
+    let (s, id) = setup();
+    let f = Fake::new(vec![]);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let on = enable(&e, &id).await;
+    let authorization = Fake::new(vec![
+        (
+            Endpoint::AuthState,
+            Ok(
+                json!({"code":0,"data":{"state":"auto-relogin","authUrl":"https://www.codebuddy.cn/login?state=auto-relogin"}}),
+            ),
+        ),
+        (
+            Endpoint::AuthToken,
+            Ok(
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_TOKEN_CANARY","domain":"www.codebuddy.cn"}}),
+            ),
+        ),
+        (
+            Endpoint::Profile,
+            Ok(json!({"code":0,"data":{"uid":"synthetic-uid","domain":"www.codebuddy.cn"}})),
+        ),
+    ]);
+    let login = super::authorization::begin(&s, &authorization, NOW)
+        .await
+        .unwrap();
+    super::authorization::finish(&s, &authorization, &login.flow_id, NOW + 1)
+        .await
+        .unwrap();
+    let after = e.list().await.unwrap().remove(0);
+    assert!(!after.auto_claim_enabled);
+    assert!(after.generation > on.generation);
+    assert!(e
+        .set_automatic(
+            &id,
+            on.generation,
+            on.auto_claim_revision,
+            on.auto_claim_policy_version,
+            true
+        )
+        .await
+        .is_err());
+    e.automatic_tick().await.unwrap();
+    assert!(f.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn auto_claim_only_uses_the_opted_in_account_identity() {
+    let (session, ids) = account_isolation_fixture();
+    let transport = BatchFake::new(batch_b(), false);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&engine, &ids[1]).await;
+    engine.automatic_tick().await.unwrap();
+    assert!(transport.queue.lock().unwrap().is_empty());
+    assert!(transport
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|c| c.0 == Domain::WorkBuddy && c.1 == "same-uid"));
+    let rows = engine.list().await.unwrap();
+    assert!(!rows[0].auto_claim_enabled);
+    assert!(!rows[2].auto_claim_enabled);
+}
+#[tokio::test]
+async fn uncertain_claim_failure_and_optout_after_dispatch_never_replay() {
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    q.push((Endpoint::Claim, Err(Failure::NeedsVerification)));
+    q.push(status(false));
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    let row = e.list().await.unwrap().remove(0);
+    assert!(row.auto_claim_blocked);
+    assert_eq!(row.credited, None);
+    e.set_automatic(
+        &id,
+        row.generation,
+        row.auto_claim_revision,
+        row.auto_claim_policy_version,
+        false,
+    )
+    .await
+    .unwrap();
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    assert_eq!(
+        f.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == Endpoint::Claim)
+            .count(),
+        1
+    );
+}
+#[tokio::test]
+async fn transport_proven_unsent_failure_can_clear_prepared_intent() {
+    struct Unsent(Fake);
+    impl Transport for Unsent {
+        fn request<'a>(
+            &'a self,
+            e: Endpoint,
+            a: Option<&'a Account>,
+            s: Option<&'a str>,
+            n: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+            self.0.request(e, a, s, n)
+        }
+        fn claim<'a>(
+            &'a self,
+            _: &'a Account,
+            _: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+            Box::pin(async { Err(DispatchFailure::NotDispatched(Failure::UnsupportedContext)) })
+        }
+    }
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = Unsent(Fake::new(q));
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    let rows = store::load(&s, &store::binding(&s).unwrap()).unwrap();
+    assert!(rows[0].pending.is_none());
+    assert!(rows[0].attempted_day.is_none());
+    assert!(!f.0.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+#[test]
+fn legacy_account_is_default_off_and_policy_wire_is_single_owner() {
+    let (s, _) = setup();
+    let b = store::binding(&s).unwrap();
+    let rows = store::load(&s, &b).unwrap();
+    let mut legacy = serde_json::to_value(&rows[0]).unwrap();
+    for key in [
+        "generation",
+        "auto_claim_enabled",
+        "auto_claim_revision",
+        "auto_claim_policy_version",
+        "auto_claim_credential",
+        "attempted_day",
+    ] {
+        legacy.as_object_mut().unwrap().remove(key);
+    }
+    let legacy: SavedAccount = serde_json::from_value(legacy).unwrap();
+    assert!(!legacy.automatic_enabled());
+    let commands = include_str!("../commands/workbuddy.rs");
+    let registrations = include_str!("../lib.rs");
+    let frontend = include_str!("../../../src/lib/api/workbuddy.ts");
+    for source in [commands, registrations, frontend] {
+        assert!(source.contains("set_workbuddy_automatic_claim"));
+    }
+    let maintenance = include_str!("../maintenance/mod.rs");
+    assert!(maintenance.contains("start_workbuddy_automatic_claim(app.clone())"));
+    assert!(maintenance.contains(".automatic_tick()"));
+}
+
+#[tokio::test]
+async fn continuously_locked_pre_dispatch_keeps_intent_fail_closed_after_unlock() {
+    let (s, id) = setup();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    let gate = gate(&s);
+    let mut tick = Box::pin(e.automatic_tick());
+    tokio::select! { _ = &mut tick => panic!("must pause"), _ = gate.reached.notified() => {} }
+    s.set_blocked(true);
+    gate.resume.notify_one();
+    tick.await.unwrap();
+    s.set_blocked(false);
+    e.automatic_tick().await.unwrap();
+    assert!(e.list().await.unwrap()[0].auto_claim_blocked);
+    assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+#[test]
+fn automatic_future_is_send_for_existing_scheduler() {
+    fn is_send<T: Send>(_: T) {}
+    let (s, _) = setup();
+    let f = Fake::new(vec![]);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    is_send(e.automatic_tick());
+}
+
+#[tokio::test]
+async fn late_claim_receipt_cannot_overwrite_reauthorized_account_or_revive_consent() {
+    struct InFlight {
+        inner: Fake,
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+    impl Transport for InFlight {
+        fn request<'a>(
+            &'a self,
+            e: Endpoint,
+            a: Option<&'a Account>,
+            s: Option<&'a str>,
+            n: i64,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+            Box::pin(async move {
+                if e == Endpoint::Claim {
+                    self.reached.notify_one();
+                    self.resume.notified().await;
+                    Ok(json!({"code":0,"credit":7}))
+                } else {
+                    self.inner.request(e, a, s, n).await
+                }
+            })
+        }
+    }
+    let (s, id) = setup();
+    let b = store::binding(&s).unwrap();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = InFlight {
+        inner: Fake::new(q),
+        reached: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    };
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let before = enable(&e, &id).await;
+    let mut tick = Box::pin(e.automatic_tick());
+    tokio::select! { _ = &mut tick => panic!("claim must be in flight"), _ = f.reached.notified() => {} }
+    let pending = store::load(&s, &b).unwrap()[0].pending.clone();
+    assert!(pending.is_some());
+    let auth = Fake::new(vec![
+        (
+            Endpoint::AuthState,
+            Ok(
+                json!({"code":0,"data":{"state":"inflight-relogin","authUrl":"https://www.codebuddy.cn/login?state=inflight-relogin"}}),
+            ),
+        ),
+        (
+            Endpoint::AuthToken,
+            Ok(
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_NEW_TOKEN","domain":"www.codebuddy.cn"}}),
+            ),
+        ),
+        (
+            Endpoint::Profile,
+            Ok(json!({"code":0,"data":{"uid":"synthetic-uid","domain":"www.codebuddy.cn"}})),
+        ),
+    ]);
+    let login = super::authorization::begin(&s, &auth, NOW).await.unwrap();
+    super::authorization::finish(&s, &auth, &login.flow_id, NOW + 1)
+        .await
+        .unwrap();
+    f.resume.notify_one();
+    tick.await.unwrap();
+    let saved = store::load(&s, &b).unwrap().remove(0);
+    assert!(saved.generation > before.generation);
+    assert!(!saved.automatic_enabled());
+    assert_eq!(saved.account.token, "SYNTHETIC_NEW_TOKEN");
+    assert!(saved.pending == pending);
+    assert_eq!(saved.credited, None);
+    enable(&e, &id).await;
+    e.automatic_tick().await.unwrap();
+    assert!(f.inner.queue.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unsent_rollback_does_not_clear_a_replacement_pending_attempt() {
+    let (s, id) = setup();
+    let b = store::binding(&s).unwrap();
+    let mut q = vec![status(false)];
+    q.extend(resource(10.0));
+    let f = Fake::new(q);
+    let e = Engine {
+        session: &s,
+        transport: &f,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&e, &id).await;
+    let gate = gate(&s);
+    let mut tick = Box::pin(e.automatic_tick());
+    tokio::select! { _ = &mut tick => panic!("must pause after persistence"), _ = gate.reached.notified() => {} }
+    let mut rows = store::load(&s, &b).unwrap();
+    rows[0].pending.as_mut().unwrap().before = Some(22.0);
+    let replacement = rows[0].pending.clone();
+    store::save(&s, &b, rows).unwrap();
+    gate.resume.notify_one();
+    tick.await.unwrap();
+    assert!(store::load(&s, &b).unwrap()[0].pending == replacement);
+    assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+
+// The gate lives inside the real transport future: reaching it proves refresh
+// has entered HTTP, rather than merely being queued for the catalog mutex.
+struct RefreshReadGate {
+    inner: Fake,
+    endpoint: Endpoint,
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+impl RefreshReadGate {
+    fn new(endpoint: Endpoint, balance: f64, checked: bool) -> Self {
+        let mut requests = resource(balance);
+        requests.push(status(checked));
+        Self {
+            inner: Fake::new(requests),
+            endpoint,
+            reached: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        }
+    }
+}
+impl Transport for RefreshReadGate {
+    fn request<'a>(
+        &'a self,
+        endpoint: Endpoint,
+        account: Option<&'a Account>,
+        state: Option<&'a str>,
+        now: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
+        Box::pin(async move {
+            if endpoint == self.endpoint {
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.request(endpoint, account, state, now).await
+        })
+    }
+}
+async fn refresh_progress<F: Future>(future: F) -> F::Output {
+    tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .expect("unrelated local operation must finish while refresh HTTP is suspended")
+}
+
+#[tokio::test]
+async fn refresh_pending_http_allows_other_accounts_and_minimax_owner_to_progress() {
+    let _minimax = crate::minimax_code::isolated_fixture_guard().await;
+    let (s, ids) = account_isolation_fixture();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&ids[0]));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    assert!(matches!(engine.refresh(&ids[0]).await, Err(Failure::Busy)));
+    assert!(matches!(engine.claim(&ids[0]).await, Err(Failure::Busy)));
+    assert_eq!(refresh_progress(engine.list()).await.unwrap().len(), 3);
+    let minimax = crate::minimax_code::checkin::Engine {
+        session: &s,
+        transport: &crate::minimax_code::http::OfficialHttp,
+    };
+    // Real MiniMax catalog consumer; list has no HTTP side effects.
+    assert!(refresh_progress(minimax.list()).await.unwrap().is_empty());
+    let mut requests = resource(77.0);
+    requests.push(status(true));
+    let other_transport = Fake::new(requests);
+    let other = Engine {
+        session: &s,
+        transport: &other_transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    assert_eq!(
+        refresh_progress(other.refresh(&ids[1]))
+            .await
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(77.0)
+    );
+    gate.resume.notify_one();
+    assert_eq!(refresh.await.unwrap().credits.total_remaining, Some(10.0));
+    let rows = engine.list().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == ids[1])
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(77.0)
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.id == ids[1]).unwrap().claim_state,
+        ClaimState::AlreadyClaimed
+    );
+}
+
+#[tokio::test]
+async fn refresh_pending_http_preserves_concurrent_policy_and_current_account_fields() {
+    let (s, id) = setup();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    let on = refresh_progress(enable(&engine, &id)).await;
+    let off = refresh_progress(engine.set_automatic(
+        &id,
+        on.generation,
+        on.auto_claim_revision,
+        on.auto_claim_policy_version,
+        false,
+    ))
+    .await
+    .unwrap();
+    {
+        let _owner = refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+        let b = store::binding(&s).unwrap();
+        let mut rows = store::load(&s, &b).unwrap();
+        rows[0].account.label = "Updated while reading".into();
+        store::save(&s, &b, rows).unwrap();
+    }
+    gate.resume.notify_one();
+    let refreshed = refresh.await.unwrap();
+    assert!(!refreshed.auto_claim_enabled);
+    assert_eq!(refreshed.auto_claim_revision, off.auto_claim_revision);
+    assert_eq!(refreshed.label, "Updated while reading");
+    assert_eq!(refreshed.credits.total_remaining, Some(10.0));
+}
+
+#[tokio::test]
+async fn refresh_late_result_rejects_relogin_generation_token_identity_deletion_and_epoch() {
+    for endpoint in [Endpoint::Summary, Endpoint::Status] {
+        for change in [
+            "relogin",
+            "generation",
+            "token",
+            "identity",
+            "delete",
+            "epoch",
+        ] {
+            let (s, id) = setup();
+            let gate = RefreshReadGate::new(endpoint, 99.0, true);
+            let engine = Engine {
+                session: &s,
+                transport: &gate,
+                clock: &super::clock::FixedClock(NOW),
+            };
+            let mut refresh = Box::pin(engine.refresh(&id));
+            tokio::select! { _ = &mut refresh => panic!("read must be suspended"), _ = gate.reached.notified() => {} }
+            if change == "relogin" {
+                let auth = Fake::new(vec![
+                    (
+                        Endpoint::AuthState,
+                        Ok(
+                            json!({"code":0,"data":{"state":"refresh-relogin","authUrl":"https://www.codebuddy.cn/login?state=refresh-relogin"}}),
+                        ),
+                    ),
+                    (
+                        Endpoint::AuthToken,
+                        Ok(
+                            json!({"code":0,"data":{"accessToken":"SYNTHETIC_RELOGIN_TOKEN","domain":"www.codebuddy.cn"}}),
+                        ),
+                    ),
+                    (
+                        Endpoint::Profile,
+                        Ok(
+                            json!({"code":0,"data":{"uid":"synthetic-uid","domain":"www.codebuddy.cn"}}),
+                        ),
+                    ),
+                ]);
+                let login = refresh_progress(super::authorization::begin(&s, &auth, NOW))
+                    .await
+                    .unwrap();
+                refresh_progress(super::authorization::finish(
+                    &s,
+                    &auth,
+                    &login.flow_id,
+                    NOW + 1,
+                ))
+                .await
+                .unwrap();
+            } else if change == "epoch" {
+                s.set_blocked(true);
+                s.set_blocked(false);
+            } else {
+                let _owner =
+                    refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+                let b = store::binding(&s).unwrap();
+                let mut rows = store::load(&s, &b).unwrap();
+                match change {
+                    "generation" => rows[0].generation += 1,
+                    "token" => rows[0].account.token = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
+                    "identity" => rows[0].account.uid = "replacement-uid".into(),
+                    "delete" => rows.clear(),
+                    _ => unreachable!(),
+                }
+                store::save(&s, &b, rows).unwrap();
+            }
+            let latest = std::fs::read(s.root().join(store::FILE)).unwrap();
+            gate.resume.notify_one();
+            assert!(
+                matches!(refresh.await, Err(Failure::ExpiredAuthorization)),
+                "{change}"
+            );
+            let expected = if endpoint == Endpoint::Summary {
+                vec![Endpoint::Summary]
+            } else {
+                vec![
+                    Endpoint::Summary,
+                    Endpoint::Paid,
+                    Endpoint::Free,
+                    Endpoint::Status,
+                ]
+            };
+            assert_eq!(
+                *gate.inner.calls.lock().unwrap(),
+                expected,
+                "{change}: no follow-up request may use the retired snapshot"
+            );
+            assert_eq!(
+                latest,
+                std::fs::read(s.root().join(store::FILE)).unwrap(),
+                "{change}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn refresh_cancellation_releases_lease_without_writing_partial_results() {
+    let (s, id) = setup();
+    let before = std::fs::read(s.root().join(store::FILE)).unwrap();
+    let gate = RefreshReadGate::new(Endpoint::Summary, 10.0, false);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Summary must be suspended"), _ = gate.reached.notified() => {} }
+    drop(refresh);
+    assert_eq!(before, std::fs::read(s.root().join(store::FILE)).unwrap());
+    gate.resume.notify_one();
+    assert_eq!(
+        refresh_progress(engine.refresh(&id))
+            .await
+            .unwrap()
+            .credits
+            .total_remaining,
+        Some(10.0)
+    );
+}
+
+#[tokio::test]
+async fn refresh_waiting_to_merge_across_midnight_does_not_relabel_yesterday_data() {
+    let (s, id) = setup();
+    let before = 1_800_028_799_000;
+    let clock = MovingClock(std::sync::atomic::AtomicI64::new(before));
+    let gate = RefreshReadGate::new(Endpoint::Status, 10.0, true);
+    let engine = Engine {
+        session: &s,
+        transport: &gate,
+        clock: &clock,
+    };
+    let original = std::fs::read(s.root().join(store::FILE)).unwrap();
+    let mut refresh = Box::pin(engine.refresh(&id));
+    tokio::select! { _ = &mut refresh => panic!("Status must be suspended"), _ = gate.reached.notified() => {} }
+    let owner = refresh_progress(crate::services::sync_protocol::sync_mutex().lock()).await;
+    gate.resume.notify_one();
+    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(refresh.as_mut().poll(cx))).await;
+    assert!(polled.is_pending(), "HTTP completed; merge waits for owner");
+    assert_eq!(
+        gate.inner.calls.lock().unwrap().last(),
+        Some(&Endpoint::Status)
+    );
+    clock
+        .0
+        .store(before + 2000, std::sync::atomic::Ordering::SeqCst);
+    drop(owner);
+    let row = refresh.await.unwrap();
+    assert_eq!(row.claim_state, ClaimState::Unconfirmed);
+    assert_eq!(row.credits.total_remaining, None);
+    assert_eq!(original, std::fs::read(s.root().join(store::FILE)).unwrap());
 }

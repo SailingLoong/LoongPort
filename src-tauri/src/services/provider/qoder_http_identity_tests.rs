@@ -177,14 +177,15 @@ fn strict_action_wire_rejects_unknown_fields_without_echoing_values() {
     }
 }
 #[test]
-fn context_projection_has_only_five_safe_fields_and_never_derived_identity() {
+fn context_projection_has_only_six_safe_fields_and_never_derived_identity() {
     let (db, request) = fixture();
     ready(&db, &request, true, NOW + 600_000);
     let value = serde_json::to_value(identity_context_admitted(&db, ID, NOW).unwrap()).unwrap();
     let object = value.as_object().unwrap();
-    assert_eq!(object.len(), 5);
+    assert_eq!(object.len(), 6);
     for key in [
         "providerId",
+        "source",
         "credentialGeneration",
         "status",
         "expiresAtMs",
@@ -759,6 +760,28 @@ async fn exceptional_confirmation_holds_neither_database_nor_vault_guard() {
         )
         .await,
         IdentityActionResult::Cancelled
+    ));
+    assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cn_device_source_is_rejected_before_pat_identity_action_preparation() {
+    let (db, mut request) = fixture();
+    request.declaration.source = CredentialSource::ChinaQoderDevice;
+    let transport = Transport::new();
+    let result = perform_identity_action(
+        &db,
+        request,
+        &transport,
+        |_| async { panic!("device login must not enter PAT confirmation") },
+        || NOW,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        IdentityActionResult::Failed {
+            code: IdentityFailureCode::InvalidSource
+        }
     ));
     assert_eq!(transport.exchanges.load(Ordering::SeqCst), 0);
 }

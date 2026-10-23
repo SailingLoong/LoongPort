@@ -54,6 +54,9 @@ pub(crate) struct Operation {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountView {
+    pub auto_claim_enabled: bool,
+    pub auto_claim_revision: u64,
+    pub auto_claim_failure: Option<Failure>,
     pub entitlement: Option<super::entitlement::Entitlement>,
     pub id: String,
     pub label: String,
@@ -63,6 +66,10 @@ pub(crate) struct AccountView {
     pub auth_generation: u64,
     pub credential_version: u64,
     pub authorized: bool,
+    pub credential_kind: Option<CredentialKind>,
+    pub credential_expires_at: Option<i64>,
+    pub requires_reimport: bool,
+    pub can_refresh_credentials: bool,
     pub status: Status,
     pub can_claim: bool,
     pub can_refresh: bool,
@@ -73,16 +80,51 @@ pub(crate) struct AccountView {
     pub credit_amount: Option<f64>,
     pub last_observed_status: Option<Status>,
 }
+/// Existing device grants retain refresh ownership; imported access capabilities do not.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CredentialKind {
+    #[default]
+    DeviceOAuth,
+    NativeAccessOnly,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NativeSourceFormat {
+    PublicCliOAuthV1,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NativeSource {
+    pub format: NativeSourceFormat,
+    pub generation: u64,
+    pub fingerprint: String,
+    /// Independent of daily check-in state: late status/receipt writes cannot
+    /// revive an access copy rejected by the upstream authentication boundary.
+    #[serde(default)]
+    pub rejected: bool,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Credentials {
     pub access_token: String,
-    pub refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub kind: CredentialKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_source: Option<NativeSource>,
     pub expires_at: i64,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Account {
+    #[serde(default)]
+    pub auto_claim_enabled: bool,
+    #[serde(default)]
+    pub auto_claim_revision: u64,
+    #[serde(default)]
+    pub auto_claim_failure: Option<Failure>,
     pub id: String,
     pub label: String,
     pub region: Region,
@@ -165,13 +207,28 @@ pub(super) fn account_id(vault_id: &str, region: Region, uid: &str) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 impl Account {
+    /// Native capabilities are never refreshed or extended. Owned OAuth keeps its
+    /// existing refresh-on-demand semantics even after the access token expires.
+    pub(super) fn usable(&self) -> Result<(), Failure> {
+        let c = self.credentials.as_ref().ok_or(Failure::NeedsLogin)?;
+        if c.kind == CredentialKind::NativeAccessOnly
+            && (c.expires_at <= now_ms() || c.native_source.as_ref().is_none_or(|s| s.rejected))
+        {
+            return Err(Failure::NeedsLogin);
+        }
+        Ok(())
+    }
     pub(super) fn unresolved(&self) -> bool {
         self.operation
             .as_ref()
             .is_some_and(|o| matches!(o.status, AttemptStatus::Pending | AttemptStatus::Unknown))
     }
     pub(super) fn view(&self) -> AccountView {
-        let authorized = self.credentials.is_some();
+        let authorized = self.usable().is_ok();
+        let native = self
+            .credentials
+            .as_ref()
+            .is_some_and(|c| c.kind == CredentialKind::NativeAccessOnly);
         let status = if self.unresolved() {
             Status::Unknown
         } else if !authorized {
@@ -180,6 +237,9 @@ impl Account {
             self.status
         };
         AccountView {
+            auto_claim_enabled: self.auto_claim_enabled,
+            auto_claim_revision: self.auto_claim_revision,
+            auto_claim_failure: self.auto_claim_failure,
             entitlement: None,
             id: self.id.clone(),
             label: self.label.clone(),
@@ -189,11 +249,18 @@ impl Account {
             auth_generation: self.auth_generation,
             credential_version: self.credential_version,
             authorized,
+            credential_kind: self.credentials.as_ref().map(|c| c.kind),
+            credential_expires_at: self.credentials.as_ref().map(|c| c.expires_at),
+            requires_reimport: native && !authorized,
+            can_refresh_credentials: self
+                .credentials
+                .as_ref()
+                .is_some_and(|c| c.kind == CredentialKind::DeviceOAuth),
             status,
             can_claim: authorized && status == Status::Claimable,
             can_refresh: authorized,
             can_recheck: authorized && self.unresolved(),
-            can_retire: authorized,
+            can_retire: self.credentials.is_some(),
             operation: self.operation.clone(),
             last_checked_at: self.last_checked_at,
             credit_amount: self.operation.as_ref().and_then(|o| o.credit_amount),
@@ -212,13 +279,34 @@ pub(super) fn same_account(current: &Account, expected: &Account) -> bool {
 fn valid_text(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
-pub(super) fn validate_credentials(credentials: &Credentials) -> Result<(), Failure> {
-    if !valid_text(&credentials.access_token, 16384)
-        || !valid_text(&credentials.refresh_token, 16384)
-        || credentials.expires_at <= 0
-        || reqwest::header::HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
-            .is_err()
+pub(super) fn validate_access_token(access_token: &str) -> Result<(), Failure> {
+    if !valid_text(access_token, 16384)
+        || reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}")).is_err()
     {
+        return Err(Failure::InvalidResponse);
+    }
+    Ok(())
+}
+pub(super) fn validate_credentials(credentials: &Credentials) -> Result<(), Failure> {
+    validate_access_token(&credentials.access_token)?;
+    let valid_capability = match credentials.kind {
+        CredentialKind::DeviceOAuth => {
+            credentials
+                .refresh_token
+                .as_deref()
+                .is_some_and(|r| valid_text(r, 16384))
+                && credentials.native_source.is_none()
+        }
+        CredentialKind::NativeAccessOnly => {
+            credentials.refresh_token.is_none()
+                && credentials.native_source.as_ref().is_some_and(|source| {
+                    source.generation <= 9_007_199_254_740_991
+                        && source.fingerprint.len() == 64
+                        && source.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        }
+    };
+    if !valid_capability || credentials.expires_at <= 0 {
         return Err(Failure::InvalidResponse);
     }
     Ok(())
@@ -367,9 +455,7 @@ pub(super) async fn snapshot(session: &SecretSession, id: &str) -> Result<Snapsh
             .iter()
             .find(|a| a.id == id)
             .ok_or(Failure::UnsupportedContext)?;
-        if account.credentials.is_none() {
-            return Err(Failure::NeedsLogin);
-        };
+        account.usable()?;
         Ok((
             Snapshot {
                 binding: b.clone(),
@@ -394,6 +480,17 @@ pub(super) fn matched<'a>(
 /// under the same identity/Runtime fence as retirement and shutdown. This is not
 /// a claim that bytes are already on wire. Pending network IO is awaited only
 /// after every storage/key/Runtime guard has been dropped.
+pub(super) enum DispatchFailure {
+    NotDispatched(Failure),
+    OutcomeUnknown(Failure),
+}
+impl DispatchFailure {
+    pub(super) fn failure(self) -> Failure {
+        match self {
+            Self::NotDispatched(f) | Self::OutcomeUnknown(f) => f,
+        }
+    }
+}
 pub(super) async fn dispatch<T: super::http::Transport>(
     session: &SecretSession,
     binding: &Binding,
@@ -401,13 +498,26 @@ pub(super) async fn dispatch<T: super::http::Transport>(
     request: super::http::Request,
     validate: impl FnOnce(&mut Document, &Binding) -> Result<(), Failure>,
 ) -> Result<super::http::Response, Failure> {
+    dispatch_classified(session, binding, transport, request, validate)
+        .await
+        .map_err(DispatchFailure::failure)
+}
+pub(super) async fn dispatch_classified<T: super::http::Transport>(
+    session: &SecretSession,
+    binding: &Binding,
+    transport: &T,
+    request: super::http::Request,
+    validate: impl FnOnce(&mut Document, &Binding) -> Result<(), Failure>,
+) -> Result<super::http::Response, DispatchFailure> {
     #[cfg(test)]
     super::tests::before_dispatch(session.root(), request.endpoint).await;
     let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
+    let mut dispatched = false;
     let mut pending = None;
     let mut ready = None;
     access(session, Some(binding), |document, current| {
         validate(document, current)?;
+        dispatched = true;
         let mut future = transport.request(request);
         match future
             .as_mut()
@@ -418,10 +528,20 @@ pub(super) async fn dispatch<T: super::http::Transport>(
         }
         Ok(((), false))
     })
-    .await?;
+    .await
+    .map_err(|failure| {
+        if dispatched {
+            DispatchFailure::OutcomeUnknown(failure)
+        } else {
+            DispatchFailure::NotDispatched(failure)
+        }
+    })?;
     if let Some(response) = ready {
-        response
+        response.map_err(DispatchFailure::OutcomeUnknown)
     } else {
-        pending.ok_or(Failure::StorageUnavailable)?.await
+        pending
+            .ok_or(DispatchFailure::OutcomeUnknown(Failure::StorageUnavailable))?
+            .await
+            .map_err(DispatchFailure::OutcomeUnknown)
     }
 }

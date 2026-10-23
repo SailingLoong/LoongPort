@@ -5,6 +5,29 @@ import zhTW from "@/i18n/locales/zh-TW.json";
 import zh from "@/i18n/locales/zh.json";
 
 const required = [
+  "nativeImport.open",
+  "nativeImport.title",
+  "nativeImport.description",
+  "nativeImport.choose",
+  "nativeImport.fileFilter",
+  "nativeImport.source",
+  "nativeImport.readConsent",
+  "nativeImport.read",
+  "nativeImport.unverified",
+  "nativeImport.expires",
+  "nativeImport.verified",
+  "nativeImport.verifyConsent",
+  "nativeImport.verify",
+  "nativeImport.accessOnly",
+  "nativeImport.expired",
+  "nativeImport.saveConsent",
+  "nativeImport.save",
+  "nativeImport.error",
+  "nativeImport.cancel",
+  "credentials.accessOnly",
+  "credentials.expires",
+  "credentials.reimport",
+
   "description",
   "region",
   "regions.cn",
@@ -109,3 +132,22 @@ describe("MiniMax Code localization contract", () => {
     },
   );
 });
+
+it.each([
+  ["en", en],
+  ["ja", ja],
+  ["zh", zh],
+  ["zh-TW", zhTW],
+] as const)(
+  "names the supported CLI source paths and explicit recipients in %s",
+  (_, locale) => {
+    const copy = locale.minimaxCode.nativeImport;
+    expect(copy.choose).toContain("auth.json");
+    expect(copy.choose).not.toContain("oauth.json");
+    expect(copy.description).toContain("prod/cn/mcode-public/auth.json");
+    expect(copy.description).toContain("prod/en/mcode-public/auth.json");
+    expect(copy.description).not.toContain("oauth.json");
+    expect(copy.verifyConsent).toContain("MiniMax");
+    expect(copy.saveConsent).toContain("LoongPort");
+  },
+);

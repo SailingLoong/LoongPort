@@ -453,7 +453,8 @@ fn builtin_config_for(app: &crate::app_config::AppType) -> Option<(&'static str,
         crate::app_config::AppType::Gemini
         | crate::app_config::AppType::GrokBuild
         | crate::app_config::AppType::CodexImage
-        | crate::app_config::AppType::Pi => return None,
+        | crate::app_config::AppType::Pi
+        | crate::app_config::AppType::Mcode => return None,
     })
 }
 

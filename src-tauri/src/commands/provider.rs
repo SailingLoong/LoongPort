@@ -242,9 +242,11 @@ fn add_provider_internal(
     let result = add_provider_internal_impl(state, app_type.clone(), provider, add_to_live)?;
     // 用户手工新建的 provider 归他维护 ⇒ 置「已手工维护」标记。
     // provision 不走这条命令（直调 save_provider），所以托管档位不会被误置位。
-    state
-        .db
-        .set_user_edited(&app_type_name, &provider_id, true)?;
+    if app_type_name != "mcode" {
+        state
+            .db
+            .set_user_edited(&app_type_name, &provider_id, true)?;
+    }
     if result && add_to_live && app_type.is_additive_mode() {
         crate::services::application_overview::record_successful_selection(
             &state.db,
@@ -311,9 +313,11 @@ fn update_provider_internal(
     let result = ProviderService::update(state, app_type, original_id, provider)?;
     // 用户手工编辑保存 ⇒ 置「已手工维护」标记（即使改得跟默认一样，见需求）。
     // 更新后的行 id 是 `provider.id`（改名时 original_id 指向旧行）。
-    state
-        .db
-        .set_user_edited(&app_type_name, &provider_id, true)?;
+    if app_type_name != "mcode" {
+        state
+            .db
+            .set_user_edited(&app_type_name, &provider_id, true)?;
+    }
     Ok(result)
 }
 
@@ -1087,6 +1091,9 @@ mod switch_presentation_tests {
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+    if matches!(app_type, AppType::Mcode) {
+        return crate::services::provider::mcode::import_from_live(state).map(|count| count > 0);
+    }
     if matches!(app_type, AppType::GrokBuild) {
         // 官方登录态（live 语法合法且无自定义模型表）+ 用户手动导入：
         // 导入的正确结果是让 Grok Official 成为当前供应商，而非报错。
@@ -2518,6 +2525,58 @@ pub async fn claim_qoder_daily_credits(
     .map_err(|_| "Qoder 领取任务失败，请重新打开后仅查询结果".to_owned())?
 }
 
+/// Local policy/device context only; reading never authenticates or claims.
+#[tauri::command]
+pub(crate) async fn qoder_daily_automatic_context(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+) -> Result<crate::services::provider::qoder_daily::automatic::Context, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        crate::services::provider::qoder_daily::automatic::context(&state.db, &provider_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 自动领取状态任务失败".to_owned())?
+}
+
+/// Explicit continuous-consent mutation; never replay on an uncertain IPC result.
+#[tauri::command]
+pub(crate) async fn set_qoder_daily_automatic(
+    app_handle: tauri::AppHandle,
+    request: crate::services::provider::qoder_daily::automatic::Request,
+) -> Result<crate::services::provider::qoder_daily::automatic::Context, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_owned())?;
+        crate::services::provider::qoder_daily::automatic::set(&state.db, request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "Qoder 自动领取设置结果未确认，请仅查询状态".to_owned())?
+}
+
+/// Explicit CN GET only, with the original credential owner's pre/post fences.
+#[tauri::command]
+pub(crate) async fn read_qoder_cn_campaigns<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    declaration: crate::services::provider::qoder_daily::http::PatDeclaration,
+) -> crate::services::provider::qoder_daily::cn_campaigns::ReadResult {
+    use crate::services::provider::qoder_daily::cn_campaigns;
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return cn_campaigns::ReadResult::Failed {
+                code: cn_campaigns::FailureCode::OwnerUnavailable,
+            }
+        }
+    };
+    cn_campaigns::read(&db, declaration).await
+}
+
 /// Safe original-Provider status only. Source and identity admission stays in
 /// the original credential owner, including direct IPC invocation.
 #[tauri::command]
@@ -2550,7 +2609,18 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
         Some(state) => state.db.clone(),
         None => return owner::IdentityActionResult::unavailable(),
     };
-    let transport = match owner::transport::FixedInternationalTransport::new() {
+    let source = match request.declaration.source {
+        crate::services::provider::qoder_daily::http::CredentialSource::InternationalQoderPat => {
+            owner::SourceKind::InternationalQoderPat
+        }
+        crate::services::provider::qoder_daily::http::CredentialSource::ChinaQoderPat => {
+            owner::SourceKind::ChinaQoderPat
+        }
+        crate::services::provider::qoder_daily::http::CredentialSource::ChinaQoderDevice => {
+            return owner::IdentityActionResult::unavailable();
+        }
+    };
+    let transport = match owner::transport::FixedRegionTransport::for_source(source) {
         Ok(transport) => transport,
         Err(_) => return owner::IdentityActionResult::unavailable(),
     };
@@ -2567,11 +2637,11 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
                     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
                     let (message, accept) = match summary.kind {
                         owner::IdentityConfirmationKind::Recover => (
-                            format!("供应商“{}”上次身份请求的结果尚未确认。继续将放弃这一次本地尝试，并用当前已声明的国际版 PAT 重新建立身份。不会重发旧刷新请求。", summary.provider_name),
+                            format!("供应商“{}”上次身份请求的结果尚未确认。继续将放弃这一次本地尝试，并用当前已声明区域的 PAT 重新建立身份。不会重发旧刷新请求。", summary.provider_name),
                             "重新建立身份",
                         ),
                         owner::IdentityConfirmationKind::Rebind => (
-                            format!("确定更换供应商“{}”绑定的推理身份吗？这会退役当前派生凭据，使用当前已声明的国际版 PAT 验证新身份，并生成新的推理设备标识。", summary.provider_name),
+                            format!("确定更换供应商“{}”绑定的推理身份吗？这会退役当前派生凭据，使用当前已声明区域的 PAT 验证新身份，并生成新的推理设备标识。", summary.provider_name),
                             "更换身份",
                         ),
                     };
@@ -2584,6 +2654,69 @@ pub(crate) async fn qoder_http_identity_action<R: tauri::Runtime>(
         },
         || chrono::Utc::now().timestamp_millis(),
     ).await
+}
+
+/// Explicit independent CN grant. New records are DB-only: ProviderService::add
+/// may select/write live Codex config for the first account even with false.
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_start<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    request: crate::services::provider::qoder_cn_device_login::StartRequest,
+) -> crate::services::provider::qoder_cn_device_login::StartResult {
+    use crate::services::provider::{qoder_cn_device_login as login, qoder_http_auth as owner};
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return login::StartResult::Failed {
+                code: "unavailable",
+            }
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        login::sessions().start(db.clone(), request, |provider| {
+            db.save_provider("codex", &provider)?;
+            db.set_user_edited("codex", &provider.id, true)
+        }, |summary| {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+            let (message, accept) = match summary.kind {
+                owner::IdentityConfirmationKind::Recover => (
+                    format!("供应商“{}”上次独立授权尚未确认。继续会退役旧的本地尝试，使用新的 CN 授权流程登录同一账号；不会重发旧 refresh。", summary.provider_name), "重新授权"),
+                owner::IdentityConfirmationKind::Rebind => (
+                    format!("确定更换供应商“{}”绑定的 CN 账号吗？当前本地凭据将退役，随后以新的独立设备标识授权。服务器是否保留其他客户端会话由 Qoder 决定。", summary.provider_name), "更换账号"),
+            };
+            app_handle.dialog().message(message).title("Qoder CN 独立授权")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(accept.into(), "取消".into()))
+                .blocking_show()
+        }, chrono::Utc::now().timestamp_millis())
+    }).await.unwrap_or(login::StartResult::Failed { code: "unavailable" })
+}
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_poll<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    session_id: String,
+) -> crate::services::provider::qoder_cn_device_login::PollResult {
+    use crate::services::provider::qoder_cn_device_login as login;
+    let db = match app_handle.try_state::<AppState>() {
+        Some(state) => state.db.clone(),
+        None => {
+            return login::PollResult::Failed {
+                code: "unavailable",
+            }
+        }
+    };
+    login::sessions().poll(&db, &session_id).await
+}
+#[tauri::command]
+pub(crate) async fn qoder_cn_device_login_cancel<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    session_id: String,
+) -> crate::services::provider::qoder_cn_device_login::CancelResult {
+    use crate::services::provider::qoder_cn_device_login as login;
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return login::CancelResult::Cancelled;
+    };
+    login::sessions().cancel(&state.db, &session_id)
 }
 
 #[cfg(test)]
@@ -2619,4 +2752,21 @@ mod qoder_identity_command_tests {
             }
         ));
     }
+}
+
+/// Read-only recovery descriptor; backup plaintext never crosses the IPC boundary.
+#[tauri::command]
+pub(crate) fn get_mcode_backup(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::services::provider::mcode::BackupDescriptor>, String> {
+    crate::services::provider::mcode::latest_backup(&state).map_err(|error| error.to_string())
+}
+#[tauri::command]
+pub fn restore_mcode_backup(
+    state: State<'_, AppState>,
+    id: String,
+    revision: String,
+) -> Result<bool, String> {
+    crate::services::provider::mcode::restore_backup(&state, &id, &revision)
+        .map_err(|error| error.to_string())
 }

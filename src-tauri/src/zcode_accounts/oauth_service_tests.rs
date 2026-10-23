@@ -947,6 +947,16 @@ async fn review_transient_poll_preserves_same_flow_for_later_pending_response() 
             service.flows.progress(&id, Instant::now()).unwrap().phase,
             "waiting"
         );
+        assert_eq!(
+            service
+                .flows
+                .progress(&id, Instant::now())
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "zcode.account.oauth_poll_unavailable"
+        );
         let lease = service
             .flows
             .acquire(&id, WorkKind::Poll, Instant::now())
@@ -976,6 +986,16 @@ async fn review_transient_normalization_preserves_authorized_ready_credentials()
     assert_eq!(
         service.flows.progress(&id, Instant::now()).unwrap().phase,
         "preparing"
+    );
+    assert_eq!(
+        service
+            .flows
+            .progress(&id, Instant::now())
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "zcode.account.oauth_normalize_unavailable"
     );
     let lease = service
         .flows
@@ -1778,5 +1798,191 @@ async fn review_saved_coding_changed_session_cannot_reopen_uncertain_creation() 
             .progress(&id, Instant::now())
             .unwrap()
             .key_may_exist
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn official_poll_deadline_bounds_inflight_response_and_drops_late_identity() {
+    struct DelayedPoll {
+        inner: Transport,
+        blocking_deadline: Option<Instant>,
+        returned: std::sync::atomic::AtomicBool,
+    }
+    impl OfficialTransport for DelayedPoll {
+        fn send(&self, request: OfficialRequest) -> TransportFuture<'_> {
+            let response = self.inner.send(request);
+            Box::pin(async move {
+                if let Some(deadline) = self.blocking_deadline {
+                    // No async yield: timeout observes Ready, so only the
+                    // consumer's post-response std deadline guard can reject it.
+                    while Instant::now() <= deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+                }
+                let result = response.await;
+                self.returned
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            })
+        }
+    }
+    for blocking in [false, true] {
+        for result in [
+            Ok(
+                r#"{"code":0,"data":{"status":"ready","user":{"user_id":"late-account"},"token":"synthetic-late-jwt","bigmodel":{"access_token":"synthetic-late-access"}}}"#,
+            ),
+            Ok(r#"{"code":0,"data":{"status":"pending"}}"#),
+            Err(OfficialError::Timeout),
+        ] {
+            let (service, id, _) = fixture(&[result]);
+            let lease = service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .unwrap();
+            let deadline = Instant::now()
+                + if blocking {
+                    std::time::Duration::from_millis(40)
+                } else {
+                    std::time::Duration::from_secs(60)
+                };
+            lease
+                .finish(FlowStage::Waiting, |draft| {
+                    draft.ready = None;
+                    draft.init = Some(OAuthInit {
+                        authorize_url: "https://zcode.z.ai/authorize?flow=synthetic".into(),
+                        flow_id: "original-remote-flow".into(),
+                        expires_at: u64::MAX,
+                        poll_interval_sec: 2,
+                    });
+                    draft.poll_deadline = Some(deadline);
+                })
+                .unwrap();
+            let service = LoginService {
+                flows: service.flows,
+                client: OfficialClient::new(DelayedPoll {
+                    inner: service.client.transport,
+                    blocking_deadline: blocking.then_some(deadline),
+                    returned: std::sync::atomic::AtomicBool::new(false),
+                }),
+                persistence: service.persistence,
+            };
+            let lease = service
+                .flows
+                .acquire(&id, WorkKind::Poll, Instant::now())
+                .unwrap();
+            assert!(
+                service
+                    .flows
+                    .acquire(&id, WorkKind::Poll, Instant::now())
+                    .is_err(),
+                "repeated polling stays single-flight"
+            );
+            assert!(!service.poll(lease).await.unwrap());
+            assert_eq!(
+                service
+                    .client
+                    .transport
+                    .returned
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                blocking,
+                "only synchronous responses reach Ready inside timeout"
+            );
+            let progress = service.flows.progress(&id, Instant::now()).unwrap();
+            assert_eq!(progress.phase, "expired");
+            assert!(progress.authorization.is_none());
+            assert!(progress.account.is_none());
+            assert!(progress.saved.is_none());
+            assert!(service
+                .flows
+                .acquire(&id, WorkKind::Poll, Instant::now())
+                .is_err());
+            assert!(service
+                .flows
+                .acquire(&id, WorkKind::Prepare, Instant::now())
+                .is_err());
+            assert_eq!(service.client.transport.inner.0.lock().unwrap().len(), 1);
+            assert!(service.persistence.0.lock().unwrap().events.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn official_init_failure_reports_safe_stage_without_a_saved_identity() {
+    let service = LoginService::new(
+        Transport::new(&[Err(OfficialError::Http(503))]),
+        Store::default(),
+    );
+    let binding = VaultBinding {
+        root: super::super::synthetic_test_path("vault"),
+        vault_id: "vault".into(),
+        key_id: "key".into(),
+        revision: 1,
+    };
+    let id = service
+        .flows
+        .begin(
+            binding,
+            OAuthFamily::BigModel,
+            PollToken::new("synthetic-poll").unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
+    let home = super::super::synthetic_test_path("home");
+    let context = LibraryContext::from_os_identity(
+        home.to_str().unwrap(),
+        "synthetic-user",
+        &home.join(".zcode/v2"),
+    )
+    .unwrap();
+    let lease = service
+        .flows
+        .acquire(&id, WorkKind::Init, Instant::now())
+        .unwrap();
+    service.initialize(lease, context, None).await.unwrap();
+    let progress = service.flows.progress(&id, Instant::now()).unwrap();
+    assert_eq!(progress.phase, "failed");
+    let error = progress.error.as_ref().unwrap();
+    assert_eq!(error.code, "zcode.account.oauth_init_unavailable");
+    assert_eq!(error.remedy, "queryOriginal");
+    assert!(!error.committed);
+    assert!(progress.account.is_none());
+    assert!(progress.saved.is_none());
+    assert!(progress.authorization.is_none());
+    let public = serde_json::to_string(&progress).unwrap();
+    assert!(!public.contains("synthetic-poll"));
+    // A random flow UUID may legitimately contain "503". Assert the exact
+    // public error shape instead of searching unrelated identity fields.
+    let public_value = serde_json::to_value(&progress).unwrap();
+    assert_eq!(
+        public_value["error"],
+        serde_json::json!({
+            "code": "zcode.account.oauth_init_unavailable",
+            "remedy": "queryOriginal",
+            "committed": false,
+        })
+    );
+    assert!(service.persistence.0.lock().unwrap().events.is_empty());
+}
+
+#[test]
+fn official_poll_window_preserves_fractional_absolute_expiry() {
+    use std::time::Duration;
+    assert_eq!(
+        official_poll_remaining(101, Duration::from_millis(100_900)),
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        official_poll_remaining(101, Duration::from_secs(101)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        official_poll_remaining(101, Duration::from_millis(101_001)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        official_poll_remaining(1000, Duration::from_millis(100_900)),
+        Duration::from_secs(300)
     );
 }

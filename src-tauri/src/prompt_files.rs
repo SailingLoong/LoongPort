@@ -27,7 +27,9 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::OpenClaw => get_openclaw_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
         AppType::Pi => crate::pi_config::get_pi_agent_dir()?,
-        AppType::ClaudeDesktop | AppType::CodexImage => unreachable!("handled above"),
+        AppType::ClaudeDesktop | AppType::CodexImage | AppType::Mcode => {
+            unreachable!("handled above")
+        }
     };
 
     let filename = match app {
@@ -37,7 +39,9 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::GrokBuild | AppType::OpenCode | AppType::OpenClaw => "AGENTS.md",
         AppType::Hermes => "SOUL.md",
         AppType::Pi => "AGENTS.md",
-        AppType::ClaudeDesktop | AppType::CodexImage => unreachable!("handled above"),
+        AppType::ClaudeDesktop | AppType::CodexImage | AppType::Mcode => {
+            unreachable!("handled above")
+        }
     };
 
     Ok(base_dir.join(filename))
@@ -63,6 +67,11 @@ fn get_base_dir_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcode_has_no_managed_prompt_path() {
+        assert!(prompt_file_path(&AppType::Mcode).is_err());
+    }
 
     #[test]
     fn hermes_prompt_file_uses_soul_md() {

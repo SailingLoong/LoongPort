@@ -64,6 +64,7 @@ export function AddProviderForm({
     appId !== "openclaw" &&
     appId !== "hermes" &&
     appId !== "pi" &&
+    appId !== "mcode" &&
     appId !== "grokbuild" &&
     appId !== "claude-desktop";
   const [activeTab, setActiveTab] = useState<"app-specific" | "universal">(
@@ -199,7 +200,8 @@ export function AddProviderForm({
         (appId === "opencode" ||
           appId === "openclaw" ||
           appId === "hermes" ||
-          appId === "pi") &&
+          appId === "pi" ||
+          appId === "mcode") &&
         values.providerKey
       ) {
         providerData.providerKey = values.providerKey;

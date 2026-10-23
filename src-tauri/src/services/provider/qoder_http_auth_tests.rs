@@ -825,3 +825,376 @@ fn source_digest_remains_stable_lowercase_hex_with_sha2_011() {
         "0ae30de816667fc04ebbe678b2420287e177cb80d8f119ca5a51eb81d758eb8d"
     );
 }
+
+#[test]
+fn cn_provider_is_a_distinct_original_source_and_cross_region_changes_retire_snapshot() {
+    let (db, international) = fixture();
+    let old = establish_ready(&db, &international, NOW + 900_000);
+    let mut cn = selected_provider(&db);
+    cn.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    db.save_provider("codex", &cn).unwrap();
+    let cn = selected_provider(&db);
+    let source = SourceBinding::from_provider(&cn);
+    assert!(source.is_ok(), "CN must be admitted as its own source");
+    let (source, _) = source.unwrap();
+    assert_eq!(source.origin, "https://openapi.qoder.com.cn");
+    assert!(source.admit(&international).is_err());
+    assert!(db.check_qoder_http_snapshot(&old, NOW).is_err());
+}
+
+struct CnWaitingTransport(WaitingTransport, SourceKind);
+impl AuthTransport for CnWaitingTransport {
+    fn source_kind(&self) -> SourceKind {
+        self.1.clone()
+    }
+    fn exchange_and_identify<'a>(
+        &'a self,
+        pat: &'a str,
+        machine: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Established, ()>> + Send + 'a>> {
+        self.0.exchange_and_identify(pat, machine)
+    }
+    fn refresh<'a>(
+        &'a self,
+        token: &'a str,
+        identity: &'a Identity,
+    ) -> Pin<Box<dyn Future<Output = Result<TokenPair, ()>> + Send + 'a>> {
+        self.0.refresh(token, identity)
+    }
+}
+#[tokio::test]
+async fn cn_refresh_reuses_one_owner_lock_and_never_submits_to_international_transport() {
+    let (db, _) = fixture();
+    let mut provider = selected_provider(&db);
+    provider.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    db.save_provider("codex", &provider).unwrap();
+    let mut declaration = declaration(&db);
+    declaration.source = CredentialSource::ChinaQoderPat;
+    let snapshot = establish_ready(&db, &declaration, NOW + 1);
+    assert_eq!(snapshot.region(), "cn");
+    let wrong = WaitingTransport {
+        calls: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+    };
+    has_non_retryable(acquire(&db, &selected_provider(&db), &wrong, || NOW).await);
+    assert_eq!(wrong.calls.load(Ordering::SeqCst), 0);
+    let transport = CnWaitingTransport(wrong, SourceKind::ChinaQoderPat);
+    let selected = selected_provider(&db);
+    let first = acquire(&db, &selected, &transport, || NOW);
+    let second = async {
+        transport.0.entered.notified().await;
+        has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
+        assert_eq!(transport.0.calls.load(Ordering::SeqCst), 1);
+        transport.0.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(first, second);
+    let refreshed = result.unwrap();
+    assert_eq!(refreshed.region(), "cn");
+    assert!(db.check_qoder_http_snapshot(&refreshed, NOW).is_ok());
+}
+
+#[test]
+fn same_pat_and_uid_in_two_realms_keep_distinct_original_account_owners() {
+    let (db, international) = fixture();
+    let international_snapshot = establish_ready(&db, &international, NOW + 900_000);
+    let mut cn = selected_provider(&db);
+    cn.id = "separate-cn-account".into();
+    cn.meta.as_mut().unwrap().provider_type = Some("qoder_cn".into());
+    // Deliberately identical synthetic PAT and returned UID in both realms.
+    db.save_provider("codex", &cn).unwrap();
+    let cn = db.get_provider_by_id(&cn.id, "codex").unwrap().unwrap();
+    let (cn_source, _) = SourceBinding::from_provider(&cn).unwrap();
+    let mut cn_declaration = PatDeclaration {
+        provider_id: cn.id.clone(),
+        credential_generation: cn_source.credential_generation.clone(),
+        source: CredentialSource::InternationalQoderPat,
+    };
+    assert!(reserve_action(&db, &cn_declaration, IdentityAction::Establish).is_err());
+    cn_declaration.source = CredentialSource::ChinaQoderPat;
+    let cn_snapshot = establish_ready(&db, &cn_declaration, NOW + 900_000);
+    assert_eq!(cn_snapshot.uid(), international_snapshot.uid());
+    assert_ne!(
+        cn_snapshot.machine_id(),
+        international_snapshot.machine_id()
+    );
+    assert_eq!(cn_snapshot.region(), "cn");
+    assert_eq!(international_snapshot.region(), "international");
+    assert_eq!(cn_source.origin, "https://openapi.qoder.com.cn");
+    assert!(db.check_qoder_http_snapshot(&cn_snapshot, NOW).is_ok());
+    assert!(db
+        .check_qoder_http_snapshot(&international_snapshot, NOW)
+        .is_ok());
+    assert!(check_selected_provider(&cn, &international_snapshot).is_err());
+    assert!(check_selected_provider(&selected_provider(&db), &cn_snapshot).is_err());
+    let mut forged = cn_source;
+    forged.origin = ORIGIN.into();
+    assert!(!forged.validate());
+}
+
+#[test]
+fn saved_legacy_international_source_never_defaults_to_cn() {
+    let (db, declaration) = fixture();
+    let binding = source(&db);
+    let encoded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(encoded["source"], "InternationalQoderPat");
+    let old: SourceBinding = serde_json::from_value(encoded.clone()).unwrap();
+    assert!(old.source == SourceKind::InternationalQoderPat);
+    assert_eq!(old.origin, ORIGIN);
+    assert!(old.admit(&declaration).is_ok());
+    let mut missing = encoded;
+    missing.as_object_mut().unwrap().remove("source");
+    assert!(serde_json::from_value::<SourceBinding>(missing).is_err());
+}
+
+#[test]
+fn cn_device_binding_admits_no_api_key_without_pat() {
+    let (db, _) = fixture();
+    let mut provider = selected_provider(&db);
+    provider.meta.as_mut().unwrap().provider_type = Some("qoder_cn_device".into());
+    provider.settings_config = serde_json::json!({});
+    let result = SourceBinding::from_provider(&provider);
+    assert!(
+        result.is_ok(),
+        "independent CN device source must not require a PAT"
+    );
+    let (binding, pat) = result.unwrap();
+    assert!(pat.is_empty());
+    assert_eq!(binding.origin, "https://openapi.qoder.com.cn");
+    assert_eq!(
+        serde_json::to_value(binding.source.declaration()).unwrap(),
+        "chinaQoderDevice"
+    );
+    provider.settings_config =
+        serde_json::json!({"env":{"OPENAI_API_KEY":"synthetic-not-a-device-token"}});
+    assert!(SourceBinding::from_provider(&provider).is_err());
+}
+
+#[test]
+fn cn_device_context_preserves_status_without_exposing_pat_actions() {
+    let (db, _) = fixture();
+    let mut provider = selected_provider(&db);
+    provider.meta.as_mut().unwrap().provider_type = Some("qoder_cn_device".into());
+    provider.settings_config = serde_json::json!({});
+    let source = SourceBinding::from_provider(&provider).unwrap().0;
+    let missing = IdentityContext::from_record(&source, None, NOW);
+    assert_eq!(missing.status, IdentityStatus::Unestablished);
+    assert_eq!(
+        serde_json::to_value(&missing).unwrap()["allowedDeviceActions"],
+        serde_json::json!(["login"])
+    );
+    assert!(missing.allowed_actions.is_empty());
+    for phase in [
+        Phase::Ready {
+            identity: Identity {
+                uid: "synthetic-cn".into(),
+                machine_id: uuid::Uuid::new_v4().to_string(),
+            },
+            tokens: pair("cn-device", NOW + 900_000),
+        },
+        Phase::Unknown {
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            identity: None,
+            machine_id: uuid::Uuid::new_v4().to_string(),
+        },
+    ] {
+        let expected = if matches!(phase, Phase::Ready { .. }) {
+            IdentityStatus::Ready
+        } else {
+            IdentityStatus::Unknown
+        };
+        let record = Record::new(source.clone(), 1, phase);
+        let context = IdentityContext::from_record(&source, Some(&record), NOW);
+        assert_eq!(context.status, expected);
+        assert_eq!(context.source, Some(CredentialSource::ChinaQoderDevice));
+        assert!(context.allowed_actions.is_empty());
+    }
+}
+
+#[test]
+fn cn_device_snapshot_projects_its_exact_credential_family() {
+    let (db, _) = fixture();
+    let mut provider = selected_provider(&db);
+    for (provider_type, kind, region) in [
+        ("qoder_sdk", "international_qoder_pat", "international"),
+        ("qoder_cn", "china_qoder_pat", "cn"),
+        ("qoder_cn_device", "china_qoder_device", "cn"),
+    ] {
+        provider.meta.as_mut().unwrap().provider_type = Some(provider_type.into());
+        if provider_type == "qoder_cn_device" {
+            provider.settings_config = serde_json::json!({});
+        }
+        let source = SourceBinding::from_provider(&provider).unwrap().0;
+        let snapshot = RequestSnapshot::new(
+            Stamp {
+                source,
+                generation: 1,
+                vault_epoch: 0,
+            },
+            Identity {
+                uid: "synthetic-cn".into(),
+                machine_id: uuid::Uuid::new_v4().to_string(),
+            },
+            &pair("device", NOW + 900000),
+        );
+        assert_eq!(snapshot.credential_kind(), kind);
+        assert_eq!(snapshot.region(), region);
+    }
+}
+
+#[test]
+fn cn_device_first_save_initializes_generation_and_login_without_any_pat() {
+    let db = Database::memory().unwrap();
+    let mut provider = Provider::with_id(
+        ID.into(),
+        "Synthetic independent CN".into(),
+        serde_json::json!({}),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        provider_type: Some("qoder_cn_device".into()),
+        ..Default::default()
+    });
+    db.save_provider("codex", &provider).unwrap();
+    let stored = selected_provider(&db);
+    assert!(
+        stored.meta.as_ref().unwrap().qoder_campaign_state.is_some(),
+        "device first save must initialize its original source generation"
+    );
+    let (source, pat) = SourceBinding::from_provider(&stored).unwrap();
+    assert!(!source.credential_generation.is_empty());
+    assert!(pat.is_empty());
+    let context = identity_context(&db, ID, NOW);
+    assert_eq!(context.status, IdentityStatus::Unestablished);
+    assert_eq!(
+        context.allowed_device_actions,
+        vec![DeviceIdentityAction::Login]
+    );
+    assert!(context.allowed_actions.is_empty());
+    assert!(plaintext(&db).is_empty());
+}
+
+fn device_fixture() -> (Database, PatDeclaration) {
+    let db = Database::memory().unwrap();
+    let mut provider = Provider::with_id(
+        ID.into(),
+        "Synthetic independent CN".into(),
+        serde_json::json!({}),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        provider_type: Some("qoder_cn_device".into()),
+        ..Default::default()
+    });
+    db.save_provider("codex", &provider).unwrap();
+    let mut declaration = declaration(&db);
+    declaration.source = CredentialSource::ChinaQoderDevice;
+    (db, declaration)
+}
+
+#[test]
+fn device_auth_rejection_retires_only_its_current_tokens_and_keeps_relogin_identity() {
+    let (db, declaration) = device_fixture();
+    let snapshot = establish_ready(&db, &declaration, NOW + 900000);
+    db.qoder_http_reject_device_snapshot(&snapshot).unwrap();
+    assert!(db.check_qoder_http_snapshot(&snapshot, NOW).is_err());
+    let raw = plaintext(&db);
+    assert!(!raw.contains("synthetic-access") && !raw.contains("synthetic-refresh"));
+    let record = Record::decode(&raw).unwrap().unwrap();
+    let Phase::Unknown {
+        identity: Some(identity),
+        machine_id,
+        ..
+    } = record.phase
+    else {
+        panic!("rejected device owner must require a fresh grant");
+    };
+    assert_eq!(identity.uid, snapshot.uid());
+    assert_eq!(machine_id, snapshot.machine_id());
+    let context = identity_context(&db, ID, NOW);
+    assert_eq!(context.status, IdentityStatus::Unknown);
+    assert_eq!(
+        context.allowed_device_actions,
+        vec![DeviceIdentityAction::Login, DeviceIdentityAction::Rebind]
+    );
+    let lease = reserve_action(&db, &declaration, IdentityAction::Recover).unwrap();
+    assert_eq!(lease.expected_uid.as_deref(), Some(snapshot.uid()));
+    assert_eq!(lease.machine_id, snapshot.machine_id());
+    assert!(lease.pat.is_empty());
+}
+
+#[test]
+fn stale_device_rejection_cannot_revoke_a_new_owner_or_an_inflight_refresh() {
+    let (db, declaration) = device_fixture();
+    let old = establish_ready(&db, &declaration, NOW + 900000);
+    let lease = reserve_action(&db, &declaration, IdentityAction::Rebind).unwrap();
+    let new = db
+        .qoder_http_publish_establish(
+            &lease,
+            Established {
+                uid: "synthetic-new-uid".into(),
+                tokens: pair("new", NOW + 1),
+            },
+            NOW,
+        )
+        .unwrap();
+    assert!(db.qoder_http_reject_device_snapshot(&old).is_err());
+    assert!(db.check_qoder_http_snapshot(&new, NOW).is_ok());
+    let Acquisition::Refresh(refresh) = db.qoder_http_acquire(&source(&db), NOW).unwrap() else {
+        panic!("short-lived grant must reserve refresh");
+    };
+    assert!(db.qoder_http_reject_device_snapshot(&new).is_err());
+    let newer = db
+        .qoder_http_publish_refresh(&refresh, pair("refreshed", NOW + 900000), NOW)
+        .unwrap();
+    assert!(db.check_qoder_http_snapshot(&newer, NOW).is_ok());
+}
+
+#[test]
+fn device_rejection_cannot_retire_a_pat_owner() {
+    let (db, declaration) = fixture();
+    let snapshot = establish_ready(&db, &declaration, NOW + 900000);
+    assert!(db.qoder_http_reject_device_snapshot(&snapshot).is_err());
+    assert!(db.check_qoder_http_snapshot(&snapshot, NOW).is_ok());
+}
+
+#[tokio::test]
+async fn native_device_refresh_is_single_consumption_even_when_outcome_unknown() {
+    let (db, declaration) = device_fixture();
+    let snapshot = establish_ready(&db, &declaration, NOW + 1);
+    let transport = CnWaitingTransport(
+        WaitingTransport {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            fail: true,
+        },
+        SourceKind::ChinaQoderPat,
+    );
+    has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
+    assert_eq!(transport.0.calls.load(Ordering::SeqCst), 0);
+    let transport = CnWaitingTransport(transport.0, SourceKind::ChinaQoderDevice);
+    let selected = selected_provider(&db);
+    let first = acquire(&db, &selected, &transport, || NOW);
+    let second = async {
+        transport.0.entered.notified().await;
+        has_non_retryable(acquire(&db, &selected_provider(&db), &transport, || NOW).await);
+        transport.0.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(first, second);
+    has_non_retryable(result);
+    has_non_retryable(acquire(&db, &selected, &transport, || NOW).await);
+    assert_eq!(transport.0.calls.load(Ordering::SeqCst), 1);
+    let raw = plaintext(&db);
+    assert!(!raw.contains("synthetic-refresh"));
+    let record = Record::decode(&raw).unwrap().unwrap();
+    let Phase::Unknown {
+        identity: Some(identity),
+        ..
+    } = record.phase
+    else {
+        panic!("ambiguous refresh cannot be replayed");
+    };
+    assert_eq!(identity.machine_id, snapshot.machine_id());
+}

@@ -29,6 +29,7 @@ export const APP_IDS: AppId[] = [
   "openclaw",
   "hermes",
   "zcode",
+  "mcode",
 ];
 
 /** Apps backed by LoongPort's provider store; native configuration has its own owner. */
@@ -53,6 +54,7 @@ export const APP_DISPLAY_NAME: Record<AppId, string> = {
   hermes: "Hermes",
   pi: "Pi",
   zcode: "ZCode",
+  mcode: "MiniMax Code",
 };
 
 /** 应用展示名的唯一来源：「生图」是功能描述，四语各有说法（apps.codex-image）；
@@ -77,10 +79,15 @@ export const DEFAULT_VISIBLE_APPS: VisibleApps = {
   hermes: false,
   pi: false,
   zcode: false,
+  mcode: false,
 };
 
 /** App IDs shown in Skills panels. */
-export const SKILLS_APP_IDS: ProviderStoreAppId[] = [
+export type SkillsAppId = Exclude<ProviderStoreAppId, "mcode">;
+export function isSkillsAppId(app: AppId): app is SkillsAppId {
+  return (SKILLS_APP_IDS as AppId[]).includes(app);
+}
+export const SKILLS_APP_IDS: SkillsAppId[] = [
   "claude",
   "codex",
   "gemini",
@@ -109,10 +116,11 @@ export function isProxyAppId(appId: string): appId is ProxyAppId {
 
 export type AdditiveAppId = Extract<
   AppId,
-  "opencode" | "openclaw" | "hermes" | "pi"
+  "opencode" | "openclaw" | "hermes" | "pi" | "mcode"
 >;
 
 export const ADDITIVE_APP_IDS: AdditiveAppId[] = [
+  "mcode",
   "opencode",
   "openclaw",
   "hermes",
@@ -126,7 +134,7 @@ export function isAdditiveAppId(appId: string): appId is AdditiveAppId {
 /** Pi has no native MCP registry; do not manufacture a disabled mirror. */
 export type McpAppId = Exclude<
   AppId,
-  "claude-desktop" | "openclaw" | "pi" | "zcode"
+  "claude-desktop" | "openclaw" | "pi" | "zcode" | "mcode"
 >;
 export const MCP_APP_IDS: McpAppId[] = [
   "claude",
@@ -142,6 +150,14 @@ export function isMcpAppId(appId: string): appId is McpAppId {
 }
 
 export const APP_ICON_MAP: Record<AppId, AppConfig> = {
+  mcode: {
+    label: "MiniMax Code",
+    icon: <ProviderIcon icon="minimax" name="MiniMax Code" size={14} />,
+    activeClass:
+      "bg-pink-500/10 ring-1 ring-pink-500/20 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400",
+    badgeClass:
+      "bg-pink-500/10 text-pink-700 dark:text-pink-300 hover:bg-pink-500/20 border-0 gap-1.5",
+  },
   zcode: {
     label: "ZCode",
     icon: <ProviderIcon icon="zcode" name="ZCode" size={14} />,

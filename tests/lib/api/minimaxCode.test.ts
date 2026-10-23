@@ -54,3 +54,59 @@ describe("MiniMax Code thin command boundary", () => {
     },
   );
 });
+
+it("automatic policy binds the displayed account and revisions, never credentials", async () => {
+  const account = {
+    id: "synthetic",
+    authGeneration: 3,
+    autoClaimRevision: 7,
+    token: "SYNTHETIC-SECRET",
+  } as unknown as import("@/lib/api/minimaxCode").MiniMaxCodeAccount;
+  await minimaxCodeApi.setAutomatic(account, true);
+  expect(invoke.mock.calls).toEqual([
+    [
+      "set_minimax_code_automatic_claim",
+      { id: "synthetic", authGeneration: 3, policyRevision: 7, enabled: true },
+    ],
+  ]);
+});
+
+it.each(["cn", "global"] as const)(
+  "reads only a separately confirmed public CLI file for %s",
+  async (region) => {
+    expect(typeof minimaxCodeApi.previewNativeFile).toBe("function");
+    const path = `/fixture/.minimax/auth/prod/${region === "cn" ? "cn" : "en"}/mcode-public/auth.json`;
+    await minimaxCodeApi.previewNativeFile(path, region, true);
+    expect(invoke.mock.calls).toEqual([
+      [
+        "preview_minimax_native_file",
+        {
+          path,
+          region,
+          source: "publicCliOAuthV1",
+          confirmed: true,
+        },
+      ],
+    ]);
+  },
+);
+it.each([
+  ["verifyNativeImport", "verify_minimax_native_import"],
+  ["saveNativeImport", "save_minimax_native_import"],
+] as const)(
+  "%s sends only the preview reference and explicit consent",
+  async (method, command) => {
+    expect(typeof minimaxCodeApi[method]).toBe("function");
+    await minimaxCodeApi[method]("synthetic-preview", true);
+    expect(invoke.mock.calls).toEqual([
+      [command, { previewId: "synthetic-preview", confirmed: true }],
+    ]);
+  },
+);
+it("cancels native imports without transmitting local paths or credentials", async () => {
+  expect(typeof minimaxCodeApi.cancelNativeImport).toBe("function");
+  await minimaxCodeApi.cancelNativeImport("synthetic-preview");
+  expect(invoke.mock.calls).toEqual([
+    ["cancel_minimax_native_import", { previewId: "synthetic-preview" }],
+  ]);
+});

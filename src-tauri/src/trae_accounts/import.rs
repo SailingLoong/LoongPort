@@ -15,6 +15,25 @@ use ring::signature::KeyPair;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+pub(super) fn storage_directory_matches(name: &str, edition: Edition, windows: bool) -> bool {
+    let names: &[&str] = match edition {
+        Edition::Cn => {
+            if windows {
+                &["Trae CN", "trae-cn"]
+            } else {
+                &["Trae CN"]
+            }
+        }
+        Edition::Global => &["Trae"],
+    };
+    names.iter().any(|expected| {
+        if windows {
+            name.eq_ignore_ascii_case(expected)
+        } else {
+            name == *expected
+        }
+    })
+}
 /// This method is called ONLY after explicit user selection/consent, never on startup.
 /// It reads bounded regular files once and never writes the original installation.
 pub(crate) fn read_selected(
@@ -22,10 +41,6 @@ pub(crate) fn read_selected(
     product: &std::path::Path,
     edition: Edition,
 ) -> Result<Material, Failure> {
-    let expected = match edition {
-        Edition::Cn => "Trae CN",
-        Edition::Global => "Trae",
-    };
     if storage.file_name().and_then(|s| s.to_str()) != Some("storage.json")
         || storage
             .parent()
@@ -38,25 +53,42 @@ pub(crate) fn read_selected(
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
             != Some("User")
-        || storage
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
+        || !storage
+            .ancestors()
+            .nth(3)
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
-            != Some(expected)
+            .is_some_and(|name| storage_directory_matches(name, edition, cfg!(windows)))
         || product.file_name().and_then(|s| s.to_str()) != Some("product.json")
     {
         return Err(Failure::Unsupported);
+    }
+    let version = crate::config_file_io::read_regular_file(product, 1024 * 1024)
+        .map_err(|_| Failure::Storage)?
+        .ok_or(Failure::Storage)?;
+    if cfg!(windows) {
+        let metadata: Value = serde_json::from_slice(&version).map_err(|_| Failure::Invalid)?;
+        let data_name = storage
+            .ancestors()
+            .nth(3)
+            .and_then(|p| p.file_name())
+            .and_then(|p| p.to_str())
+            .ok_or(Failure::Unsupported)?;
+        let declared = metadata
+            .get("win32DirName")
+            .and_then(Value::as_str)
+            .ok_or(Failure::Unsupported)?;
+        if !storage_directory_matches(declared, edition, true)
+            || !data_name.eq_ignore_ascii_case(declared)
+        {
+            return Err(Failure::Unsupported);
+        }
     }
     let raw = Zeroizing::new(
         crate::config_file_io::read_regular_file(storage, 4 * 1024 * 1024)
             .map_err(|_| Failure::Storage)?
             .ok_or(Failure::Storage)?,
     );
-    let version = crate::config_file_io::read_regular_file(product, 1024 * 1024)
-        .map_err(|_| Failure::Storage)?
-        .ok_or(Failure::Storage)?;
     parse(
         &raw,
         &version,
@@ -310,6 +342,9 @@ pub(super) fn parse(
             grant: Some(grant),
             refresh_pending: false,
             checkin_day: None,
+            checkin_attempt: None,
+            auto_checkin_enabled: false,
+            auto_checkin_revision: 0,
         },
     })
 }

@@ -72,7 +72,7 @@ export function QoderInferenceIdentity({
   };
   const actionLabels: Record<QoderHttpIdentityAction, string> = {
     establish: t("qoderHttpIdentity.establish", {
-      defaultValue: "声明国际版 PAT 并建立",
+      defaultValue: "声明对应区域 PAT 并建立",
     }),
     recover: t("qoderHttpIdentity.recover", {
       defaultValue: "恢复推理身份",
@@ -90,7 +90,7 @@ export function QoderInferenceIdentity({
       defaultValue: "凭据保管状态已变化，请重新打开查看状态。",
     }),
     invalid_source: t("qoderHttpIdentity.invalidSource", {
-      defaultValue: "当前来源声明无法验证，请检查已保存的国际版 Qoder PAT。",
+      defaultValue: "当前来源声明无法验证，请检查已保存的对应区域 Qoder PAT。",
     }),
     state_changed: t("qoderHttpIdentity.stateChanged", {
       defaultValue: "身份状态已变化，请重新打开查看状态。",
@@ -143,7 +143,9 @@ export function QoderInferenceIdentity({
     !disabled &&
     !busy &&
     declared &&
-    Boolean(visibleContext?.credentialGeneration);
+    Boolean(visibleContext?.credentialGeneration) &&
+    (visibleContext?.source === "internationalQoderPat" ||
+      visibleContext?.source === "chinaQoderPat");
 
   async function perform(action: QoderHttpIdentityAction) {
     if (
@@ -228,10 +230,12 @@ export function QoderInferenceIdentity({
             {t("qoderHttpIdentity.title", { defaultValue: "Qoder 推理身份" })}
           </DialogTitle>
           <DialogDescription>
-            {t("qoderHttpIdentity.description", {
-              defaultValue:
-                "使用此供应商已保存的国际版 Qoder PAT 主动建立推理身份。打开窗口不会交换凭据；旧 SDK Token 不会自动转换为 PAT。",
-            })}
+            {context?.source === "chinaQoderDevice"
+              ? "这是本应用独立授权身份。授权已保存不代表真实推理已验证；登录或更换账号请使用独立授权入口。"
+              : t("qoderHttpIdentity.description", {
+                  defaultValue:
+                    "使用此供应商已保存的对应区域 Qoder PAT 主动建立推理身份。打开窗口不会交换凭据；旧 SDK Token 不会自动转换为 PAT。",
+                })}
           </DialogDescription>
         </DialogHeader>
         {visibleContext && (
@@ -251,16 +255,27 @@ export function QoderInferenceIdentity({
               onCheckedChange={(value) => setDeclared(value === true)}
               disabled={disabled || busy}
               aria-label={t("qoderHttpIdentity.source", {
-                defaultValue: "确认当前凭据来源为国际版 Qoder PAT",
+                defaultValue: "确认当前凭据来源为本账号区域 Qoder PAT",
               })}
             />
             <span>
-              {t("qoderHttpIdentity.sourceDetail", {
-                defaultValue:
-                  "我明确确认此供应商当前保存的是国际版 Qoder PAT。本次声明不会被保存。",
-              })}
+              {visibleContext?.source === "chinaQoderPat"
+                ? "我确认当前保存的是本人独立授权用于 LoongPort 的 Qoder CN PAT，不是从官方客户端复制的登录态或刷新令牌。本次声明不会被保存。"
+                : t("qoderHttpIdentity.sourceDetail", {
+                    defaultValue:
+                      "我明确确认此供应商当前保存的是下方所示区域的 Qoder PAT。本次声明不会被保存。",
+                  })}
             </span>
           </label>
+        )}
+        {context?.source && (
+          <p className="text-sm">
+            {context.source === "chinaQoderDevice"
+              ? "凭据区域：Qoder CN（本应用独立授权）"
+              : context.source === "chinaQoderPat"
+                ? "凭据区域：Qoder CN（独立 PAT 模式）"
+                : "凭据区域：Qoder 国际版"}
+          </p>
         )}
         {feedback && <p role={feedback.role}>{feedback.message}</p>}
         {busy && (

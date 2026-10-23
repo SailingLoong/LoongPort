@@ -122,7 +122,9 @@ fn token(response: &Response, previous: Option<&str>) -> Result<Credentials, Fai
         .ok_or(Failure::InvalidResponse)?;
     let credentials = Credentials {
         access_token: access.into(),
-        refresh_token: refresh.into(),
+        refresh_token: Some(refresh.into()),
+        kind: catalog::CredentialKind::DeviceOAuth,
+        native_source: None,
         expires_at: now_ms()
             .checked_add((expires * 1000.0) as i64)
             .ok_or(Failure::InvalidResponse)?,
@@ -221,14 +223,20 @@ fn active_flow(
     }
     Ok(())
 }
-async fn verify<T: Transport>(
+/// One profile-verification owner for independently authorized credentials and
+/// future explicitly confirmed native reads. No refresh token is accepted,
+/// copied, refreshed or saved here; local/JWT identity claims are not trusted.
+/// This result alone cannot authorize persistence: the caller must still check
+/// its source/account incarnation and credential ownership at commit time.
+pub(super) async fn verify_access_token<T: Transport>(
     session: &SecretSession,
     transport: &T,
     region: Region,
-    credentials: &Credentials,
+    access_token: &str,
     binding: &Binding,
     validate: impl FnOnce(&mut Document, &Binding) -> Result<(), Failure>,
 ) -> Result<(String, String), Failure> {
+    catalog::validate_access_token(access_token)?;
     let response = catalog::dispatch(
         session,
         binding,
@@ -236,14 +244,19 @@ async fn verify<T: Transport>(
         Request {
             endpoint: Endpoint::Profile,
             region,
-            access_token: Some(credentials.access_token.clone()),
+            access_token: Some(access_token.to_owned()),
             real_user_id: None,
             body: None,
         },
         validate,
     )
     .await?;
-    profile(&response)
+    // The transport can complete after vault recovery or process retirement.
+    // Never return a verified identity across that lifecycle boundary.
+    catalog::access(session, Some(binding), |_, _| {
+        Ok((profile(&response)?, false))
+    })
+    .await
 }
 pub(crate) async fn begin<T: Transport>(
     session: &SecretSession,
@@ -419,11 +432,11 @@ pub(crate) async fn poll<T: Transport>(
         });
     }
     let credentials = token(&response, None)?;
-    let (uid, label) = verify(
+    let (uid, label) = verify_access_token(
         session,
         transport,
         flow.region,
-        &credentials,
+        &credentials.access_token,
         &flow.binding,
         |_, b| active_flow(session, id, &flow, b),
     )
@@ -457,6 +470,12 @@ pub(crate) async fn poll<T: Transport>(
                     .credential_version
                     .checked_add(1)
                     .ok_or(Failure::StorageUnavailable)?;
+                a.auto_claim_enabled = false;
+                a.auto_claim_revision = a
+                    .auto_claim_revision
+                    .checked_add(1)
+                    .ok_or(Failure::StorageUnavailable)?;
+                a.auto_claim_failure = None;
                 a.credentials = Some(credentials.clone());
                 a.label = label.clone();
                 if !a.unresolved() {
@@ -465,6 +484,9 @@ pub(crate) async fn poll<T: Transport>(
                 i
             } else {
                 d.accounts.push(Account {
+                    auto_claim_enabled: false,
+                    auto_claim_revision: 0,
+                    auto_claim_failure: None,
                     id: account_id,
                     label: label.clone(),
                     region: flow.region,
@@ -537,17 +559,36 @@ pub(super) async fn refresh_snapshot<T: Transport>(
         .credentials
         .as_ref()
         .ok_or(Failure::NeedsLogin)?;
-    let response=catalog::dispatch(session, &snapshot.binding, transport, public_request(Endpoint::Refresh,snapshot.account.region,json!({"grant_type":"refresh_token","refresh_token":old.refresh_token,"client_id":"mcode-public","scope":"agent.default","audience":"agent-backend"})), |d, _| {
+    if old.kind == catalog::CredentialKind::NativeAccessOnly {
+        // This path follows an explicit upstream 401. Invalidate only this local
+        // access copy, not the source app/grant and not an unresolved claim.
+        catalog::access(session, Some(&snapshot.binding), |d, _| {
+            let a = catalog::matched(d, snapshot)?;
+            if a.credential_version != snapshot.account.credential_version {
+                return Err(Failure::StaleIdentity);
+            }
+            a.credentials
+                .as_mut()
+                .and_then(|c| c.native_source.as_mut())
+                .ok_or(Failure::InvalidResponse)?
+                .rejected = true;
+            Ok(((), true))
+        })
+        .await?;
+        return Err(Failure::NeedsLogin);
+    }
+    let refresh_token = old.refresh_token.as_deref().ok_or(Failure::NeedsLogin)?;
+    let response=catalog::dispatch(session, &snapshot.binding, transport, public_request(Endpoint::Refresh,snapshot.account.region,json!({"grant_type":"refresh_token","refresh_token":refresh_token,"client_id":"mcode-public","scope":"agent.default","audience":"agent-backend"})), |d, _| {
         let a = catalog::matched(d, snapshot)?;
         if a.credential_version != snapshot.account.credential_version { return Err(Failure::StaleIdentity); }
         Ok(())
     }).await?;
-    let credentials = token(&response, Some(&old.refresh_token))?;
-    let (uid, label) = verify(
+    let credentials = token(&response, Some(refresh_token))?;
+    let (uid, label) = verify_access_token(
         session,
         transport,
         snapshot.account.region,
-        &credentials,
+        &credentials.access_token,
         &snapshot.binding,
         |d, _| {
             let a = catalog::matched(d, snapshot)?;

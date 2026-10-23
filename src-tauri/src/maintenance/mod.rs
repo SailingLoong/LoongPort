@@ -9,13 +9,39 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
 #[cfg(feature = "gui")]
 pub fn start(app: tauri::AppHandle) {
+    start_qoder_claim(app.clone());
     start_zcode_claim(app.clone());
+    start_minimax_automatic_claim(app.clone());
+    start_trae_automatic_checkin(app.clone());
+    start_workbuddy_automatic_claim(app.clone());
     start_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
     start_crowd_metrics_flush(app.clone());
     start_plaza_visibility_seeding(app.clone());
     start_app_update_check(app);
+}
+
+#[cfg(feature = "gui")]
+fn start_qoder_claim(app: tauri::AppHandle) {
+    use crate::services::provider::qoder_daily::automatic;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "qoder-automatic-claim",
+        scheduler::TaskSchedule::new(
+            automatic::STARTUP_DELAY,
+            automatic::INTERVAL,
+            automatic::INTERVAL,
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                tauri::async_runtime::spawn_blocking(move || automatic::tick(&db))
+                    .await
+                    .map_err(|_| crate::AppError::Config("qoder.automatic_task_failed".into()))?
+            }
+        },
+    );
 }
 
 #[cfg(feature = "gui")]
@@ -182,6 +208,83 @@ fn start_zcode_claim(app: tauri::AppHandle) {
             let db = db.clone();
             async move {
                 crate::zcode_accounts::claim_runtime::tick(app, db).await;
+                Ok(())
+            }
+        },
+    );
+}
+
+#[cfg(feature = "gui")]
+fn start_trae_automatic_checkin(app: tauri::AppHandle) {
+    use std::time::Duration;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "trae-automatic-checkin",
+        scheduler::TaskSchedule::new(
+            Duration::from_secs(30),
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(15 * 60),
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                // The existing account owner enforces current per-account consent.
+                let _ = crate::trae_accounts::checkin::automatic_tick(db.secrets.clone()).await;
+                Ok(())
+            }
+        },
+    );
+}
+
+#[cfg(feature = "gui")]
+fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
+    use std::time::Duration;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "workbuddy-automatic-claim",
+        scheduler::TaskSchedule::new(
+            Duration::from_secs(30),
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(15 * 60),
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                // Fail closed when locked; the owner checks consent at final dispatch.
+                let _ = crate::workbuddy::engine::Engine {
+                    session: db.secret_session(),
+                    transport: &crate::workbuddy::http::OfficialHttp,
+                    clock: &crate::workbuddy::clock::SystemClock,
+                }
+                .automatic_tick()
+                .await;
+                Ok(())
+            }
+        },
+    );
+}
+
+#[cfg(feature = "gui")]
+fn start_minimax_automatic_claim(app: tauri::AppHandle) {
+    use std::time::Duration;
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic(
+        "minimax-automatic-claim",
+        scheduler::TaskSchedule::new(
+            Duration::from_secs(30),
+            Duration::from_secs(15 * 60),
+            Duration::from_secs(15 * 60),
+        ),
+        move || {
+            let db = db.clone();
+            async move {
+                // Closed/locked Vault admits no account action. Each pass reads current opt-ins.
+                let _ = crate::minimax_code::checkin::Engine {
+                    session: db.secret_session(),
+                    transport: &crate::minimax_code::http::OfficialHttp,
+                }
+                .automatic_tick()
+                .await;
                 Ok(())
             }
         },

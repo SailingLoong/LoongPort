@@ -8,6 +8,12 @@ export interface TraeAccountView {
   status: "stored" | "refreshPending" | "retired";
   // Source adapter eligibility, not live model/credit acceptance. Missing CN metadata fails closed.
   nativeSourceSupported?: boolean;
+  generation?: number;
+  autoCheckinEnabled?: boolean;
+  autoCheckinRevision?: number;
+  canSetAutomatic?: boolean;
+  checkinAttemptStatus?:
+    "pending" | "unknown" | "accepted" | "ineligible" | null;
 }
 export const TRAE_AUTH_HOST = "https://growsg-normal.trae.ai" as const;
 export const traeAuthHost = (realm: TraeRealm) =>
@@ -23,7 +29,28 @@ export interface TraeSelection {
   realm: TraeRealm;
 }
 
+export interface TraeInstallation {
+  storagePath: string;
+  productPath: string;
+  version: string;
+}
+
+export type TraeCheckinOutcome =
+  | { status: "inactive" | "done" | "ineligible" | "alreadyAttempted" }
+  | { status: "accepted"; reportedCredits: number };
+
 export const traeAccountsApi = {
+  setAutomatic: (account: TraeAccountView, enabled: boolean) =>
+    invoke<TraeAccountView>("set_trae_automatic_checkin", {
+      id: account.id,
+      generation: account.generation,
+      policyRevision: account.autoCheckinRevision,
+      enabled,
+    }),
+  checkin: (id: string) =>
+    invoke<TraeCheckinOutcome>("checkin_trae_account", { id }),
+  discover: (realm: TraeRealm) =>
+    invoke<TraeInstallation[]>("discover_trae_installations", { realm }),
   list: () => invoke<TraeAccountView[]>("list_trae_accounts"),
   // Selection alone records paths. Only confirm authorizes the bounded read.
   begin: (selection: TraeSelection) =>

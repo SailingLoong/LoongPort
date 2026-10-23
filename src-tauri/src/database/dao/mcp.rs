@@ -110,7 +110,11 @@ impl Database {
             AppType::OpenCode => Some("enabled_opencode"),
             AppType::Hermes => Some("enabled_hermes"),
             // These applications intentionally have no MCP flag in the SSOT.
-            AppType::ClaudeDesktop | AppType::OpenClaw | AppType::Pi | AppType::CodexImage => None,
+            AppType::ClaudeDesktop
+            | AppType::OpenClaw
+            | AppType::Pi
+            | AppType::Mcode
+            | AppType::CodexImage => None,
         };
 
         if let Some(column) = column {
@@ -326,7 +330,12 @@ mod tests {
         let original = test_server();
         db.save_mcp_server(&original).expect("seed server");
 
-        for app in [AppType::ClaudeDesktop, AppType::OpenClaw, AppType::Pi] {
+        for app in [
+            AppType::ClaudeDesktop,
+            AppType::OpenClaw,
+            AppType::Pi,
+            AppType::Mcode,
+        ] {
             let returned = db
                 .update_mcp_server_app_enabled("shared-server", &app, true)
                 .expect("toggle unsupported app")

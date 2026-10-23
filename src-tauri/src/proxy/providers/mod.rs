@@ -214,7 +214,7 @@ impl ProviderType {
             }
             AppType::GrokBuild => ProviderType::Codex,
             AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => ProviderType::Codex,
-            AppType::Pi => return None,
+            AppType::Pi | AppType::Mcode => return None,
         };
         Some(provider_type)
     }
@@ -272,7 +272,7 @@ pub fn get_adapter(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::GrokBuild => Box::new(CodexAdapter::new()),
         AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Box::new(CodexAdapter::new()),
-        AppType::Pi => return None,
+        AppType::Pi | AppType::Mcode => return None,
     })
 }
 
@@ -312,6 +312,16 @@ mod tests {
             in_failover_queue: false,
             available_models: None,
         }
+    }
+
+    #[test]
+    fn mcode_does_not_get_a_local_proxy_adapter() {
+        assert!(get_adapter(&AppType::Mcode).is_none());
+        assert!(ProviderType::from_app_type_and_config(
+            &AppType::Mcode,
+            &create_provider(json!({}))
+        )
+        .is_none());
     }
 
     #[test]
