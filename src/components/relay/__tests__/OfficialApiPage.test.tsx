@@ -3,11 +3,26 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import type { AppId } from "@/lib/api";
 
-const { openLogin } = vi.hoisted(() => ({ openLogin: vi.fn() }));
+const {
+  openLogin,
+  importOpenCodeKey,
+  previewOpenCodeLocal,
+  importOpenCodeLocal,
+} = vi.hoisted(() => ({
+  openLogin: vi.fn(),
+  importOpenCodeKey: vi.fn(),
+  previewOpenCodeLocal: vi.fn(),
+  importOpenCodeLocal: vi.fn(),
+}));
 
 vi.mock("@/lib/api", () => ({}));
 vi.mock("@/lib/api/vendor", () => ({
-  vendorApi: { openLogin },
+  vendorApi: {
+    openLogin,
+    importOpenCodeKey,
+    previewOpenCodeLocal,
+    importOpenCodeLocal,
+  },
   DEEPSEEK_VENDOR_ID: "deepseek",
   BIGMODEL_VENDOR_ID: "bigmodel",
   VENDOR_CATALOG: [
@@ -129,5 +144,76 @@ describe("OfficialApiPage", () => {
     fireEvent.click(screen.getByText("OpenCode"));
     await waitFor(() => expect(openLogin).toHaveBeenCalledTimes(2));
     expect(toast.success).not.toHaveBeenCalled();
+  });
+  it("offers existing key forms after OpenCode failure without reading or saving credentials", async () => {
+    const { toast } = await import("sonner");
+    openLogin.mockRejectedValueOnce(new Error("新版 Console 未取得可用密钥"));
+    const onConnected = vi.fn();
+    const onBack = vi.fn();
+    render(
+      <OfficialApiPage
+        sourceAppId="codex"
+        vendorId="opencode"
+        onBack={onBack}
+        onConnected={onConnected}
+      />,
+    );
+    const login = screen.getByRole("button", { name: /官网账户登录/ });
+    const keyInput = screen.getByLabelText("OpenCode Personal API key");
+    fireEvent.change(keyInput, {
+      target: { value: "oc_sk_synthetic_unsubmitted" },
+    });
+    fireEvent.click(login);
+    const recovery = await screen.findByRole("button", {
+      name: "使用已有 Personal key 或本机导入",
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("尚未验证真实调用");
+    expect(login).toBeEnabled();
+    fireEvent.click(recovery);
+    const methods = screen.getByRole("region", {
+      name: "OpenCode API key 接入方式",
+    });
+    expect(methods).toHaveFocus();
+    expect(methods).toContainElement(keyInput);
+    expect(methods).toContainElement(
+      screen.getByRole("button", { name: "同意只读预览本机 OpenCode 凭据" }),
+    );
+    expect(keyInput).toHaveValue("oc_sk_synthetic_unsubmitted");
+    expect(
+      screen.queryByText("oc_sk_synthetic_unsubmitted"),
+    ).not.toBeInTheDocument();
+    expect(importOpenCodeKey).not.toHaveBeenCalled();
+    expect(previewOpenCodeLocal).not.toHaveBeenCalled();
+    expect(importOpenCodeLocal).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+
+    openLogin.mockResolvedValueOnce(null);
+    fireEvent.click(login);
+    await waitFor(() => expect(openLogin).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(onConnected).not.toHaveBeenCalled();
+  });
+
+  it("does not offer OpenCode recovery for other vendors or a cancelled login", async () => {
+    const { toast } = await import("sonner");
+    openLogin.mockRejectedValueOnce(new Error("登录未完成"));
+    renderPage();
+    fireEvent.click(screen.getByText("DeepSeek"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByRole("button", {
+        name: "使用已有 Personal key 或本机导入",
+      }),
+    ).not.toBeInTheDocument();
+    openLogin.mockResolvedValueOnce(null);
+    fireEvent.click(screen.getByText("OpenCode"));
+    await waitFor(() => expect(openLogin).toHaveBeenCalledTimes(2));
+    expect(
+      screen.queryByRole("button", {
+        name: "使用已有 Personal key 或本机导入",
+      }),
+    ).not.toBeInTheDocument();
   });
 });
