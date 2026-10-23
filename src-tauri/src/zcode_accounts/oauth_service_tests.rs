@@ -1952,7 +1952,17 @@ async fn official_init_failure_reports_safe_stage_without_a_saved_identity() {
     assert!(progress.authorization.is_none());
     let public = serde_json::to_string(&progress).unwrap();
     assert!(!public.contains("synthetic-poll"));
-    assert!(!public.contains("503"));
+    // A random flow UUID may legitimately contain "503". Assert the exact
+    // public error shape instead of searching unrelated identity fields.
+    let public_value = serde_json::to_value(&progress).unwrap();
+    assert_eq!(
+        public_value["error"],
+        serde_json::json!({
+            "code": "zcode.account.oauth_init_unavailable",
+            "remedy": "queryOriginal",
+            "committed": false,
+        })
+    );
     assert!(service.persistence.0.lock().unwrap().events.is_empty());
 }
 
