@@ -315,8 +315,9 @@ export function QoderCnDeviceLogin({
             {rebind ? "更换 Qoder CN 绑定账号" : "Qoder CN 独立授权"}
           </DialogTitle>
           <DialogDescription>
-            这是本应用独立会话，不读取官方认证文件。尚未实号验证，不能保证服务器会话一定并存。CN
-            签到仍未接通。
+            这是本应用独立会话，不读取官方认证文件，不能保证服务器会话一定并存。
+            免费福利请在账号的“CN
+            活动状态”中单独查询或领取，不会随登录自动开启；活动已领取不代表今日签到成功。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 px-6 pb-6">
@@ -335,17 +336,25 @@ export function QoderCnDeviceLogin({
           {feedback && (
             <p role={phase === "failed" ? "alert" : "status"}>{feedback}</p>
           )}
-          <p className="text-sm text-muted-foreground">
-            关闭或取消只停止本地等待，不代表撤销服务器授权。
-          </p>
+          {phase !== "completed" && (
+            <p className="text-sm text-muted-foreground">
+              关闭或取消只停止本地等待，不代表撤销服务器授权。
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={!canStart}
-              onClick={() => void start()}
-            >
-              {rebind ? "确认更换并在浏览器中授权" : "在浏览器中授权"}
-            </Button>
+            {phase === "completed" ? (
+              <Button type="button" onClick={close}>
+                完成，返回账号列表
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                disabled={!canStart}
+                onClick={() => void start()}
+              >
+                {rebind ? "确认更换并在浏览器中授权" : "在浏览器中授权"}
+              </Button>
+            )}
             {busy && (
               <Button
                 type="button"

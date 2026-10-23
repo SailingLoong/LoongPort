@@ -108,7 +108,10 @@ export function QoderAccountPanel() {
                         sourceGeneration={generation}
                         disabled={!active || query.isFetching}
                       />
-                      <span>CN 签到仍未接通；活动状态查询不会领取积分。</span>
+                      <span>
+                        免费福利可在“CN
+                        活动状态”中单独领取，自动领取需单独开启；活动已领取不代表今日签到成功。
+                      </span>
                     </>
                   )}
                 </div>

@@ -30,6 +30,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const addLabel = "添加 Qoder CN 独立授权账号";
 const startLabel = "在浏览器中授权";
+const doneLabel = "完成，返回账号列表";
 const loginLabel = "登录 / 重新授权";
 const rebindLabel = "更换绑定账号";
 const authUrl =
@@ -137,7 +138,11 @@ it("offers the actual CN entry with no textbox or automatic grant and keeps the 
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "不能保证服务器会话一定并存",
   );
-  expect(screen.getByRole("dialog")).toHaveTextContent("CN 签到仍未接通");
+  expect(screen.getByRole("dialog")).toHaveTextContent(
+    "免费福利请在账号的“CN 活动状态”中单独查询或领取",
+  );
+  expect(screen.getByRole("dialog")).toHaveTextContent("不会随登录自动开启");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("CN 签到仍未接通");
   expect(api.start).not.toHaveBeenCalled();
 });
 it("starts exactly once on an explicit action and polls only the returned session", async () => {
@@ -161,6 +166,10 @@ it("cancels locally without claiming server revocation and stops polling", async
     sessionId: "session-a",
   });
   expect(screen.getByRole("dialog")).toHaveTextContent("不代表撤销服务器授权");
+  expect(
+    screen.queryByRole("button", { name: doneLabel }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: startLabel })).toBeEnabled();
   await tick(60_000);
   expect(api.poll).not.toHaveBeenCalled();
   expect(api.start).toHaveBeenCalledTimes(1);
@@ -404,7 +413,7 @@ it("cancels after a browser opener failure without polling or restarting", async
   expect(api.start).toHaveBeenCalledTimes(1);
   expect(document.body.textContent).not.toContain("SYNTHETIC-PRIVATE");
 });
-it("refreshes the original provider and identity queries on success without asserting inference or CN claim", async () => {
+it("completes visibly, refreshes the saved account, and returns without cancelling or restarting authorization", async () => {
   api.poll.mockResolvedValue({
     status: "completed",
     providerId: "created-provider",
@@ -412,6 +421,7 @@ it("refreshes the original provider and identity queries on success without asse
   const { client } = await setup();
   const invalidate = vi.spyOn(client, "invalidateQueries");
   await startNew();
+  api.getAll.mockResolvedValue({ saved: device("created-provider") });
   await tick();
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["providers", "codex"] });
   expect(invalidate).toHaveBeenCalledWith({
@@ -420,9 +430,41 @@ it("refreshes the original provider and identity queries on success without asse
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "授权已保存，不代表真实推理已验证",
   );
-  expect(screen.getByRole("dialog")).toHaveTextContent("CN 签到仍未接通");
+  expect(screen.getByRole("button", { name: doneLabel })).toBeEnabled();
+  expect(screen.getByRole("dialog")).toHaveTextContent(
+    "免费福利请在账号的“CN 活动状态”中单独查询或领取",
+  );
+  expect(screen.getByRole("dialog")).toHaveTextContent("不会随登录自动开启");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("CN 签到仍未接通");
+  // Flush the query notification scheduled after the completed poll resolves.
+  expect(client.getQueryData(["providers", "codex"])).toEqual({
+    providers: { saved: device("created-provider") },
+  });
+  await act(async () => {
+    await vi.advanceTimersToNextTimerAsync();
+  });
+  expect(screen.getByText("独立授权 created-provider")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: startLabel }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("关闭或取消只停止本地等待，不代表撤销服务器授权。"),
+  ).not.toBeInTheDocument();
+  await click(doneLabel);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(api.cancel).not.toHaveBeenCalled();
+  expect(api.start).toHaveBeenCalledTimes(1);
+  await openNew();
+  expect(screen.getByRole("button", { name: startLabel })).toBeEnabled();
+  expect(
+    screen.queryByRole("button", { name: doneLabel }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/授权已保存，不代表真实推理已验证/),
+  ).not.toBeInTheDocument();
   await tick(60_000);
   expect(api.poll).toHaveBeenCalledTimes(1);
+  expect(api.start).toHaveBeenCalledTimes(1);
   expect(api.cancel).not.toHaveBeenCalled();
 });
 
@@ -638,3 +680,22 @@ it("refreshes backend-saved pending records after a failed start without retryin
   expect(api.start).toHaveBeenCalledTimes(1);
   expect(api.openExternal).not.toHaveBeenCalled();
 });
+
+// A completion exit is not a substitute for retry/cancel while authorization is unresolved.
+it.each(["pending", "failed"])(
+  "does not offer completed exit for a %s authorization",
+  async (status) => {
+    api.poll.mockResolvedValue(
+      status === "pending" ? { status } : { status, code: "unavailable" },
+    );
+    await setup();
+    await startNew();
+    await tick();
+    expect(
+      screen.queryByRole("button", { name: doneLabel }),
+    ).not.toBeInTheDocument();
+    const start = screen.getByRole("button", { name: startLabel });
+    if (status === "pending") expect(start).toBeDisabled();
+    else expect(start).toBeEnabled();
+  },
+);

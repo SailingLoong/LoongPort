@@ -209,6 +209,8 @@ it.each(["qoder_cn", "qoder_cn_device"])(
     render(card(type, "codex", "g1", false));
     expect(screen.queryByText("qoder-explicit-entry")).not.toBeInTheDocument();
     expect(campaignRead).not.toHaveBeenCalled();
+    expect(screen.getByText(/免费福利领取与授权独立/)).toBeInTheDocument();
+    expect(screen.queryByText("CN 签到接口尚未验证")).not.toBeInTheDocument();
     await act(async () =>
       fireEvent.click(screen.getByRole("button", { name: "CN 活动状态" })),
     );
