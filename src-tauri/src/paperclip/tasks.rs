@@ -524,6 +524,64 @@ mod tests {
             },
         ]
     }
+    // Cancellation only signals workers. Their completion callback may briefly
+    // own the nonblocking task gate. Repeat the same durable request, never work.
+    fn retry_busy_local_task(mut create: impl FnMut() -> Result<Value, AppError>) -> Value {
+        let until = Instant::now() + REQUEST_BUDGET;
+        loop {
+            assert!(Instant::now() < until, "local task gate did not settle");
+            match create() {
+                Ok(value) => return value,
+                Err(AppError::Config(code)) if code == "paperclip.owner_unavailable" => {
+                    thread::yield_now();
+                }
+                Err(error) => panic!("unexpected duplicate request failure: {error}"),
+            }
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn busy_task_gate_rejects_then_reuses_the_same_group_without_new_starts() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let (_rt, _state, owner) = super::super::tests::fixture();
+        let mut starts = 0;
+        owner
+            .create_local_task_with(
+                "busy-replay".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |_, _| {
+                    starts += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(starts, 2);
+        let gate = owner.control.local_task_gate.lock().unwrap();
+        let result = owner.create_local_task_with(
+            "busy-replay".into(),
+            "Objective".into(),
+            "test-model".into(),
+            Some(analyses()),
+            |_, _| panic!("busy duplicate start"),
+        );
+        assert!(
+            matches!(result, Err(AppError::Config(code)) if code == "paperclip.owner_unavailable")
+        );
+        drop(gate);
+        retry_busy_local_task(|| {
+            owner.create_local_task_with(
+                "busy-replay".into(),
+                "Objective".into(),
+                "test-model".into(),
+                Some(analyses()),
+                |_, _| panic!("released duplicate start"),
+            )
+        });
+        assert_eq!(owner.local_bindings().unwrap().len(), 2);
+        assert_eq!(starts, 2);
+    }
     #[test]
     #[serial_test::serial]
     fn finite_group_workers_overlap_and_cancel_blocks_summary_and_replay() {
@@ -560,15 +618,15 @@ mod tests {
         receive.recv_timeout(Duration::from_secs(2)).unwrap();
         receive.recv_timeout(Duration::from_secs(2)).unwrap();
         owner.cancel_local_task("parallel").unwrap();
-        owner
-            .create_local_task_with(
+        retry_busy_local_task(|| {
+            owner.create_local_task_with(
                 "parallel".into(),
                 "Objective".into(),
                 "test-model".into(),
                 Some(analyses()),
                 |_, _| panic!("duplicate start"),
             )
-            .unwrap();
+        });
         owner.stop_local_tasks().unwrap();
         let reopened = Owner::new(state, AppType::Codex, owner.owner.clone()).unwrap();
         assert_eq!(reopened.local_bindings().unwrap().len(), 2);

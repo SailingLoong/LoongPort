@@ -193,6 +193,11 @@ fn stream_error(auth: bool) -> std::io::Error {
 fn owner_error(_: Failure) -> ProxyError {
     ProxyError::AuthError("workbuddy.authorization_unavailable".into())
 }
+fn post_dispatch_owner_error(_: Failure) -> ProxyError {
+    // Rechecking the original owner after submission must still revoke access,
+    // but cannot authorize replay as a pre-send authentication failure.
+    ProxyError::Internal("workbuddy.authorization_changed_after_dispatch".into())
+}
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -1079,7 +1084,7 @@ impl Lease {
                 },
             )
             .await?;
-            self.check().await.map_err(owner_error)?;
+            self.check().await.map_err(post_dispatch_owner_error)?;
             // Never classify an opaque compressed 401 as refreshable: it may
             // contain an explicit denial. Identity was requested. Reject this
             // protocol response terminally (415) rather than retrying elsewhere.
@@ -1113,7 +1118,7 @@ impl Lease {
                     .await
                     .map_err(|_| ProxyError::Internal("workbuddy.error_body_timeout".into()))?
                     .map_err(|_| ProxyError::Internal("workbuddy.invalid_error_response".into()))?;
-                self.check().await.map_err(owner_error)?;
+                self.check().await.map_err(post_dispatch_owner_error)?;
                 let env: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 let upstream_code = upstream_error_code(&env);
                 let refusal = matches!(upstream_code, Some(11004 | 11140));

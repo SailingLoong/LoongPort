@@ -744,6 +744,23 @@ pub(crate) fn validate_capabilities(body: &Value) -> Result<(), &'static str> {
     }
 }
 
+/// Additional automatic-chain admission on the original request. The original
+/// TRAE wire accepts no response_format field, including explicit text/null;
+/// this is a wire limitation, not a claim that those values constrain output.
+/// Structured formats and vendor-bound cursors cannot be silently discarded.
+/// Keep manual selection separate; never erase fields to make a candidate fit.
+#[cfg(any(feature = "gui", test))]
+pub(crate) fn validate_automatic_capabilities(body: &Value) -> Result<(), &'static str> {
+    if body.pointer("/text/format").is_some()
+        || body.get("response_format").is_some()
+        || body.get("previous_response_id").is_some()
+    {
+        Err("trae.text_only_request_required")
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod fixture;
 #[cfg(test)]

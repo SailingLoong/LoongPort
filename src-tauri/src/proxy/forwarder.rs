@@ -233,6 +233,8 @@ impl Drop for ActiveConnectionGuard {
 }
 
 pub struct RequestForwarder {
+    /// Same request snapshot used to select the original candidate chain.
+    automatic_failover: bool,
     diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
     /// 共享的 ProviderRouter（持有熔断器状态）
@@ -419,11 +421,13 @@ impl RequestForwarder {
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
         model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
+        automatic_failover: bool,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            automatic_failover,
             diagnostic_id,
             request_identity: None,
             router,
@@ -758,7 +762,11 @@ impl RequestForwarder {
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
-            if let Err(error) = super::managed_accounts::validate_capabilities(provider, &body) {
+            if let Err(error) = super::managed_accounts::validate_capabilities(
+                provider,
+                &body,
+                self.automatic_failover,
+            ) {
                 last_error = Some(error);
                 last_provider = Some(provider.clone());
                 continue;
@@ -5178,6 +5186,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            automatic_failover: false,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,
             router: Arc::new(ProviderRouter::new(db.clone())),

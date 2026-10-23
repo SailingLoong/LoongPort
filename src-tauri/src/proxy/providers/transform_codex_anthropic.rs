@@ -229,6 +229,7 @@ pub fn responses_request_to_anthropic(
     body: Value,
     default_max_tokens: u64,
 ) -> Result<Value, ProxyError> {
+    super::responses_output_format::ensure_anthropic_output_format_supported(&body)?;
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
     let model = body

@@ -40,18 +40,29 @@ pub(crate) fn is_chat(provider: &Provider) -> bool {
     )
 }
 
-pub(crate) fn validate_capabilities(provider: &Provider, body: &Value) -> Result<(), ProxyError> {
+pub(crate) fn validate_capabilities(
+    provider: &Provider,
+    body: &Value,
+    automatic_failover: bool,
+) -> Result<(), ProxyError> {
     if !matches!(selected(provider), Some((AccountKind::Trae, _))) {
         return Ok(());
     }
     #[cfg(any(feature = "gui", test))]
     {
         crate::trae_accounts::inference::validate_capabilities(body)
+            .and_then(|()| {
+                if automatic_failover {
+                    crate::trae_accounts::inference::validate_automatic_capabilities(body)
+                } else {
+                    Ok(())
+                }
+            })
             .map_err(|_| ProxyError::InvalidRequest("trae.text_only_request_required".into()))
     }
     #[cfg(not(any(feature = "gui", test)))]
     {
-        let _ = body;
+        let _ = (body, automatic_failover);
         Err(ProxyError::ConfigError(
             "TRAE owner is unavailable in this build".into(),
         ))

@@ -28,6 +28,7 @@ pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
 pub mod models;
 pub(crate) mod reasoning_bridge;
+mod responses_output_format;
 pub mod streaming;
 pub mod streaming_codex_anthropic;
 pub mod streaming_codex_chat;
@@ -36,6 +37,8 @@ pub mod streaming_responses;
 pub mod transform;
 pub mod transform_codex_anthropic;
 pub mod transform_codex_chat;
+#[cfg(test)]
+mod transform_codex_output_format_tests;
 pub mod transform_codex_responses_namespace;
 pub mod transform_codex_responses_xai_sanitize;
 pub mod transform_gemini;

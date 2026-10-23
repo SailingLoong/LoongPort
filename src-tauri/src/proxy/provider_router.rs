@@ -183,6 +183,18 @@ impl ProviderRouter {
         }
     }
 
+    /// Existing automatic-failover entry, not a new smart-routing policy.
+    pub(crate) async fn automatic_failover_enabled(
+        &self,
+        app_type: &str,
+    ) -> Result<bool, AppError> {
+        Ok(self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await?
+            .auto_failover_enabled)
+    }
+
     pub fn preferred_model(&self, app_type: &str, provider: &Provider) -> Option<String> {
         super::application_routing::model_for_provider(&self.db, app_type, provider)
     }
@@ -193,17 +205,22 @@ impl ProviderRouter {
     /// 不是后备，永不参与自动重试。当前档照旧排第一位（它是用户的手动选择）；
     /// 当前档被应用出链时，整条链从链顶开始都算后继候选。
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
+        let enabled = self.automatic_failover_enabled(app_type).await?;
+        self.select_providers_with_mode(app_type, enabled).await
+    }
+
+    /// Select and admit a request using the same captured automatic-chain mode.
+    pub(crate) async fn select_providers_with_mode(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<Vec<Provider>, AppError> {
         use super::application_routing;
         let chain = application_routing::chain_providers(&self.db, app_type)?;
         let current_id = application_routing::current_provider_id_checked(&self.db, app_type)?;
         let current = current_id
             .as_deref()
             .and_then(|id| self.db.get_provider_by_id(id, app_type).ok().flatten());
-        let enabled = self
-            .db
-            .get_proxy_config_for_app(app_type)
-            .await?
-            .auto_failover_enabled;
         let blocked = if crate::mode::operation::uses_upstream4_schema(&self.db)? {
             application_routing::blocked_tier_ids_checked(&self.db, app_type)?
         } else {

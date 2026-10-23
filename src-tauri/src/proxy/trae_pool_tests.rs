@@ -483,9 +483,12 @@ async fn trae_manual_semantic_compatibility_remains_outside_automatic_gate() {
         }
         let (path, body) = automatic_semantic_case(case);
         let response = f.request(path, body).await;
-        let expected_status = if case == "chat_format" {
-            // The native Chat field survives to the original strict TRAE wire
-            // validator, which already rejects it. Preserve that behavior too.
+        let expected_status = if case != "responses_cursor" {
+            // Structured-format conversion now preserves Responses text.format
+            // as well as native Chat response_format. The original strict TRAE
+            // wire must reject both, not silently return an unconstrained answer.
+            // This intentionally corrects the old Responses false-success while
+            // keeping manual selection separate from automatic eligibility.
             StatusCode::BAD_REQUEST
         } else {
             StatusCode::OK
@@ -498,7 +501,7 @@ async fn trae_manual_semantic_compatibility_remains_outside_automatic_gate() {
         .await
         .unwrap()
         .unwrap();
-        if case == "chat_format" {
+        if case != "responses_cursor" {
             assert!(!String::from_utf8_lossy(&body).contains("synthetic TRAE answer"));
             assert_eq!(f.calls.lock().unwrap().len(), 0, "{case}");
         } else {
@@ -506,6 +509,138 @@ async fn trae_manual_semantic_compatibility_remains_outside_automatic_gate() {
             assert_eq!(f.calls.lock().unwrap().len(), 1, "{case}");
         }
     }
-    // This deliberately preserves the old manual compatibility boundary; a
-    // successful text answer is NOT proof of structured-output/state fidelity.
+    // The cursor's legacy manual behavior remains out of the automatic gate;
+    // its successful text answer is NOT proof of state portability. Structured
+    // formats instead explicitly fail now that conversion preserves their intent.
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_automatic_eligibility_uses_the_original_selection_mode_snapshot() {
+    use crate::{app_config::AppType, proxy::handler_context::RequestContext};
+    for selected_automatic in [true, false] {
+        let f = Fixture::new().await;
+        let mut config = f.db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = selected_automatic;
+        f.db.update_proxy_config_for_app(config.clone())
+            .await
+            .unwrap();
+        let (_, body) = automatic_semantic_case("responses_cursor");
+        let headers = http::HeaderMap::new();
+        let context = RequestContext::new(
+            &f.proxy.state,
+            &body,
+            &headers,
+            AppType::Codex,
+            "Codex",
+            "codex",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            context.get_providers().len(),
+            if selected_automatic { 2 } else { 1 }
+        );
+        // Deterministically change the setting after original selection but
+        // before creating/using its forwarder. Never infer mode from chain size.
+        config.auto_failover_enabled = !selected_automatic;
+        f.db.update_proxy_config_for_app(config).await.unwrap();
+        let mut extensions = http::Extensions::new();
+        extensions.insert(f.transport.clone());
+        let forwarder = context.create_forwarder(&f.proxy.state);
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            forwarder.forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                body,
+                headers,
+                extensions,
+                context.get_providers(),
+            ),
+        )
+        .await
+        .expect("snapshot dispatch must complete within the original request budget");
+        if selected_automatic {
+            assert!(matches!(
+                result,
+                Err(crate::proxy::forwarder::ForwardError {
+                    error: ProxyError::InvalidRequest(_),
+                    ..
+                })
+            ));
+            assert_eq!(f.calls.lock().unwrap().len(), 0);
+            assert_eq!(f.transport.attempts(), 0);
+            assert!(f
+                .db
+                .provider_attempt_error_rates("codex")
+                .unwrap()
+                .is_empty());
+        } else {
+            let result = result
+                .unwrap_or_else(|_| panic!("later toggle must not reinterpret the manual request"));
+            assert_eq!(result.response.status(), StatusCode::OK);
+            let bytes = tokio::time::timeout(
+                Duration::from_secs(5),
+                result.response.bytes_with_limit(1024 * 1024),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("synthetic TRAE answer"));
+            assert_eq!(f.calls.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_explicit_unconstrained_formats_respect_original_wire_limits() {
+    for automatic in [true, false] {
+        for (path, body) in [
+            (
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":true,"input":"hello","text":{"format":{"type":"text"}}}),
+            ),
+            (
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":true,"input":"hello","response_format":null}),
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":{"type":"text"}}),
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"hello"}],"response_format":null}),
+            ),
+        ] {
+            let f = Fixture::new().await;
+            let mut config = f.db.get_proxy_config_for_app("codex").await.unwrap();
+            config.auto_failover_enabled = automatic;
+            f.db.update_proxy_config_for_app(config).await.unwrap();
+            let response = f.request(path, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                axum::body::to_bytes(response.into_body(), 1024 * 1024),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(f.calls.lock().unwrap().len(), 0);
+            assert_eq!(f.transport.attempts(), 0);
+            if automatic {
+                assert!(f
+                    .db
+                    .provider_attempt_error_rates("codex")
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+    }
+    // These values are not structured constraints. They are excluded because
+    // TRAE's original strict wire accepts no response_format field at all.
+    // Unadorned plain text remains covered by the original three-entry control.
 }
