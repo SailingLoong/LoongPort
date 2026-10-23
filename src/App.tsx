@@ -131,6 +131,7 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { ImageTabPage } from "@/components/relay/ImageTabPage";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
+import { ClientsPanel } from "@/components/clients/ClientsPanel";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
 import { Button } from "@/components/ui/button";
@@ -1242,6 +1243,8 @@ function App() {
               onInteractionBlockedChange={setMcpManagementBusy}
             />
           );
+        case "clients":
+          return <ClientsPanel />;
         case "agents":
           return <AgentsPanel onOpenChange={goBack} />;
         case "universal":
@@ -1530,6 +1533,7 @@ function App() {
                   {currentView === "skills" && t("skills.title")}
                   {currentView === "skillsDiscovery" && t("skills.title")}
                   {currentView === "mcp" && t("mcp.unifiedPanel.title")}
+                  {currentView === "clients" && t("client.features.clients")}
                   {currentView === "agents" && t("agents.title")}
                   {currentView === "universal" &&
                     t("universalProvider.title", {

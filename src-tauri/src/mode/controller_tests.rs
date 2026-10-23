@@ -996,7 +996,12 @@ fn codex_compaction_row(mut row: Provider, name: &str, capability: Option<&str>)
 }
 
 #[cfg(test)]
-fn assert_codex_proxy_compaction(path: &std::path::Path, name: &str, capability: Option<&str>) {
+fn assert_codex_proxy_compaction(
+    db: &crate::Database,
+    path: &std::path::Path,
+    name: &str,
+    capability: Option<&str>,
+) {
     let text = std::fs::read_to_string(path).unwrap();
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     assert_eq!(doc["model_provider"].as_str(), Some("custom"));
@@ -1025,7 +1030,11 @@ fn assert_codex_proxy_compaction(path: &std::path::Path, name: &str, capability:
         .starts_with("http://127.0.0.1:"));
     assert_eq!(
         table["experimental_bearer_token"].as_str(),
-        Some(crate::live::project::codex::PROXY_TOKEN_PLACEHOLDER)
+        Some(
+            crate::proxy::client_access::managed::key(db, "codex")
+                .unwrap()
+                .as_str()
+        )
     );
     for key in ["env_key", "http_headers", "env_http_headers", "auth"] {
         assert!(
@@ -1053,7 +1062,7 @@ fn check_codex_remote_compaction_lifecycle(capability: Option<&str>) {
         fx.runtime
             .block_on(fx.state.proxy_service.set_takeover_for_app("codex", true))
             .unwrap();
-        assert_codex_proxy_compaction(&fx.path, name, capability);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, name, capability);
 
         // A changed source must replace the preference on the active route.
         let updated_capability = if capability == Some("v2") {
@@ -1063,7 +1072,7 @@ fn check_codex_remote_compaction_lifecycle(capability: Option<&str>) {
         };
         let updated = codex_compaction_row(source.clone(), name, updated_capability);
         ProviderService::update(&fx.state, AppType::Codex, None, updated).unwrap();
-        assert_codex_proxy_compaction(&fx.path, name, updated_capability);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, name, updated_capability);
 
         fx.runtime
             .block_on(fx.state.proxy_service.stop_with_restore_keep_state())
@@ -1072,18 +1081,18 @@ fn check_codex_remote_compaction_lifecycle(capability: Option<&str>) {
         fx.runtime
             .block_on(fx.state.proxy_service.recover_from_crash())
             .unwrap();
-        assert_codex_proxy_compaction(&fx.path, name, updated_capability);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, name, updated_capability);
 
         // Updating the same source to no preference clears its old projection.
         let cleared = codex_compaction_row(source.clone(), "Relay", None);
         ProviderService::update(&fx.state, AppType::Codex, None, cleared).unwrap();
-        assert_codex_proxy_compaction(&fx.path, "Relay", None);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, "Relay", None);
         ProviderService::update(&fx.state, AppType::Codex, None, source).unwrap();
-        assert_codex_proxy_compaction(&fx.path, name, capability);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, name, capability);
         fx.runtime
             .block_on(fx.state.proxy_service.switch_proxy_target("codex", "b"))
             .unwrap();
-        assert_codex_proxy_compaction(&fx.path, "Synthetic", None);
+        assert_codex_proxy_compaction(&fx.state.db, &fx.path, "Synthetic", None);
         assert_eq!(
             read_current(&crate::codex_config::get_codex_auth_path()).unwrap(),
             native
@@ -1237,7 +1246,7 @@ fn codex_remote_compaction_catalog_preview_matches_actual_selection() {
                     "preview/actual file {index}: {name}/{capability:?}"
                 );
             }
-            assert_codex_proxy_compaction(&fx.path, name, capability);
+            assert_codex_proxy_compaction(&fx.state.db, &fx.path, name, capability);
             assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
             fx.runtime
                 .block_on(fx.state.proxy_service.set_takeover_for_app("codex", false))

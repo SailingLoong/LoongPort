@@ -517,6 +517,7 @@ pub(crate) fn create_usage_collector(
     let provider_id = ctx.provider.id.clone();
     let request_model = ctx.request_model.clone();
     let local_input_tokens = ctx.local_input_tokens;
+    let caller = ctx.caller.clone();
     // 流式事件缺失模型名时的归因兜底：映射后的出站模型（路由接管真值）优先，
     // 其次才是客户端请求别名
     let fallback_model = ctx
@@ -546,10 +547,12 @@ pub(crate) fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let caller = caller.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
+                        caller,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -573,10 +576,12 @@ pub(crate) fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let caller = caller.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
+                        caller,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -628,10 +633,12 @@ fn spawn_log_usage(
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
     let local_input_tokens = ctx.local_input_tokens;
+    let caller = ctx.caller.clone();
 
     tokio::spawn(async move {
         log_usage_internal(
             &state,
+            caller,
             &provider_id,
             &app_type_str,
             &model,
@@ -666,6 +673,7 @@ pub(crate) fn usage_logging_enabled(state: &ProxyState) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn log_usage_internal(
     state: &ProxyState,
+    caller: Option<super::client_access::CallerIdentity>,
     provider_id: &str,
     app_type: &str,
     model: &str,
@@ -681,7 +689,7 @@ async fn log_usage_internal(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new(&state.db).with_caller(caller.as_ref());
     let (multiplier, pricing_model_source) =
         logger.resolve_pricing_config(provider_id, app_type).await;
     let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
@@ -1589,6 +1597,7 @@ mod tests {
 
         log_usage_internal(
             &state,
+            None,
             "provider-1",
             app_type,
             "resp-model",
@@ -1660,6 +1669,7 @@ mod tests {
         // （$4/M），上游回显 resp-model。「按请求计价」必须锚定实际发出的模型。
         log_usage_internal(
             &state,
+            None,
             "provider-3",
             app_type,
             "resp-model",
@@ -1741,6 +1751,7 @@ mod tests {
 
         log_usage_internal(
             &state,
+            None,
             "provider-2",
             app_type,
             "resp-model",

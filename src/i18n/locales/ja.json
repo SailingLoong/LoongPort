@@ -4058,7 +4058,8 @@
       "openclawTools": "ツール権限",
       "openclawAgents": "Agent の既定設定",
       "hermesMemory": "Hermes メモリ",
-      "hermesDashboard": "Hermes ダッシュボード"
+      "hermesDashboard": "Hermes ダッシュボード",
+      "clients": "クライアント接続"
     },
     "featureDescriptions": {
       "usage": "リクエスト、Token、料金を確認",
@@ -4073,7 +4074,8 @@
       "openclawTools": "OpenClaw のツール権限を管理",
       "openclawAgents": "OpenClaw の既定動作を設定",
       "hermesMemory": "永続メモリを確認・編集",
-      "hermesDashboard": "ローカル管理画面を開く"
+      "hermesDashboard": "ローカル管理画面を開く",
+      "clients": "WorkBuddy などのクライアントを接続"
     }
   },
   "applications": {
@@ -5137,5 +5139,60 @@
       "expires": "アクセス認証情報の有効期限: {{time}}",
       "reimport": "CLI で再ログインし、このアカウントを明示的に再インポートしてください。"
     }
+  },
+  "clients": {
+    "description": "他のクライアントを既存の LoongPort ルートに接続します。",
+    "configured": "設定を書き込みました。クライアントでの会話は未確認です。",
+    "notConfigured": "未接続",
+    "sharedRoute": "{{route}} のルーティング設定を共有",
+    "route": "ルート",
+    "models": "モデル ID（カンマ区切り）",
+    "credential": "接続認証情報",
+    "chooseCredential": "接続認証情報を選択",
+    "createCredential": "接続認証情報を作成",
+    "preview": "設定をプレビュー",
+    "previewDescription": "{{route}} ルートに {{count}} 個のモデルを設定します。他のモデルと設定は保持します。",
+    "apply": "設定を適用",
+    "disconnect": "接続を解除",
+    "recover": "中断した操作を確認",
+    "applied": "設定を書き込みました。クライアントでモデルを選び、会話を確認してください。表示されない場合は再起動してください。",
+    "operationFailed": "操作は完了しませんでした。ローカルプロキシ、認証情報、設定の外部変更を確認して再試行してください。",
+    "configurationChanged": "クライアントの設定が変更されました。再接続の前に確認してください。",
+    "recoveryRequired": "中断した操作を確認する必要があります。",
+    "revoke": "認証情報を失効"
+  },
+  "codeAgents": {
+    "title": "コードタスク",
+    "description": "独立した作業領域で Codex を実行します。変更は確認用に保持され、自動マージされません。承認済みの接続のみを使用します。",
+    "authorize": "コードタスクを承認",
+    "revoke": "コードのアクセスを取り消す",
+    "grant": "コードのアクセス",
+    "chooseGrant": "アクセスを選択",
+    "repository": "リポジトリ",
+    "base": "基準リビジョン",
+    "model": "コードモデル",
+    "modelHint": "設定済みモデルを選択するか、モデル ID を入力してください。利用可否は実行時に確認されます。",
+    "run": "コードタスクを実行",
+    "refresh": "実行状況を更新",
+    "workspace": "作業領域：",
+    "baseCommit": "基準：",
+    "headCommit": "結果リビジョン：",
+    "lostOutput": "再起動後は応答本文を復元できませんが、作業領域と実行状態は保持されます。",
+    "interaction": "Codex に追加確認が必要なため、タスクを停止しました。",
+    "unfinished": "タスクは完了していません。作業領域と実行状態を確認してください。",
+    "processUnknown": "プロセスの停止を確認できません。",
+    "cancel": "コードタスクをキャンセル",
+    "readFailed": "コードタスクを読み取れません。",
+    "modelsFailed": "設定済みモデルを読み取れません。",
+    "createUncertain": "開始結果を確認できません。同じ内容を再送すると既存の状態を読み取ります。",
+    "operationFailed": "操作に失敗しました。状態を更新して再試行してください。",
+    "unknown": "未確認",
+    "running": "実行中",
+    "completed": "完了",
+    "cancelled": "キャンセル済み",
+    "failed": "失敗",
+    "unknownStatus": "不明な状態",
+    "routeUnsupported": "コードタスクには API キー接続が必要です。Codex で API キー接続を選び、モデルを入力して再試行してください。",
+    "accessDenied": "コードへのアクセスが利用できません。アクセス状態を更新するか、再度承認してから再試行してください。"
   }
 }

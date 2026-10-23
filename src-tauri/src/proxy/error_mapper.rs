@@ -50,7 +50,7 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         ProxyError::ConfigError(_) | ProxyError::InvalidRequest(_) => 400,
 
         // 认证错误：401 Unauthorized
-        ProxyError::AuthError(_) => 401,
+        ProxyError::AuthError(_) | ProxyError::ClientAccessDenied => 401,
 
         // 数据库错误：500 Internal Server Error
         ProxyError::DatabaseError(_) => 500,

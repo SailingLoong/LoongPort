@@ -48,7 +48,15 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 28;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 29;
+
+/// The authenticated snapshot contract starts at the original vault schema.
+/// Snapshots retain their recorded identity; this bound does not migrate them.
+pub(crate) const MIN_AUTHENTICATED_SNAPSHOT_VERSION: i32 = 24;
+
+pub(crate) fn supports_authenticated_snapshot_version(version: i32) -> bool {
+    (MIN_AUTHENTICATED_SNAPSHOT_VERSION..=LOONGPORT_SCHEMA_VERSION).contains(&version)
+}
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -378,10 +386,17 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 conn.execute_batch("RELEASE qoder_http_auth_migration")?;
             }
             27 => {
+                crate::proxy::client_access::create_schema(conn)?;
+                set_version(conn, 28)?;
+            }
+            28 => {
+                // Published v28 belongs to client access. Validate that owner;
+                // never reinterpret a pre-merge experimental CN-only v28 as it.
                 conn.execute_batch("SAVEPOINT qoder_cn_operation_migration")?;
                 let result = (|| {
+                    crate::proxy::client_access::validate_schema(conn)?;
                     crate::database::dao::qoder_campaign_operations::migrate_cn_schema(conn)?;
-                    set_version(conn, 28)
+                    set_version(conn, 29)
                 })();
                 if let Err(error) = result {
                     conn.execute_batch("ROLLBACK TO qoder_cn_operation_migration; RELEASE qoder_cn_operation_migration")?;
@@ -398,6 +413,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    crate::proxy::client_access::validate_schema(conn)?;
     crate::database::dao::qoder_http_auth::validate_column(conn)?;
     crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     // Installed v25 is evidence to validate, never permission to recreate a ledger.
@@ -975,6 +991,19 @@ mod tests {
     use super::*;
     use crate::Database;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    #[test]
+    fn authenticated_snapshots_accept_supported_history_and_reject_future_versions() {
+        for version in MIN_AUTHENTICATED_SNAPSHOT_VERSION..=LOONGPORT_SCHEMA_VERSION {
+            assert!(supports_authenticated_snapshot_version(version));
+        }
+        assert!(!supports_authenticated_snapshot_version(
+            MIN_AUTHENTICATED_SNAPSHOT_VERSION - 1
+        ));
+        assert!(!supports_authenticated_snapshot_version(
+            LOONGPORT_SCHEMA_VERSION + 1
+        ));
+    }
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
@@ -2488,13 +2517,17 @@ mod tests {
         )
         .unwrap();
         conn.execute("INSERT INTO qoder_campaign_operations VALUES('legacy-attempt','synthetic-subject','international','legacy-campaign','legacy-key',100,200,'legacy-generation','unknown')", []).unwrap();
+        conn.execute_batch("DROP TABLE loongport_client_credentials; ALTER TABLE proxy_request_logs DROP COLUMN client_id; ALTER TABLE proxy_request_logs DROP COLUMN client_credential_id").unwrap();
         set_version(&conn, 27).unwrap();
         let before = crate::database::dao::qoder_campaign_operations::read_rows(&conn).unwrap();
         let upstream: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         apply(&conn).unwrap();
-        assert_eq!(read_stored_version(&conn).unwrap(), 28);
+        assert_eq!(
+            read_stored_version(&conn).unwrap(),
+            LOONGPORT_SCHEMA_VERSION
+        );
         assert_eq!(
             crate::database::dao::qoder_campaign_operations::read_rows(&conn).unwrap(),
             before
@@ -2511,14 +2544,14 @@ mod tests {
         );
     }
     #[test]
-    fn qoder_v27_missing_or_forged_ledger_never_advances_or_repairs() {
+    fn qoder_v28_missing_or_forged_ledger_never_advances_or_repairs() {
         for malformed in ["DROP TABLE qoder_campaign_operations", "DROP TABLE qoder_campaign_operations;CREATE TABLE qoder_campaign_operations(attempt_id TEXT)"] {
             let db = crate::database::Database::memory().unwrap();
             let conn = db.conn.lock().unwrap();
             conn.execute_batch(malformed).unwrap();
-            set_version(&conn, 27).unwrap();
+            set_version(&conn, 28).unwrap();
             assert!(apply(&conn).is_err());
-            assert_eq!(read_stored_version(&conn).unwrap(), 27);
+            assert_eq!(read_stored_version(&conn).unwrap(), 28);
             assert!(!table_exists(&conn, "qoder_campaign_operations_v27").unwrap());
         }
     }
@@ -2574,3 +2607,7 @@ mod tests {
         assert_eq!(read_stored_version(&conn).unwrap(), 25);
     }
 }
+
+#[cfg(test)]
+#[path = "loongport_schema_qoder_cn_tests.rs"]
+mod qoder_cn_migration_tests;

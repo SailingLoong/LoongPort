@@ -173,8 +173,8 @@ async fn handle_messages_for_app(
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri;
-    let headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut headers = parts.headers;
+    let mut extensions = parts.extensions;
     let body_bytes = body
         .collect()
         .await
@@ -185,6 +185,7 @@ async fn handle_messages_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
 
     let raw_endpoint = uri
         .path_and_query()
@@ -272,7 +273,9 @@ fn validate_claude_desktop_gateway_auth(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), ProxyError> {
-    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
+    let expected = state
+        .db
+        .builtin_client_key("claude-desktop", "claude-desktop")
         .map_err(|e| ProxyError::AuthError(e.to_string()))?;
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
         return Err(ProxyError::AuthError(
@@ -299,6 +302,7 @@ fn validate_claude_desktop_gateway_auth(
 ///
 /// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
 struct ClaudeUsageLog {
+    caller: Option<super::client_access::CallerIdentity>,
     model: String,
     request_model: String,
     outbound_model: String,
@@ -330,6 +334,7 @@ fn prepare_claude_usage_log(
         .unwrap_or_else(|| ctx.request_model.clone());
 
     Some(ClaudeUsageLog {
+        caller: ctx.caller.clone(),
         model,
         request_model: ctx.request_model.clone(),
         outbound_model: ctx
@@ -350,6 +355,7 @@ fn prepare_claude_usage_log(
 async fn write_claude_usage_log(state: &ProxyState, log: ClaudeUsageLog) {
     log_usage(
         state,
+        log.caller,
         &log.provider_id,
         log.app_type,
         &log.model,
@@ -473,6 +479,7 @@ async fn handle_claude_transform(
             let app_type_str = ctx.app_type_str;
 
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
                 Some(claude_stream_usage_event_filter),
@@ -489,10 +496,12 @@ async fn handle_claude_transform(
                         let session_id = session_id.clone();
                         let request_model = request_model.clone();
                         let outbound_model = fallback_model.clone();
+                        let caller = caller.clone();
 
                         tokio::spawn(async move {
                             log_usage(
                                 &state,
+                                caller,
                                 &provider_id,
                                 app_type_str,
                                 &model,
@@ -774,7 +783,7 @@ pub async fn handle_chat_completions(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -786,6 +795,7 @@ pub async fn handle_chat_completions(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -865,7 +875,7 @@ async fn handle_responses_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -877,6 +887,7 @@ async fn handle_responses_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/responses");
 
     let is_stream = body
@@ -1002,7 +1013,7 @@ pub async fn handle_alpha_search(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -1014,6 +1025,7 @@ pub async fn handle_alpha_search(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/alpha/search");
 
     let forwarder = ctx.create_forwarder(&state);
@@ -1079,7 +1091,7 @@ async fn handle_responses_compact_for_app(
     let method = parts.method.clone();
     let uri = parts.uri;
     let mut headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -1091,6 +1103,7 @@ async fn handle_responses_compact_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
 
     let is_stream = body
@@ -1277,9 +1290,11 @@ async fn handle_codex_responses_namespace_restore(
                     let session_id = ctx.session_id.clone();
                     let latency_ms = ctx.latency_ms();
                     let local_input_tokens = ctx.local_input_tokens;
+                    let caller = ctx.caller.clone();
                     async move {
                         log_usage(
                             &state,
+                            caller,
                             &provider_id,
                             app_type_str,
                             &model,
@@ -1366,6 +1381,7 @@ async fn handle_codex_chat_to_responses_transform(
             let session_id = ctx.session_id.clone();
 
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
                 Some(codex_stream_usage_event_filter),
@@ -1392,11 +1408,13 @@ async fn handle_codex_chat_to_responses_transform(
                     let provider_id = provider_id.clone();
                     let request_model = request_model.clone();
                     let outbound_model = fallback_model.clone();
+                    let caller = caller.clone();
                     let session_id = session_id.clone();
 
                     tokio::spawn(async move {
                         log_usage(
                             &state,
+                            caller,
                             &provider_id,
                             app_type_str,
                             &model,
@@ -1518,9 +1536,11 @@ async fn handle_codex_chat_to_responses_transform(
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             async move {
                 log_usage(
                     &state,
+                    caller,
                     &provider_id,
                     app_type_str,
                     &model,
@@ -1686,9 +1706,11 @@ async fn handle_codex_anthropic_to_responses_transform(
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
             let local_input_tokens = ctx.local_input_tokens;
+            let caller = ctx.caller.clone();
             async move {
                 log_usage(
                     &state,
+                    caller,
                     &provider_id,
                     app_type_str,
                     &model,
@@ -1756,6 +1778,7 @@ fn build_codex_anthropic_sse_response(
         let session_id = ctx.session_id.clone();
 
         let local_input_tokens = ctx.local_input_tokens;
+        let caller = ctx.caller.clone();
         Some(SseUsageCollector::new(
             start_time,
             Some(codex_stream_usage_event_filter),
@@ -1776,11 +1799,13 @@ fn build_codex_anthropic_sse_response(
                 let provider_id = provider_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let caller = caller.clone();
                 let session_id = session_id.clone();
 
                 tokio::spawn(async move {
                     log_usage(
                         &state,
+                        caller,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -2116,7 +2141,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::ConfigError(_) => "cc_switch_config_error",
         ProxyError::TransformError(_) => "cc_switch_transform_error",
         ProxyError::InvalidRequest(_) => "cc_switch_invalid_request",
-        ProxyError::AuthError(_) => "cc_switch_auth_error",
+        ProxyError::AuthError(_) | ProxyError::ClientAccessDenied => "cc_switch_auth_error",
         ProxyError::UpstreamError { .. } => "cc_switch_upstream_error",
         ProxyError::DatabaseError(_) => "cc_switch_database_error",
         ProxyError::Internal(_) => "cc_switch_internal_error",
@@ -2156,8 +2181,8 @@ pub async fn handle_gemini(
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
-    let headers = parts.headers;
-    let extensions = parts.extensions;
+    let mut headers = parts.headers;
+    let mut extensions = parts.extensions;
     let body_bytes = req_body
         .collect()
         .await
@@ -2176,6 +2201,7 @@ pub async fn handle_gemini(
     let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini")
         .await?
         .with_model_from_uri(&uri);
+    ctx.authenticate_caller(&state, &mut headers, &mut extensions)?;
 
     // 提取完整的路径和查询参数
     let endpoint = uri
@@ -2850,7 +2876,7 @@ fn log_forward_error(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new(&state.db).with_caller(ctx.caller.as_ref());
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -2879,6 +2905,7 @@ fn log_forward_error(
 #[allow(clippy::too_many_arguments)]
 async fn log_usage(
     state: &ProxyState,
+    caller: Option<super::client_access::CallerIdentity>,
     provider_id: &str,
     app_type: &str,
     model: &str,
@@ -2898,7 +2925,7 @@ async fn log_usage(
         return;
     }
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new(&state.db).with_caller(caller.as_ref());
 
     let (multiplier, pricing_model_source) =
         logger.resolve_pricing_config(provider_id, app_type).await;
@@ -3722,6 +3749,7 @@ async fn handle_budgeted_native_response(
                 // Preserve the normal proxy pricing source, multiplier and usage owner.
                 log_usage(
                     state,
+                    ctx.caller.clone(),
                     &ctx.provider.id,
                     ctx.app_type_str,
                     model,

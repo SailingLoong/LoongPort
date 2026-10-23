@@ -53,6 +53,7 @@ pub struct RequestContext {
     /// One request-local diagnostic identity, independent of authorization and sessions.
     pub(crate) diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
+    pub(crate) caller: Option<super::client_access::CallerIdentity>,
     /// 请求开始时间（客户端请求进入代理的时刻）
     pub start_time: Instant,
     /// 最终成功尝试的开始时刻 —— latency/first_token 归因的锚点。
@@ -111,6 +112,31 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
+    /// All inference aliases converge on the handler context before dispatch.
+    pub(crate) fn authenticate_caller(
+        &mut self,
+        state: &ProxyState,
+        headers: &mut HeaderMap,
+        extensions: &mut axum::http::Extensions,
+    ) -> Result<(), ProxyError> {
+        if !state
+            .db
+            .client_access_ready()
+            .map_err(|error| ProxyError::DatabaseError(error.to_string()))?
+        {
+            return Ok(());
+        }
+        let caller = super::client_access::authenticate_request(
+            &state.db,
+            headers,
+            self.app_type_str,
+            Some(&self.request_model),
+        )?;
+        extensions.insert(caller.clone());
+        self.caller = Some(caller);
+        Ok(())
+    }
+
     /// 创建请求上下文
     ///
     /// # Arguments
@@ -219,6 +245,7 @@ impl RequestContext {
         );
 
         Ok(Self {
+            caller: None,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity,
             start_time,

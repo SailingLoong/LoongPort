@@ -35,6 +35,9 @@ impl Database {
     /// 在指定连接上创建表（供迁移和测试使用）
     pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
         let loongport_version = super::loongport_schema::read_stored_version(conn)?;
+        if loongport_version >= 28 {
+            crate::proxy::client_access::validate_schema(conn)?;
+        }
         if loongport_version >= 25 {
             crate::paperclip::bindings::validate_schema(conn)?;
             crate::paperclip::bindings::read_rows(conn)?;
@@ -504,6 +507,10 @@ impl Database {
             [],
         )
         .map_err(|error| AppError::Database(format!("创建故障转移索引失败: {error}")))?;
+
+        if loongport_version == 0 {
+            crate::proxy::client_access::create_schema(conn)?;
+        }
 
         // LoongPort：中转站与凭据（单行表）
         crate::relay::creds::create_table(conn)?;

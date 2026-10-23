@@ -248,7 +248,7 @@ fn migration_preserves_all_legacy_receipts_and_is_idempotent() {
     migrate_cn_schema(&tx).unwrap();
     tx.commit().unwrap();
     assert_eq!(read_rows(&c).unwrap(), before);
-    version(&c, 28);
+    version(&c, 29);
     migrate_cn_schema(&c).unwrap();
     let intl = read_on(&c, &identity(Region::International, "new-provider")).unwrap();
     assert_eq!(intl[0].outcome, Outcome::Unknown);
@@ -260,7 +260,7 @@ fn migration_preserves_all_legacy_receipts_and_is_idempotent() {
 #[test]
 fn installed_current_cannot_downgrade_or_repair_missing_schema() {
     let c = old();
-    version(&c, 28);
+    version(&c, 29);
     assert!(read_rows(&c).is_err());
     assert!(migrate_cn_schema(&c).is_err());
     let c = db();
@@ -298,7 +298,7 @@ fn restore_preserves_local_cn_and_intl_and_discards_foreign_claims() {
         migrate_cn_schema(&tx).unwrap();
         tx.commit().unwrap();
     }
-    version(&live, 28);
+    version(&live, 29);
     let a = cn("local-cn", "welcome");
     insert(&live, &a).unwrap();
     let target = old();
@@ -650,4 +650,21 @@ fn intl_schema_rejects_cn_only_confirmation_variants() {
         c.execute_batch("PRAGMA ignore_check_constraints=OFF")
             .unwrap();
     }
+}
+
+#[test]
+fn published_main_v28_legacy_ledger_is_readable_before_cn_migration() {
+    let c = old();
+    let before = read_rows(&c).unwrap();
+    version(&c, 28);
+    assert_eq!(read_rows(&c).unwrap(), before);
+    let tx = c.unchecked_transaction().unwrap();
+    migrate_cn_schema(&tx).unwrap();
+    tx.commit().unwrap();
+    version(&c, 29);
+    assert_eq!(read_rows(&c).unwrap(), before);
+    assert_eq!(
+        read_on(&c, &identity(Region::International, "new-provider")).unwrap()[0].outcome,
+        Outcome::Unknown
+    );
 }

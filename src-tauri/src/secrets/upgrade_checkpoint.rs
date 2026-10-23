@@ -13,10 +13,10 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) use crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE as FILE;
 pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Explicitly supported historical and current checkpoint identities. This is
-/// only an admission bound; manifest/database checks still require exact equality.
+/// The schema owner supplies the authenticated snapshot admission range.
+/// Manifest/database checks still require the exact recorded identity.
 pub(crate) fn supports_loongport_version(version: i32) -> bool {
-    [24, 25, 26, 27, 28].contains(&version)
+    database::loongport_schema::supports_authenticated_snapshot_version(version)
 }
 
 fn legacy_archive_source_versions() -> SchemaVersions {
@@ -1005,10 +1005,7 @@ mod paperclip_schema_lifecycle_tests {
     use super::*;
 
     fn historical_source() -> super::super::checkpoint_tests::Fixture {
-        let fixture = super::super::checkpoint_tests::Fixture::new();
-        let conn = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret; DROP TABLE IF EXISTS qoder_campaign_operations; DROP TABLE IF EXISTS paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;").unwrap();
-        fixture
+        super::super::checkpoint_tests::Fixture::new()
     }
 
     fn write_archive(
@@ -1097,8 +1094,8 @@ mod paperclip_schema_lifecycle_tests {
         assert_eq!(Database::content_digest(&source).unwrap(), before);
     }
 
-    #[test]
-    fn qoder_http_historical_v27_checkpoint_keeps_legacy_ledger_and_identity() {
+    fn historical_qoder_source(version: i32) -> super::super::checkpoint_tests::Fixture {
+        assert!([27, 28].contains(&version));
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         crate::paperclip::bindings::ensure_schema(&source).unwrap();
@@ -1108,33 +1105,98 @@ mod paperclip_schema_lifecycle_tests {
                 "test_fixtures/qoder_campaign_operations_v27.sql"
             ))
             .unwrap();
-        source.execute_batch("UPDATE loongport_schema_version SET version=27 WHERE id=1; INSERT INTO qoder_campaign_operations VALUES('historical-attempt','synthetic-subject','international','historical-campaign','historical-key',100,200,'historical-generation','unknown')").unwrap();
-        let before = Database::content_digest(&source).unwrap();
-        let rows = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
-        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
-        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
-        assert_eq!(
-            database::loongport_schema::read_stored_version(&staged).unwrap(),
-            27
-        );
-        assert_eq!(
-            crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
-            rows
-        );
-        assert_eq!(Database::content_digest(&source).unwrap(), before);
-        let columns: i64 = staged
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
-                [],
-                |r| r.get(0),
+        if version == 28 {
+            source
+                .execute_batch(include_str!("test_fixtures/client_credentials_v28.sql"))
+                .unwrap();
+            let sealed = crate::secrets::inventory::seal_db(
+                &f.vault,
+                "loongport_client_credentials",
+                "secret",
+                &["synthetic-client-credential"],
+                "synthetic-client-secret",
             )
             .unwrap();
-        assert_eq!(columns, 9);
-        database::vault::preflight_connection(&staged).unwrap();
+            source.execute("INSERT INTO loongport_client_credentials(id,client_id,route_app,allowed_models,secret,secret_digest) VALUES('synthetic-client-credential','synthetic-client','codex','[]',?1,'synthetic-digest')", [&sealed]).unwrap();
+            source.execute_batch("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,status_code,created_at,client_id,client_credential_id) VALUES('synthetic-client-request','synthetic-provider','codex','synthetic-model',1,200,1,'synthetic-client','synthetic-client-credential')").unwrap();
+        }
+        source
+            .execute(
+                "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                [version],
+            )
+            .unwrap();
+        source.execute_batch("INSERT INTO qoder_campaign_operations VALUES('historical-attempt','synthetic-subject','international','historical-campaign','historical-key',100,200,'historical-generation','unknown')").unwrap();
+        f
     }
 
     #[test]
-    fn qoder_cn_current_v28_checkpoint_keeps_unknown_receipt_and_recorded_identity() {
+    fn qoder_historical_v27_v28_checkpoints_keep_legacy_ledger_and_recorded_identity() {
+        for version in [27, 28] {
+            let f = historical_qoder_source(version);
+            let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            let before = Database::content_digest(&source).unwrap();
+            let rows = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
+            let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+            let checkpoint_before = std::fs::read(path(&f.device)).unwrap();
+            let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+            assert_eq!(
+                database::loongport_schema::read_stored_version(&staged).unwrap(),
+                version
+            );
+            assert_eq!(
+                crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
+                rows
+            );
+            assert_eq!(Database::content_digest(&source).unwrap(), before);
+            assert_eq!(std::fs::read(path(&f.device)).unwrap(), checkpoint_before);
+            let columns: i64 = staged
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(columns, 9);
+            assert_eq!(
+                Database::table_exists(&staged, "loongport_client_credentials").unwrap(),
+                version == 28
+            );
+            if version == 28 {
+                let client = |conn: &Connection| -> (String, String, String) {
+                    conn.query_row("SELECT secret,proxy_request_logs.client_id,client_credential_id FROM loongport_client_credentials JOIN proxy_request_logs ON loongport_client_credentials.id=proxy_request_logs.client_credential_id", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
+                };
+                assert_eq!(client(&staged), client(&source));
+            }
+            database::vault::preflight_connection(&staged).unwrap();
+        }
+    }
+
+    #[test]
+    fn qoder_historical_v28_checkpoint_rejects_relabelled_target_v29() {
+        let f = historical_qoder_source(28);
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        let before = Database::content_digest(&source).unwrap();
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let bytes = std::fs::read(path(&f.device)).unwrap();
+        let decoded = descriptor().unwrap().decode(&f.vault, &bytes).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        manifest["target_versions"]["loongport"] = serde_json::json!(29);
+        let ciphertext = descriptor()
+            .unwrap()
+            .encode(&f.vault, &serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        crate::config_file_io::write_durable(&path(&f.device), &ciphertext).unwrap();
+        assert!(stage(&f.root, &f.device, &f.vault, &id).is_err());
+        assert_eq!(Database::content_digest(&source).unwrap(), before);
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&source).unwrap(),
+            28
+        );
+    }
+
+    #[test]
+    fn qoder_cn_current_v29_checkpoint_keeps_unknown_receipt_and_recorded_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         database::loongport_schema::apply(&source).unwrap();
@@ -1145,25 +1207,35 @@ mod paperclip_schema_lifecycle_tests {
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&staged).unwrap(),
-            28
+            29
         );
         assert_eq!(
             crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
             rows
         );
         assert_eq!(Database::content_digest(&source).unwrap(), before);
+        assert!(Database::table_exists(&staged, "loongport_client_credentials").unwrap());
+        let columns: i64 = staged
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 10);
         database::vault::preflight_connection(&staged).unwrap();
     }
 
     #[test]
     fn checkpoint_admission_covers_current_and_historical_but_rejects_future() {
-        for version in [24, 25, 26, 27] {
+        for version in [24, 25, 26, 27, 28, 29] {
             assert!(supports_loongport_version(version));
         }
-        let current = database::loongport_schema::LOONGPORT_SCHEMA_VERSION;
-        assert!(supports_loongport_version(current));
         assert!(!supports_loongport_version(23));
-        assert!(!supports_loongport_version(current + 1));
+        assert!(!supports_loongport_version(30));
+        assert!(!supports_loongport_version(
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1
+        ));
     }
 
     #[test]

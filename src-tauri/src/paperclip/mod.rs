@@ -1,11 +1,19 @@
 //! Original native task owner and local IPC boundary. No prompt or output persistence.
 //! Reuses the existing Database, Vault, request router and usage log.
 pub(crate) mod bindings;
+#[cfg(all(unix, feature = "gui"))]
+mod code_access;
+#[cfg(unix)]
+pub(crate) mod code_runtime;
+#[cfg(unix)]
+mod codex_runner;
 pub(crate) mod contract;
 pub(crate) mod execution;
 pub(crate) mod snapshot;
 #[cfg(unix)]
-mod tasks;
+pub(crate) mod tasks;
+#[cfg(unix)]
+mod workspace;
 use crate::error::AppError;
 #[cfg(any(unix, test))]
 use crate::{app_config::AppType, store::AppState};
@@ -336,10 +344,14 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(1);
 #[derive(Default)]
 struct Control {
     #[cfg(unix)]
+    code_tasks: code_runtime::CodeRuntime,
+    #[cfg(unix)]
     local_task_gate: Mutex<()>,
     #[cfg(unix)]
     // Ephemeral gap before the dependent binding exists: None is pending, Some is a stop reason.
     local_followups: Mutex<std::collections::HashMap<String, Option<&'static str>>>,
+    #[cfg(unix)]
+    local_summary_tasks: Mutex<std::collections::HashMap<String, contract::Task>>,
     stop: AtomicBool,
     #[cfg(unix)]
     active: Mutex<Option<UnixStream>>,

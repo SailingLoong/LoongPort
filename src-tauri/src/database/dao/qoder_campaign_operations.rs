@@ -72,7 +72,7 @@ fn normalized(value: &str) -> String {
         .to_string()
 }
 /// Recognize only the exact published schemas. Legacy shapes are read-only
-/// before v28; an installed v28 database cannot downgrade to the old shape.
+/// before v29; an installed v29 database cannot downgrade to the old shape.
 fn legacy_schema(conn: &Connection) -> Result<bool, AppError> {
     let table: String = conn.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
@@ -83,7 +83,7 @@ fn legacy_schema(conn: &Connection) -> Result<bool, AppError> {
         return Ok(false);
     }
     if normalized(&table) == normalized(LEGACY_CREATE)
-        && crate::database::loongport_schema::read_stored_version(conn)? < 28
+        && crate::database::loongport_schema::read_stored_version(conn)? < 29
     {
         return Ok(true);
     }
@@ -122,7 +122,7 @@ pub(crate) fn validate_schema(conn: &Connection) -> Result<(), AppError> {
     }
     Ok(())
 }
-/// Called by the v27 -> v28 owner inside its migration savepoint. No receipt is
+/// Called by the v28 -> v29 owner inside its migration savepoint. No receipt is
 /// inferred or dropped; already-current fresh databases are validated only.
 pub(crate) fn migrate_cn_schema(conn: &Connection) -> Result<(), AppError> {
     let before = read_rows(conn)?;

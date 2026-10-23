@@ -131,7 +131,7 @@ impl LiveNow {
     }
 }
 
-fn claude_proxy_projection(route: &Provider, url: &str) -> ClaudeProjection {
+fn claude_proxy_projection(route: &Provider, url: &str, key: &str) -> ClaudeProjection {
     let auth = if route.uses_managed_account_auth() {
         ProxyAuth::Managed {
             auth_token: !route.is_github_copilot() || !route.claude_uses_api_key_field(),
@@ -139,27 +139,37 @@ fn claude_proxy_projection(route: &Provider, url: &str) -> ClaudeProjection {
     } else {
         ProxyAuth::FollowRow
     };
-    proxy_projection(
+    let mut projection = proxy_projection(
         &ClaudeProjection::of(&route.settings_config),
         url,
         auth,
         None,
-    )
+    );
+    for value in projection.env.values_mut() {
+        if value.as_str() == Some(PROXY_TOKEN_PLACEHOLDER) {
+            *value = serde_json::Value::String(key.to_string());
+        }
+    }
+    projection
 }
 
-fn gemini_proxy_projection(route: &Provider, url: &str) -> GeminiProjection {
+fn gemini_proxy_projection(route: &Provider, url: &str, key: &str) -> GeminiProjection {
     GeminiProjection::proxy_contract(
         &GeminiProjection::of(&route.settings_config, false),
         url,
-        PROXY_TOKEN_PLACEHOLDER,
+        key,
     )
 }
 
-fn grok_proxy_projection(route: &Provider, url: &str) -> Result<GrokProjection, AppError> {
+fn grok_proxy_projection(
+    route: &Provider,
+    url: &str,
+    key: &str,
+) -> Result<GrokProjection, AppError> {
     GrokProjection::proxy_contract(
         &grok_direct::projection(route)?,
         &format!("{}/grokbuild/v1", url.trim_end_matches('/')),
-        PROXY_TOKEN_PLACEHOLDER,
+        key,
     )
     .map_err(|error| AppError::Config(error.to_string()))
 }
@@ -172,9 +182,21 @@ fn expected_proxy_contract(
     url: &str,
 ) -> Result<Contract, AppError> {
     Ok(match app {
-        AppType::Claude => contract::claude(&claude_proxy_projection(route, url)),
-        AppType::Gemini => contract::gemini(&gemini_proxy_projection(route, url)),
-        AppType::GrokBuild => contract::grok(&grok_proxy_projection(route, url)?),
+        AppType::Claude => contract::claude(&claude_proxy_projection(
+            route,
+            url,
+            &crate::proxy::client_access::managed::key(service.database(), "claude")?,
+        )),
+        AppType::Gemini => contract::gemini(&gemini_proxy_projection(
+            route,
+            url,
+            &crate::proxy::client_access::managed::key(service.database(), "gemini")?,
+        )),
+        AppType::GrokBuild => contract::grok(&grok_proxy_projection(
+            route,
+            url,
+            &crate::proxy::client_access::managed::key(service.database(), "grokbuild")?,
+        )?),
         AppType::Codex => codex_direct::planned_proxy_contract(
             service.database(),
             &live.codex_owner(),
@@ -208,6 +230,9 @@ fn write_proxy_with_catalog(
     url: &str,
     catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<bool, AppError> {
+    service
+        .database()
+        .provision_managed_client_credential(app.as_str())?;
     let mut next = target.state.clone().ok_or_else(invalid)?;
     match app {
         AppType::Codex => {
@@ -224,7 +249,11 @@ fn write_proxy_with_catalog(
             );
         }
         AppType::Claude => {
-            let projection = claude_proxy_projection(route, url);
+            let projection = claude_proxy_projection(
+                route,
+                url,
+                &crate::proxy::client_access::managed::key(service.database(), "claude")?,
+            );
             next.contract = Some(contract::claude(&projection));
             target.state = Some(next);
             let patch = direct_patch(live.claude_owner().as_ref(), &projection);
@@ -232,14 +261,22 @@ fn write_proxy_with_catalog(
             claude_direct::run_with_write(&write, operation, Some(&patch), target)?;
         }
         AppType::Gemini => {
-            let projection = gemini_proxy_projection(route, url);
+            let projection = gemini_proxy_projection(
+                route,
+                url,
+                &crate::proxy::client_access::managed::key(service.database(), "gemini")?,
+            );
             next.contract = Some(contract::gemini(&projection));
             target.state = Some(next);
             let write = AppWrite::begin_mode(service, app)?;
             gemini_direct::run_with_write(&write, operation, Some(&projection), target)?;
         }
         AppType::GrokBuild => {
-            let projection = grok_proxy_projection(route, url)?;
+            let projection = grok_proxy_projection(
+                route,
+                url,
+                &crate::proxy::client_access::managed::key(service.database(), "grokbuild")?,
+            )?;
             next.contract = Some(contract::grok(&projection));
             target.state = Some(next);
             let write = AppWrite::begin_mode(service, app)?;
@@ -558,6 +595,10 @@ async fn enter_with_initial_route_locked(
     operation: &'static str,
     initial: Option<InitialProxyRoute>,
 ) -> Result<(), String> {
+    service
+        .database()
+        .provision_managed_client_credential(app.as_str())
+        .map_err(err)?;
     let before = mode(service, app).map_err(err)?;
     let route = if let Some(initial) = &initial {
         admit_initial_route(service, app, &initial.provider_id).map_err(err)?
@@ -1282,10 +1323,14 @@ pub(crate) fn plan_row_save_with_generation(
         }
         match app {
             AppType::Claude => {
-                let projection = endpoint
-                    .as_ref()
-                    .map(|url| claude_proxy_projection(provider, url))
-                    .unwrap_or_else(|| ClaudeProjection::of(&provider.settings_config));
+                let projection = match endpoint.as_ref() {
+                    Some(url) => claude_proxy_projection(
+                        provider,
+                        url,
+                        &crate::proxy::client_access::managed::key(service.database(), "claude")?,
+                    ),
+                    None => ClaudeProjection::of(&provider.settings_config),
+                };
                 if let Some(next) = &mut target.state {
                     next.contract = Some(contract::claude(&projection));
                 }
@@ -1296,7 +1341,11 @@ pub(crate) fn plan_row_save_with_generation(
             }
             AppType::Gemini => {
                 let projection = match &endpoint {
-                    Some(url) => gemini_proxy_projection(provider, url),
+                    Some(url) => gemini_proxy_projection(
+                        provider,
+                        url,
+                        &crate::proxy::client_access::managed::key(service.database(), "gemini")?,
+                    ),
                     None => gemini_direct::projection(provider)?,
                 };
                 if let Some(next) = &mut target.state {
@@ -1313,7 +1362,14 @@ pub(crate) fn plan_row_save_with_generation(
             }
             AppType::GrokBuild => {
                 let projection = match &endpoint {
-                    Some(url) => grok_proxy_projection(provider, url)?,
+                    Some(url) => grok_proxy_projection(
+                        provider,
+                        url,
+                        &crate::proxy::client_access::managed::key(
+                            service.database(),
+                            "grokbuild",
+                        )?,
+                    )?,
                     None => grok_direct::projection(provider)?,
                 };
                 if let Some(next) = &mut target.state {

@@ -171,11 +171,11 @@ pub fn get_status(db: &Database, proxy_running: bool) -> Result<ClaudeDesktopSta
             })
         })
         .unwrap_or(false);
-    let gateway_token_configured = db
-        .get_setting(GATEWAY_TOKEN_SETTING_KEY)
-        .ok()
-        .flatten()
-        .is_some_and(|token| !token.trim().is_empty());
+    let gateway_token_configured = db.list_client_credentials().ok().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.client_id == "claude-desktop" && !item.revoked)
+    });
     let current_provider = crate::settings::get_effective_current_provider(
         db,
         &crate::app_config::AppType::ClaudeDesktop,
@@ -290,16 +290,26 @@ fn inference_model_json(spec: &InferenceModelSpec) -> Value {
 }
 
 pub fn get_or_create_gateway_token(db: &Database) -> Result<String, AppError> {
-    if let Some(token) = db.get_setting(GATEWAY_TOKEN_SETTING_KEY)? {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
+    migrate_gateway_credential(db)?;
+    db.builtin_client_key("claude-desktop", "claude-desktop")
+}
 
-    let token = format!("ccs-{}", uuid::Uuid::new_v4().simple());
-    db.set_setting(GATEWAY_TOKEN_SETTING_KEY, &token)?;
-    Ok(token)
+/// Called by configuration/startup ownership, never by request authentication.
+pub(crate) fn migrate_gateway_credential(db: &Database) -> Result<(), AppError> {
+    if let Some(token) = db
+        .get_setting(GATEWAY_TOKEN_SETTING_KEY)?
+        .filter(|v| !v.trim().is_empty())
+    {
+        db.adopt_builtin_client_credential("claude-desktop", "claude-desktop", token.trim())?;
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.execute(
+            "DELETE FROM settings WHERE key=?1",
+            [GATEWAY_TOKEN_SETTING_KEY],
+        )?;
+    } else {
+        db.ensure_builtin_client_credential("claude-desktop", "claude-desktop", &[])?;
+    }
+    Ok(())
 }
 
 pub fn direct_gateway_credentials(
@@ -1738,10 +1748,14 @@ mod tests {
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
         assert_eq!(profile["coworkEgressAllowedHosts"], json!(["*"]));
         assert_ne!(profile["inferenceGatewayApiKey"], json!("test-token"));
-        assert!(profile["inferenceGatewayApiKey"]
-            .as_str()
-            .expect("gateway token")
-            .starts_with("ccs-"));
+        assert_eq!(
+            profile["inferenceGatewayApiKey"].as_str(),
+            Some(
+                db.builtin_client_key("claude-desktop", "claude-desktop")
+                    .unwrap()
+                    .as_str()
+            )
+        );
         assert_eq!(
             profile["inferenceModels"],
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "Kimi K2", "supports1m": true }])

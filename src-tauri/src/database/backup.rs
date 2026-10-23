@@ -2007,51 +2007,108 @@ mod tests {
 
     #[test]
     #[serial]
-    fn qoder_v27_released_checkpoint_migrates_only_after_release_and_keeps_unknown(
+    fn qoder_v27_and_v28_released_checkpoint_migrates_only_after_release_and_keeps_unknown(
     ) -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let dir = crate::secrets::testing::tempdir().unwrap();
-        let store = crate::secrets::testing::MemoryKeyStore::default();
-        let session =
-            crate::secrets::session::SecretSession::open(&dir.path().join("root"), &store, None)?;
-        let db = Database::init_with_secrets(session)?;
-        {
-            let conn = db.conn.lock()?;
-            Database::apply_upstream4_migrations_on_conn(&conn)?;
-            conn.execute_batch("DROP TABLE qoder_campaign_operations; UPDATE loongport_schema_version SET version=27 WHERE id=1")?;
-            conn.execute_batch(include_str!(
-                "../secrets/test_fixtures/qoder_campaign_operations_v27.sql"
-            ))?;
-            conn.execute_batch("INSERT INTO qoder_campaign_operations VALUES('retained-attempt','synthetic-subject','international','retained-campaign','retained-key',100,200,'retained-generation','unknown')")?;
+        for version in [27, 28] {
+            let dir = crate::secrets::testing::tempdir().unwrap();
+            let store = crate::secrets::testing::MemoryKeyStore::default();
+            let session = crate::secrets::session::SecretSession::open(
+                &dir.path().join("root"),
+                &store,
+                None,
+            )?;
+            let db = Database::init_with_secrets(session)?;
+            let sealed_client = {
+                let vault = db.secret_session().read()?;
+                crate::secrets::inventory::seal_db(
+                    &vault,
+                    "loongport_client_credentials",
+                    "secret",
+                    &["retained-client"],
+                    "synthetic-local-client-value",
+                )?
+            };
+            {
+                let conn = db.conn.lock()?;
+                Database::apply_upstream4_migrations_on_conn(&conn)?;
+                conn.execute_batch("DROP TABLE qoder_campaign_operations")?;
+                conn.execute(
+                    "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                    [version],
+                )?;
+                if version == 27 {
+                    conn.execute_batch("DROP TABLE loongport_client_credentials; ALTER TABLE proxy_request_logs DROP COLUMN client_id; ALTER TABLE proxy_request_logs DROP COLUMN client_credential_id")?;
+                } else {
+                    conn.execute("INSERT INTO loongport_client_credentials VALUES('retained-client','synthetic-client','codex','[]',?1,'synthetic-digest',1)", [&sealed_client])?;
+                }
+                conn.execute_batch(include_str!(
+                    "../secrets/test_fixtures/qoder_campaign_operations_v27.sql"
+                ))?;
+                conn.execute_batch("INSERT INTO qoder_campaign_operations VALUES('retained-attempt','synthetic-subject','international','retained-campaign','retained-key',100,200,'retained-generation','unknown')")?;
+            }
+            let rows = crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?;
+            let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
+            crate::config_file_io::ensure_private_directory(device.root())?;
+            let checkpoint = device
+                .root()
+                .join(crate::secrets::upgrade::checkpoint::FILE);
+            std::fs::write(&checkpoint, b"retained-checkpoint").unwrap();
+            let before = Database::content_digest(&*db.conn.lock()?)?;
+            let vault = db.secret_session().read()?;
+            assert!(db
+                .migrate_released_checkpoint_schema(&device, &vault)
+                .is_err());
+            assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+            assert_eq!(
+                super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
+                version
+            );
+            std::fs::remove_file(checkpoint).unwrap();
+            // The private working copy reaches the CN migration, whose rename is
+            // blocked by this deliberate collision. It must never publish any
+            // completed earlier migration step back to the original database.
+            db.conn
+                .lock()?
+                .execute_batch("CREATE TABLE qoder_campaign_operations_v27(value TEXT)")?;
+            let before_failed_migration = Database::content_digest(&*db.conn.lock()?)?;
+            assert!(db
+                .migrate_released_checkpoint_schema(&device, &vault)
+                .is_err());
+            assert_eq!(
+                Database::content_digest(&*db.conn.lock()?)?,
+                before_failed_migration
+            );
+            assert_eq!(
+                super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
+                version
+            );
+            assert_eq!(
+                crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
+                rows
+            );
+            db.conn
+                .lock()?
+                .execute_batch("DROP TABLE qoder_campaign_operations_v27")?;
+            db.migrate_released_checkpoint_schema(&device, &vault)?;
+            assert_eq!(
+                super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
+                super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            );
+            assert_eq!(
+                crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
+                rows
+            );
+            db.migrate_released_checkpoint_schema(&device, &vault)?;
+            assert_eq!(
+                crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
+                rows
+            );
+            if version == 28 {
+                let kept: (String, i64) = db.conn.lock()?.query_row("SELECT secret, revoked FROM loongport_client_credentials WHERE id='retained-client'", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                assert_eq!(kept, (sealed_client, 1));
+            }
         }
-        let rows = crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?;
-        let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
-        crate::config_file_io::ensure_private_directory(device.root())?;
-        let checkpoint = device
-            .root()
-            .join(crate::secrets::upgrade::checkpoint::FILE);
-        std::fs::write(&checkpoint, b"retained-checkpoint").unwrap();
-        let before = Database::content_digest(&*db.conn.lock()?)?;
-        let vault = db.secret_session().read()?;
-        assert!(db
-            .migrate_released_checkpoint_schema(&device, &vault)
-            .is_err());
-        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
-        std::fs::remove_file(checkpoint).unwrap();
-        db.migrate_released_checkpoint_schema(&device, &vault)?;
-        assert_eq!(
-            super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
-            super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
-        );
-        assert_eq!(
-            crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
-            rows
-        );
-        db.migrate_released_checkpoint_schema(&device, &vault)?;
-        assert_eq!(
-            crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
-            rows
-        );
         Ok(())
     }
 
