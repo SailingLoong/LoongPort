@@ -14,11 +14,13 @@ use serde_json::{json, Value};
 use std::{sync::Mutex, time::Duration};
 use tower::ServiceExt;
 
+type CapturedRequest = (HeaderMap, Value, String, Method);
+
 struct PersonalFixture {
     owner: FixtureOwner,
     proxy: ProxyServer,
     transport: FixtureTransport,
-    calls: Arc<Mutex<Vec<(HeaderMap, Value, String, Method)>>>,
+    calls: Arc<Mutex<Vec<CapturedRequest>>>,
     upstream: tokio::task::JoinHandle<()>,
     app: AppType,
 }
@@ -137,7 +139,7 @@ impl PersonalFixture {
         .unwrap()
     }
     async fn consume(&self, response: axum::response::Response, expected: StatusCode) {
-        assert_eq!(response.status(), expected);
+        let status = response.status();
         let body = tokio::time::timeout(
             Duration::from_secs(5),
             axum::body::to_bytes(response.into_body(), 1024 * 1024),
@@ -145,6 +147,12 @@ impl PersonalFixture {
         .await
         .unwrap()
         .unwrap();
+        let missing_personal_session = String::from_utf8_lossy(&body)
+            .contains("OpenCode Go requires a stable conversation ID from the calling application");
+        assert_eq!(
+            status, expected,
+            "missing_personal_session={missing_personal_session}"
+        );
         if expected == StatusCode::OK {
             assert!(String::from_utf8_lossy(&body).contains("synthetic personal answer"));
         }
@@ -182,57 +190,58 @@ async fn personal_go_original_responses_preserves_real_prompt_cache_session() {
             .await;
         f.consume(response, StatusCode::OK).await;
     }
-    let calls = f.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    for (headers, body, path, method) in calls.iter() {
-        assert_eq!(method, &Method::POST);
-        assert_eq!(path, "/inference/go/openai/v1/chat/completions");
-        assert_eq!(body["model"], "glm-5.2");
+    {
+        let calls = f.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        for (headers, body, path, method) in calls.iter() {
+            assert_eq!(method, &Method::POST);
+            assert_eq!(path, "/inference/go/openai/v1/chat/completions");
+            assert_eq!(body["model"], "glm-5.2");
+            assert_eq!(
+                headers["x-opencode-session"],
+                "ses_fixture_prompt_cache_123456"
+            );
+            assert_eq!(
+                headers["authorization"],
+                format!("Bearer {}", f.owner.synthetic_key(0))
+            );
+            assert!(headers["user-agent"]
+                .to_str()
+                .unwrap()
+                .starts_with("LoongPort/"));
+        }
+        let second_messages = calls[1].1["messages"].as_array().unwrap();
+        let projected = second_messages
+            .iter()
+            .map(|message| {
+                let content = match &message["content"] {
+                    Value::String(text) => text.clone(),
+                    Value::Array(parts) => parts
+                        .iter()
+                        .map(|part| {
+                            assert_eq!(part["type"], "text");
+                            part["text"].as_str().unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                        .concat(),
+                    _ => panic!("original plain-text history must remain plain text"),
+                };
+                (message["role"].as_str().unwrap().to_owned(), content)
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            headers["x-opencode-session"],
-            "ses_fixture_prompt_cache_123456"
+            projected,
+            vec![
+                ("user".to_owned(), "synthetic prompt".to_owned()),
+                (
+                    "assistant".to_owned(),
+                    "synthetic personal answer".to_owned()
+                ),
+                ("user".to_owned(), "synthetic follow-up".to_owned()),
+            ],
+            "preserve exact ordered history without dropping, duplicating or adding turns"
         );
-        assert_eq!(
-            headers["authorization"],
-            format!("Bearer {}", f.owner.synthetic_key(0))
-        );
-        assert!(headers["user-agent"]
-            .to_str()
-            .unwrap()
-            .starts_with("LoongPort/"));
     }
-    let second_messages = calls[1].1["messages"].as_array().unwrap();
-    let projected = second_messages
-        .iter()
-        .map(|message| {
-            let content = match &message["content"] {
-                Value::String(text) => text.clone(),
-                Value::Array(parts) => parts
-                    .iter()
-                    .map(|part| {
-                        assert_eq!(part["type"], "text");
-                        part["text"].as_str().unwrap()
-                    })
-                    .collect::<Vec<_>>()
-                    .concat(),
-                _ => panic!("original plain-text history must remain plain text"),
-            };
-            (message["role"].as_str().unwrap().to_owned(), content)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        projected,
-        vec![
-            ("user".to_owned(), "synthetic prompt".to_owned()),
-            (
-                "assistant".to_owned(),
-                "synthetic personal answer".to_owned()
-            ),
-            ("user".to_owned(), "synthetic follow-up".to_owned()),
-        ],
-        "preserve exact ordered history without dropping, duplicating or adding turns"
-    );
-    drop(calls);
     f.stop().await;
 }
 
