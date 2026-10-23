@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
 pub(crate) const MAX_PARALLEL_ANALYSES: usize = 8;
 
 /// Each item is independent; the first item's model also performs the summary.

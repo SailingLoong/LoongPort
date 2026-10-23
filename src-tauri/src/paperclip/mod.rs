@@ -1,7 +1,7 @@
 //! Original native task owner and local IPC boundary. No prompt or output persistence.
 //! Reuses the existing Database, Vault, request router and usage log.
 pub(crate) mod bindings;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "gui"))]
 mod code_access;
 #[cfg(unix)]
 pub(crate) mod code_runtime;

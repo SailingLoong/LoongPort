@@ -3025,7 +3025,7 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 /// `tauri::process::restart` 直接 spawn 可执行文件。macOS 14 起应用激活是协作式的：
 /// 新进程的 `activateIgnoringOtherApps` 会被系统拒绝，窗口留在其它应用后面。
 /// 由当前前台应用请求 LaunchServices 启动，新实例才能拿到前台。
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "gui"))]
 fn relaunch_macos_bundle(env: &tauri::Env) {
     let Ok(binary) = tauri::process::current_binary(env) else {
         return;
