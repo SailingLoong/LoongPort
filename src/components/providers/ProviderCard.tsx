@@ -674,7 +674,7 @@ export function ProviderCard({
                         disabled={mutationsDisabled}
                       />
                       <span className="text-xs text-muted-foreground">
-                        CN 签到接口尚未验证
+                        免费福利领取与授权独立，自动领取需单独开启；不代表今日签到成功
                       </span>
                     </>
                   )}
