@@ -208,7 +208,9 @@ it("rejects a different filename without attempting a credential read", async ()
   await userEvent.click(
     screen.getByRole("button", { name: "trae.selectFiles" }),
   );
-  expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "trae.failure.invalidSelection",
+  );
   expect(mocks.begin).not.toHaveBeenCalled();
   expect(mocks.confirm).not.toHaveBeenCalled();
 });
@@ -321,7 +323,9 @@ it.each([
     await userEvent.click(
       screen.getByRole("button", { name: "trae.selectFiles" }),
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "trae.failure.unknown",
+    );
     expect(mocks.cancel).toHaveBeenCalledExactlyOnceWith(flow.flowId);
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "trae.confirm" })).toBeDisabled();
@@ -415,28 +419,32 @@ it.each(["open", "begin", "confirm"] as const)(
         screen.getByRole("button", { name: "trae.selectFiles" }),
       );
     }
-    expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "trae.failure.unknown",
+    );
     expect(
       screen.queryByText(/SYNTHETIC_CREDENTIAL_CANARY/),
     ).not.toBeInTheDocument();
   },
 );
 
-it("consumes a failed confirmation once and keeps cancellation/list review available", async () => {
+it("consumes an uncertain confirmation once and reviews its list without cancelling", async () => {
   mocks.confirm.mockRejectedValue("publicationUnknown");
   render(<TraeAccounts />);
   await authorize();
-  expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
-  expect(screen.getByText("trae.flowConsumed")).toBeVisible();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "trae.failure.publicationUnknown",
+  );
+  expect(screen.getByText("trae.reviewAfterAttempt")).toBeVisible();
   const button = screen.getByRole("button", { name: "trae.confirm" });
   expect(button).toBeDisabled();
   expect(screen.getByRole("checkbox")).toBeDisabled();
   fireEvent.click(button);
   expect(mocks.confirm).toHaveBeenCalledTimes(1);
   await userEvent.click(
-    screen.getByRole("button", { name: "trae.cancelAndReview" }),
+    screen.getByRole("button", { name: "trae.closeAndReview" }),
   );
-  expect(mocks.cancel).toHaveBeenCalledWith(flow.flowId);
+  expect(mocks.cancel).not.toHaveBeenCalled();
   await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
   expect(screen.getByRole("button", { name: "trae.reload" })).toBeEnabled();
   expect(screen.queryByText("trae.saved")).not.toBeInTheDocument();
@@ -452,13 +460,17 @@ it.each([
     mocks.confirm.mockResolvedValue(invalid);
     render(<TraeAccounts />);
     await authorize();
-    expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "trae.failure.receiptUnknown",
+    );
     expect(screen.queryByText("trae.saved")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "trae.confirm" })).toBeDisabled();
     await userEvent.click(
-      screen.getByRole("button", { name: "trae.cancelAndReview" }),
+      screen.getByRole("button", { name: "trae.closeAndReview" }),
     );
-    expect(mocks.cancel).toHaveBeenCalledExactlyOnceWith(flow.flowId);
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(mocks.retire).not.toHaveBeenCalled();
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -488,7 +500,9 @@ it("sanitizes a retire failure without inventing a retired state", async () => {
   render(<TraeAccounts />);
   await screen.findByText(account.id);
   await userEvent.click(screen.getByRole("button", { name: "trae.retire" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("trae.failed");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "trae.failure.unknown",
+  );
   expect(screen.getByText("trae.status.stored")).toBeVisible();
   expect(screen.queryByText("trae.status.retired")).not.toBeInTheDocument();
   expect(screen.queryByText(/SYNTHETIC_RETIRE_SECRET/)).not.toBeInTheDocument();
@@ -1245,4 +1259,109 @@ it("late uncertain-policy readback cannot overwrite a newer account identity", a
       ([cmd]) => cmd === "set_trae_automatic_checkin",
     ),
   ).toHaveLength(1);
+});
+
+it.each([
+  "cancelled",
+  "busy",
+  "invalidSelection",
+  "unsupported",
+  "storageUnavailable",
+  "authorizationUnavailable",
+  "publicationUnknown",
+  "expired",
+])(
+  "shows the allowlisted native diagnostic %s without guessing identity",
+  async (code) => {
+    mocks.confirm.mockRejectedValue(code);
+    render(<TraeAccounts />);
+    await authorize();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `trae.failure.${code}`,
+    );
+    expect(screen.getByText(code)).toBeVisible();
+    expect(screen.queryByText("trae.saved")).not.toBeInTheDocument();
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  "publicationUnknown SYNTHETIC_SECRET_TOKEN",
+  { message: "authorizationUnavailable", body: "SYNTHETIC_SECRET_TOKEN" },
+  new Error("publicationUnknown SYNTHETIC_SECRET_TOKEN"),
+  "__proto__",
+  null,
+])(
+  "never extracts diagnostics from unknown native payloads %#",
+  async (error) => {
+    mocks.confirm.mockRejectedValue(error);
+    render(<TraeAccounts />);
+    await authorize();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "trae.failure.unknown",
+    );
+    expect(
+      screen.queryByText(/SYNTHETIC_SECRET_TOKEN|__proto__/),
+    ).not.toBeInTheDocument();
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["review", "close", "escape"])(
+  "%s after a lost saved receipt only rereads the list and never retires or resends",
+  async (action) => {
+    mocks.confirm.mockRejectedValue("publicationUnknown");
+    mocks.list.mockResolvedValueOnce([]).mockResolvedValueOnce([account]);
+    const view = render(<TraeAccounts />);
+    await authorize();
+    await screen.findByText("trae.reviewAfterAttempt");
+    if (action === "escape") await userEvent.keyboard("{Escape}");
+    else
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: action === "review" ? "trae.closeAndReview" : "trae.close",
+        }),
+      );
+    expect(await screen.findByText(account.id)).toBeVisible();
+    expect(screen.getByText("trae.status.stored")).toBeVisible();
+    expect(screen.queryByText("trae.saved")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    view.unmount();
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(mocks.retire).not.toHaveBeenCalled();
+  },
+);
+
+it("unmount after a rejected receipt cannot revoke a possibly saved account", async () => {
+  mocks.confirm.mockRejectedValue(new Error("SYNTHETIC_LOST_IPC_REPLY"));
+  const view = render(<TraeAccounts />);
+  await authorize();
+  await screen.findByText("trae.reviewAfterAttempt");
+  view.unmount();
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  expect(mocks.retire).not.toHaveBeenCalled();
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+  expect(mocks.list).toHaveBeenCalledTimes(1);
+});
+
+it("a failed readback remains uncertain and never resends authorization", async () => {
+  mocks.confirm.mockRejectedValue("publicationUnknown");
+  mocks.list
+    .mockResolvedValueOnce([])
+    .mockRejectedValueOnce(new Error("SYNTHETIC_LIST_SECRET"));
+  render(<TraeAccounts />);
+  await authorize();
+  await userEvent.click(
+    screen.getByRole("button", { name: "trae.closeAndReview" }),
+  );
+  expect(await screen.findByText("trae.listFailed")).toBeVisible();
+  expect(screen.getByText("trae.failure.publicationUnknown")).toBeVisible();
+  expect(screen.queryByText("trae.saved")).not.toBeInTheDocument();
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  expect(mocks.retire).not.toHaveBeenCalled();
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
 });
