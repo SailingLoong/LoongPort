@@ -292,6 +292,13 @@ pub(crate) async fn finish<T: Transport>(
             return Err(Failure::ExpiredAuthorization);
         }
     }
+    // Official browser authorization is not an error while the token is still
+    // pending. Match Magpie's token-stage code, not arbitrary provider failures.
+    if checkin::code(&token) == Some(11217) {
+        return Ok(AuthorizationResult {
+            state: AuthorizationState::Waiting,
+        });
+    }
     if !checkin::success(&token) {
         return Err(Failure::NeedsVerification);
     }
@@ -321,7 +328,6 @@ pub(crate) async fn finish<T: Transport>(
         now,
     )
     .await?;
-    let account = parse_account(&token, &profile)?;
     let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
     // Cancel does not wait for HTTP or the sync lock. Serialize its decision
     // against the final synchronous vault write, not against network latency.
@@ -334,6 +340,14 @@ pub(crate) async fn finish<T: Transport>(
     {
         return Err(Failure::ExpiredAuthorization);
     }
+    // The token may be ready before the official profile. Keep the same flow
+    // within its original deadline; cancellation/retirement above still wins.
+    if checkin::code(&profile) == Some(12151) {
+        return Ok(AuthorizationResult {
+            state: AuthorizationState::Waiting,
+        });
+    }
+    let account = parse_account(&token, &profile)?;
     let mut rows = store::load(session, &binding)?;
     let account_id = account.id(&binding.vault_id);
     if let Some(row) = rows
