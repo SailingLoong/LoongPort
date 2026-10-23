@@ -977,7 +977,7 @@ impl Database {
             crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
             return Ok(());
         }
-        if !matches!(version, 24 | 25) {
+        if !crate::secrets::upgrade::checkpoint::supports_loongport_version(version) {
             return Err(AppError::Config("upgrade.unsupported_source".into()));
         }
         let mut working = Connection::open_in_memory()?;
@@ -2002,6 +2002,56 @@ mod tests {
         );
         crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?;
         db.migrate_released_checkpoint_schema(&device, &vault)?;
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn qoder_v27_released_checkpoint_migrates_only_after_release_and_keeps_unknown(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let store = crate::secrets::testing::MemoryKeyStore::default();
+        let session =
+            crate::secrets::session::SecretSession::open(&dir.path().join("root"), &store, None)?;
+        let db = Database::init_with_secrets(session)?;
+        {
+            let conn = db.conn.lock()?;
+            Database::apply_upstream4_migrations_on_conn(&conn)?;
+            conn.execute_batch("DROP TABLE qoder_campaign_operations; UPDATE loongport_schema_version SET version=27 WHERE id=1")?;
+            conn.execute_batch(include_str!(
+                "../secrets/test_fixtures/qoder_campaign_operations_v27.sql"
+            ))?;
+            conn.execute_batch("INSERT INTO qoder_campaign_operations VALUES('retained-attempt','synthetic-subject','international','retained-campaign','retained-key',100,200,'retained-generation','unknown')")?;
+        }
+        let rows = crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?;
+        let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
+        crate::config_file_io::ensure_private_directory(device.root())?;
+        let checkpoint = device
+            .root()
+            .join(crate::secrets::upgrade::checkpoint::FILE);
+        std::fs::write(&checkpoint, b"retained-checkpoint").unwrap();
+        let before = Database::content_digest(&*db.conn.lock()?)?;
+        let vault = db.secret_session().read()?;
+        assert!(db
+            .migrate_released_checkpoint_schema(&device, &vault)
+            .is_err());
+        assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
+        std::fs::remove_file(checkpoint).unwrap();
+        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        assert_eq!(
+            super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
+            super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
+            rows
+        );
+        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        assert_eq!(
+            crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
+            rows
+        );
         Ok(())
     }
 

@@ -1323,10 +1323,10 @@ pub(crate) fn uses_upstream4_schema(db: &Database) -> Result<bool, AppError> {
     if stored == crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION {
         return Ok(true);
     }
-    // Only the original authenticated v24 publication may temporarily retain
-    // its identity while per-app completion/archive runs. This is classification,
-    // never app admission; the existing AppWrite checks still prove each write.
-    if stored != 24 || !crate::secrets::upgrade::checkpoint::supports_loongport_version(stored) {
+    // Only an original authenticated publication may temporarily retain a
+    // supported historical identity while per-app completion/archive runs. This
+    // is classification, never app admission; AppWrite still proves each write.
+    if !crate::secrets::upgrade::checkpoint::supports_loongport_version(stored) {
         return Err(AppError::Config("upgrade.future_version".into()));
     }
     use crate::database::inspection;

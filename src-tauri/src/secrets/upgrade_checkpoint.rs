@@ -16,7 +16,7 @@ pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Explicitly supported historical and current checkpoint identities. This is
 /// only an admission bound; manifest/database checks still require exact equality.
 pub(crate) fn supports_loongport_version(version: i32) -> bool {
-    [24, 25, 26, 27].contains(&version)
+    [24, 25, 26, 27, 28].contains(&version)
 }
 
 fn legacy_archive_source_versions() -> SchemaVersions {
@@ -1078,7 +1078,11 @@ mod paperclip_schema_lifecycle_tests {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         crate::paperclip::bindings::ensure_schema(&source).unwrap();
-        crate::database::create_qoder_campaign_operations_schema(&source).unwrap();
+        source
+            .execute_batch(include_str!(
+                "test_fixtures/qoder_campaign_operations_v27.sql"
+            ))
+            .unwrap();
         source
             .execute_batch("UPDATE loongport_schema_version SET version=26 WHERE id=1")
             .unwrap();
@@ -1094,21 +1098,72 @@ mod paperclip_schema_lifecycle_tests {
     }
 
     #[test]
-    fn qoder_http_current_v27_checkpoint_keeps_recorded_identity() {
+    fn qoder_http_historical_v27_checkpoint_keeps_legacy_ledger_and_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        database::loongport_schema::apply(&source).unwrap();
-        drop(source);
+        crate::paperclip::bindings::ensure_schema(&source).unwrap();
+        crate::database::create_qoder_http_auth_column(&source).unwrap();
+        source
+            .execute_batch(include_str!(
+                "test_fixtures/qoder_campaign_operations_v27.sql"
+            ))
+            .unwrap();
+        source.execute_batch("UPDATE loongport_schema_version SET version=27 WHERE id=1; INSERT INTO qoder_campaign_operations VALUES('historical-attempt','synthetic-subject','international','historical-campaign','historical-key',100,200,'historical-generation','unknown')").unwrap();
+        let before = Database::content_digest(&source).unwrap();
+        let rows = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
         let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&staged).unwrap(),
             27
         );
-        // The existing read-only owner validates the receipt schema and rows.
+        assert_eq!(
+            crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
+            rows
+        );
+        assert_eq!(Database::content_digest(&source).unwrap(), before);
+        let columns: i64 = staged
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('qoder_campaign_operations')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 9);
         database::vault::preflight_connection(&staged).unwrap();
-        assert!(supports_loongport_version(26));
-        assert!(!supports_loongport_version(28));
+    }
+
+    #[test]
+    fn qoder_cn_current_v28_checkpoint_keeps_unknown_receipt_and_recorded_identity() {
+        let f = historical_source();
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        database::loongport_schema::apply(&source).unwrap();
+        source.execute_batch("INSERT INTO qoder_campaign_operations(attempt_id,subject,region,campaign_id,credential_generation,result,provider_id) VALUES('cn-attempt','synthetic-subject','china','benefit:2026','cn-generation','unknown','synthetic-provider')").unwrap();
+        let before = Database::content_digest(&source).unwrap();
+        let rows = crate::database::read_qoder_campaign_operation_rows(&source).unwrap();
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            28
+        );
+        assert_eq!(
+            crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
+            rows
+        );
+        assert_eq!(Database::content_digest(&source).unwrap(), before);
+        database::vault::preflight_connection(&staged).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_admission_covers_current_and_historical_but_rejects_future() {
+        for version in [24, 25, 26, 27] {
+            assert!(supports_loongport_version(version));
+        }
+        let current = database::loongport_schema::LOONGPORT_SCHEMA_VERSION;
+        assert!(supports_loongport_version(current));
+        assert!(!supports_loongport_version(23));
+        assert!(!supports_loongport_version(current + 1));
     }
 
     #[test]

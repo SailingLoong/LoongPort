@@ -913,7 +913,7 @@ fn validate_database_version(
         return vault::preflight_connection(conn);
     };
     if binding.upstream != crate::database::UPSTREAM4_SCHEMA_VERSION
-        || ![24, 25, 26, 27].contains(&binding.loongport)
+        || !super::upgrade::checkpoint::supports_loongport_version(binding.loongport)
     {
         return Err(invalid());
     }
@@ -1656,11 +1656,20 @@ mod tests {
     // Explicit historical shapes: current fixture creation must not silently
     // turn a fixed historical identity test into the latest schema.
     fn set_test_checkpoint_version(conn: &Connection, version: i32) {
-        assert!([24, 25, 26, 27].contains(&version));
+        assert!([24, 25, 26, 27, 28].contains(&version));
         if version < 26 {
             conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
                 .unwrap();
+        } else if version < 28 {
+            conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
+                .unwrap();
+            conn.execute_batch(include_str!(
+                "test_fixtures/qoder_campaign_operations_v27.sql"
+            ))
+            .unwrap();
         } else {
+            conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations")
+                .unwrap();
             crate::database::create_qoder_campaign_operations_schema(conn).unwrap();
         }
         if version < 27 {
@@ -1763,8 +1772,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn transition_publishes_exact_authenticated_v24_v25_v26_v27_targets() {
-        for version in [24, 25, 26, 27] {
+    fn transition_publishes_exact_authenticated_v24_through_v28_targets() {
+        for version in [24, 25, 26, 27, 28] {
             publish_native_checkpoint(version, version, version);
         }
     }
@@ -1780,16 +1789,44 @@ mod tests {
             (25, 26, 25),
             (26, 25, 26),
             (26, 26, 27),
+            (27, 28, 27),
+            (28, 27, 28),
+            (28, 28, 27),
+            (28, 28, 29),
         ] {
             publish_native_checkpoint(source, image, recorded);
         }
     }
 
     #[test]
+    fn current_database_binding_is_admitted_without_rewriting_its_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
+        let current = crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION;
+        conn.execute(
+            "INSERT INTO loongport_schema_version VALUES(1,?1)",
+            [current],
+        )
+        .unwrap();
+        let binding = DatabaseBinding {
+            upstream: crate::database::UPSTREAM4_SCHEMA_VERSION,
+            loongport: current,
+            source_database: "synthetic-current-version-gate".into(),
+        };
+        validate_database_version(&conn, Some(&binding), true).unwrap();
+        conn.execute(
+            "UPDATE loongport_schema_version SET version=?1",
+            [current - 1],
+        )
+        .unwrap();
+        assert!(validate_database_version(&conn, Some(&binding), true).is_err());
+    }
+
+    #[test]
     fn recorded_database_binding_versions_survive_native_schema_bumps() {
         // Version admission only. MAC, roots, inode and content digest remain
         // enforced by the existing original-journal replay owner and its tests.
-        for version in [24, 25, 26, 27] {
+        for version in [24, 25, 26, 27, 28] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20; CREATE TABLE loongport_schema_version(id INTEGER PRIMARY KEY,version INTEGER NOT NULL)").unwrap();
             conn.execute(
@@ -1812,7 +1849,7 @@ mod tests {
             conn.execute_batch("PRAGMA user_version=19").unwrap();
             assert!(validate_database_version(&conn, Some(&binding), true).is_err());
         }
-        for version in [23, 28] {
+        for version in [23, 29] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch("PRAGMA user_version=20").unwrap();
             let binding = DatabaseBinding {

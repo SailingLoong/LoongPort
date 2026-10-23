@@ -6195,72 +6195,86 @@ fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
 #[test]
 #[serial_test::serial]
 fn native_historical_schema_classification_requires_authenticated_publication() {
-    for case in [
-        "published",
-        "missing",
-        "corrupt",
-        "unpublished",
-        "target25",
-        "forged25",
-        "future",
-        "wrong_root",
-    ] {
-        let f = Fixture::new();
-        publish_resume_fixture(&f);
-        let path = f.device.root().join(checkpoint::FILE);
-        match case {
-            "missing" => std::fs::remove_file(&path).unwrap(),
-            "corrupt" => std::fs::write(&path, b"synthetic-corrupt-checkpoint").unwrap(),
-            "unpublished" | "target25" | "forged25" => {
-                let file =
-                    crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE).unwrap();
-                let plain = file
-                    .decode(&f.vault, &std::fs::read(&path).unwrap())
-                    .unwrap();
-                let mut value: serde_json::Value = serde_json::from_slice(&plain).unwrap();
-                match case {
-                    "unpublished" => value["published_database"] = serde_json::Value::Null,
-                    "target25" => value["target_versions"]["loongport"] = serde_json::json!(25),
-                    "forged25" => {
-                        value["source_versions"]["loongport"] = serde_json::json!(25);
-                        value["target_versions"]["loongport"] = serde_json::json!(25);
+    for version in [24, 27] {
+        for case in [
+            "published",
+            "missing",
+            "corrupt",
+            "unpublished",
+            "target25",
+            "forged25",
+            "future",
+            "wrong_root",
+        ] {
+            let f = Fixture::new();
+            if version == 27 {
+                let conn =
+                    rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+                crate::paperclip::bindings::ensure_schema(&conn).unwrap();
+                crate::database::create_qoder_http_auth_column(&conn).unwrap();
+                conn.execute_batch("DROP TABLE IF EXISTS qoder_campaign_operations; UPDATE loongport_schema_version SET version=27 WHERE id=1").unwrap();
+                conn.execute_batch(include_str!(
+                    "test_fixtures/qoder_campaign_operations_v27.sql"
+                ))
+                .unwrap();
+            }
+            publish_resume_fixture(&f);
+            let path = f.device.root().join(checkpoint::FILE);
+            match case {
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "corrupt" => std::fs::write(&path, b"synthetic-corrupt-checkpoint").unwrap(),
+                "unpublished" | "target25" | "forged25" => {
+                    let file = crate::secrets::owned_file::DeviceFile::registered(checkpoint::FILE)
+                        .unwrap();
+                    let plain = file
+                        .decode(&f.vault, &std::fs::read(&path).unwrap())
+                        .unwrap();
+                    let mut value: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+                    match case {
+                        "unpublished" => value["published_database"] = serde_json::Value::Null,
+                        "target25" => value["target_versions"]["loongport"] = serde_json::json!(25),
+                        "forged25" => {
+                            value["source_versions"]["loongport"] = serde_json::json!(25);
+                            value["target_versions"]["loongport"] = serde_json::json!(25);
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => unreachable!(),
+                    std::fs::write(
+                        &path,
+                        file.encode(&f.vault, &serde_json::to_vec(&value).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
                 }
-                std::fs::write(
-                    &path,
-                    file.encode(&f.vault, &serde_json::to_vec(&value).unwrap())
-                        .unwrap(),
+                _ => {}
+            }
+            let conn =
+                rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+            if case == "future" {
+                conn.execute(
+                    "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
+                    [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
                 )
                 .unwrap();
             }
-            _ => {}
+            let root = if case == "wrong_root" {
+                f.root.join("synthetic-other-root")
+            } else {
+                f.root.clone()
+            };
+            let db = Database::from_connection(
+                conn,
+                session::SecretSession::from_context(root, f.vault.clone()),
+            );
+            let before = snapshot(f.home.path());
+            let result = crate::mode::operation::uses_upstream4_schema(&db);
+            if case == "published" {
+                assert!(result.unwrap(), "{case}");
+            } else {
+                assert!(result.is_err(), "{case} must fail closed");
+            }
+            assert_eq!(snapshot(f.home.path()), before, "{case} must be read-only");
         }
-        let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        if case == "future" {
-            conn.execute(
-                "UPDATE loongport_schema_version SET version=?1 WHERE id=1",
-                [crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1],
-            )
-            .unwrap();
-        }
-        let root = if case == "wrong_root" {
-            f.root.join("synthetic-other-root")
-        } else {
-            f.root.clone()
-        };
-        let db = Database::from_connection(
-            conn,
-            session::SecretSession::from_context(root, f.vault.clone()),
-        );
-        let before = snapshot(f.home.path());
-        let result = crate::mode::operation::uses_upstream4_schema(&db);
-        if case == "published" {
-            assert!(result.unwrap(), "{case}");
-        } else {
-            assert!(result.is_err(), "{case} must fail closed");
-        }
-        assert_eq!(snapshot(f.home.path()), before, "{case} must be read-only");
     }
 }
 
