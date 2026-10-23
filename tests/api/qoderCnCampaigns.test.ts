@@ -59,3 +59,52 @@ it("uses an actually registered Tauri command, not a frontend-only placeholder",
   expect(commands).toContain("cn_campaigns::read(&db, declaration).await");
   expect(registry).toContain("commands::read_qoder_cn_campaigns,");
 });
+
+it.each(["chinaQoderPat", "chinaQoderDevice"] as const)(
+  "claims %s only through the fixed backend entry and original owner declaration",
+  async (source) => {
+    const declaration = {
+      providerId: "cn",
+      credentialGeneration: "g1",
+      source,
+    };
+    await qoderCnCampaignsApi.claim({
+      ...declaration,
+      token: "SYNTHETIC",
+      campaignId: "injected",
+    } as typeof declaration);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("claim_qoder_cn_benefits", {
+      declaration,
+    });
+  },
+);
+it("saves explicit CN consent with the backend policy revision and actual source", async () => {
+  const context = {
+    providerId: "cn",
+    credentialGeneration: "g1",
+    revision: 3,
+    policyVersion: 2,
+    enabled: false,
+    canEnable: true,
+    reason: null,
+    subject: "synthetic",
+  };
+  await qoderCnCampaignsApi.setAutomatic(context, true, "chinaQoderDevice");
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("set_qoder_daily_automatic", {
+    request: {
+      providerId: "cn",
+      credentialGeneration: "g1",
+      expectedRevision: 3,
+      policyVersion: 2,
+      enabled: true,
+      source: "chinaQoderDevice",
+    },
+  });
+});
+it("registers the real CN batch service command", () => {
+  const commands = readFileSync("src-tauri/src/commands/provider.rs", "utf8");
+  const registry = readFileSync("src-tauri/src/lib.rs", "utf8");
+  expect(commands).toContain("async fn claim_qoder_cn_benefits");
+  expect(commands).toContain("cn_benefits::run(&db, declaration, None).await");
+  expect(registry).toContain("commands::claim_qoder_cn_benefits,");
+});

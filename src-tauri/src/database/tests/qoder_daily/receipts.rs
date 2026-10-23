@@ -255,7 +255,7 @@ fn capacity_exhaustion_never_commits_an_unreadable_ledger_or_posts() {
         let mut c = db.conn.lock().unwrap();
         let tx = c.transaction().unwrap();
         for n in 0..4096 {
-            tx.execute("INSERT INTO qoder_campaign_operations VALUES(?1,?2,'international','campaign','key',100,200,'generation','claimed')",params![format!("attempt-{n}"),format!("subject-{n}")]).unwrap();
+            tx.execute("INSERT INTO qoder_campaign_operations(attempt_id,subject,region,campaign_id,campaign_key,window_start,window_end,credential_generation,result) VALUES(?1,?2,'international','campaign','key',100,200,'generation','claimed')",params![format!("attempt-{n}"),format!("subject-{n}")]).unwrap();
         }
         tx.commit().unwrap();
     }

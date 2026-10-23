@@ -8,12 +8,23 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
 import type { QoderCnCampaignReadResult } from "@/lib/api/qoderCnCampaigns";
-const api = vi.hoisted(() => ({ context: vi.fn(), read: vi.fn() }));
+const api = vi.hoisted(() => ({
+  context: vi.fn(),
+  read: vi.fn(),
+  claim: vi.fn(),
+  automaticContext: vi.fn(),
+  setAutomatic: vi.fn(),
+}));
 vi.mock("@/lib/api/qoderHttpAuth", () => ({
   qoderHttpAuthApi: { context: api.context },
 }));
 vi.mock("@/lib/api/qoderCnCampaigns", () => ({
-  qoderCnCampaignsApi: { read: api.read },
+  qoderCnCampaignsApi: {
+    read: api.read,
+    claim: api.claim,
+    automaticContext: api.automaticContext,
+    setAutomatic: api.setAutomatic,
+  },
 }));
 const context = {
   providerId: "cn",
@@ -22,6 +33,35 @@ const context = {
   status: "ready",
   allowedActions: [],
   expiresAtMs: null,
+};
+const policy = {
+  providerId: "cn",
+  credentialGeneration: "g1",
+  revision: 0,
+  policyVersion: 2,
+  enabled: false,
+  canEnable: true,
+  reason: null,
+  subject: null,
+};
+const completed = {
+  status: "completed",
+  providerId: "cn",
+  credentialGeneration: "g1",
+  activities: [
+    {
+      campaignId: "free.one",
+      outcome: "claimedDeltaUnknown",
+      reason: null,
+      benefitAmount: 100,
+    },
+    {
+      campaignId: "free.two",
+      outcome: "unknown",
+      reason: "response_unknown",
+      benefitAmount: null,
+    },
+  ],
 };
 const observed: QoderCnCampaignReadResult = {
   status: "observed",
@@ -38,8 +78,6 @@ const observed: QoderCnCampaignReadResult = {
       benefitAmount: 100,
     },
   ],
-  automaticClaimEnabled: false,
-  blockedReason: "daily_contract_unverified",
   runtimeIdentity: "not_requested",
 };
 function deferred<T>() {
@@ -63,6 +101,15 @@ async function query() {
 beforeEach(() => {
   api.context.mockReset().mockResolvedValue(context);
   api.read.mockReset().mockResolvedValue(observed);
+  api.claim.mockReset().mockResolvedValue(completed);
+  api.automaticContext.mockReset().mockResolvedValue(policy);
+  api.setAutomatic
+    .mockReset()
+    .mockImplementation(async (_context, enabled) => ({
+      ...policy,
+      enabled,
+      revision: 1,
+    }));
 });
 describe("explicit original-owner CN campaign reads", () => {
   it("stays inert while the preserved account view is disabled", () => {
@@ -100,11 +147,12 @@ describe("explicit original-owner CN campaign reads", () => {
     expect(
       screen.getByText(/不代表今日签到成功或本次新增积分/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/每日活动标识与轮次尚未确认/)).toBeInTheDocument();
-    expect(screen.queryByText(/100/)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /领取|自动/ }),
-    ).not.toBeInTheDocument();
+      screen.getByText(/不会购买、订阅、扣积分或完成额外任务/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/100/)).not.toBeInTheDocument();
+    expect(api.claim).not.toHaveBeenCalled();
+    expect(api.setAutomatic).not.toHaveBeenCalled();
   });
   it("routes independent device identity without pretending to supply official runtime", async () => {
     api.context.mockResolvedValue({ ...context, source: "chinaQoderDevice" });
@@ -226,4 +274,140 @@ describe("explicit original-owner CN campaign reads", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("查询未完成");
     expect(screen.queryByText(/synthetic-sensitive/)).not.toBeInTheDocument();
   });
+});
+
+describe("explicit free-benefit actions and continuing opt-in", () => {
+  it("stays default off on open; manual batch uses the original source and never displays +100", async () => {
+    render(<QoderCnCampaigns providerId="cn" />);
+    await open();
+    expect(api.claim).not.toHaveBeenCalled();
+    expect(api.setAutomatic).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("button", { name: "开启自动领取免费福利" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "领取免费福利" }));
+    expect(api.claim).toHaveBeenCalledExactlyOnceWith({
+      providerId: "cn",
+      credentialGeneration: "g1",
+      source: "chinaQoderPat",
+    });
+    expect(await screen.findByText("free.one")).toBeInTheDocument();
+    expect(
+      screen.getByText("已确认领取状态，本次新增数量未知"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("结果未确认，仅查询恢复，不会重复领取"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/100/)).not.toBeInTheDocument();
+  });
+  it("enables only after explicit click and disables through the same revision owner", async () => {
+    api.context.mockResolvedValue({ ...context, source: "chinaQoderDevice" });
+    render(<QoderCnCampaigns providerId="cn" />);
+    await open();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开启自动领取免费福利" }),
+    );
+    expect(api.setAutomatic).toHaveBeenCalledWith(
+      policy,
+      true,
+      "chinaQoderDevice",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "关闭自动领取免费福利" }),
+    );
+    expect(api.setAutomatic).toHaveBeenLastCalledWith(
+      { ...policy, enabled: true, revision: 1 },
+      false,
+      "chinaQoderDevice",
+    );
+    expect(api.claim).not.toHaveBeenCalled();
+  });
+  it("does not replay or display raw errors after ambiguous policy IPC", async () => {
+    api.setAutomatic.mockRejectedValue(new Error("SYNTHETIC-SECRET"));
+    render(<QoderCnCampaigns providerId="cn" />);
+    await open();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开启自动领取免费福利" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "设置结果未确认",
+    );
+    expect(api.setAutomatic).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/SYNTHETIC/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "开启自动领取免费福利" }),
+    ).toBeDisabled();
+  });
+  it.each(["provider", "generation", "disabled"])(
+    "discards late claim after %s change",
+    async (change) => {
+      const pending = deferred<typeof completed>();
+      api.claim.mockReturnValue(pending.promise);
+      const view = render(
+        <QoderCnCampaigns providerId="cn" sourceGeneration="g1" />,
+      );
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "领取免费福利" }));
+      view.rerender(
+        <QoderCnCampaigns
+          providerId={change === "provider" ? "other" : "cn"}
+          sourceGeneration={change === "generation" ? "g2" : "g1"}
+          disabled={change === "disabled"}
+        />,
+      );
+      await act(async () => pending.resolve(completed));
+      expect(screen.queryByText("free.one")).not.toBeInTheDocument();
+    },
+  );
+  it("single-flights a batch and rejects mismatching owner results", async () => {
+    const pending = deferred<typeof completed>();
+    api.claim.mockReturnValue(pending.promise);
+    render(<QoderCnCampaigns providerId="cn" />);
+    await open();
+    const button = screen.getByRole("button", { name: "领取免费福利" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(api.claim).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      pending.resolve({ ...completed, credentialGeneration: "g2" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("状态已变化");
+    expect(screen.queryByText("free.one")).not.toBeInTheDocument();
+  });
+});
+
+it("can revoke automatic consent during a batch and discards its late reply", async () => {
+  api.automaticContext.mockResolvedValue({ ...policy, enabled: true });
+  const pending = deferred<typeof completed>();
+  api.claim.mockReturnValue(pending.promise);
+  render(<QoderCnCampaigns providerId="cn" />);
+  await open();
+  fireEvent.click(screen.getByRole("button", { name: "领取免费福利" }));
+  const disable = await screen.findByRole("button", {
+    name: "关闭自动领取免费福利",
+  });
+  expect(disable).toBeEnabled();
+  fireEvent.click(disable);
+  await screen.findByRole("button", { name: "开启自动领取免费福利" });
+  await act(async () => pending.resolve(completed));
+  expect(screen.queryByText("free.one")).not.toBeInTheDocument();
+});
+it("explains why a previously uncertain no-window claim cannot automatically reopen", async () => {
+  api.claim.mockResolvedValue({
+    ...completed,
+    activities: [
+      {
+        campaignId: "unconfirmed-old",
+        outcome: "skipped",
+        reason: "reconciled_no_new_round",
+        benefitAmount: null,
+      },
+    ],
+  });
+  render(<QoderCnCampaigns providerId="cn" />);
+  await open();
+  fireEvent.click(screen.getByRole("button", { name: "领取免费福利" }));
+  expect(
+    await screen.findByText(/缺少明确新活动区间，不能自动重新领取/),
+  ).toBeInTheDocument();
 });

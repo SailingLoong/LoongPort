@@ -141,6 +141,36 @@ fn snapshot(record: &Record, epoch: u64) -> Result<RequestSnapshot, AppError> {
     ))
 }
 
+/// Exact original owner validation for callers already holding vault + SQLite.
+/// Keeping this check inside their transaction closes the preflight/dispatch gap.
+pub(crate) fn snapshot_matches_on(
+    conn: &Connection,
+    vault: &VaultContext,
+    epoch: u64,
+    provider: &Provider,
+    snapshot: &RequestSnapshot,
+    now_ms: Option<i64>,
+) -> Result<(), AppError> {
+    if now_ms.is_some_and(|now| now < 0 || snapshot.expires_at_ms() <= now) {
+        return Err(denied("snapshot_expired"));
+    }
+    let (source, _) = SourceBinding::from_provider(provider)?;
+    let (_, record) = read_on(conn, vault, &source.provider_id)?;
+    let record = record.ok_or_else(|| denied("stale_owner"))?;
+    stamp_matches(&record, &source, epoch, &snapshot.stamp)?;
+    match &record.phase {
+        Phase::Ready { identity, tokens }
+            if identity.uid == snapshot.uid()
+                && identity.machine_id == snapshot.machine_id()
+                && tokens.access_token == snapshot.access_token()
+                && tokens.expires_at_ms == snapshot.expires_at_ms() =>
+        {
+            Ok(())
+        }
+        _ => Err(denied("stale_owner")),
+    }
+}
+
 // Shared original reservation body: explicit recovery changes admission, not
 // the identity/PAT owner or how establishment gets its durable lease.
 fn next_establishment(
@@ -429,7 +459,7 @@ impl Database {
         receipt: IdentityActionReceipt,
     ) -> Result<EstablishLease, AppError> {
         let provider_id = receipt.source.provider_id.clone();
-        self.with_qoder_http(&provider_id, |tx, vault, epoch, _, source, pat| {
+        self.with_qoder_http(&provider_id, |tx, vault, epoch, provider, source, pat| {
             if source != receipt.source {
                 return Err(denied("source_changed"));
             }
@@ -446,6 +476,7 @@ impl Database {
             let (next, lease) =
                 next_establishment(source, record.as_ref(), epoch, pat, receipt.intent)?;
             publish_on(tx, vault, &provider_id, &raw, &next)?;
+            Self::revoke_qoder_automatic_on(tx, vault, &provider)?;
             Ok(lease)
         })
     }
@@ -629,20 +660,8 @@ impl Database {
     ) -> Result<(), AppError> {
         self.with_qoder_http(
             &snapshot.stamp.source.provider_id,
-            |tx, vault, epoch, _, source, _| {
-                let (_, record) = read_on(tx, vault, &source.provider_id)?;
-                let record = record.ok_or_else(|| denied("stale_owner"))?;
-                stamp_matches(&record, &source, epoch, &snapshot.stamp)?;
-                match record.phase {
-                    Phase::Ready { identity, tokens }
-                        if identity.uid == snapshot.uid()
-                            && identity.machine_id == snapshot.machine_id()
-                            && tokens.access_token == snapshot.access_token() =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(denied("stale_owner")),
-                }
+            |tx, vault, epoch, provider, _, _| {
+                snapshot_matches_on(tx, vault, epoch, &provider, snapshot, None)
             },
         )
     }

@@ -284,8 +284,6 @@ async fn full_read_uses_only_existing_access_for_one_get_and_no_runtime_identity
         let result = read_using(&db, d, &transport, || NOW).await;
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["status"], "observed");
-        assert_eq!(value["automaticClaimEnabled"], false);
-        assert_eq!(value["blockedReason"], "daily_contract_unverified");
         assert_eq!(value["runtimeIdentity"], "not_requested");
         assert_eq!(original_raw(&db), before);
         let seen = server.finish().await;
