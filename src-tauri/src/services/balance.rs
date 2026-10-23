@@ -407,11 +407,11 @@ async fn verify_openrouter_key(
     })?;
     let body: serde_json::Value = serde_json::from_slice(&raw)
         .map_err(|_| "Invalid OpenRouter key verification response".to_string())?;
-    if !body
+    if body
         .get("data")
         .and_then(|data| data.get("label"))
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|label| !label.trim().is_empty())
+        .is_none_or(|label| label.trim().is_empty())
     {
         return Err("Invalid OpenRouter key verification response".to_string());
     }
