@@ -51,6 +51,16 @@ pub(crate) use dao::qoder_campaign_operations::{
     create_schema as create_qoder_campaign_operations_schema,
     read_rows as read_qoder_campaign_operation_rows,
 };
+
+// Narrow CN operation hooks for the original claim service. Keep the DAO private.
+pub(crate) use dao::qoder_campaign_operations::{
+    insert_cn_unknown_on as reserve_qoder_cn_operation_on,
+    observe_cn_claimed_on as observe_qoder_cn_claimed_on,
+    read_cn_on as read_qoder_cn_operations_on,
+    reconcile_cn_result_on as reconcile_qoder_cn_operation_on,
+    update_cn_result_on as finish_qoder_cn_operation_on, CnOperation, CnTarget,
+};
+
 #[cfg(test)]
 pub(crate) use dao::qoder_http_auth::{
     create_column as create_qoder_http_auth_column,

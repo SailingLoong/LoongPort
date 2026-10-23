@@ -8,10 +8,7 @@ use super::{
     http::{CredentialSource, PatDeclaration},
 };
 use crate::{
-    database::{
-        dao::qoder_campaign_operations::{self as ledger, CnOperation, CnTarget},
-        Database,
-    },
+    database::{self as ledger, CnOperation, CnTarget, Database},
     error::AppError,
     services::provider::qoder_http_auth::{self as owner, RequestSnapshot},
 };
@@ -329,7 +326,7 @@ async fn run_inner(
                     &snapshot,
                     &now,
                     |conn| {
-                        before_listing = ledger::read_cn_on(conn, &identity)?;
+                        before_listing = ledger::read_qoder_cn_operations_on(conn, &identity)?;
                         Ok(())
                     },
                     || transport.client.execute(request),
@@ -350,7 +347,9 @@ async fn run_inner(
             observed: headers_observed,
         };
         let previous = admission
-            .dispatch_cn(&snapshot, now(), |conn| ledger::read_cn_on(conn, &identity))
+            .dispatch_cn(&snapshot, now(), |conn| {
+                ledger::read_qoder_cn_operations_on(conn, &identity)
+            })
             .map_err(fail)?;
         let mut activities = Vec::new();
         for old in previous
@@ -372,7 +371,7 @@ async fn run_inner(
             if confirmed {
                 admission
                     .dispatch_cn(&snapshot, now(), |conn| {
-                        ledger::reconcile_cn_result_on(conn, old)
+                        ledger::reconcile_qoder_cn_operation_on(conn, old)
                     })
                     .map_err(fail)?;
             }
@@ -420,7 +419,7 @@ async fn run_inner(
                 {
                     admission
                         .dispatch_cn(&snapshot, now(), |conn| {
-                            ledger::observe_cn_claimed_on(conn, old)
+                            ledger::observe_qoder_cn_claimed_on(conn, old)
                         })
                         .map_err(fail)?;
                     activities.push(observed(item, ActivityOutcome::ObservedClaimed, None));
@@ -489,13 +488,13 @@ async fn run_inner(
                     if listing.window_reason(&item.target).is_some() {
                         return Ok(false);
                     };
-                    let current = ledger::read_cn_on(conn, &identity)?
+                    let current = ledger::read_qoder_cn_operations_on(conn, &identity)?
                         .into_iter()
                         .find(|o| o.target.campaign_id == item.target.campaign_id);
                     if current.as_ref() != old {
                         return Ok(false);
                     }
-                    match ledger::insert_cn_unknown_on(conn, &operation) {
+                    match ledger::reserve_qoder_cn_operation_on(conn, &operation) {
                         Ok(_) => Ok(true),
                         Err(AppError::Config(code)) if code == "qoder.window_not_advanced" => {
                             Ok(false)
@@ -519,7 +518,7 @@ async fn run_inner(
                         &now,
                         |conn| {
                             if listing.window_reason(&item.target).is_some()
-                                || !ledger::read_cn_on(conn, &identity)?
+                                || !ledger::read_qoder_cn_operations_on(conn, &identity)?
                                     .iter()
                                     .any(|o| o == &operation)
                             {
@@ -544,7 +543,7 @@ async fn run_inner(
             if matches!(receipt, Ok(true)) {
                 admission
                     .dispatch_cn(&snapshot, now(), |conn| {
-                        ledger::update_cn_result_on(
+                        ledger::finish_qoder_cn_operation_on(
                             conn,
                             &operation,
                             super::contract::Outcome::ClaimedDeltaUnknown,

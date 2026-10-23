@@ -1,5 +1,5 @@
 //! CN free-benefit wire contract; independent of international daily rewards.
-use crate::database::dao::qoder_campaign_operations::CnTarget;
+use crate::database::CnTarget;
 use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {

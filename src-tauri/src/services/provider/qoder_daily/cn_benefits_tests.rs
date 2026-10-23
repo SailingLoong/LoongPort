@@ -200,7 +200,7 @@ fn listed(rows: Vec<Value>) -> Value {
     json!({"campaigns":rows})
 }
 fn receipts(db: &Database) -> Vec<CnOperation> {
-    ledger::read_cn_on(
+    ledger::read_qoder_cn_operations_on(
         &db.conn.lock().unwrap(),
         &super::super::contract::Identity {
             provider_id: "synthetic-cn-read".into(),
