@@ -28,6 +28,7 @@ const STOP: &str = concat!(
 enum UpstreamBehavior {
     Complete,
     FirstRateLimited,
+    #[cfg(unix)]
     FirstHeadersPending,
     FailAfterOutput,
     CleanEofAfterOutput,
@@ -83,6 +84,7 @@ impl MiniMaxRouterFixture {
                 async move {
                     let first = headers.get("authorization").unwrap().to_str().unwrap() == "Bearer synthetic-a-access";
                     calls.lock().unwrap().push(CapturedRequest {region, headers, body: body.clone()});
+                    #[cfg(unix)]
                     if first && matches!(behavior, UpstreamBehavior::FirstHeadersPending) {
                         // The original owner has submitted the complete request.
                         // No response headers does not prove no work was accepted.

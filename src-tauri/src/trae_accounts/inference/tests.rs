@@ -284,6 +284,10 @@ async fn adapter_unknown_success_outcomes_are_terminal_not_synthetic_http_failur
         ),
         ("Content-Type: application/json\r\n", "{}"),
         (
+            "Content-Type: text/plain\r\n",
+            "event: output\ndata: {\"response\":\"partial\"}\n\nevent: error\ndata: {\"code\":429}\n\n",
+        ),
+        (
             "Content-Type: text/event-stream\r\n",
             "event: output\ndata: {\"response\":\"partial\"}\n\n",
         ),
@@ -327,4 +331,27 @@ async fn adapter_real_http_502_keeps_explicit_response_policy() {
     assert_eq!(result.response.status(), http::StatusCode::BAD_GATEWAY);
     assert_eq!(fixture.attempts(), 1);
     worker.join().unwrap();
+}
+
+#[tokio::test]
+async fn adapter_success_headers_do_not_prove_business_error_was_unsent() {
+    for headers in [
+        "Content-Type: text/event-stream\r\n",
+        "Content-Type: text/plain\r\n",
+    ] {
+        for code in [401, 429] {
+            let f = Owner::new().await;
+            let reply = format!("event: error\ndata: {{\"code\":{code}}}\n\n");
+            let (origin, worker) = server("200 OK", headers, &reply);
+            let fixture = FixtureTransport::loopback(&f.seal, &origin).unwrap();
+            let result = Lease::acquire(f.session.clone(), "synthetic-sg", "s")
+                .await
+                .unwrap()
+                .dispatch_fixture(body(), Duration::from_secs(2), &fixture)
+                .await;
+            assert!(matches!(result, Err(ProxyError::ForwardFailed(_))));
+            assert_eq!(fixture.attempts(), 1);
+            worker.join().unwrap();
+        }
+    }
 }

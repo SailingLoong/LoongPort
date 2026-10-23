@@ -27,6 +27,13 @@ impl Fixture {
         Self::with_reply(deny, None).await
     }
     async fn with_reply(deny: bool, reply: Option<&'static str>) -> Self {
+        Self::with_response(deny, "text/event-stream", reply).await
+    }
+    async fn with_response(
+        deny: bool,
+        content_type: &'static str,
+        reply: Option<&'static str>,
+    ) -> Self {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -44,7 +51,7 @@ impl Fixture {
    let captured=captured.clone(); async move {
     captured.lock().unwrap().push(body);
                     if deny { return (StatusCode::FORBIDDEN, axum::Json(json!({"code":11004}))).into_response(); }
-                    if let Some(reply) = reply { return (StatusCode::OK, [("content-type", "text/event-stream")], reply).into_response(); }
+                    if let Some(reply) = reply { return (StatusCode::OK, [("content-type", content_type)], reply).into_response(); }
     (StatusCode::OK,[("content-type","text/event-stream")], "event: output\ndata: {\"response\":\"synthetic TRAE answer\"}\n\nevent: done\ndata: {}\n\n").into_response()
    }
   }));
@@ -285,5 +292,67 @@ async fn trae_unknown_success_response_never_tries_second_account() {
             1,
             "an accepted but unknown response cannot select the next account"
         );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_non_sse_partial_then_error_never_replays() {
+    let f = Fixture::with_response(false, "text/plain", Some(
+        "event: output\ndata: {\"response\":\"partial\"}\n\nevent: error\ndata: {\"code\":429}\n\n",
+    )).await;
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        f.calls.lock().unwrap().len(),
+        1,
+        "successful headers and partial work cannot become a replayable HTTP429"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_success_headers_explicit_denial_stays_terminal() {
+    for content_type in ["text/event-stream", "text/plain"] {
+        let f = Fixture::with_response(
+            false,
+            content_type,
+            Some("event: error\ndata: {\"code\":11004}\n\n"),
+        )
+        .await;
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(f.calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn trae_success_headers_business_error_never_tries_second_account() {
+    for content_type in ["text/event-stream", "text/plain"] {
+        for reply in [
+            "event: error\ndata: {\"code\":401}\n\n",
+            "event: error\ndata: {\"code\":429}\n\n",
+        ] {
+            let f = Fixture::with_response(false, content_type, Some(reply)).await;
+            let response = f
+                .request(
+                    "/v1/responses",
+                    json!({"model":"synthetic-model","stream":false,"input":"hello"}),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(f.calls.lock().unwrap().len(), 1);
+        }
     }
 }

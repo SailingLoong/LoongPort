@@ -41,7 +41,7 @@ impl Transport for OfficialHttp {
             #[cfg(not(test))]
             {
                 let client = crate::proxy::http_client::get_budgeted_authenticated()
-                    .map_err(|_| network_error())?;
+                    .map_err(|_| ProxyError::ConfigError("trae.transport_unavailable".into()))?;
                 let response = client
                     .post(r.url)
                     .headers(r.headers)
@@ -263,7 +263,7 @@ impl Lease {
         .await?;
         self.fence().check().await?;
         if !response.status().is_success() {
-            let status = classified_failure(response).await;
+            let status = classified_failure(response).await?;
             self.fence().check().await?;
             if status != 401 || refreshed {
                 return Ok(DispatchResponse {
@@ -290,8 +290,15 @@ impl Lease {
             .as_ref()
             .ok_or_else(auth_error)?;
         if !response.status().is_success() || !response.is_sse() {
-            let status = classified_failure(response).await;
+            let successful_headers = response.status().is_success();
+            let status = classified_failure(response).await?;
             fence.check().await?;
+            // A status decoded from a successful response body is not an
+            // HTTP rejection and does not prove the request was unaccepted.
+            // Keep explicit access/safety denial, never replay other outcomes.
+            if successful_headers && status != 403 {
+                return Err(network_error());
+            }
             return Ok(DispatchResponse {
                 response: failure(status),
                 fence,
@@ -302,10 +309,7 @@ impl Lease {
             .get(http::header::CONTENT_ENCODING)
             .is_some_and(|v| v != "identity")
         {
-            return Ok(DispatchResponse {
-                response: failure(502),
-                fence,
-            });
+            return Err(network_error());
         }
         let guard = KnownSecretGuard::new(&[g.access.as_bytes(), g.refresh.as_bytes()])
             .map_err(|_| network_error())?;
@@ -322,36 +326,28 @@ impl Lease {
             fence.check().await?;
             let bytes = match next {
                 Some(Ok(bytes)) => bytes,
-                _ => {
-                    return Ok(DispatchResponse {
-                        response: failure(502),
-                        fence,
-                    })
-                }
+                _ => return Err(network_error()),
             };
             size = size.saturating_add(bytes.len());
             if size > 1024 * 1024 {
-                return Ok(DispatchResponse {
-                    response: failure(502),
-                    fence,
-                });
+                return Err(network_error());
             }
             let semantic = match peek.feed(&bytes) {
                 Ok(parts) => parts.into_iter().next(),
-                Err(_) => {
-                    return Ok(DispatchResponse {
-                        response: failure(502),
-                        fence,
-                    })
-                }
+                Err(_) => return Err(network_error()),
             };
             held.push(Ok(bytes));
             match semantic {
                 Some(Part::Error(status)) => {
+                    // Successful HTTP headers establish no safe retry even if
+                    // the first decoded event is a business 401 or 429.
+                    if status != 403 {
+                        return Err(network_error());
+                    }
                     return Ok(DispatchResponse {
                         response: failure(status),
                         fence,
-                    })
+                    });
                 }
                 Some(_) => break,
                 None => continue,
@@ -373,50 +369,57 @@ impl Lease {
         };
         let first = parts.next().await;
         let response = match first {
-            Part::Error(status) => failure(status),
+            Part::Error(403) => failure(403),
+            Part::Error(_) => return Err(network_error()),
             part if want_stream => stream_response(parts, part, model),
             part => buffered_response(parts, part, model).await,
         };
         fence.check().await?;
+        // A 502 produced while decoding a successful response is local loss of
+        // outcome, not an explicit upstream HTTP rejection. Never erase that
+        // distinction before the shared router makes its retry decision.
+        if response.status() == http::StatusCode::BAD_GATEWAY {
+            return Err(network_error());
+        }
         Ok(DispatchResponse { response, fence })
     }
 }
 /// Only fixed sanitized errors are returned. Read a bounded error body before
 /// deciding whether an explicit HTTP 401 may use the single refresh budget.
-async fn classified_failure(response: ProxyResponse) -> u16 {
+async fn classified_failure(response: ProxyResponse) -> Result<u16, ProxyError> {
     let status = response.status().as_u16();
     if response
         .headers()
         .get(http::header::CONTENT_ENCODING)
         .is_some_and(|v| v != "identity")
     {
-        return 502;
+        return Err(network_error());
     }
     let bytes = match response.bytes_with_limit(1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return 502,
+        Err(_) => return Err(network_error()),
     };
     if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
         if let Some(status) = protocol::denial(&body) {
-            return status;
+            return Ok(status);
         }
     }
     if let Ok(parts) = Decoder::default().feed(&bytes) {
         // Permission/risk denials take priority over any authentication code.
         if parts.iter().any(|p| matches!(p, Part::Error(403))) {
-            return 403;
+            return Ok(403);
         }
         if let Some(status) = parts.into_iter().find_map(|p| match p {
             Part::Error(s) => Some(s),
             _ => None,
         }) {
-            return status;
+            return Ok(status);
         }
     }
     if (200..300).contains(&status) {
-        502
+        Err(network_error())
     } else {
-        status
+        Ok(status)
     }
 }
 /// Classification is conservative: only a failure before transport creation and
@@ -643,7 +646,13 @@ async fn buffered_response(mut parts: Parts, first: Part, model: String) -> Prox
     let mut reasoning = String::new();
     loop {
         match part {
-            Part::Error(s) => return failure(s),
+            Part::Error(s) => {
+                // Buffered output has not reached the client yet, but the
+                // upstream already performed work. A late rate-limit/error
+                // cannot turn that partial generation into a replayable HTTP
+                // rejection. Explicit refusal remains terminal as before.
+                return failure(if s == 403 { 403 } else { 502 });
+            }
             Part::Done => break,
             Part::Delta(d) => {
                 if let Some(s) = d["content"].as_str() {
