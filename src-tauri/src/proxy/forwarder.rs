@@ -259,6 +259,7 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    personal_session_hint: crate::vendor::opencode_personal::PersonalSessionHint,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -443,6 +444,7 @@ impl RequestForwarder {
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            personal_session_hint: Default::default(),
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -454,6 +456,14 @@ impl RequestForwarder {
             max_attempts,
             model_alignment,
         }
+    }
+
+    pub(crate) fn with_personal_session_hint(
+        mut self,
+        hint: crate::vendor::opencode_personal::PersonalSessionHint,
+    ) -> Self {
+        self.personal_session_hint = hint;
+        self
     }
 
     pub(crate) fn with_request_identity(
@@ -3115,12 +3125,16 @@ impl RequestForwarder {
             .get("opencodePersonalKeyPlan")
             .and_then(serde_json::Value::as_str)
         {
+            let personal_session = self.personal_session_hint.resolve(
+                &ordered_headers,
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            )?;
             crate::vendor::opencode_personal::request_headers(
                 plan,
                 &url,
                 &mut ordered_headers,
-                self.session_client_provided
-                    .then_some(self.session_id.as_str()),
+                personal_session,
             )?;
         }
 
@@ -5209,6 +5223,7 @@ mod tests {
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            personal_session_hint: Default::default(),
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
