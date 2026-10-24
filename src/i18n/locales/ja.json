@@ -3847,7 +3847,9 @@
         "monthly": "月次ウィンドウ"
       },
       "usageTitle": "使用量サマリー",
-      "usageHeadline": "7日 {{seven}} · 30日 {{thirty}}"
+      "usageHeadline": "7日 {{seven}} · 30日 {{thirty}}",
+      "overview": "アカウント概要",
+      "staleSummary": "読み取りに失敗しました。前回のアカウント概要を表示しています。現在の状態は不明です。"
     },
     "onboarding": {
       "domain": "中継サービスの URL",

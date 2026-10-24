@@ -3847,7 +3847,9 @@
         "monthly": "月窗口"
       },
       "usageTitle": "用量摘要",
-      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}",
+      "overview": "账号总览",
+      "staleSummary": "读取失败，显示上次读取的账号摘要；当前状态未知。"
     },
     "onboarding": {
       "domain": "中转站网址",

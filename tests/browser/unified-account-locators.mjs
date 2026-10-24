@@ -11,4 +11,4 @@ export function nativeAccountKeyboardSteps(t) {
   ];
 }
 
-export const nativeAccountOverviewCounts = { details: 2, accountButtons: 1 };
+export const nativeAccountOverviewCounts = { details: 0, accountButtons: 1 };

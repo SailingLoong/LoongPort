@@ -1,3 +1,5 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 import { StrictMode } from "react";
 import {
   act,
@@ -1364,4 +1366,36 @@ it("a failed readback remains uncertain and never resends authorization", async 
   expect(mocks.cancel).not.toHaveBeenCalled();
   expect(mocks.retire).not.toHaveBeenCalled();
   expect(mocks.confirm).toHaveBeenCalledTimes(1);
+});
+
+it("hides a retained account owner's authorization portal on All without cancelling its native flow", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const tree = (platform?: "trae") => (
+    <QueryClientProvider client={client}>
+      <ServicesPage
+        appId="codex"
+        platform={platform}
+        onOpenPlatform={vi.fn()}
+        onOpenAddHub={vi.fn()}
+        onOpenApp={vi.fn()}
+      />
+    </QueryClientProvider>
+  );
+  const view = render(tree("trae"));
+  await selectFiles();
+  await userEvent.click(screen.getByRole("checkbox", { name: "trae.consent" }));
+  view.rerender(tree());
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(document.body.style.pointerEvents).not.toBe("none");
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  view.rerender(tree("trae"));
+  expect(await screen.findByRole("dialog")).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: "trae.consent" })).toBeChecked();
+  expect(mocks.begin).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "trae.confirm" }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalledWith(flow.flowId));
 });

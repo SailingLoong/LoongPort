@@ -125,9 +125,26 @@ try {
             name: "账号详情",
             exact: true,
           });
-          await detail
-            .getByRole("heading", { name: "Synthetic account A", exact: true })
+          await main
+            .getByRole("button", {
+              name: "查看 Synthetic account B",
+              exact: true,
+            })
             .waitFor();
+          assert.equal(
+            await detail.count(),
+            0,
+            "All must show summaries without visible native workspaces",
+          );
+          await page.waitForFunction(() => window.unifiedLayout.settled());
+          await page.evaluate(() => document.fonts.ready);
+          await page.screenshot({
+            path: path.join(
+              output,
+              `native-overview-${variant.width}-${variant.language}-${variant.dark ? "dark" : "light"}.png`,
+            ),
+            fullPage: true,
+          });
           await main
             .getByRole("button", {
               name: "查看 Synthetic account B",
@@ -175,7 +192,7 @@ try {
             )
             .waitFor();
           await main
-            .getByText("Synthetic OpenCode workspace with a long label", {
+            .getByText("Synthetic workspace account", {
               exact: true,
             })
             .waitFor();
@@ -195,7 +212,7 @@ try {
           );
           assert.equal(
             await main
-              .getByText("Synthetic OpenCode workspace with a long label", {
+              .getByText("Synthetic workspace account", {
                 exact: true,
               })
               .count(),
@@ -321,7 +338,7 @@ try {
         await main.evaluate((node) => node.scrollTo(0, 0));
         if (scenario === "populated")
           await main
-            .getByText("Synthetic OpenCode workspace with a long label", {
+            .getByText("Synthetic workspace account", {
               exact: true,
             })
             .scrollIntoViewIfNeeded();
@@ -590,10 +607,10 @@ try {
             "true",
           );
           for (const name of [
-            "Synthetic account A",
-            "Synthetic WorkBuddy account",
+            "查看 Synthetic account A",
+            "查看 Synthetic WorkBuddy account",
           ])
-            await main.getByRole("heading", { name, exact: true }).waitFor();
+            await main.getByRole("button", { name, exact: true }).waitFor();
           assert.equal(
             await main
               .getByRole("region", { name: "账号详情", exact: true })

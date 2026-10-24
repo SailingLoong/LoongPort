@@ -1,6 +1,11 @@
+import { DialogVisibility } from "@/components/ui/dialog";
 import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
 import { QoderAccountPanel } from "./QoderAccountPanel";
-import { AccountApplicationNavigation } from "./AccountWorkspace";
+import {
+  AccountApplicationNavigation,
+  AccountWorkspace,
+  AccountWorkspaceTarget,
+} from "./AccountWorkspace";
 import { AccountPlatformTabs } from "./AccountPlatformTabs";
 import {
   serviceEntryIntent,
@@ -12,7 +17,7 @@ import {
   accountPlatformLabel,
   type AccountPlatform,
 } from "./accountPlatforms";
-import { useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
@@ -96,15 +101,38 @@ export function ServicesPage(props: ServicesPageProps) {
     AccountPlatform | undefined
   >(props.platform);
   const [blocked, setBlocked] = useState(false);
-  const active = props.onOpenPlatform ? props.platform : localPlatform;
+  const [entered, setEntered] = useState<AccountPlatform[]>([]);
+  const [targets, setTargets] = useState<
+    Partial<Record<AccountPlatform, { id: string; request: number }>>
+  >({});
+  const { accounts: serviceAccounts, error: serviceAccountsError } =
+    useServiceAccounts();
+  const routedOpenCode =
+    props.account?.kind === "vendor" &&
+    serviceAccounts.some(
+      (row) =>
+        row.kind === "vendor" &&
+        row.id === props.account?.id &&
+        row.row.vendorId === "opencode",
+    );
+  const active =
+    (props.onOpenPlatform ? props.platform : localPlatform) ??
+    (routedOpenCode ? "opencode" : undefined);
   const select = (platform: AccountPlatform | undefined) => {
     if (blocked) return;
     if (props.onOpenPlatform) props.onOpenPlatform(platform);
     else setLocalPlatform(platform);
   };
+  useEffect(() => {
+    if (active)
+      setEntered((previous) =>
+        previous.includes(active) ? previous : [...previous, active],
+      );
+  }, [active]);
   const presence = useAccountPlatformPresence();
-  const { accounts: serviceAccounts } = useServiceAccounts();
   const present = new Set(presence.data?.platforms ?? []);
+  const unavailable = new Set(presence.data?.unavailable ?? []);
+  if (serviceAccountsError) unavailable.add("opencode");
   if (
     serviceAccounts.some(
       (account) =>
@@ -115,7 +143,16 @@ export function ServicesPage(props: ServicesPageProps) {
   const available = accountPlatforms
     .filter((item) => present.has(item.id))
     .map((item) => item.id);
-  const displayed = active ? [active] : available;
+  // Only visited managers stay mounted; switching views must not cancel authorization.
+  const displayed = [...new Set([...entered, ...(active ? [active] : [])])];
+  const openSummary = (platform: AccountPlatform, id: string) => {
+    if (blocked) return;
+    setTargets((previous) => ({
+      ...previous,
+      [platform]: { id, request: (previous[platform]?.request ?? 0) + 1 },
+    }));
+    select(platform);
+  };
   return (
     <AccountApplicationNavigation.Provider
       value={() => props.onOpenApp(props.appId)}
@@ -154,7 +191,7 @@ export function ServicesPage(props: ServicesPageProps) {
               })}
             </p>
           )}
-          {!!presence.data?.unavailable.length && (
+          {!!unavailable.size && (
             <p role="alert" className="text-sm text-muted-foreground">
               {t("loongport.accounts.partialPlatformRead", {
                 defaultValue:
@@ -162,59 +199,173 @@ export function ServicesPage(props: ServicesPageProps) {
               })}
             </p>
           )}
-          {!presence.isPending &&
-            !displayed.length &&
-            !presence.data?.unavailable.length && (
-              <p className="text-sm text-muted-foreground">
-                {t("loongport.accounts.emptyPlatforms", {
-                  defaultValue:
-                    "尚无已导入的平台账号，添加账号后将在这里显示。",
-                })}
-              </p>
-            )}
+          {!presence.isPending && !available.length && !unavailable.size && (
+            <p className="text-sm text-muted-foreground">
+              {t("loongport.accounts.emptyPlatforms", {
+                defaultValue: "尚无已导入的平台账号，添加账号后将在这里显示。",
+              })}
+            </p>
+          )}
+          {!active &&
+            available.map((platform) => {
+              const definition = accountPlatforms.find(
+                (item) => item.id === platform,
+              )!;
+              const summaries =
+                presence.data?.accounts?.filter(
+                  (row) =>
+                    row.platform === platform &&
+                    (row.source !== "workbuddy-inference" ||
+                      !presence.data?.accounts?.some(
+                        (other) =>
+                          other.source === "workbuddy" && other.id === row.id,
+                      )),
+                ) ?? [];
+              const vendors =
+                platform === "opencode"
+                  ? serviceAccounts.filter(
+                      (row) =>
+                        row.kind === "vendor" &&
+                        row.row.vendorId === "opencode",
+                    )
+                  : [];
+              return (
+                <section
+                  key={platform}
+                  aria-label={`${accountPlatformLabel(definition)} · ${t("loongport.accounts.overview", { defaultValue: "账号总览" })}`}
+                  className="overflow-hidden rounded-xl border border-border bg-card"
+                >
+                  <header className="flex items-center justify-between border-b border-border px-4 py-2">
+                    <h3 className="text-sm font-semibold">
+                      {accountPlatformLabel(definition)}
+                    </h3>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={blocked}
+                      onClick={() => select(platform)}
+                    >
+                      {t("common.view", { defaultValue: "查看" })}
+                    </Button>
+                  </header>
+                  {unavailable.has(platform) && (
+                    <p
+                      role="status"
+                      className="px-4 py-2 text-xs text-muted-foreground"
+                    >
+                      {t("loongport.accounts.staleSummary", {
+                        defaultValue:
+                          "读取失败，显示上次读取的账号摘要；当前状态未知。",
+                      })}
+                    </p>
+                  )}
+                  <ul className="divide-y divide-border">
+                    {summaries.map((row) => (
+                      <li key={`${row.source}:${row.app ?? ""}:${row.id}`}>
+                        <button
+                          type="button"
+                          aria-label={`查看 ${row.label}`}
+                          disabled={blocked}
+                          onClick={() =>
+                            openSummary(
+                              platform,
+                              row.app ? `${row.app}:${row.id}` : row.id,
+                            )
+                          }
+                          className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <span className="min-w-0 break-all font-medium">
+                            {row.label}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {row.app
+                              ? getAppDisplayName(row.app, t)
+                              : row.identity}
+                            {row.app || row.identity ? " · " : ""}
+                            {unavailable.has(platform)
+                              ? t("common.unknown", { defaultValue: "未知" })
+                              : row.status
+                                ? t(
+                                    `${platform === "workbuddy" ? (row.source === "workbuddy-inference" ? "workbuddy.inference.state" : "workbuddy.state") : platform.startsWith("minimax_code") ? "minimaxCode.status" : "trae.status"}.${row.status}`,
+                                    { defaultValue: row.status },
+                                  )
+                                : t("common.unknown", { defaultValue: "未知" })}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                    {vendors.map((row) => (
+                      <li key={row.id}>
+                        <button
+                          type="button"
+                          disabled={blocked}
+                          aria-label={`查看 ${row.row.accountLabel || accountName(row)}`}
+                          className="w-full px-4 py-3 text-left text-sm hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() => {
+                            openSummary(platform, String(row.id));
+                          }}
+                        >
+                          {row.row.accountLabel || accountName(row)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              );
+            })}
           {displayed.map((platform) => (
             <div
               key={platform}
+              hidden={active !== platform}
               className="rounded-xl border border-border bg-card"
             >
-              <ServicesPageContent
-                {...props}
-                platform={platform}
-                onOpenPlatform={select}
-                onNavigationBlockedChange={(value) => {
-                  setBlocked(value);
-                  props.onNavigationBlockedChange?.(value);
-                }}
-              />
-              {platform === "openrouter" &&
-                presence.data?.connections.map((connection) => (
-                  <article
-                    key={`${connection.app}:${connection.id}`}
-                    className="m-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-3"
-                  >
-                    <div>
-                      <h3 className="text-sm font-medium">{connection.name}</h3>
-                      <p className="text-xs text-muted-foreground">
-                        {getAppDisplayName(connection.app, t)} · API Key
-                      </p>
-                    </div>
-                    <Button
-                      variant="outline"
-                      onClick={() => props.onOpenApp(connection.app)}
+              <DialogVisibility active={active === platform}>
+                <AccountWorkspaceTarget.Provider value={targets[platform]}>
+                  <ServicesPageContent
+                    {...props}
+                    platform={platform}
+                    onOpenPlatform={select}
+                    onNavigationBlockedChange={(value) => {
+                      setBlocked(value);
+                      props.onNavigationBlockedChange?.(value);
+                    }}
+                  />
+                  {platform === "openrouter" && (
+                    <AccountWorkspace
+                      accounts={(presence.data?.connections ?? []).map(
+                        (connection) => ({
+                          ...connection,
+                          id: `${connection.app}:${connection.id}`,
+                        }),
+                      )}
+                      label={(connection) => connection.name}
                     >
-                      {t("loongport.accounts.manageConnection", {
-                        defaultValue: "管理原有连接",
-                      })}
-                    </Button>
-                  </article>
-                ))}
-              {platform === "opencode" && (
-                <ServicesPageContent
-                  {...props}
-                  platform={undefined}
-                  accountKind="opencode"
-                />
-              )}
+                      {(connection) => (
+                        <article className="space-y-3">
+                          <p className="text-sm text-muted-foreground">
+                            {getAppDisplayName(connection.app, t)} · API Key
+                          </p>
+                          <Button
+                            variant="outline"
+                            onClick={() => props.onOpenApp(connection.app)}
+                          >
+                            {t("loongport.accounts.manageConnection", {
+                              defaultValue: "管理原有连接",
+                            })}
+                          </Button>
+                        </article>
+                      )}
+                    </AccountWorkspace>
+                  )}
+                  {platform === "opencode" && (
+                    <ServicesPageContent
+                      {...props}
+                      platform={undefined}
+                      accountKind="opencode"
+                    />
+                  )}
+                </AccountWorkspaceTarget.Provider>
+              </DialogVisibility>
             </div>
           ))}
         </section>
@@ -252,6 +403,7 @@ function ServicesPageContent({
   accountKind,
 }: ServicesPageProps & { accountKind?: "opencode" | "relay-and-vendor" }) {
   const { t } = useTranslation();
+  const target = useContext(AccountWorkspaceTarget);
   const {
     accounts: allAccounts,
     isPending,
@@ -311,6 +463,10 @@ function ServicesPageContent({
       onSelectAccount(next ?? undefined, next?.appId ?? appId);
     else setLocalSelection(next);
   };
+  useEffect(() => {
+    if (target && accountKind === "opencode")
+      setSelection({ kind: "vendor", id: Number(target.id), appId });
+  }, [target]);
   const selected =
     selection &&
     accounts.find(

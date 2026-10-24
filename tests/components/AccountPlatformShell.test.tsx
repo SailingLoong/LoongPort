@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { providersApi } from "@/lib/api/providers";
 import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
@@ -13,6 +13,7 @@ import {
 import type { ServiceAccount } from "@/components/relay/accounts/useServiceAccounts";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 const savedServices = vi.hoisted(() => [] as ServiceAccount[]);
+const serviceRead = vi.hoisted(() => ({ error: null as Error | null }));
 const native = vi.hoisted(() =>
   vi.fn(async (command: string): Promise<unknown> => {
     if (command === "get_service_sources") return [];
@@ -71,7 +72,7 @@ vi.mock("@/components/relay/accounts/useServiceAccounts", () => ({
   useServiceAccounts: () => ({
     accounts: savedServices,
     isPending: false,
-    error: null,
+    error: serviceRead.error,
     reload: vi.fn(),
   }),
   configuredApps: () => [],
@@ -79,6 +80,7 @@ vi.mock("@/components/relay/accounts/useServiceAccounts", () => ({
 const defaultRead = native.getMockImplementation()!;
 beforeEach(() => {
   savedServices.length = 0;
+  serviceRead.error = null;
   localStorage.clear();
   native.mockReset().mockImplementation(defaultRead);
 });
@@ -99,8 +101,11 @@ it("shows all imported platform accounts by default, filters without hiding, and
     </QueryClientProvider>,
   );
   expect(
-    await screen.findByText("Native account: workbuddy"),
+    await screen.findByRole("button", { name: "查看 Saved account" }),
   ).toBeInTheDocument();
+  expect(
+    screen.queryByText("Native account: workbuddy"),
+  ).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "平台账号" })).toBeInTheDocument();
   expect(
     screen.getByRole("region", { name: "中转站与官方 API" }),
@@ -113,7 +118,10 @@ it("shows all imported platform accounts by default, filters without hiding, and
   await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
   expect(screen.getByText("Native account: workbuddy")).toBeInTheDocument();
   await user.click(screen.getByRole("tab", { name: "全部" }));
-  expect(screen.getByText("Native account: workbuddy")).toBeInTheDocument();
+  expect(screen.getByText("Native account: workbuddy")).not.toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "查看 Saved account" }),
+  ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "添加账号" }));
   expect(onOpenAddHub).toHaveBeenCalledWith("accounts");
   expect(localStorage.getItem("loongport.account-platform-tabs.v1")).toBeNull();
@@ -215,7 +223,7 @@ it("renders an OpenCode vendor detail only in its platform section", async () =>
   expect(await screen.findAllByText("Native detail vendor:42")).toHaveLength(1);
 });
 
-it("preserves an open native manager through failed inventory reads, then removes it only on confirmed empty", async () => {
+it("preserves an entered native manager through All, failed reads and confirmed empty without cancelling its session", async () => {
   const user = userEvent.setup();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -225,10 +233,13 @@ it("preserves an open native manager through failed inventory reads, then remove
       <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
     </QueryClientProvider>,
   );
+  await user.click(await screen.findByRole("tab", { name: "WorkBuddy" }));
   const session = await screen.findByRole("button", {
     name: "Native session workbuddy: 0",
   });
   await user.click(session);
+  await user.click(screen.getByRole("tab", { name: "全部" }));
+  expect(session).not.toBeVisible();
   native.mockImplementation(async (command: string): Promise<unknown> => {
     if (command === "list_workbuddy_accounts")
       throw new Error("temporary local read failure");
@@ -240,6 +251,11 @@ it("preserves an open native manager through failed inventory reads, then remove
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "部分平台账号读取失败",
   );
+  expect(
+    screen.getByRole("button", { name: "查看 Saved account" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("读取失败");
+  await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
   expect(
     screen.getByRole("button", { name: "Native session workbuddy: 1" }),
   ).toBe(session);
@@ -257,8 +273,8 @@ it("preserves an open native manager through failed inventory reads, then remove
     await client.invalidateQueries({ queryKey: accountPlatformPresenceKey });
   });
   expect(
-    screen.queryByText("Native account: workbuddy"),
-  ).not.toBeInTheDocument();
+    screen.getByRole("button", { name: "Native session workbuddy: 1" }),
+  ).toBe(session);
 });
 
 it("uses the existing selected ZCode library root rather than an empty default library", async () => {
@@ -355,4 +371,228 @@ it("retains OpenRouter connections only for the app whose local read failed", as
   } finally {
     providers.mockRestore();
   }
+});
+
+it("opens the exact OpenCode account across real mutually exclusive route callbacks", async () => {
+  savedServices.push(
+    ...[41, 42].map(
+      (id) =>
+        ({
+          kind: "vendor",
+          id,
+          row: {
+            id,
+            vendorId: "opencode",
+            vendorName: "OpenCode",
+            accountLabel: `OpenCode ${id}`,
+            status: "ready",
+            plans: [],
+          },
+          apps: new Map([["codex", { id, status: "ready", plans: [] }]]),
+        }) as unknown as ServiceAccount,
+    ),
+  );
+  function Routed() {
+    const [route, setRoute] = useState<{
+      platform?: "opencode";
+      account?: { kind: "vendor"; id: number };
+    }>({});
+    return (
+      <ServicesPage
+        appId="codex"
+        platform={route.platform}
+        account={route.account}
+        onOpenPlatform={(platform) =>
+          setRoute({ platform: platform as "opencode" })
+        }
+        onSelectAccount={(account) =>
+          setRoute({ account: account as { kind: "vendor"; id: number } })
+        }
+        onOpenAddHub={vi.fn()}
+        onOpenApp={vi.fn()}
+      />
+    );
+  }
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <Routed />
+    </QueryClientProvider>,
+  );
+  await user.click(
+    await screen.findByRole("button", { name: "查看 OpenCode 42" }),
+  );
+  expect(await screen.findByText("Native detail vendor:42")).toBeVisible();
+  expect(screen.queryByText("Native detail vendor:41")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("button", { name: "查看 OpenCode 41" }));
+  expect(await screen.findByText("Native detail vendor:41")).toBeVisible();
+  expect(screen.queryByText("Native detail vendor:42")).not.toBeInTheDocument();
+});
+
+it("shows one WorkBuddy identity when its native and inference snapshots share the same ID", async () => {
+  native.mockImplementation(async (command) =>
+    command === "list_workbuddy_inference_accounts"
+      ? [{ id: "wb", state: "ready" }]
+      : defaultRead(command),
+  );
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByRole("button", { name: "查看 Saved account" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "查看 wb" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps CN and Global account summaries with the same native ID in their correct groups", async () => {
+  native.mockImplementation(async (command) =>
+    command === "list_minimax_code_accounts"
+      ? [
+          { id: "same-id", region: "cn", label: "Domestic identity" },
+          { id: "same-id", region: "global", label: "Global identity" },
+        ]
+      : defaultRead(command),
+  );
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  const cn = await screen.findByRole("region", {
+    name: "MiniMax Code 国内版 · 账号总览",
+  });
+  const global = screen.getByRole("region", {
+    name: "MiniMax Code 国际版 · 账号总览",
+  });
+  expect(
+    within(cn).getByRole("button", { name: "查看 Domestic identity" }),
+  ).toBeInTheDocument();
+  expect(within(cn).queryByText("Global identity")).not.toBeInTheDocument();
+  expect(
+    within(global).getByRole("button", { name: "查看 Global identity" }),
+  ).toBeInTheDocument();
+  expect(
+    within(global).queryByText("Domestic identity"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("Native account: minimax_code"),
+  ).not.toBeInTheDocument();
+});
+
+it("opens the exact OpenRouter connection when two apps use the same provider ID", async () => {
+  const providers = vi
+    .spyOn(providersApi, "getAll")
+    .mockImplementation(async (app) =>
+      app === "codex" || app === "claude"
+        ? ({
+            shared: {
+              id: "shared",
+              name: `Connection ${app}`,
+              icon: "openrouter",
+              settingsConfig: {},
+            },
+          } as never)
+        : {},
+    );
+  const onOpenApp = vi.fn();
+  try {
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <ServicesPage
+          appId="codex"
+          onOpenAddHub={vi.fn()}
+          onOpenApp={onOpenApp}
+        />
+      </QueryClientProvider>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "查看 Connection codex" }),
+    );
+    const detail = await screen.findByRole("region", { name: "账号详情" });
+    expect(
+      within(detail).getByRole("heading", { name: "Connection codex" }),
+    ).toBeVisible();
+    expect(
+      within(detail).queryByText("Connection claude"),
+    ).not.toBeInTheDocument();
+    await user.click(
+      within(detail).getByRole("button", { name: "管理原有连接" }),
+    );
+    expect(onOpenApp).toHaveBeenLastCalledWith("codex");
+    await user.click(screen.getByRole("tab", { name: "全部" }));
+    await user.click(
+      screen.getByRole("button", { name: "查看 Connection claude" }),
+    );
+    expect(
+      within(detail).getByRole("heading", { name: "Connection claude" }),
+    ).toBeVisible();
+    await user.click(
+      within(detail).getByRole("button", { name: "管理原有连接" }),
+    );
+    expect(onOpenApp).toHaveBeenLastCalledWith("claude");
+  } finally {
+    providers.mockRestore();
+  }
+});
+
+it("marks the retained OpenCode summary unknown when its existing service inventory read fails", async () => {
+  savedServices.push({
+    kind: "vendor",
+    id: 42,
+    row: {
+      id: 42,
+      vendorId: "opencode",
+      vendorName: "OpenCode",
+      accountLabel: "Retained OpenCode",
+      status: "ready",
+      plans: [],
+    },
+    apps: new Map(),
+  } as unknown as ServiceAccount);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const tree = () => (
+    <QueryClientProvider client={client}>
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>
+  );
+  const view = render(tree());
+  const group = await screen.findByRole("region", {
+    name: "OpenCode · 账号总览",
+  });
+  expect(
+    within(group).getByRole("button", { name: "查看 Retained OpenCode" }),
+  ).toBeVisible();
+  serviceRead.error = new Error("private inventory details");
+  view.rerender(tree());
+  expect(within(group).getByRole("status")).toHaveTextContent("当前状态未知");
+  expect(
+    within(group).getByRole("button", { name: "查看 Retained OpenCode" }),
+  ).toBeVisible();
+  expect(
+    screen.queryByText("private inventory details"),
+  ).not.toBeInTheDocument();
 });

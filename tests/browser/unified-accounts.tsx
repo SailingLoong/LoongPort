@@ -242,7 +242,7 @@ function Fixture() {
     scenario === "add" ? "addHub" : "services",
   );
   const [platform, setPlatform] = useState<AccountPlatform | undefined>(
-    scenario === "native" ? "minimax_code" : undefined,
+    undefined,
   );
   const [entryRequest, setEntryRequest] = useState<{
     id: number;

@@ -3847,7 +3847,9 @@
         "monthly": "Monthly window"
       },
       "usageTitle": "Usage summary",
-      "usageHeadline": "7 days {{seven}} · 30 days {{thirty}}"
+      "usageHeadline": "7 days {{seven}} · 30 days {{thirty}}",
+      "overview": "Account overview",
+      "staleSummary": "Could not read this platform. Showing the last account summary; current status is unknown."
     },
     "onboarding": {
       "domain": "Relay URL",

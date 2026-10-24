@@ -3844,7 +3844,9 @@
         "monthly": "月窗口"
       },
       "usageTitle": "用量摘要",
-      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}",
+      "overview": "帳號總覽",
+      "staleSummary": "讀取失敗，顯示上次讀取的帳號摘要；目前狀態未知。"
     },
     "onboarding": {
       "domain": "中轉站網址",

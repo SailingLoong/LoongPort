@@ -72,6 +72,53 @@ for (const language of ["en", "zh"]) {
     expect(
       within(tablist).getByRole("tab", { name: "OpenCode" }),
     ).toBeInTheDocument();
+    await user.click(
+      within(tablist).getByRole("tab", {
+        name: t("loongport.accounts.allPlatforms"),
+      }),
+    );
+    expect(
+      within(main).queryAllByRole("region", { name: "账号详情" }),
+    ).toHaveLength(0);
+    const second = await within(main).findByRole("button", {
+      name: "查看 Synthetic account B",
+    });
+    await user.click(second);
+    expect(
+      await within(main).findByRole("heading", { name: "Synthetic account B" }),
+    ).toBeInTheDocument();
+    expect(
+      within(main).queryByRole("heading", { name: "Synthetic account A" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      within(tablist).getByRole("tab", {
+        name: t("loongport.accounts.allPlatforms"),
+      }),
+    );
+    expect(
+      within(main).queryAllByRole("region", { name: "账号详情" }),
+    ).toHaveLength(0);
+    await user.click(minimax);
+    expect(
+      within(main).getByRole("heading", { name: "Synthetic account B" }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(main).getByRole("button", { name: "查看 Synthetic account A" }),
+    );
+    expect(
+      within(main).getByRole("heading", { name: "Synthetic account A" }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(tablist).getByRole("tab", {
+        name: t("loongport.accounts.allPlatforms"),
+      }),
+    );
+    await user.click(
+      within(main).getByRole("button", { name: "查看 Synthetic account B" }),
+    );
+    expect(
+      within(main).getByRole("heading", { name: "Synthetic account B" }),
+    ).toBeInTheDocument();
     await user.click(minimax);
     for (const [key, name] of nativeAccountKeyboardSteps(t)) {
       await user.keyboard(`{${key}}`);
@@ -87,7 +134,7 @@ for (const language of ["en", "zh"]) {
     );
     await waitFor(() =>
       expect(
-        within(main).getAllByRole("region", { name: "账号详情" }),
+        within(main).queryAllByRole("region", { name: "账号详情" }),
       ).toHaveLength(nativeAccountOverviewCounts.details),
     );
     for (const name of [
@@ -104,11 +151,11 @@ for (const language of ["en", "zh"]) {
       }),
     ).toHaveAttribute("aria-selected", "true");
     expect(
-      within(main).getByRole("heading", { name: "Synthetic account A" }),
+      within(main).getByRole("button", { name: "查看 Synthetic account A" }),
     ).toBeInTheDocument();
     expect(
-      within(main).getByRole("heading", {
-        name: "Synthetic WorkBuddy account",
+      within(main).getByRole("button", {
+        name: "查看 Synthetic WorkBuddy account",
       }),
     ).toBeInTheDocument();
     expect(window.unifiedLayout.rejectedCommands).toEqual([]);

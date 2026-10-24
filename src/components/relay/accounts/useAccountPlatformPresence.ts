@@ -19,7 +19,17 @@ export interface PlatformConnection {
   app: AppId;
   platform: "openrouter";
 }
+export interface PlatformAccountSummary {
+  source: string;
+  platform: AccountPlatform;
+  id: string;
+  label: string;
+  identity?: string;
+  status?: string;
+  app?: AppId;
+}
 export interface PlatformPresenceSnapshot {
+  accounts?: PlatformAccountSummary[];
   platforms: AccountPlatform[];
   unavailable: AccountPlatform[];
   connections: PlatformConnection[];
@@ -31,71 +41,140 @@ export async function readAccountPlatformPresence(
   previous?: PlatformPresenceSnapshot,
 ): Promise<PlatformPresenceSnapshot> {
   const connections: PlatformConnection[] = [];
+  const accounts: PlatformAccountSummary[] = [];
+  const add = (
+    source: string,
+    platform: AccountPlatform,
+    rows: {
+      id: string;
+      label?: string | null;
+      status?: string;
+      identity?: string;
+      app?: AppId;
+    }[],
+  ) => {
+    accounts.push(
+      ...rows.map((row) => ({
+        ...row,
+        source,
+        platform,
+        label: row.label || row.id,
+      })),
+    );
+    return rows.length ? [platform] : [];
+  };
   const readers: {
+    source: string;
     platforms: AccountPlatform[];
     connectionApp?: AppId;
     read: () => Promise<AccountPlatform[]>;
   }[] = [
     ...(["github_copilot", "codex_oauth", "xai_oauth"] as const).map(
       (platform) => ({
+        source: platform,
         platforms: [platform],
         read: async () =>
-          (await authApi.authGetStatus(platform)).accounts.length
-            ? [platform]
-            : [],
+          add(
+            platform,
+            platform,
+            (await authApi.authGetStatus(platform)).accounts.map((row) => ({
+              id: row.id,
+              label: row.login,
+            })),
+          ),
       }),
     ),
     {
+      source: "workbuddy",
       platforms: ["workbuddy"],
       read: async () =>
-        (await workbuddyApi.list()).length ? ["workbuddy"] : [],
+        add(
+          "workbuddy",
+          "workbuddy",
+          (await workbuddyApi.list()).map((row) => ({
+            id: row.id,
+            label: row.label,
+            status: row.claimState,
+          })),
+        ),
     },
     {
+      source: "workbuddy-inference",
       platforms: ["workbuddy"],
       read: async () =>
-        (await workbuddyApi.listInferenceAccounts()).length
-          ? ["workbuddy"]
-          : [],
+        add(
+          "workbuddy-inference",
+          "workbuddy",
+          (await workbuddyApi.listInferenceAccounts()).map((row) => ({
+            id: row.id,
+            status: row.state,
+            identity: "HTTP",
+          })),
+        ),
     },
     {
+      source: "minimax_code",
       platforms: ["minimax_code", "minimax_code_global"],
-      read: async () => [
-        ...new Set(
-          (await minimaxCodeApi.list())
-            .filter(
-              (account) =>
-                account.region === "cn" || account.region === "global",
-            )
-            .map((account): AccountPlatform =>
-              account.region === "cn" ? "minimax_code" : "minimax_code_global",
-            ),
-        ),
-      ],
+      read: async () => {
+        const rows = await minimaxCodeApi.list();
+        return ["cn", "global"].flatMap((region) =>
+          add(
+            "minimax_code",
+            region === "cn" ? "minimax_code" : "minimax_code_global",
+            rows
+              .filter((row) => row.region === region)
+              .map((row) => ({
+                id: row.id,
+                label: row.label,
+                status: row.status,
+                identity: row.region === "cn" ? "CN" : "Global",
+              })),
+          ),
+        );
+      },
     },
     {
+      source: "trae",
       platforms: ["trae_cn", "trae"],
-      read: async () => [
-        ...new Set(
-          (await traeAccountsApi.list())
-            .filter((account) => account.status !== "retired")
-            .map((account): AccountPlatform =>
-              account.realm === "cn" ? "trae_cn" : "trae",
-            ),
-        ),
-      ],
+      read: async () => {
+        const rows = (await traeAccountsApi.list()).filter(
+          (row) => row.status !== "retired",
+        );
+        return [true, false].flatMap((cn) =>
+          add(
+            "trae",
+            cn ? "trae_cn" : "trae",
+            rows
+              .filter((row) => (row.realm === "cn") === cn)
+              .map((row) => ({
+                id: row.id,
+                status: row.status,
+                identity: row.realm,
+              })),
+          ),
+        );
+      },
     },
     {
+      source: "zcode",
       platforms: ["zcode"],
       read: async () =>
-        (
-          await zcodeAccountsApi.library(
-            readZCodeSourcePreference()?.dataRoot || undefined,
-          )
-        ).profiles.length
-          ? ["zcode"]
-          : [],
+        add(
+          "zcode",
+          "zcode",
+          (
+            await zcodeAccountsApi.library(
+              readZCodeSourcePreference()?.dataRoot || undefined,
+            )
+          ).profiles.map((row) => ({
+            id: row.id,
+            label: row.label,
+            identity: row.family,
+          })),
+        ),
     },
     ...PROVIDER_STORE_APP_IDS.map((app) => ({
+      source: `provider:${app}`,
       platforms: (app === "codex"
         ? ["qoder", "openrouter"]
         : ["openrouter"]) as AccountPlatform[],
@@ -108,11 +187,23 @@ export async function readAccountPlatformPresence(
             ["qoder_sdk", "qoder_cn", "qoder_cn_device"].includes(
               provider.meta?.providerType ?? "",
             )
-          )
+          ) {
             present.add("qoder");
+            add(`provider:${app}`, "qoder", [
+              {
+                id: provider.id,
+                label: provider.name,
+                identity:
+                  provider.meta?.providerType === "qoder_sdk" ? "Global" : "CN",
+              },
+            ]);
+          }
           // The persisted preset icon is explicit brand metadata, not a URL/name guess.
           if (provider.icon === "openrouter") {
             present.add("openrouter");
+            add(`provider:${app}`, "openrouter", [
+              { id: provider.id, label: provider.name, app },
+            ]);
             connections.push({
               id: provider.id,
               name: provider.name,
@@ -135,6 +226,11 @@ export async function readAccountPlatformPresence(
     if (result.status === "fulfilled")
       result.value.forEach((platform) => platforms.add(platform));
     else {
+      accounts.push(
+        ...(previous?.accounts ?? []).filter(
+          (row) => row.source === readers[index].source,
+        ),
+      );
       readers[index].platforms.forEach((platform) => unavailable.add(platform));
       const app = readers[index].connectionApp;
       if (app) unavailableApps.add(app);
@@ -161,6 +257,7 @@ export async function readAccountPlatformPresence(
   if (connections.length) platforms.add("openrouter");
   else platforms.delete("openrouter");
   return {
+    accounts,
     platforms: [...platforms],
     unavailable: [...unavailable],
     connections,
