@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 /** Legacy cheapest/fastest values both retain application priority. */
 export type AutoModeStrategy = "cheapest" | "fastest" | "known_expiry_first";
-/** 省心选路模式：自动按策略 / 用户手动定序。 */
+/** 兼容历史响应；当前后端看板固定返回 manual，写入仅支持 manual。 */
 export type EasyModeMode = "auto" | "manual";
 
 export interface AutoModeStatus {
@@ -24,7 +24,7 @@ export interface AutoModeStatus {
   cliInstalled: boolean;
 }
 
-/** 档位看板的一行：展示序 = 纯策略序/手动序（后端唯源，前端只渲染）。 */
+/** 档位看板的一行：展示后端给出的已应用顺序，前端不另行选路。 */
 export interface TierBoardTier {
   providerId: string;
   name: string;
@@ -96,7 +96,7 @@ export const autoModeApi = {
     strategy: Exclude<AutoModeStrategy, "fastest">,
   ): Promise<void> => invoke("set_auto_mode_strategy", { strategy }),
 
-  /** 设模型偏好（`null` = 不限）。后端会绕过会话亲和立即切到最优档位。 */
+  /** 设模型偏好（`null` = 不限），保留当前选中档位；不按价格或速度切号。 */
   setModel: (appType: string, model: string | null): Promise<void> =>
     invoke("set_auto_mode_model", { appType, model }),
 
@@ -104,11 +104,11 @@ export const autoModeApi = {
   getTierBoard: (appType: string): Promise<TierBoard> =>
     invoke("easy_mode_tier_board", { appType }),
 
-  /** 切选路模式；后端在首次切手动时快照当前序为初始清单。 */
-  setEasyModeMode: (appType: string, mode: EasyModeMode): Promise<void> =>
+  /** 兼容旧入口：初始化持久化应用顺序，不再提供自动策略模式。 */
+  setEasyModeMode: (appType: string, mode: "manual"): Promise<void> =>
     invoke("set_easy_mode_mode", { appType, mode }),
 
-  /** 写手动档位顺序（拖拽落定后整份提交）。 */
+  /** 兼容旧入口：委托原应用顺序写入路径，不维护另一份手动队列。 */
   setEasyModeManualOrder: (
     appType: string,
     orderedIds: string[],
