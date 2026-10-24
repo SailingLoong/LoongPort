@@ -420,8 +420,7 @@ mod tests {
                 format!(
                     "mode={mode} streaming={streaming} elapsed={:?} fixture_stages={}",
                     started.elapsed(),
-                    std::fs::read_to_string(&trace_path)
-                        .unwrap_or_else(|_| "not-observed".into())
+                    std::fs::read_to_string(&trace_path).unwrap_or_else(|_| "not-observed".into())
                 )
             };
             let result = forward(
@@ -509,7 +508,10 @@ mod tests {
         // that a parent wait/reap completed. Host reaping tests remain separate.
         wait_for_fixture_marker(&dir.join("gate.cancelled")).await;
         wait_for_fixture_marker(&dir.join("gate.exited")).await;
-        assert_eq!(std::fs::read_to_string(dir.join("gate.exited")).unwrap(), "0");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("gate.exited")).unwrap(),
+            "0"
+        );
     }
 
     #[tokio::test]
