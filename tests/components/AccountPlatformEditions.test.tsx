@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createTestQueryClient } from "../utils/testQueryClient";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
@@ -28,6 +30,24 @@ const list = vi.hoisted(() =>
   ]),
 );
 vi.mock("@/lib/api/minimaxCode", () => ({ minimaxCodeApi: { list } }));
+const initialList = list.getMockImplementation()!;
+beforeEach(async () => {
+  list.mockReset().mockImplementation(initialList);
+  await i18n.changeLanguage("zh");
+  i18n.addResourceBundle("zh", "translation", zh, true, true);
+});
+vi.mock("@/lib/api/automaticClaim", () => ({
+  automaticClaimApi: {
+    status: vi.fn(async (provider: string) => ({
+      provider,
+      phase: "waiting",
+      lastCheckedAt: null,
+      nextCheckAt: null,
+      result: null,
+      reason: null,
+    })),
+  },
+}));
 const trae = vi.hoisted(() => ({
   list: vi.fn(async () => [
     { id: "CN-only-account", realm: "cn", status: "stored" },
@@ -98,7 +118,7 @@ it("shows MiniMax authorization separately from claim state and inference accept
 });
 
 it("keeps a claimed badge out of MiniMax authorization status", async () => {
-  list.mockResolvedValueOnce([
+  list.mockResolvedValue([
     {
       id: "cn",
       label: "Claimed account",
@@ -118,11 +138,11 @@ it("keeps a claimed badge out of MiniMax authorization status", async () => {
   const auth = await screen.findByRole("region", { name: "授权状态" });
   expect(auth).toHaveTextContent("账号授权已保存");
   expect(
-    within(auth).queryByText("minimaxCode.status.claimed"),
+    within(auth).queryByText(zh.minimaxCode.status.claimed),
   ).not.toBeInTheDocument();
   expect(
     within(screen.getByRole("region", { name: "权益与签到" })).getByText(
-      "minimaxCode.status.claimed",
+      zh.minimaxCode.status.claimed,
     ),
   ).toBeInTheDocument();
 });

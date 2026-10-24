@@ -150,6 +150,15 @@ beforeEach(async () => {
       if (command === "get_zcode_account_library")
         return { revision: "test", pending: false, profiles: [] };
       if (handlers[command]) return handlers[command](payload);
+      if (command === "get_automatic_claim_status")
+        return {
+          provider: payload.provider,
+          phase: "waiting",
+          lastCheckedAt: null,
+          nextCheckAt: null,
+          result: null,
+          reason: null,
+        };
       if (command === "list_minimax_code_accounts")
         return structuredClone(catalog);
       if (command === "begin_minimax_code_authorization") return flow;
@@ -170,7 +179,12 @@ describe("MiniMax Code in the original authentication center", () => {
     ).toBeInTheDocument();
     expect(row()).toHaveTextContent("verified-code-a");
     expect(row()).toHaveTextContent("中国区");
-    expect(mocks.invoke.mock.calls).toEqual([["list_minimax_code_accounts"]]);
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["get_automatic_claim_status", { provider: "minimaxCode" }],
+      ["list_minimax_code_accounts"],
+      ["get_automatic_claim_status", { provider: "minimaxCode" }],
+      ["list_minimax_code_accounts"],
+    ]);
     expect(miniMax.queryByRole("textbox")).not.toBeInTheDocument();
     expect(miniMax.getByText(/Token Plan 和 API Key/)).toBeInTheDocument();
   });
@@ -475,7 +489,7 @@ describe("MiniMax Code in the original authentication center", () => {
     expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     expect(button("领取今日额度")).toBeDisabled();
     // The manager and provider consumer each read once on mount, then the manager rereads.
-    expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+    expect(calls("list_minimax_code_accounts")).toHaveLength(3);
     await act(async () =>
       pending.resolve({ state: "saved", account: account("late-account") }),
     );
@@ -502,7 +516,7 @@ describe("MiniMax Code in the original authentication center", () => {
       expect(miniMax.getByRole("alert")).not.toHaveTextContent("授权已完成");
       expect(miniMax.getByRole("alert")).not.toHaveTextContent("已取消");
       // No reread beyond the manager and provider consumer mount reads.
-      expect(calls("list_minimax_code_accounts")).toHaveLength(1);
+      expect(calls("list_minimax_code_accounts")).toHaveLength(2);
       expect(miniMax.queryByRole("article")).not.toBeInTheDocument();
       expect(miniMax.queryByText("TEST-CODE")).not.toBeInTheDocument();
     },
@@ -716,7 +730,7 @@ it("re-reads the authoritative account catalog after native save and preserves a
   );
   fireEvent.click(page.getByRole("button", { name: "加密保存仅访问账号" }));
   await waitFor(() => expect(row()).toBeInTheDocument());
-  expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+  expect(calls("list_minimax_code_accounts")).toHaveLength(3);
   expect(
     miniMax.queryByText("Code wrong-save-response"),
   ).not.toBeInTheDocument();
@@ -739,3 +753,140 @@ it("displays native access expiry and backend reimport capability without promis
   expect(row()).toHaveTextContent("访问凭据到期：");
   expect(row()).toHaveTextContent("请在 CLI 重新登录，再明确重新导入此账号。");
 });
+
+it("reflects automatic completion through local reads without repeating a claim", async () => {
+  const { emitTauriEvent } = await import("../msw/tauriMocks");
+  await mount();
+  catalog = [
+    account("code-a", { status: "alreadyClaimed", autoClaimEnabled: true }),
+  ];
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "workbuddy",
+      phase: "waiting",
+    }),
+  );
+  expect(calls("list_minimax_code_accounts")).toHaveLength(2);
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "minimaxCode",
+      phase: "waiting",
+    }),
+  );
+  await waitFor(() => expect(row()).toHaveTextContent("当前面板已领取"));
+  expect(calls("refresh_minimax_code_account")).toHaveLength(0);
+  expect(calls("claim_minimax_code_today")).toHaveLength(0);
+  expect(calls("set_minimax_code_automatic_claim")).toHaveLength(0);
+});
+
+it("preserves explicitly refreshed entitlements only for the same identity on background reads", async () => {
+  const { emitTauriEvent } = await import("../msw/tauriMocks");
+  handlers.refresh_minimax_code_account = () =>
+    account("code-a", {
+      entitlement: {
+        remainingCredits: "123.45",
+        hasTokenPlan: true,
+        tokenPlanExpiresAt: null,
+      },
+    });
+  await mount();
+  await userEvent.click(button("刷新状态"));
+  await waitFor(() => expect(row()).toHaveTextContent("123.45"));
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "minimaxCode",
+      phase: "waiting",
+    }),
+  );
+  await waitFor(() =>
+    expect(calls("list_minimax_code_accounts")).toHaveLength(4),
+  );
+  expect(row()).toHaveTextContent("123.45");
+  catalog = [account("code-a", { authGeneration: 2, credentialVersion: 2 })];
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "minimaxCode",
+      phase: "waiting",
+    }),
+  );
+  await waitFor(() =>
+    expect(calls("list_minimax_code_accounts")).toHaveLength(5),
+  );
+  await waitFor(() => expect(row()).not.toHaveTextContent("123.45"));
+  expect(calls("refresh_minimax_code_account")).toHaveLength(1);
+});
+
+it("keeps a refresh projection when a background catalog read overtakes its pending catalog read", async () => {
+  const { emitTauriEvent } = await import("../msw/tauriMocks");
+  await mount();
+  const manualRead = deferred<MiniMaxCodeAccount[]>();
+  const passiveRead = deferred<MiniMaxCodeAccount[]>();
+  let reads = 0;
+  handlers.refresh_minimax_code_account = () =>
+    account("code-a", {
+      entitlement: {
+        remainingCredits: "123.45",
+        hasTokenPlan: true,
+        tokenPlanExpiresAt: null,
+      },
+    });
+  handlers.list_minimax_code_accounts = () =>
+    ++reads === 1 ? manualRead.promise : passiveRead.promise;
+  fireEvent.click(button("刷新状态"));
+  await waitFor(() => expect(reads).toBe(1));
+  act(() =>
+    emitTauriEvent("automatic-claim-status-updated", {
+      provider: "minimaxCode",
+      phase: "waiting",
+    }),
+  );
+  await waitFor(() => expect(reads).toBe(2));
+  await act(async () => passiveRead.resolve([account()]));
+  await act(async () => manualRead.resolve([account()]));
+  expect(row()).toHaveTextContent("123.45");
+  expect(calls("refresh_minimax_code_account")).toHaveLength(1);
+  expect(calls("claim_minimax_code_today")).toHaveLength(0);
+});
+
+it.each([
+  { authGeneration: 2 },
+  { credentialVersion: 2 },
+  { realUserId: "replacement-subject" },
+  { region: "global" as const },
+  { authorized: false, status: "needsLogin" as const },
+  null,
+])(
+  "does not apply a pending entitlement after identity replacement or retirement: %j",
+  async (replacement) => {
+    const { emitTauriEvent } = await import("../msw/tauriMocks");
+    await mount();
+    const manualRead = deferred<MiniMaxCodeAccount[]>();
+    const passiveRead = deferred<MiniMaxCodeAccount[]>();
+    let reads = 0;
+    handlers.refresh_minimax_code_account = () =>
+      account("code-a", {
+        entitlement: {
+          remainingCredits: "123.45",
+          hasTokenPlan: true,
+          tokenPlanExpiresAt: null,
+        },
+      });
+    handlers.list_minimax_code_accounts = () =>
+      ++reads === 1 ? manualRead.promise : passiveRead.promise;
+    fireEvent.click(button("刷新状态"));
+    await waitFor(() => expect(reads).toBe(1));
+    act(() =>
+      emitTauriEvent("automatic-claim-status-updated", {
+        provider: "minimaxCode",
+        phase: "waiting",
+      }),
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () =>
+      passiveRead.resolve(replacement ? [account("code-a", replacement)] : []),
+    );
+    await act(async () => manualRead.resolve([account()]));
+    expect(miniMax.queryByText(/123\.45/)).not.toBeInTheDocument();
+    expect(calls("claim_minimax_code_today")).toHaveLength(0);
+  },
+);

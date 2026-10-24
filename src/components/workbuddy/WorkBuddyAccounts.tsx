@@ -1,3 +1,5 @@
+import { AutomaticClaimStatus } from "@/components/relay/accounts/AutomaticClaimStatus";
+import { useAutomaticClaimStatus } from "@/hooks/useAutomaticClaimStatus";
 import {
   AccountWorkspace,
   AccountDetailSections,
@@ -324,24 +326,30 @@ export function WorkBuddyAccounts({
   const [claimResults, setClaimResults] = useState<
     { id: string; error: WorkBuddyClaimResult["error"] }[] | null
   >(null);
-  const loadAccounts = useCallback(async () => {
-    const generation = ++listGeneration.current;
-    const isCurrent = () =>
-      alive.current && generation === listGeneration.current;
-    setFailed(false);
-    try {
-      const rows = await workbuddyApi.list();
-      if (isCurrent()) {
-        setAccounts((old) => mergeAccounts(old, rows));
-        reconcileAutomatic(rows);
-        setClaimResults(null);
+  const loadAccounts = useCallback(
+    async (passive = false) => {
+      const generation = ++listGeneration.current;
+      const isCurrent = () =>
+        alive.current && generation === listGeneration.current;
+      setFailed(false);
+      try {
+        const rows = await workbuddyApi.list();
+        if (isCurrent()) {
+          setAccounts((old) => mergeAccounts(old, rows));
+          reconcileAutomatic(rows);
+          if (!passive) setClaimResults(null);
+        }
+      } catch {
+        if (isCurrent()) setFailed(true);
+      } finally {
+        if (isCurrent()) setLoading(false);
       }
-    } catch {
-      if (isCurrent()) setFailed(true);
-    } finally {
-      if (isCurrent()) setLoading(false);
-    }
-  }, [reconcileAutomatic]);
+    },
+    [reconcileAutomatic],
+  );
+  const automaticStatus = useAutomaticClaimStatus("workbuddy", () =>
+    loadAccounts(true),
+  );
   useEffect(() => {
     alive.current = true;
     void loadAccounts();
@@ -449,6 +457,8 @@ export function WorkBuddyAccounts({
   };
   const update = (row: WorkBuddyAccount) => {
     if (!alive.current) return;
+    // A pre-completion local read cannot replace this newer command receipt.
+    listGeneration.current += 1;
     reconcileAutomatic([row]);
     setAccounts((rows) =>
       rows.some((old) => old.id === row.id)
@@ -478,6 +488,7 @@ export function WorkBuddyAccounts({
                 setClaimResults(null);
                 const results = await workbuddyApi.claimAll();
                 if (!alive.current) return;
+                listGeneration.current += 1;
                 setAccounts((rows) => {
                   const updated = new Map(rows.map((row) => [row.id, row]));
                   for (const { account } of results)
@@ -513,6 +524,7 @@ export function WorkBuddyAccounts({
               void run("all", async () => {
                 const rows = await workbuddyApi.refreshAll();
                 if (alive.current) {
+                  listGeneration.current += 1;
                   setAccounts((old) => mergeAccounts(old, rows));
                   reconcileAutomatic(rows);
                   setClaimResults(null);
@@ -862,6 +874,7 @@ export function WorkBuddyAccounts({
               );
               const credits = (
                 <>
+                  <AutomaticClaimStatus {...automaticStatus} />
                   <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
                     <div>
                       <dt>{t("workbuddy.total")}</dt>
@@ -948,7 +961,7 @@ export function WorkBuddyAccounts({
                       <>
                         {inference}
                         <p className="text-xs text-muted-foreground">
-                          真实推理消费尚未验收。领取成功、授权就绪或模型发现均不等于积分已用于推理。
+                          {t("automaticStatus.inferenceUnverified")}
                         </p>
                       </>
                     }

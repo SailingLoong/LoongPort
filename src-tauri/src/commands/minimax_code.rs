@@ -109,12 +109,18 @@ pub(crate) async fn set_minimax_code_automatic_claim(
     policy_revision: u64,
     enabled: bool,
 ) -> Result<AccountView, Failure> {
-    Engine {
+    let account = Engine {
         session: state.db.secret_session(),
         transport: &OfficialHttp,
     }
     .set_automatic(&id, auth_generation, policy_revision, enabled)
-    .await
+    .await?;
+    if enabled {
+        crate::maintenance::wake_automatic_claim(
+            crate::maintenance::scheduler::AutomaticProvider::MinimaxCode,
+        );
+    }
+    Ok(account)
 }
 
 #[tauri::command]

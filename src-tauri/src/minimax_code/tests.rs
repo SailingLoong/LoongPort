@@ -2685,3 +2685,69 @@ fn native_and_owned_credential_capabilities_cannot_be_mixed() {
     );
     assert!(serde_json::from_str::<NativeSourceFormat>("\"desktopOAuth\"").is_err());
 }
+
+#[tokio::test]
+async fn automatic_failed_account_reports_error_and_other_account_still_runs() {
+    struct FirstPanelFails {
+        calls: Mutex<Vec<String>>,
+        inner: Fake,
+    }
+    impl Transport for FirstPanelFails {
+        fn request(
+            &self,
+            r: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                let uid = r.real_user_id.clone().unwrap_or_default();
+                self.calls.lock().unwrap().push(uid.clone());
+                if uid == "synthetic-user" {
+                    return Err(Failure::NetworkUnavailable);
+                }
+                self.inner.request(r).await
+            })
+        }
+    }
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        let mut second = account();
+        second.id = "synthetic-second".into();
+        second.real_user_id = "synthetic-second-user".into();
+        d.accounts.push(second);
+    });
+    let t = FirstPanelFails {
+        calls: Mutex::new(vec![]),
+        inner: Fake::default(),
+    };
+    let e = Engine {
+        session: &f.session,
+        transport: &t,
+    };
+    e.set_automatic("synthetic-account", 1, 0, true)
+        .await
+        .unwrap();
+    e.set_automatic("synthetic-second", 1, 0, true)
+        .await
+        .unwrap();
+    assert_eq!(e.automatic_tick().await.unwrap(), 1);
+    let rows = e.list().await.unwrap();
+    let failed = rows.iter().find(|a| a.id == "synthetic-account").unwrap();
+    assert_eq!(failed.auto_claim_failure, Some(Failure::NetworkUnavailable));
+    assert!(failed.operation.is_none());
+    assert_eq!(
+        rows.iter()
+            .find(|a| a.id == "synthetic-second")
+            .unwrap()
+            .status,
+        Status::Claimed
+    );
+    assert_eq!(
+        t.inner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|ep| **ep == Endpoint::Claim)
+            .count(),
+        1
+    );
+}

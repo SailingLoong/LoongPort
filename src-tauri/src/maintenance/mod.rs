@@ -237,58 +237,128 @@ fn start_trae_automatic_checkin(app: tauri::AppHandle) {
 }
 
 #[cfg(feature = "gui")]
-fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
-    use std::time::Duration;
-    let db = app.state::<crate::AppState>().db.clone();
-    scheduler::spawn_periodic(
-        "workbuddy-automatic-claim",
-        scheduler::TaskSchedule::new(
-            Duration::from_secs(30),
-            Duration::from_secs(15 * 60),
-            Duration::from_secs(15 * 60),
-        ),
-        move || {
-            let db = db.clone();
-            async move {
-                // Fail closed when locked; the owner checks consent at final dispatch.
-                let _ = crate::workbuddy::engine::Engine {
-                    session: db.secret_session(),
-                    transport: &crate::workbuddy::http::OfficialHttp,
-                    clock: &crate::workbuddy::clock::SystemClock,
-                }
-                .automatic_tick()
-                .await;
-                Ok(())
+pub(crate) fn wake_automatic_claim(provider: scheduler::AutomaticProvider) {
+    scheduler::automatic_registry().wake(provider);
+}
+
+#[cfg(feature = "gui")]
+fn start_automatic_claim_task<F, Fut>(
+    app: tauri::AppHandle,
+    provider: scheduler::AutomaticProvider,
+    task: F,
+) where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = scheduler::AutomaticOutcome> + Send + 'static,
+{
+    let Some(control) = scheduler::automatic_registry().register(provider) else {
+        return;
+    };
+    let schedule = scheduler::TaskSchedule::new(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(15 * 60),
+        std::time::Duration::from_secs(15 * 60),
+    );
+    tauri::async_runtime::spawn(scheduler::run_wakeable(
+        control,
+        schedule,
+        task,
+        move |status| {
+            if app
+                .emit(crate::events::AUTOMATIC_CLAIM_STATUS_UPDATED, status)
+                .is_err()
+            {
+                log::warn!("Could not publish automatic account check status");
             }
         },
-    );
+    ));
+}
+
+#[cfg(feature = "gui")]
+fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
+    use scheduler::{AutomaticOutcome as Outcome, AutomaticProvider, AutomaticReason as Reason};
+    let db = app.state::<crate::AppState>().db.clone();
+    start_automatic_claim_task(app, AutomaticProvider::Workbuddy, move || {
+        let db = db.clone();
+        async move {
+            if db.secret_session().read().is_err() {
+                return Outcome::skipped(Reason::Locked);
+            }
+            let engine = crate::workbuddy::engine::Engine {
+                session: db.secret_session(),
+                transport: &crate::workbuddy::http::OfficialHttp,
+                clock: &crate::workbuddy::clock::SystemClock,
+            };
+            let rows = match engine.list().await {
+                Ok(rows) => rows,
+                Err(_) => return Outcome::failed(),
+            };
+            let enabled: Vec<_> = rows.iter().filter(|row| row.auto_claim_enabled).collect();
+            if enabled.is_empty() {
+                return Outcome::skipped(Reason::Disabled);
+            }
+            if !enabled
+                .iter()
+                .any(|row| row.can_set_automatic && !row.auto_claim_blocked && row.can_claim)
+            {
+                return Outcome::skipped(if enabled.iter().any(|row| row.auto_claim_blocked) {
+                    Reason::Pending
+                } else {
+                    Reason::NotEligible
+                });
+            }
+            match engine.automatic_tick().await {
+                Ok(0) => Outcome::completed(),
+                Ok(_) | Err(_) => Outcome::failed(),
+            }
+        }
+    });
 }
 
 #[cfg(feature = "gui")]
 fn start_minimax_automatic_claim(app: tauri::AppHandle) {
-    use std::time::Duration;
+    use scheduler::{AutomaticOutcome as Outcome, AutomaticProvider, AutomaticReason as Reason};
     let db = app.state::<crate::AppState>().db.clone();
-    scheduler::spawn_periodic(
-        "minimax-automatic-claim",
-        scheduler::TaskSchedule::new(
-            Duration::from_secs(30),
-            Duration::from_secs(15 * 60),
-            Duration::from_secs(15 * 60),
-        ),
-        move || {
-            let db = db.clone();
-            async move {
-                // Closed/locked Vault admits no account action. Each pass reads current opt-ins.
-                let _ = crate::minimax_code::checkin::Engine {
-                    session: db.secret_session(),
-                    transport: &crate::minimax_code::http::OfficialHttp,
-                }
-                .automatic_tick()
-                .await;
-                Ok(())
+    start_automatic_claim_task(app, AutomaticProvider::MinimaxCode, move || {
+        let db = db.clone();
+        async move {
+            if db.secret_session().read().is_err() {
+                return Outcome::skipped(Reason::Locked);
             }
-        },
-    );
+            let engine = crate::minimax_code::checkin::Engine {
+                session: db.secret_session(),
+                transport: &crate::minimax_code::http::OfficialHttp,
+            };
+            let rows = match engine.list().await {
+                Ok(rows) => rows,
+                Err(_) => return Outcome::failed(),
+            };
+            let enabled: Vec<_> = rows.iter().filter(|row| row.auto_claim_enabled).collect();
+            if enabled.is_empty() {
+                return Outcome::skipped(Reason::Disabled);
+            }
+            if !enabled.iter().any(|row| row.authorized) {
+                return Outcome::skipped(Reason::NotEligible);
+            }
+            // The original owner still queries unresolved attempts but never replays them.
+            match engine.automatic_tick().await {
+                Ok(0) => {}
+                Ok(_) | Err(_) => return Outcome::failed(),
+            }
+            match engine.list().await {
+                Ok(rows)
+                    if rows.iter().any(|row| {
+                        row.auto_claim_enabled
+                            && row.authorized
+                            && row.status == crate::minimax_code::catalog::Status::Unknown
+                    }) =>
+                {
+                    Outcome::skipped(Reason::Pending)
+                }
+                Ok(_) => Outcome::completed(),
+                Err(_) => Outcome::failed(),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

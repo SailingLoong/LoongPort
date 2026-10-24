@@ -4895,6 +4895,23 @@
       "alreadyClaimed": "已領過",
       "unavailable": "暫不可領",
       "needsVerification": "需驗證"
+    },
+    "inference": {
+      "authorization": "推理授權",
+      "authorize": "單獨授權推理",
+      "availableModels": "可用推理模型",
+      "cancel": "取消推理授權",
+      "failed": "推理授權或模型探索未完成，請選擇對應帳號後重試；簽到登入不受影響。",
+      "finish": "我已完成推理授權",
+      "identityNotice": "請在同一區域授權同一個 WorkBuddy 帳號；此操作保留原有簽到登入。",
+      "models": "查詢推理模型",
+      "open": "開啟推理授權頁",
+      "state": {
+        "needsAuthorization": "推理需要單獨授權（不影響簽到）",
+        "ready": "推理授權已儲存（實際消費尚未驗收）",
+        "refreshRequired": "推理授權需要重新整理",
+        "expired": "推理授權已過期（請單獨重新授權）"
+      }
     }
   },
   "startupUpgrade": {
@@ -5168,5 +5185,37 @@
     "unknownStatus": "未知狀態",
     "routeUnsupported": "程式碼任務需要 API Key 連線。請在 Codex 中選擇 API Key 連線並填寫模型後重試。",
     "accessDenied": "程式碼存取授權無法使用。請更新授權狀態或重新授權後重試。"
+  },
+  "automaticStatus": {
+    "title": "此平台背景檢查",
+    "loading": "正在讀取背景檢查狀態",
+    "unavailable": "背景檢查狀態暫時無法使用，請重新讀取背景狀態。",
+    "reload": "重新讀取背景狀態",
+    "waiting": "等待下一次檢查",
+    "checking": "正在檢查伺服器資格",
+    "lastCheckedAt": "最近檢查：{{time}}",
+    "nextCheckAt": "下次預定檢查：{{time}}（需應用程式執行且保管庫解鎖）",
+    "receiptNotice": "每 15 分鐘檢查資格，不是每 15 分鐘領取。檢查完成不等於領取成功；此帳號結果以領取記錄為準。",
+    "result": {
+      "completed": "最近結果：背景檢查已完成",
+      "failed": "最近結果：背景檢查未完成",
+      "skipped": "最近結果：已略過檢查"
+    },
+    "reason": {
+      "locked": "憑證保管庫未解鎖，未執行此次檢查。",
+      "disabled": "此平台沒有開啟自動簽到的帳號。",
+      "pending": "已有操作正在處理，此次不重複執行。",
+      "notEligible": "此次沒有符合自動領取條件的帳號。",
+      "checkFailed": "檢查未完成，請查看帳號狀態；這不代表領取成功。"
+    },
+    "enable": "開啟自動簽到",
+    "disable": "關閉自動簽到",
+    "enabled": "自動簽到已開啟",
+    "disabled": "自動簽到已關閉",
+    "notice": "應用程式執行且憑證保管庫解鎖時，每 15 分鐘檢查伺服器資格，並非每次都領取。結果未確認時不重複領取；錯過時段不補領。關閉不會撤銷已提交的領取。背景完成後自動重讀簽到記錄，餘額仍需點擊重新整理查詢。",
+    "actionRequired": "自動簽到需處理：",
+    "inferenceUnverified": "實際推理消費尚未驗收。領取成功、授權就緒或模型探索均不等於已完成實際推理消費。",
+    "authorizationSaved": "帳號授權已儲存；不代表推理消費已驗收",
+    "reauthorize": "需要重新授權"
   }
 }

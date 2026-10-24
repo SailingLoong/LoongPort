@@ -1,3 +1,5 @@
+import { AutomaticClaimStatus } from "@/components/relay/accounts/AutomaticClaimStatus";
+import { useAutomaticClaimStatus } from "@/hooks/useAutomaticClaimStatus";
 import {
   AccountWorkspace,
   AccountDetailSections,
@@ -74,54 +76,75 @@ export function MiniMaxCodeSection({
   const loginGeneration = useRef(0);
   const activeLogin = useRef<MiniMaxCodeLogin | null>(null);
   const loginRequest = useRef(false);
+  // Only refresh responses waiting to be published, not a second account catalog.
+  const pendingEntitlements = useRef(new Map<string, MiniMaxCodeAccount>());
 
-  const loadAccounts = useCallback(async (refreshed?: MiniMaxCodeAccount) => {
-    const generation = ++listGeneration.current;
-    const isCurrent = () =>
-      alive.current && generation === listGeneration.current;
-    setLoading(true);
-    try {
-      const rows = await minimaxCodeApi.list();
-      if (!isCurrent()) return;
-      setAccounts(
-        rows.map((row) =>
-          refreshed?.entitlement &&
-          row.authorized &&
-          row.id === refreshed.id &&
-          row.authGeneration === refreshed.authGeneration &&
-          row.credentialVersion === refreshed.credentialVersion &&
-          row.realUserId === refreshed.realUserId &&
-          row.region === refreshed.region
-            ? { ...row, entitlement: refreshed.entitlement }
-            : row,
-        ),
-      );
-      setLoaded(true);
-    } catch (cause) {
-      if (!isCurrent()) return;
-      setAccounts([]);
-      setLoaded(false);
-      setError(failureCode(cause));
-      // A failed catalog read is not an unlocked, empty account store. Do not
-      // retain an authorization session after losing access to that store.
-      loginGeneration.current += 1;
-      loginRequest.current = false;
-      const flow = activeLogin.current;
-      activeLogin.current = null;
-      setLogin(null);
-      setLoginBusy(false);
-      setWaiting(false);
-      if (flow) void minimaxCodeApi.cancelLogin(flow.flowId).catch(() => {});
-    } finally {
-      if (isCurrent()) setLoading(false);
-    }
-  }, []);
+  const loadAccounts = useCallback(
+    async (refreshed?: MiniMaxCodeAccount, passive = false) => {
+      if (refreshed?.entitlement)
+        pendingEntitlements.current.set(refreshed.id, refreshed);
+      const generation = ++listGeneration.current;
+      const isCurrent = () =>
+        alive.current && generation === listGeneration.current;
+      setLoading(true);
+      try {
+        const rows = await minimaxCodeApi.list();
+        if (!isCurrent()) return;
+        const pending = new Map(pendingEntitlements.current);
+        pendingEntitlements.current.clear();
+        setAccounts((previous) =>
+          rows.map((row) => {
+            // Catalog reads do not fetch entitlements. Keep an explicit refresh only
+            // for exactly the same identity, never across relogin or credential changes.
+            const cached =
+              pending.get(row.id) ??
+              refreshed ??
+              (passive ? previous.find((old) => old.id === row.id) : undefined);
+            return !row.entitlement &&
+              cached?.entitlement &&
+              row.authorized &&
+              row.id === cached.id &&
+              row.authGeneration === cached.authGeneration &&
+              row.credentialVersion === cached.credentialVersion &&
+              row.realUserId === cached.realUserId &&
+              row.region === cached.region
+              ? { ...row, entitlement: cached.entitlement }
+              : row;
+          }),
+        );
+        setLoaded(true);
+      } catch (cause) {
+        if (!isCurrent()) return;
+        pendingEntitlements.current.clear();
+        setAccounts([]);
+        setLoaded(false);
+        setError(failureCode(cause));
+        // A failed catalog read is not an unlocked, empty account store. Do not
+        // retain an authorization session after losing access to that store.
+        loginGeneration.current += 1;
+        loginRequest.current = false;
+        const flow = activeLogin.current;
+        activeLogin.current = null;
+        setLogin(null);
+        setLoginBusy(false);
+        setWaiting(false);
+        if (flow) void minimaxCodeApi.cancelLogin(flow.flowId).catch(() => {});
+      } finally {
+        if (isCurrent()) setLoading(false);
+      }
+    },
+    [],
+  );
+  const automaticStatus = useAutomaticClaimStatus("minimaxCode", () =>
+    loadAccounts(undefined, true),
+  );
 
   useEffect(() => {
     alive.current = true;
     void loadAccounts();
     return () => {
       alive.current = false;
+      pendingEntitlements.current.clear();
       listGeneration.current += 1;
       loginGeneration.current += 1;
       if (activeLogin.current) {
@@ -139,6 +162,7 @@ export function MiniMaxCodeSection({
   ) => {
     if (!loaded || loading || activeAccounts.current.has(account.id)) return;
     activeAccounts.current.add(account.id);
+    if (action === "retire") pendingEntitlements.current.delete(account.id);
     setBusy(new Set(activeAccounts.current));
     setError(null);
     // A list requested before this action must not replace its newer projection.
@@ -435,6 +459,7 @@ export function MiniMaxCodeSection({
               );
               const credits = (
                 <>
+                  <AutomaticClaimStatus {...automaticStatus} />
                   <div className="text-xs text-muted-foreground">
                     <p>
                       {t("minimaxCode.entitlement.remaining", {
@@ -559,18 +584,24 @@ export function MiniMaxCodeSection({
                       )
                     }
                   >
-                    {account.autoClaimEnabled ? "关闭自动签到" : "开启自动签到"}
+                    {t(
+                      account.autoClaimEnabled
+                        ? "automaticStatus.disable"
+                        : "automaticStatus.enable",
+                    )}
                   </Button>
                   <p className="w-full text-xs text-muted-foreground">
-                    {account.autoClaimEnabled
-                      ? "自动签到已开启"
-                      : "自动签到已关闭"}
-                    ：应用运行且凭据保管库解锁时，每 15
-                    分钟检查服务端资格。结果未确认时只查询，不重复领取；错过窗口不补领。关闭不会撤销已提交的领取。后台结果需重新读取账号查看，余额需点击刷新查询。
+                    {t(
+                      account.autoClaimEnabled
+                        ? "automaticStatus.enabled"
+                        : "automaticStatus.disabled",
+                    )}
+                    {" · "}
+                    {t("automaticStatus.notice")}
                   </p>
                   {account.autoClaimFailure && (
                     <p role="status" className="w-full text-xs text-amber-600">
-                      自动签到需处理：
+                      {t("automaticStatus.actionRequired")}
                       {t(`minimaxCode.errors.${account.autoClaimFailure}`)}
                     </p>
                   )}
@@ -629,8 +660,8 @@ export function MiniMaxCodeSection({
                       <>
                         <p role="status" className="text-sm">
                           {account.authorized
-                            ? "账号授权已保存；不代表推理消费已验收"
-                            : "需要重新授权"}
+                            ? t("automaticStatus.authorizationSaved")
+                            : t("automaticStatus.reauthorize")}
                         </p>
                         {credentials}
                         {retireAction}
@@ -647,7 +678,7 @@ export function MiniMaxCodeSection({
                     }
                     inference={
                       <p className="text-xs text-muted-foreground">
-                        真实推理消费尚未验收。此账号的权益与签到记录不代表模型调用已接通；模型列表与实际消费需要独立验证。
+                        {t("automaticStatus.inferenceUnverified")}
                       </p>
                     }
                   />

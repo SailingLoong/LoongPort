@@ -4900,6 +4900,23 @@
       "alreadyClaimed": "已领过",
       "unavailable": "暂不可领",
       "needsVerification": "需验证"
+    },
+    "inference": {
+      "authorization": "推理授权",
+      "authorize": "单独授权推理",
+      "availableModels": "可用推理模型",
+      "cancel": "取消推理授权",
+      "failed": "推理授权或模型发现未完成，请选择对应账号后重试；签到登录不受影响。",
+      "finish": "我已完成推理授权",
+      "identityNotice": "请在同一区域授权同一个 WorkBuddy 账号；此操作保留原有签到登录。",
+      "models": "查询推理模型",
+      "open": "打开推理授权页",
+      "state": {
+        "needsAuthorization": "推理需要单独授权（不影响签到）",
+        "ready": "推理授权已保存（实际消费尚未验收）",
+        "refreshRequired": "推理授权需要刷新",
+        "expired": "推理授权已过期（请单独重新授权）"
+      }
     }
   },
   "startupUpgrade": {
@@ -5194,5 +5211,37 @@
     "unknownStatus": "未知状态",
     "routeUnsupported": "代码任务需要 API Key 连接。请在 Codex 中选择 API Key 连接并填写模型后重试。",
     "accessDenied": "代码访问授权不可用。请刷新授权状态或重新授权后重试。"
+  },
+  "automaticStatus": {
+    "title": "此平台后台检查",
+    "loading": "正在读取后台检查状态",
+    "unavailable": "后台检查状态暂不可用，请重新读取后台状态。",
+    "reload": "重新读取后台状态",
+    "waiting": "等待下一次检查",
+    "checking": "正在检查服务端资格",
+    "lastCheckedAt": "最近检查：{{time}}",
+    "nextCheckAt": "下次计划检查：{{time}}（需应用运行且保管库解锁）",
+    "receiptNotice": "每 15 分钟检查资格，不是每 15 分钟领取。检查完成不等于领取成功；本账号结果以领取记录为准。",
+    "result": {
+      "completed": "最近结果：后台检查已完成",
+      "failed": "最近结果：后台检查未完成",
+      "skipped": "最近结果：已跳过检查"
+    },
+    "reason": {
+      "locked": "凭据保管库未解锁，未执行本次检查。",
+      "disabled": "此平台没有开启自动签到的账号。",
+      "pending": "已有操作正在处理，本次不重复执行。",
+      "notEligible": "本次没有符合自动领取条件的账号。",
+      "checkFailed": "检查未完成，请查看账号状态；不会据此宣称领取成功。"
+    },
+    "enable": "开启自动签到",
+    "disable": "关闭自动签到",
+    "enabled": "自动签到已开启",
+    "disabled": "自动签到已关闭",
+    "notice": "应用运行且凭据保管库解锁时，每 15 分钟检查服务端资格，并非每次都领取。结果未确认时不重复领取；错过窗口不补领。关闭不会撤销已提交的领取。后台完成后自动重读签到记录，余额仍需点击刷新查询。",
+    "actionRequired": "自动签到需处理：",
+    "inferenceUnverified": "真实推理消费尚未验收。领取成功、授权就绪或模型发现均不等于已完成实际推理消费。",
+    "authorizationSaved": "账号授权已保存；不代表推理消费已验收",
+    "reauthorize": "需要重新授权"
   }
 }
