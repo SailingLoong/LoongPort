@@ -2,6 +2,8 @@ mod app_config;
 mod app_store;
 #[cfg(feature = "gui")]
 mod auto_launch;
+#[cfg(any(feature = "gui", test))]
+mod automatic_claim;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
