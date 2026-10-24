@@ -2,16 +2,14 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
-use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{
-    delete_file, get_claude_settings_path, read_json_file, write_json_file, write_json_file_private,
+    get_claude_settings_path, read_json_file, write_json_file, write_json_file_private,
 };
 use crate::database::Database;
 use crate::error::AppError;
@@ -1198,79 +1196,6 @@ pub(crate) fn normalize_provider_common_config_for_storage(
     }
 
     Ok(())
-}
-
-/// Live configuration snapshot for backup/restore
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) enum LiveSnapshot {
-    Claude {
-        settings: Option<Value>,
-    },
-    Codex {
-        auth: Option<Value>,
-        config: Option<String>,
-    },
-    Gemini {
-        env: Option<HashMap<String, String>>,
-        config: Option<Value>,
-    },
-}
-
-impl LiveSnapshot {
-    #[allow(dead_code)]
-    pub(crate) fn restore(&self) -> Result<(), AppError> {
-        match self {
-            LiveSnapshot::Claude { settings } => {
-                let path = get_claude_settings_path();
-                if let Some(value) = settings {
-                    write_json_file_private(&path, value)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-            }
-            LiveSnapshot::Codex { auth, config } => {
-                let auth_path = get_codex_auth_path();
-                let config_path = get_codex_config_path();
-                if let Some(value) = auth {
-                    crate::codex_config::write_codex_auth_file(value)?;
-                } else if auth_path.exists() {
-                    delete_file(&auth_path)?;
-                }
-
-                if let Some(text) = config {
-                    crate::config::write_text_file(&config_path, text)?;
-                } else if config_path.exists() {
-                    delete_file(&config_path)?;
-                }
-            }
-            LiveSnapshot::Gemini { env, .. } => {
-                use crate::gemini_config::{
-                    get_gemini_env_path, get_gemini_settings_path, write_gemini_env_atomic,
-                };
-                let path = get_gemini_env_path();
-                if let Some(env_map) = env {
-                    write_gemini_env_atomic(env_map)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-
-                let settings_path = get_gemini_settings_path();
-                match self {
-                    LiveSnapshot::Gemini {
-                        config: Some(cfg), ..
-                    } => {
-                        write_json_file(&settings_path, cfg)?;
-                    }
-                    LiveSnapshot::Gemini { config: None, .. } if settings_path.exists() => {
-                        delete_file(&settings_path)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy)]
