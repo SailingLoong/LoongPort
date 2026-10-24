@@ -119,6 +119,10 @@ pub(super) struct Credentials {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Account {
+    /// Historical allowlisted quota fields only. Not part of the public account
+    /// DTO and not proof of final-model applicability or current spendability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_observation: Option<super::entitlement::QuotaObservation>,
     #[serde(default)]
     pub auto_claim_enabled: bool,
     #[serde(default)]

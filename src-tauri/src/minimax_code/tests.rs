@@ -45,6 +45,7 @@ impl Fixture {
 }
 fn account() -> Account {
     Account {
+        quota_observation: None,
         auto_claim_enabled: false,
         auto_claim_revision: 0,
         auto_claim_failure: None,
@@ -67,6 +68,17 @@ fn account() -> Account {
         last_checked_at: None,
         last_observed_status: Some(Status::Claimable),
     }
+}
+#[test]
+fn quota_observation_older_catalog_and_public_view_remain_compatible() {
+    let mut old = serde_json::to_value(account()).unwrap();
+    old.as_object_mut().unwrap().remove("quotaObservation");
+    let restored: Account = serde_json::from_value(old).unwrap();
+    assert!(restored.quota_observation.is_none());
+    assert!(serde_json::to_value(restored.view())
+        .unwrap()
+        .get("quotaObservation")
+        .is_none());
 }
 fn panel(status: u64) -> Value {
     json!({"scene":2,"days":(1..=7).map(|n|json!({"day_no":n,"points":10,"status":if n==1{status}else{1},"is_today":n==1})).collect::<Vec<_>>()})
@@ -2106,8 +2118,100 @@ mod entitlement_owner_tests {
         ] {
             assert!(!public.contains(secret));
         }
+        assert_ne!(f.raw(), original);
+        let saved = access(&f.session, None, |d, _| {
+            Ok((d.accounts[0].quota_observation.clone().unwrap(), false))
+        })
+        .await
+        .unwrap();
+        assert_eq!(saved.account_id, "synthetic-account");
+        assert_eq!(saved.auth_generation, 1);
+        assert_eq!(saved.credential_version, 1);
+        assert_eq!(saved.rows.len(), 1);
+        assert!(saved.observed_at_ms > 0 && saved.observed_at_ms <= now_ms());
+        assert!(saved.matches_account(&account()));
+        let mut changed = account();
+        changed.credential_version += 1;
+        assert!(!saved.matches_account(&changed));
+        changed = account();
+        changed.auth_generation += 1;
+        assert!(!saved.matches_account(&changed));
+        changed = account();
+        changed.real_user_id = "other-user".into();
+        assert!(!saved.matches_account(&changed));
+        changed = account();
+        changed.region = Region::Global;
+        assert!(!saved.matches_account(&changed));
+        let private = serde_json::to_string(&saved).unwrap();
+        assert!(!private.contains("personal-group"));
+        assert!(!private.contains("synthetic-access"));
+    }
+    #[tokio::test]
+    async fn quota_observation_failed_read_keeps_history_without_renewing_it() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let q = Queries::new(vec![
+            Ok(personal_plan(Some("personal-group"), true)),
+            Ok(response(json!({"has_token_plan":true}))),
+            Ok(quota_reply()),
+        ]);
+        run(&f, &q).await.unwrap();
+        let original = f.raw();
+        for reply in [
+            Err(Failure::NetworkUnavailable),
+            Ok(Response {
+                status: 200,
+                body: json!({"model_remains":[{}]}),
+            }),
+            Ok(Response {
+                status: 200,
+                body: json!({"model_remains":[{"current_interval_usage_count":"bad","end_time":1790000000000_i64}]}),
+            }),
+        ] {
+            let failed = reply.is_err();
+            let q = Queries::new(vec![
+                Ok(personal_plan(Some("personal-group"), true)),
+                Ok(response(json!({"has_token_plan":true}))),
+                reply,
+            ]);
+            let e = run(&f, &q).await.unwrap();
+            if failed {
+                assert!(e.quota.is_none());
+                assert_eq!(
+                    e.quota_state,
+                    super::super::entitlement::QuotaState::Unavailable
+                );
+            }
+            assert_eq!(f.raw(), original);
+            assert_eq!(q.calls.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_observation_never_overwrites_a_newer_saved_observation() {
+        let f = Fixture::new().await;
+        f.seed(|_| {});
+        let replies = || {
+            vec![
+                Ok(personal_plan(Some("personal-group"), true)),
+                Ok(response(json!({"has_token_plan":true}))),
+                Ok(quota_reply()),
+            ]
+        };
+        run(&f, &Queries::new(replies())).await.unwrap();
+        access(&f.session, None, |d, _| {
+            let saved = d.accounts[0].quota_observation.as_mut().unwrap();
+            saved.observed_at_ms = now_ms() + 60_000;
+            saved.rows[0].model_name = Some("newer-observation".into());
+            Ok(((), true))
+        })
+        .await
+        .unwrap();
+        let original = f.raw();
+        run(&f, &Queries::new(replies())).await.unwrap();
         assert_eq!(f.raw(), original);
     }
+
     #[tokio::test]
     async fn plan_quota_original_owner_never_uses_scoped_or_fallback_group() {
         let f = Fixture::new().await;
@@ -2190,6 +2294,12 @@ mod entitlement_owner_tests {
         q.change_only_on_quota = true;
         assert!(matches!(run(&f, &q).await, Err(Failure::StaleIdentity)));
         assert_eq!(q.calls.lock().unwrap().len(), 3);
+        access(&f.session, None, |d, _| {
+            assert!(d.accounts[0].quota_observation.is_none());
+            Ok(((), false))
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2208,6 +2318,12 @@ mod entitlement_owner_tests {
             q.change_kind = kind;
             assert!(matches!(run(&f, &q).await, Err(Failure::StaleIdentity)));
             assert_eq!(q.calls.lock().unwrap().len(), 3);
+            access(&f.session, None, |d, _| {
+                assert!(d.accounts[0].quota_observation.is_none());
+                Ok(((), false))
+            })
+            .await
+            .unwrap();
             if kind == 2 {
                 assert!(!super::super::catalog::list(&f.session).await.unwrap()[0].authorized);
             }
