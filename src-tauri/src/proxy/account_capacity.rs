@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const POLICY_KEY: &str = "proxy_account_concurrency_limit";
 const DEFAULT_LOCAL_LIMIT: usize = 1;
@@ -39,6 +39,12 @@ fn account_identity(provider: &Provider) -> Option<AccountIdentity> {
         authority: authority.into(),
         account: account.into(),
     })
+}
+
+/// Busy is local admission state, never an upstream attempt or owner error.
+pub(crate) enum CapacityAdmission {
+    Acquired(Option<OwnedSemaphorePermit>),
+    Busy,
 }
 
 pub(crate) struct AccountCapacity {
@@ -75,30 +81,55 @@ impl AccountCapacity {
         }
     }
 
-    pub(crate) async fn acquire(
-        &self,
-        provider: &Provider,
-    ) -> Result<Option<OwnedSemaphorePermit>, super::ProxyError> {
+    pub(crate) fn applies_to(provider: &Provider) -> bool {
+        account_identity(provider).is_some()
+    }
+
+    fn lane_for(&self, provider: &Provider) -> Result<Option<Arc<Semaphore>>, super::ProxyError> {
         let Some(account) = account_identity(provider) else {
-            // No reliable account identity means no invented sharing relation.
             return Ok(None);
         };
         let limit = self
             .limit
             .map_err(|code| super::ProxyError::ConfigError(code.into()))?;
-        let lane = {
-            let mut lanes = self.lanes.lock().map_err(|_| {
-                super::ProxyError::Internal("account_capacity.owner_unavailable".into())
-            })?;
-            lanes.retain(|_, lane| lane.strong_count() > 0);
-            match lanes.get(&account).and_then(Weak::upgrade) {
-                Some(lane) => lane,
-                None => {
-                    let lane = Arc::new(Semaphore::new(limit));
-                    lanes.insert(account, Arc::downgrade(&lane));
-                    lane
-                }
+        let mut lanes = self.lanes.lock().map_err(|_| {
+            super::ProxyError::Internal("account_capacity.owner_unavailable".into())
+        })?;
+        lanes.retain(|_, lane| lane.strong_count() > 0);
+        let lane = match lanes.get(&account).and_then(Weak::upgrade) {
+            Some(lane) => lane,
+            None => {
+                let lane = Arc::new(Semaphore::new(limit));
+                lanes.insert(account, Arc::downgrade(&lane));
+                lane
             }
+        };
+        Ok(Some(lane))
+    }
+
+    pub(crate) fn try_acquire(
+        &self,
+        provider: &Provider,
+    ) -> Result<CapacityAdmission, super::ProxyError> {
+        let Some(lane) = self.lane_for(provider)? else {
+            return Ok(CapacityAdmission::Acquired(None));
+        };
+        match lane.try_acquire_owned() {
+            Ok(permit) => Ok(CapacityAdmission::Acquired(Some(permit))),
+            Err(TryAcquireError::NoPermits) => Ok(CapacityAdmission::Busy),
+            Err(TryAcquireError::Closed) => Err(super::ProxyError::Internal(
+                "account_capacity.owner_stopped".into(),
+            )),
+        }
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        provider: &Provider,
+    ) -> Result<Option<OwnedSemaphorePermit>, super::ProxyError> {
+        let Some(lane) = self.lane_for(provider)? else {
+            // No reliable account identity means no invented sharing relation.
+            return Ok(None);
         };
         lane.acquire_owned()
             .await
@@ -247,5 +278,61 @@ mod tests {
             .acquire(&account_provider("first", "shared"))
             .await
             .is_err());
+    }
+    #[tokio::test]
+    async fn atomic_try_uses_the_existing_account_owner_and_distinguishes_busy() {
+        let capacity = AccountCapacity::default();
+        let a = account_provider("a", "shared");
+        let sibling = account_provider("other-card", "shared");
+        let b = account_provider("b", "independent");
+        let held = capacity.acquire(&a).await.unwrap();
+        assert!(matches!(
+            capacity.try_acquire(&sibling).unwrap(),
+            CapacityAdmission::Busy
+        ));
+        let available = capacity.try_acquire(&b).unwrap();
+        assert!(matches!(available, CapacityAdmission::Acquired(Some(_))));
+        assert!(matches!(
+            capacity.try_acquire(&a).unwrap(),
+            CapacityAdmission::Busy
+        ));
+        drop(held);
+        assert!(matches!(
+            capacity.try_acquire(&sibling).unwrap(),
+            CapacityAdmission::Acquired(Some(_))
+        ));
+    }
+
+    #[test]
+    fn atomic_try_preserves_unscoped_keys_and_fails_closed_for_invalid_policy() {
+        let manual = Provider::with_id("manual".into(), "Synthetic".into(), json!({}), None);
+        assert!(matches!(
+            AccountCapacity::default().try_acquire(&manual).unwrap(),
+            CapacityAdmission::Acquired(None)
+        ));
+        let db = Database::memory().unwrap();
+        db.set_setting(POLICY_KEY, "0").unwrap();
+        assert!(AccountCapacity::from_database(&db)
+            .try_acquire(&account_provider("a", "shared"))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn atomic_try_honors_existing_waiters_and_does_not_steal_their_slot() {
+        let capacity = AccountCapacity::default();
+        let a = account_provider("a", "shared");
+        let held = capacity.acquire(&a).await.unwrap();
+        let mut waiting = Box::pin(capacity.acquire(&a));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(held);
+        assert!(matches!(
+            capacity.try_acquire(&a).unwrap(),
+            CapacityAdmission::Busy
+        ));
+        drop(waiting.await.unwrap());
+        assert!(matches!(
+            capacity.try_acquire(&a).unwrap(),
+            CapacityAdmission::Acquired(Some(_))
+        ));
     }
 }

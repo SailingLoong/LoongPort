@@ -237,6 +237,7 @@ pub struct RequestForwarder {
     automatic_failover: bool,
     diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
+    request_started_at: Option<std::time::Instant>,
     /// 共享的 ProviderRouter（持有熔断器状态）
     router: Arc<ProviderRouter>,
     status: Arc<RwLock<ProxyStatus>>,
@@ -280,6 +281,12 @@ pub struct RequestForwarder {
     max_attempts: usize,
     /// 模型对齐告警（客户端模型 ≠ 出站模型时的知情层，与命令层共享同一份）。
     model_alignment: std::sync::Arc<super::model_alignment::ModelAlignmentAlerts>,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderSelectionReason {
+    Ordered,
+    BusyAlternative,
 }
 
 impl RequestForwarder {
@@ -346,6 +353,63 @@ impl RequestForwarder {
     /// 单次尝试成功后的收尾：闭合熔断、刷新当前 provider 与统计、按需触发
     /// 故障转移切换并构造 ForwardResult。主路径、media 降级重试、工具载体
     /// 剥离重试共用同一份语义。
+    fn capacity_selection_reason(
+        &self,
+        waiting_on_busy: bool,
+        busy_candidates: &std::collections::VecDeque<&Provider>,
+    ) -> ProviderSelectionReason {
+        // A busy middle candidate must not preserve a current that already
+        // failed. Only borrowing around the still-busy original current is temporary.
+        if !waiting_on_busy
+            && busy_candidates
+                .iter()
+                .any(|provider| provider.id == self.current_provider_id_at_start)
+        {
+            ProviderSelectionReason::BusyAlternative
+        } else {
+            ProviderSelectionReason::Ordered
+        }
+    }
+
+    async fn record_provider_success(
+        &self,
+        app_type_str: &str,
+        current_provider_id_at_start: &str,
+        provider: &Provider,
+        used_half_open_permit: bool,
+        selection_reason: ProviderSelectionReason,
+    ) {
+        // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；HalfOpen
+        // 探测仍同步等待，保证 permit 与熔断状态及时释放。
+        self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
+            .await;
+
+        if matches!(selection_reason, ProviderSelectionReason::Ordered) {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type_str.to_string(),
+                (provider.id.clone(), provider.name.clone()),
+            );
+        }
+
+        {
+            let mut status = self.status.write().await;
+            status.success_requests += 1;
+            status.last_error = None;
+            let should_switch = matches!(selection_reason, ProviderSelectionReason::Ordered)
+                && current_provider_id_at_start != provider.id.as_str();
+            if should_switch {
+                status.failover_count += 1;
+                // 异步触发供应商切换，更新 UI/托盘，并把「当前供应商」同步为实际使用的 provider
+                self.spawn_failover_switch(app_type_str, provider);
+            }
+            if status.total_requests > 0 {
+                status.success_rate =
+                    (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn finish_provider_success(
         &self,
@@ -358,35 +422,16 @@ impl RequestForwarder {
         claude_api_format: Option<String>,
         outbound_model: Option<String>,
         response_lease: Option<ResponseLease>,
+        selection_reason: ProviderSelectionReason,
     ) -> ForwardResult {
-        // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；HalfOpen
-        // 探测仍同步等待，保证 permit 与熔断状态及时释放。
-        self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
-            .await;
-
-        {
-            let mut current_providers = self.current_providers.write().await;
-            current_providers.insert(
-                app_type_str.to_string(),
-                (provider.id.clone(), provider.name.clone()),
-            );
-        }
-
-        {
-            let mut status = self.status.write().await;
-            status.success_requests += 1;
-            status.last_error = None;
-            let should_switch = current_provider_id_at_start != provider.id.as_str();
-            if should_switch {
-                status.failover_count += 1;
-                // 异步触发供应商切换，更新 UI/托盘，并把「当前供应商」同步为实际使用的 provider
-                self.spawn_failover_switch(app_type_str, provider);
-            }
-            if status.total_requests > 0 {
-                status.success_rate =
-                    (status.success_requests as f32 / status.total_requests as f32) * 100.0;
-            }
-        }
+        self.record_provider_success(
+            app_type_str,
+            current_provider_id_at_start,
+            provider,
+            used_half_open_permit,
+            selection_reason,
+        )
+        .await;
 
         ForwardResult {
             response,
@@ -431,6 +476,7 @@ impl RequestForwarder {
             automatic_failover,
             diagnostic_id,
             request_identity: None,
+            request_started_at: None,
             router,
             codex_tool_carriers,
             status,
@@ -456,6 +502,46 @@ impl RequestForwarder {
             max_attempts,
             model_alignment,
         }
+    }
+
+    pub(crate) fn with_request_start(mut self, start: std::time::Instant) -> Self {
+        self.request_started_at = Some(start);
+        self
+    }
+
+    // Reuse the caller and original applied-chain owners while capacity is
+    // queued and after acquiring it. These errors are never candidate skips.
+    fn check_capacity_authorization(
+        &self,
+        app: &str,
+        providers: &[Provider],
+        extensions: &Extensions,
+    ) -> Result<(), ProxyError> {
+        if let Some(caller) = extensions.get::<super::client_access::CallerIdentity>() {
+            self.router
+                .authorize_client_request(caller, app, caller.requested_model.as_deref())?;
+        }
+        if let Some(identity) = &self.request_identity {
+            let service = self
+                .service_owner
+                .upgrade()
+                .ok_or_else(|| ProxyError::ConfigError("proxy.request_owner_unavailable".into()))?;
+            if !service
+                .request_identity_is_current(app, Some(identity))
+                .map_err(|_| ProxyError::ConfigError("proxy.request_identity_unavailable".into()))?
+            {
+                return Err(ProxyError::ConfigError(
+                    "proxy.request_identity_changed".into(),
+                ));
+            }
+        }
+        if let Some(binding) = extensions.get::<RouteBinding>() {
+            let service = self.service_owner.upgrade().ok_or_else(|| {
+                ProxyError::ConfigError("paperclip.request_owner_unavailable".into())
+            })?;
+            binding.check_route(&service, app, providers)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn with_personal_session_hint(
@@ -748,6 +834,25 @@ impl RequestForwarder {
                 })?;
         }
 
+        // Capture one absolute admission budget for this request, including
+        // handler work when RequestContext supplies its original start time.
+        // Disabled failover / zero timeout retain the existing unbounded policy.
+        let admission_timeout = if is_streaming_request(endpoint, &body, &headers) {
+            self.streaming_first_byte_timeout
+        } else {
+            self.non_streaming_timeout
+        };
+        let admission_deadline =
+            (self.automatic_failover && !admission_timeout.is_zero()).then(|| {
+                tokio::time::Instant::from_std(
+                    self.request_started_at
+                        .unwrap_or_else(std::time::Instant::now)
+                        + admission_timeout,
+                )
+            });
+        let admission_timeout_error =
+            || ProxyError::Timeout("account_capacity.deadline_exceeded".into());
+
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
@@ -761,8 +866,21 @@ impl RequestForwarder {
         let mut banned_accounts: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        // 依次尝试每个供应商
-        for provider in providers.iter() {
+        // References into the original authorized list only. Busy candidates
+        // retain their order and are revisited only after the initial scan.
+        let probe_capacity = self.automatic_failover
+            && providers.first().is_some_and(|provider| {
+                super::provider_router::provider_supports_failover(app_type_str, provider)
+            });
+        let mut candidates: std::collections::VecDeque<_> = providers.iter().collect();
+        let mut busy_candidates = std::collections::VecDeque::new();
+        let mut waiting_on_busy = false;
+        while let Some(provider) = candidates.pop_front().or_else(|| {
+            waiting_on_busy = true;
+            busy_candidates.pop_front()
+        }) {
+            let selection_reason =
+                self.capacity_selection_reason(waiting_on_busy, &busy_candidates);
             // Release the previous candidate before waiting for another
             // account, so two requests cannot hold each other's capacity.
             capacity.release().map_err(|error| ForwardError {
@@ -821,22 +939,87 @@ impl RequestForwarder {
                 break;
             }
 
-            // Capacity admission precedes a half-open circuit permit. A
-            // cancelled queue waiter must not consume a circuit probe.
-            capacity
-                .hold(
+            self.check_capacity_authorization(app_type_str, &providers, &extensions)
+                .and_then(|()| {
                     self.router
-                        .acquire_account_capacity(provider)
-                        .await
-                        .map_err(|error| ForwardError {
-                            error,
-                            provider: Some(provider.clone()),
-                        })?,
-                )
+                        .validate_capacity_provider(app_type_str, provider)
+                })
                 .map_err(|error| ForwardError {
                     error,
                     provider: Some(provider.clone()),
                 })?;
+            let immediate_permit = if !waiting_on_busy {
+                match self
+                    .router
+                    .try_acquire_account_capacity(provider)
+                    .map_err(|error| ForwardError {
+                        error,
+                        provider: Some(provider.clone()),
+                    })? {
+                    super::account_capacity::CapacityAdmission::Acquired(permit) => Some(permit),
+                    super::account_capacity::CapacityAdmission::Busy => {
+                        if probe_capacity {
+                            busy_candidates.push_back(provider);
+                            continue;
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Capacity admission precedes a half-open circuit permit and
+            // attempt accounting. Cancellation drops this one queued waiter.
+            // The existing upstream timeout is per attempt. Only capacity
+            // waiting consumes this absolute queue budget; an available retry
+            // retains its original timeout, even after an earlier attempt.
+            let queue_deadline = if immediate_permit.is_none() {
+                admission_deadline
+            } else {
+                None
+            };
+            let acquire = async {
+                if queue_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(admission_timeout_error());
+                }
+                let permit = if let Some(permit) = immediate_permit {
+                    permit
+                } else {
+                    let wait = self.router.acquire_account_capacity(provider);
+                    tokio::pin!(wait);
+                    loop {
+                        self.check_capacity_authorization(app_type_str, &providers, &extensions)?;
+                        self.router
+                            .validate_capacity_provider(app_type_str, provider)?;
+                        tokio::select! {
+                            result = &mut wait => break result?,
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                        }
+                    }
+                };
+                self.check_capacity_authorization(app_type_str, &providers, &extensions)?;
+                self.router
+                    .validate_capacity_provider(app_type_str, provider)?;
+                if queue_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(admission_timeout_error());
+                }
+                Ok(permit)
+            };
+            let permit = match queue_deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, acquire)
+                    .await
+                    .unwrap_or_else(|_| Err(admission_timeout_error())),
+                None => acquire.await,
+            }
+            .map_err(|error| ForwardError {
+                error,
+                provider: Some(provider.clone()),
+            })?;
+            capacity.hold(permit).map_err(|error| ForwardError {
+                error,
+                provider: Some(provider.clone()),
+            })?;
             // 发起请求前先获取熔断器放行许可（HalfOpen 会占用探测名额）
             // 单 Provider 场景下跳过此检查，避免熔断器阻塞所有请求
             let (allowed, used_half_open_permit) =
@@ -937,6 +1120,7 @@ impl RequestForwarder {
                             claude_api_format,
                             outbound_model,
                             response_lease,
+                            selection_reason,
                         )
                         .await;
                     return Ok(result);
@@ -1063,6 +1247,7 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             response_lease,
+                                            selection_reason,
                                         )
                                         .await;
                                     return Ok(result);
@@ -1145,6 +1330,7 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             response_lease,
+                                            selection_reason,
                                         )
                                         .await;
                                     return Ok(result);
@@ -1247,54 +1433,20 @@ impl RequestForwarder {
                                         response_lease,
                                     )) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
-                                        self.record_success_result(
-                                            &provider.id,
-                                            app_type_str,
-                                            used_half_open_permit,
-                                        )
-                                        .await;
-
-                                        // 更新当前应用类型使用的 provider
-                                        {
-                                            let mut current_providers =
-                                                self.current_providers.write().await;
-                                            current_providers.insert(
-                                                app_type_str.to_string(),
-                                                (provider.id.clone(), provider.name.clone()),
-                                            );
-                                        }
-
-                                        // 更新成功统计
-                                        {
-                                            let mut status = self.status.write().await;
-                                            status.success_requests += 1;
-                                            status.last_error = None;
-                                            let should_switch =
-                                                self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
-                                            if should_switch {
-                                                status.failover_count += 1;
-
-                                                // 异步触发供应商切换，更新 UI/托盘
-                                                self.spawn_failover_switch(app_type_str, provider);
-                                            }
-                                            if status.total_requests > 0 {
-                                                status.success_rate = (status.success_requests
-                                                    as f32
-                                                    / status.total_requests as f32)
-                                                    * 100.0;
-                                            }
-                                        }
-
-                                        return Ok(ForwardResult {
-                                            response,
-                                            provider: provider.clone(),
-                                            attempt_started_at,
-                                            claude_api_format,
-                                            outbound_model,
-                                            response_lease,
-                                            connection_guard: None,
-                                        });
+                                        return Ok(self
+                                            .finish_provider_success(
+                                                app_type_str,
+                                                &self.current_provider_id_at_start,
+                                                provider,
+                                                used_half_open_permit,
+                                                attempt_started_at,
+                                                response,
+                                                claude_api_format,
+                                                outbound_model,
+                                                response_lease,
+                                                selection_reason,
+                                            )
+                                            .await);
                                     }
                                     Err(retry_err) => {
                                         log::warn!(
@@ -1411,49 +1563,20 @@ impl RequestForwarder {
                                     response_lease,
                                 )) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
-                                    self.record_success_result(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            self.spawn_failover_switch(app_type_str, provider);
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
-
-                                    return Ok(ForwardResult {
-                                        response,
-                                        provider: provider.clone(),
-                                        attempt_started_at,
-                                        claude_api_format,
-                                        outbound_model,
-                                        response_lease,
-                                        connection_guard: None,
-                                    });
+                                    return Ok(self
+                                        .finish_provider_success(
+                                            app_type_str,
+                                            &self.current_provider_id_at_start,
+                                            provider,
+                                            used_half_open_permit,
+                                            attempt_started_at,
+                                            response,
+                                            claude_api_format,
+                                            outbound_model,
+                                            response_lease,
+                                            selection_reason,
+                                        )
+                                        .await);
                                 }
                                 Err(retry_err) => {
                                     log::warn!(
@@ -5210,6 +5333,7 @@ mod tests {
             automatic_failover: false,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,
+            request_started_at: None,
             router: Arc::new(ProviderRouter::new(db.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
@@ -7412,3 +7536,7 @@ mod managed_response_lease_tests {
         assert_revoked_stream_diagnostic(true).await;
     }
 }
+
+#[cfg(test)]
+#[path = "forwarder_capacity_tests.rs"]
+mod capacity_consumer_tests;

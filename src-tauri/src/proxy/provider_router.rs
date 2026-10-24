@@ -70,6 +70,42 @@ impl ProviderRouter {
     }
 
     #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) fn try_acquire_account_capacity(
+        &self,
+        provider: &Provider,
+    ) -> Result<super::account_capacity::CapacityAdmission, super::ProxyError> {
+        self.account_capacity.try_acquire(provider)
+    }
+
+    // Re-read only the selected capacity owner. An unrelated candidate's
+    // removal/configuration must not invalidate an available selected account.
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) fn validate_capacity_provider(
+        &self,
+        app: &str,
+        provider: &Provider,
+    ) -> Result<(), super::ProxyError> {
+        if !super::account_capacity::AccountCapacity::applies_to(provider) {
+            return Ok(());
+        }
+        let changed = || super::ProxyError::ConfigError("account_capacity.provider_changed".into());
+        let current = self
+            .db
+            .get_provider_by_id(&provider.id, app)
+            .map_err(|_| changed())?
+            .ok_or_else(changed)?;
+        if current.settings_config != provider.settings_config
+            || current.website_url != provider.website_url
+            || current.category != provider.category
+            || serde_json::to_value(&current.meta).map_err(|_| changed())?
+                != serde_json::to_value(&provider.meta).map_err(|_| changed())?
+        {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
     pub(crate) fn authorize_client_request(
         &self,
         caller: &super::client_access::CallerIdentity,
