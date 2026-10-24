@@ -1,3 +1,4 @@
+import { AccountWorkspace, AccountDetailSections } from "./AccountWorkspace";
 import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -67,36 +68,40 @@ export function QoderAccountPanel() {
           供应商入口管理。
         </p>
       ) : (
-        <div className="space-y-3">
-          {accounts.map((provider) => {
+        <AccountWorkspace
+          accounts={accounts}
+          label={(provider) => provider.name}
+          identityDetails={(provider) => (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {provider.meta?.providerType === "qoder_cn_device"
+                ? "Qoder CN · 本应用独立授权"
+                : provider.meta?.providerType === "qoder_cn"
+                  ? "Qoder CN · 独立 PAT"
+                  : "Qoder 国际版"}
+            </p>
+          )}
+        >
+          {(provider) => {
             const generation = sourceGeneration(provider);
             return (
-              <article
+              <AccountDetailSections
                 key={`${provider.id}:${generation ?? ""}`}
-                className="rounded-xl border p-4 space-y-3"
-              >
-                <h3 className="font-medium">{provider.name}</h3>
-                <p className="text-sm text-muted-foreground">
-                  {provider.meta?.providerType === "qoder_cn_device"
-                    ? "Qoder CN · 本应用独立授权"
-                    : provider.meta?.providerType === "qoder_cn"
-                      ? "Qoder CN · 独立 PAT"
-                      : "Qoder 国际版"}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {provider.meta?.providerType === "qoder_cn_device" && (
+                authorization={
+                  provider.meta?.providerType === "qoder_cn_device" ? (
                     <QoderCnDeviceLogin
                       providerId={provider.id}
                       sourceGeneration={generation}
                       disabled={!active}
                     />
-                  )}
-                  <QoderInferenceIdentity
-                    providerId={provider.id}
-                    sourceGeneration={generation}
-                    disabled={!active || query.isFetching}
-                  />
-                  {provider.meta?.providerType === "qoder_sdk" ? (
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      授权与连接操作沿用原配置，请在“Qoder
+                      推理身份”中查看实际状态。
+                    </p>
+                  )
+                }
+                entitlements={
+                  provider.meta?.providerType === "qoder_sdk" ? (
                     <QoderDailyClaim
                       providerId={provider.id}
                       disabled={!active || query.isFetching}
@@ -108,17 +113,24 @@ export function QoderAccountPanel() {
                         sourceGeneration={generation}
                         disabled={!active || query.isFetching}
                       />
-                      <span>
+                      <p className="text-sm text-muted-foreground">
                         免费福利可在“CN
                         活动状态”中单独领取，自动领取需单独开启；活动已领取不代表今日签到成功。
-                      </span>
+                      </p>
                     </>
-                  )}
-                </div>
-              </article>
+                  )
+                }
+                inference={
+                  <QoderInferenceIdentity
+                    providerId={provider.id}
+                    sourceGeneration={generation}
+                    disabled={!active || query.isFetching}
+                  />
+                }
+              />
             );
-          })}
-        </div>
+          }}
+        </AccountWorkspace>
       )}
     </section>
   );

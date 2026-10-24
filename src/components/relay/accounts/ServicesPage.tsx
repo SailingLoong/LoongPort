@@ -1,3 +1,4 @@
+import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
 import { QoderAccountPanel } from "./QoderAccountPanel";
 import { AccountApplicationNavigation } from "./AccountWorkspace";
 import { AccountPlatformTabs } from "./AccountPlatformTabs";
@@ -90,6 +91,7 @@ function useAccountActivity() {
 }
 
 export function ServicesPage(props: ServicesPageProps) {
+  const { t } = useTranslation();
   const [localPlatform, setLocalPlatform] = useState<
     AccountPlatform | undefined
   >(props.platform);
@@ -100,25 +102,139 @@ export function ServicesPage(props: ServicesPageProps) {
     if (props.onOpenPlatform) props.onOpenPlatform(platform);
     else setLocalPlatform(platform);
   };
+  const presence = useAccountPlatformPresence();
+  const { accounts: serviceAccounts } = useServiceAccounts();
+  const present = new Set(presence.data?.platforms ?? []);
+  if (
+    serviceAccounts.some(
+      (account) =>
+        account.kind === "vendor" && account.row.vendorId === "opencode",
+    )
+  )
+    present.add("opencode");
+  const available = accountPlatforms
+    .filter((item) => present.has(item.id))
+    .map((item) => item.id);
+  const displayed = active ? [active] : available;
   return (
     <AccountApplicationNavigation.Provider
       value={() => props.onOpenApp(props.appId)}
     >
-      <div className="space-y-4">
-        <AccountPlatformTabs
-          active={active}
-          onSelect={select}
-          disabled={blocked}
-        />
-        <ServicesPageContent
-          {...props}
-          platform={active}
-          onOpenPlatform={select}
-          onNavigationBlockedChange={(value) => {
-            setBlocked(value);
-            props.onNavigationBlockedChange?.(value);
-          }}
-        />
+      <div className="space-y-6">
+        <section
+          aria-label={t("loongport.accounts.platformAccounts", {
+            defaultValue: "平台账号",
+          })}
+          className="space-y-4"
+        >
+          <header className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">
+              {t("loongport.accounts.platformAccounts", {
+                defaultValue: "平台账号",
+              })}
+            </h2>
+            <Button
+              disabled={blocked}
+              onClick={() => props.onOpenAddHub("accounts")}
+            >
+              <Plus className="h-4 w-4" />
+              {t("loongport.accounts.addAccount", { defaultValue: "添加账号" })}
+            </Button>
+          </header>
+          <AccountPlatformTabs
+            active={active}
+            platforms={available}
+            onSelect={select}
+            disabled={blocked}
+          />
+          {presence.isPending && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("loongport.accounts.loadingPlatforms", {
+                defaultValue: "正在读取平台账号…",
+              })}
+            </p>
+          )}
+          {!!presence.data?.unavailable.length && (
+            <p role="alert" className="text-sm text-muted-foreground">
+              {t("loongport.accounts.partialPlatformRead", {
+                defaultValue:
+                  "部分平台账号读取失败，请稍后重试；已有账号未被删除。",
+              })}
+            </p>
+          )}
+          {!presence.isPending &&
+            !displayed.length &&
+            !presence.data?.unavailable.length && (
+              <p className="text-sm text-muted-foreground">
+                {t("loongport.accounts.emptyPlatforms", {
+                  defaultValue:
+                    "尚无已导入的平台账号，添加账号后将在这里显示。",
+                })}
+              </p>
+            )}
+          {displayed.map((platform) => (
+            <div
+              key={platform}
+              className="rounded-xl border border-border bg-card"
+            >
+              <ServicesPageContent
+                {...props}
+                platform={platform}
+                onOpenPlatform={select}
+                onNavigationBlockedChange={(value) => {
+                  setBlocked(value);
+                  props.onNavigationBlockedChange?.(value);
+                }}
+              />
+              {platform === "openrouter" &&
+                presence.data?.connections.map((connection) => (
+                  <article
+                    key={`${connection.app}:${connection.id}`}
+                    className="m-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-3"
+                  >
+                    <div>
+                      <h3 className="text-sm font-medium">{connection.name}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {getAppDisplayName(connection.app, t)} · API Key
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      onClick={() => props.onOpenApp(connection.app)}
+                    >
+                      {t("loongport.accounts.manageConnection", {
+                        defaultValue: "管理原有连接",
+                      })}
+                    </Button>
+                  </article>
+                ))}
+              {platform === "opencode" && (
+                <ServicesPageContent
+                  {...props}
+                  platform={undefined}
+                  accountKind="opencode"
+                />
+              )}
+            </div>
+          ))}
+        </section>
+        <section
+          aria-label={t("loongport.accounts.relayAccounts", {
+            defaultValue: "中转站与官方 API",
+          })}
+          className="space-y-4"
+        >
+          <h2 className="text-lg font-semibold">
+            {t("loongport.accounts.relayAccounts", {
+              defaultValue: "中转站与官方 API",
+            })}
+          </h2>
+          <ServicesPageContent
+            {...props}
+            platform={undefined}
+            accountKind="relay-and-vendor"
+          />
+        </section>
       </div>
     </AccountApplicationNavigation.Provider>
   );
@@ -133,9 +249,22 @@ function ServicesPageContent({
   onSelectAccount,
   onOpenAddHub,
   onOpenApp,
-}: ServicesPageProps) {
+  accountKind,
+}: ServicesPageProps & { accountKind?: "opencode" | "relay-and-vendor" }) {
   const { t } = useTranslation();
-  const { accounts, isPending, error, reload } = useServiceAccounts();
+  const {
+    accounts: allAccounts,
+    isPending,
+    error,
+    reload,
+  } = useServiceAccounts();
+  const accounts = allAccounts.filter((account) =>
+    accountKind === "opencode"
+      ? account.kind === "vendor" && account.row.vendorId === "opencode"
+      : accountKind === "relay-and-vendor"
+        ? account.kind !== "vendor" || account.row.vendorId !== "opencode"
+        : true,
+  );
   const queryClient = useQueryClient();
   const reloadAccounts = async (requireFresh = false) => {
     const [result] = await Promise.all([
@@ -152,11 +281,29 @@ function ServicesPageContent({
     id: number;
     appId: AppId;
   } | null>(null);
-  const selection = onSelectAccount
+  const requestedSelection = onSelectAccount
     ? account
       ? { ...account, appId }
       : null
     : localSelection;
+  const isOpenCodeSelection =
+    requestedSelection &&
+    allAccounts.some(
+      (row) =>
+        row.kind === "vendor" &&
+        row.row.vendorId === "opencode" &&
+        requestedSelection.kind === "vendor" &&
+        row.id === requestedSelection.id,
+    );
+  const selection =
+    requestedSelection &&
+    (accountKind === "opencode"
+      ? isOpenCodeSelection
+      : accountKind === "relay-and-vendor"
+        ? !isOpenCodeSelection
+        : true)
+      ? requestedSelection
+      : null;
   const setSelection = (
     next: { kind: AccountRoute["kind"]; id: number; appId: AppId } | null,
   ) => {
@@ -333,52 +480,6 @@ function ServicesPageContent({
       onAccountChanged={reloadAccounts}
       renderAccounts={(renderActions, renderDelete) => (
         <section className="page-content space-y-6">
-          <header className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="max-w-xl text-sm leading-6 text-muted-foreground">
-                {t("loongport.accounts.title")}
-              </p>
-            </div>
-            <Button onClick={() => onOpenAddHub("accounts")}>
-              <Plus className="h-4 w-4" />
-              {t("common.add")}
-            </Button>
-          </header>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              onClick={() =>
-                onOpenAddHub("accounts", {
-                  intent: { kind: "account-boundary", platform: "qoder" },
-                })
-              }
-            >
-              Qoder · {t("loongport.accounts.openApp")}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() =>
-                onOpenAddHub("accounts", {
-                  intent: { kind: "provider-preset", preset: "OpenRouter" },
-                })
-              }
-            >
-              OpenRouter · {t("loongport.accounts.openApp")}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() =>
-                onOpenAddHub("accounts", {
-                  intent: { kind: "vendor", vendorId: "opencode" },
-                })
-              }
-            >
-              OpenCode · {t("loongport.accounts.add")}
-            </Button>
-          </div>
-          <h2 className="text-sm font-medium">
-            {t("loongport.accounts.relay")} · {t("loongport.accounts.vendor")}
-          </h2>
           {isPending && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("common.loading")}

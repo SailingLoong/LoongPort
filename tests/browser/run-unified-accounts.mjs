@@ -491,7 +491,7 @@ try {
             .waitFor();
         } else if (scenario === "native") {
           const platformTabs = main.getByRole("tablist", {
-            name: "服务平台",
+            name: "平台账号筛选",
             exact: true,
           });
           // Exercise the real status hook for both providers. The fixture exposes

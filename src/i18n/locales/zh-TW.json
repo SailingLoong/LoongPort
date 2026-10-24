@@ -3799,6 +3799,15 @@
       "source": "社群預告 · codex-reset.com"
     },
     "accounts": {
+      "platformAccounts": "平台帳號",
+      "allPlatforms": "全部",
+      "platformFilter": "篩選平台帳號",
+      "addAccount": "新增帳號",
+      "loadingPlatforms": "正在讀取平台帳號…",
+      "partialPlatformRead": "部分平台帳號讀取失敗，請稍後重試；已儲存帳號未被刪除。",
+      "emptyPlatforms": "尚無已匯入的平台帳號，新增帳號後將顯示於此。",
+      "relayAccounts": "中轉站與官方 API",
+      "manageConnection": "管理原有連線",
       "title": "服務與帳號",
       "description": "管理已連接的中轉站與官方 API。",
       "add": "新增服務",
