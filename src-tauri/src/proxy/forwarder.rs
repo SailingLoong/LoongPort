@@ -287,6 +287,18 @@ pub struct RequestForwarder {
 enum ProviderSelectionReason {
     Ordered,
     BusyAlternative,
+    ExpiryPreference,
+}
+
+/// A request-local assertion about the model used to compute a positive hint.
+/// It does not authorize an account, bypass admission or identify a debit bucket.
+#[derive(Clone)]
+struct ExpiryModels(std::collections::HashMap<String, String>);
+struct PreparedRoutingModel {
+    body: Value,
+    application_model: Option<String>,
+    claude_default_mapping: bool,
+    grok_applied_model: Option<String>,
 }
 
 impl RequestForwarder {
@@ -872,15 +884,49 @@ impl RequestForwarder {
             && providers.first().is_some_and(|provider| {
                 super::provider_router::provider_supports_failover(app_type_str, provider)
             });
-        let mut candidates: std::collections::VecDeque<_> = providers.iter().collect();
+        let mut ranked: Vec<_> = providers.iter().map(|p| (p, None)).collect();
+        let mut expiry_models = std::collections::HashMap::new();
+        if probe_capacity
+            && budget_binding.is_none()
+            && self.router.known_expiry_first(app_type_str)
+        {
+            let now = chrono::Utc::now().timestamp_millis();
+            for (provider, hint) in &mut ranked {
+                if let Some(model) = self.expiry_final_model(app_type, provider, endpoint, &body) {
+                    *hint = self.router.expiry_hint(provider, &model, now).await;
+                    if hint.is_some() {
+                        expiry_models.insert(provider.id.clone(), model);
+                    }
+                }
+            }
+            // Total, stable key. Unknowns and equal dates retain original order.
+            ranked.sort_by_key(|(_, at)| at.map(|at| (0, at)).unwrap_or((1, 0)));
+        }
+        let expiry_reordered = ranked
+            .iter()
+            .zip(&providers)
+            .any(|((ranked, _), original)| ranked.id != original.id);
+        let mut attempt_extensions = extensions.clone();
+        if expiry_reordered {
+            attempt_extensions.insert(ExpiryModels(expiry_models));
+        }
+        let mut current_attempted = false;
+        let mut candidates: std::collections::VecDeque<_> =
+            ranked.into_iter().map(|(p, _)| p).collect();
         let mut busy_candidates = std::collections::VecDeque::new();
         let mut waiting_on_busy = false;
         while let Some(provider) = candidates.pop_front().or_else(|| {
             waiting_on_busy = true;
             busy_candidates.pop_front()
         }) {
-            let selection_reason =
-                self.capacity_selection_reason(waiting_on_busy, &busy_candidates);
+            let selection_reason = if expiry_reordered
+                && !current_attempted
+                && provider.id != self.current_provider_id_at_start
+            {
+                ProviderSelectionReason::ExpiryPreference
+            } else {
+                self.capacity_selection_reason(waiting_on_busy, &busy_candidates)
+            };
             // Release the previous candidate before waiting for another
             // account, so two requests cannot hold each other's capacity.
             capacity.release().map_err(|error| ForwardError {
@@ -1070,6 +1116,7 @@ impl RequestForwarder {
             }
 
             attempted_providers += 1;
+            current_attempted |= provider.id == self.current_provider_id_at_start;
             log::debug!(
                 "{}",
                 DiagnosticEvent::new("proxy.forward.provider_attempt", "started")
@@ -1102,7 +1149,7 @@ impl RequestForwarder {
                     endpoint,
                     &provider_body,
                     &headers,
-                    &extensions,
+                    &attempt_extensions,
                     adapter.as_ref(),
                     &mut free_only,
                 )
@@ -1221,7 +1268,7 @@ impl RequestForwarder {
                                     endpoint,
                                     &media_body,
                                     &headers,
-                                    &extensions,
+                                    &attempt_extensions,
                                     adapter.as_ref(),
                                     &mut free_only,
                                 )
@@ -1304,7 +1351,7 @@ impl RequestForwarder {
                                     endpoint,
                                     &compat_body,
                                     &headers,
-                                    &extensions,
+                                    &attempt_extensions,
                                     adapter.as_ref(),
                                     &mut free_only,
                                 )
@@ -1420,7 +1467,7 @@ impl RequestForwarder {
                                         endpoint,
                                         &provider_body,
                                         &headers,
-                                        &extensions,
+                                        &attempt_extensions,
                                         adapter.as_ref(),
                                         &mut free_only,
                                     )
@@ -1550,7 +1597,7 @@ impl RequestForwarder {
                                     endpoint,
                                     &provider_body,
                                     &headers,
-                                    &extensions,
+                                    &attempt_extensions,
                                     adapter.as_ref(),
                                     &mut free_only,
                                 )
@@ -1834,6 +1881,102 @@ impl RequestForwarder {
         result
     }
 
+    /// Shared deterministic preparation for preview and dispatch. Side-effectful
+    /// alignment notices and protocol conversion remain at the original send path.
+    fn prepare_routing_model(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<PreparedRoutingModel, ProxyError> {
+        let mut preserve_claude_role = false;
+        let mut claude_default_mapping = false;
+        let mapped = if matches!(app, AppType::ClaudeDesktop) {
+            crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
+                .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
+        } else {
+            let (mapped, _, _, kind) =
+                super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
+            preserve_claude_role = matches!(app, AppType::Claude)
+                && !matches!(kind, super::model_mapper::ModelMappingKind::Default);
+            claude_default_mapping = matches!(app, AppType::Claude)
+                && matches!(kind, super::model_mapper::ModelMappingKind::Default);
+            mapped
+        };
+        let mut mapped = normalize_thinking_type(mapped);
+        let application_model = if preserve_claude_role {
+            None
+        } else {
+            self.router.preferred_model(app.as_str(), provider)
+        };
+        let grok_applied_model = if matches!(app, AppType::GrokBuild) && application_model.is_none()
+        {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped)
+        } else {
+            None
+        };
+        if let Some(model) = application_model.as_ref() {
+            if !matches!(app, AppType::Gemini) {
+                mapped["model"] = Value::String(model.clone());
+            }
+        } else if matches!(app, AppType::Codex | AppType::GrokBuild) {
+            if super::providers::should_convert_codex_responses_to_chat(provider, endpoint) {
+                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped);
+            } else if super::providers::should_convert_codex_responses_to_anthropic(
+                provider, endpoint,
+            ) {
+                super::providers::apply_codex_upstream_model(provider, &mut mapped);
+            }
+        }
+        Ok(PreparedRoutingModel {
+            body: mapped,
+            application_model,
+            claude_default_mapping,
+            grok_applied_model,
+        })
+    }
+
+    fn expiry_final_model(
+        &self,
+        app: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+    ) -> Option<String> {
+        let supported = matches!(
+            super::managed_accounts::selected(provider),
+            Some((super::managed_accounts::AccountKind::WorkBuddy, _))
+        );
+        #[cfg(test)]
+        let supported = supported
+            || self
+                .router
+                .expiry_test_evidence
+                .lock()
+                .ok()?
+                .contains_key(&provider.id);
+        if !supported
+            || !matches!(app, AppType::Claude | AppType::Codex | AppType::GrokBuild)
+            || provider.meta.as_ref().is_some_and(|meta| {
+                meta.provider_type.as_deref() == Some("github_copilot")
+                    || meta.local_proxy_request_overrides.is_some()
+            })
+        {
+            return None;
+        }
+        let mapped = self
+            .prepare_routing_model(app, provider, endpoint, body)
+            .ok()?
+            .body;
+        let mapped = super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped);
+        mapped
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned)
+    }
+
     fn prepare_qoder_request(
         &self,
         app_type: &AppType,
@@ -2099,54 +2242,23 @@ impl RequestForwarder {
             validate_codex_official_authorization(headers, provider)?;
         }
 
-        // 应用模型映射（独立于格式转换）
-        // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
-        // 映射成真实上游模型名，并且未知 route 要直接报错，不能使用默认模型兜底。
-        let mut preserve_claude_role = false;
-        let mut claude_default_mapping = false;
-        let mapped_body = if matches!(app_type, AppType::ClaudeDesktop) {
-            crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
-                .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
-        } else {
-            let (mapped_body, _, _, kind) =
-                super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
-            preserve_claude_role = matches!(app_type, AppType::Claude)
-                && !matches!(kind, super::model_mapper::ModelMappingKind::Default);
-            claude_default_mapping = matches!(app_type, AppType::Claude)
-                && matches!(kind, super::model_mapper::ModelMappingKind::Default);
-            mapped_body
-        };
-
-        // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
-        let mut mapped_body = normalize_thinking_type(mapped_body);
-
-        let application_model = if preserve_claude_role {
-            None
-        } else {
-            self.router.preferred_model(app_type.as_str(), provider)
-        };
-
-        // Grok Build exposes a stable client-side model profile in config.toml.
-        // Route requests to the provider's real upstream model before applying
-        // the optional Responses -> Chat/Anthropic bridge. A preferred model
-        // (below) overrides the profile, so the bridge only anchors when none
-        // is set — the outbound value ends up identical either way.
-        if matches!(app_type, AppType::GrokBuild) && application_model.is_none() {
-            if let Some(applied) =
-                super::providers::apply_codex_upstream_model(provider, &mut mapped_body)
-            {
-                if let Some(requested) = super::model_alignment::client_requested_model(body) {
-                    super::model_alignment::observe_alignment(
-                        &self.model_alignment,
-                        #[cfg(feature = "gui")]
-                        #[cfg(feature = "gui")]
-                        self.app_handle.as_ref(),
-                        app_type.as_str(),
-                        provider,
-                        &requested,
-                        &applied,
-                    );
-                }
+        let PreparedRoutingModel {
+            body: mut mapped_body,
+            application_model,
+            claude_default_mapping,
+            grok_applied_model,
+        } = self.prepare_routing_model(app_type, provider, endpoint, body)?;
+        if let Some(applied) = grok_applied_model {
+            if let Some(requested) = super::model_alignment::client_requested_model(body) {
+                super::model_alignment::observe_alignment(
+                    &self.model_alignment,
+                    #[cfg(feature = "gui")]
+                    self.app_handle.as_ref(),
+                    app_type.as_str(),
+                    provider,
+                    &requested,
+                    &applied,
+                );
             }
         }
 
@@ -2192,13 +2304,6 @@ impl RequestForwarder {
             }
         }
 
-        if application_model.is_none() {
-            if codex_responses_to_chat {
-                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
-            } else if codex_responses_to_anthropic {
-                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
-            }
-        }
         if matches!(app_type, AppType::Codex | AppType::CodexImage) {
             let model_changed = body.get("model") != mapped_body.get("model");
             super::providers::normalize_request_reasoning(
@@ -2662,6 +2767,16 @@ impl RequestForwarder {
             .filter(|m| !m.is_empty())
         {
             outbound_model = Some(m.to_string());
+        }
+        if let Some(expected) = extensions
+            .get::<ExpiryModels>()
+            .and_then(|m| m.0.get(&provider.id))
+        {
+            if outbound_model.as_deref() != Some(expected.as_str()) {
+                return Err(ProxyError::ConfigError(
+                    "entitlement_expiry.final_model_changed".into(),
+                ));
+            }
         }
         log_prompt_cache_trace(
             app_type,
@@ -7540,3 +7655,7 @@ mod managed_response_lease_tests {
 #[cfg(test)]
 #[path = "forwarder_capacity_tests.rs"]
 mod capacity_consumer_tests;
+
+#[cfg(test)]
+#[path = "forwarder_expiry_tests.rs"]
+mod expiry_consumer_tests;

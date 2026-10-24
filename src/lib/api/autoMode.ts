@@ -1,10 +1,11 @@
 /**
- * 自动模式 API：系统按全局策略（价格最低/响应最快）自动挑托管档位。
+ * 自动模式兼容 API：已应用顺序，或显式选择已知权益临期优先。
  * 后端实现见 `src-tauri/src/commands/auto_mode.rs`。
  */
 import { invoke } from "@tauri-apps/api/core";
 
-export type AutoModeStrategy = "cheapest" | "fastest";
+/** Legacy cheapest/fastest values both retain application priority. */
+export type AutoModeStrategy = "cheapest" | "fastest" | "known_expiry_first";
 /** 省心选路模式：自动按策略 / 用户手动定序。 */
 export type EasyModeMode = "auto" | "manual";
 
@@ -91,8 +92,9 @@ export const autoModeApi = {
   setEnabled: (appType: string, enabled: boolean): Promise<void> =>
     invoke("set_auto_mode_enabled", { appType, enabled }),
 
-  setStrategy: (strategy: AutoModeStrategy): Promise<void> =>
-    invoke("set_auto_mode_strategy", { strategy }),
+  setStrategy: (
+    strategy: Exclude<AutoModeStrategy, "fastest">,
+  ): Promise<void> => invoke("set_auto_mode_strategy", { strategy }),
 
   /** 设模型偏好（`null` = 不限）。后端会绕过会话亲和立即切到最优档位。 */
   setModel: (appType: string, model: string | null): Promise<void> =>

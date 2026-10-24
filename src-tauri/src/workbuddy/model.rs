@@ -82,6 +82,8 @@ pub(crate) struct SavedAccount {
     pub attempted_day: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) inference: Option<super::inference::Authorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) credit_models: Option<super::credits::CreditModelSnapshot>,
     pub account: Account,
     pub credits: Credits,
     pub claim_state: ClaimState,
@@ -99,6 +101,7 @@ impl SavedAccount {
             auto_claim_credential: None,
             attempted_day: None,
             inference: None,
+            credit_models: None,
             account,
             credits: Credits::default(),
             claim_state: ClaimState::Unconfirmed,
@@ -137,7 +140,7 @@ impl SavedAccount {
         AccountView {
             id: self.account.id(owner),
             label: self.account.label.clone(),
-            credits: self.credits.clone(),
+            credits: self.credits.for_display(),
             claim_state: state,
             credited: if same_day { self.credited } else { None },
             can_refresh: true,

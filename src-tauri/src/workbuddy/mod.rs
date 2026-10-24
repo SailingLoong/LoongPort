@@ -3,7 +3,7 @@ pub(crate) mod authorization;
 #[cfg(test)]
 mod authorization_tests;
 mod checkin;
-mod credits;
+pub(crate) mod credits;
 pub(crate) mod engine;
 #[cfg(test)]
 mod engine_tests;

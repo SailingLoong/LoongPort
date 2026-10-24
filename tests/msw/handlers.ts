@@ -132,6 +132,17 @@ function duplicateProvider(app: AppId, id: string): boolean {
 }
 
 export const handlers = [
+  // Workspace reads the independent preference beside the fallback control.
+  http.post(`${TAURI_ENDPOINT}/get_auto_mode_status`, () =>
+    success({
+      strategy: "cheapest",
+      enabled: false,
+      model: null,
+      availableModels: [],
+      hasCandidates: false,
+      cliInstalled: false,
+    }),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_cc_switch_import_preview`, () =>
     success({
       sourceExists: false,

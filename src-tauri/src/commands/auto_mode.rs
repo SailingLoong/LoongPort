@@ -11,7 +11,7 @@ use std::str::FromStr;
 #[serde(rename_all = "camelCase")]
 pub struct AutoModeStatus {
     pub enabled: bool,
-    /// "cheapest" | "fastest"
+    /// Global preference. Legacy "cheapest"/"fastest" retain applied order.
     pub strategy: String,
     /// 模型偏好（`None` = 不限）。
     pub model: Option<String>,
@@ -69,6 +69,14 @@ pub async fn get_auto_mode_status(
     app_type: String,
 ) -> Result<AutoModeStatus, String> {
     require_auto_mode_app(&app_type)?;
+    // Missing/legacy settings keep the default, but a failed read is not a
+    // confirmed user preference. Runtime routing retains its separate fallback.
+    let strategy = state
+        .db
+        .get_setting(auto_strategy::SETTING_STRATEGY)
+        .map_err(|error| error.to_string())?;
+    let strategy =
+        auto_strategy::AutoStrategy::from_setting_value(strategy.as_deref().unwrap_or("cheapest"));
     let providers = state
         .db
         .get_all_providers(&app_type)
@@ -76,7 +84,7 @@ pub async fn get_auto_mode_status(
     Ok(AutoModeStatus {
         enabled: crate::proxy::application_routing::failover_enabled(&state.db, &app_type)
             .map_err(|e| e.to_string())?,
-        strategy: auto_strategy::get_strategy(&state.db).as_str().to_string(),
+        strategy: strategy.as_str().to_string(),
         model: crate::proxy::application_routing::effective_model(&state.db, &app_type),
         available_models: auto_strategy::auto_mode_models(&providers),
         has_candidates: has_routing_candidates(&state, &app_type),
@@ -98,14 +106,20 @@ pub async fn set_auto_mode_enabled(
         .await
 }
 
-/// Policy reranking is retired; callers must submit an explicit priority order.
+/// Save the independent global expiry preference. The legacy wire value
+/// `cheapest` means applied order; price/speed policies remain retired.
 #[tauri::command]
 pub async fn set_auto_mode_strategy(
     state: tauri::State<'_, AppState>,
     strategy: String,
 ) -> Result<(), String> {
-    let _ = (state, strategy);
-    Err("Policy routing has been retired; set application priority instead".into())
+    if !matches!(strategy.as_str(), "cheapest" | "known_expiry_first") {
+        return Err("Unsupported routing preference".into());
+    }
+    state
+        .db
+        .set_setting(auto_strategy::SETTING_STRATEGY, &strategy)
+        .map_err(|error| error.to_string())
 }
 
 /// Set model intent without changing the selected provider.
