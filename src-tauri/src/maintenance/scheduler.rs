@@ -76,6 +76,7 @@ mod tests {
 }
 
 // BEGIN AUTOMATIC_CLAIM_RUNTIME
+pub(crate) use crate::automatic_claim::{AutomaticOutcome, AutomaticReason, AutomaticResult};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -93,22 +94,6 @@ pub(crate) enum AutomaticProvider {
 pub(crate) enum AutomaticPhase {
     Waiting,
     Checking,
-}
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum AutomaticResult {
-    Completed,
-    Failed,
-    Skipped,
-}
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum AutomaticReason {
-    Locked,
-    Disabled,
-    Pending,
-    NotEligible,
-    CheckFailed,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,31 +114,6 @@ impl AutomaticStatus {
             next_check_at: None,
             result: None,
             reason: None,
-        }
-    }
-}
-#[derive(Clone, Copy)]
-pub(crate) struct AutomaticOutcome {
-    pub result: AutomaticResult,
-    pub reason: Option<AutomaticReason>,
-}
-impl AutomaticOutcome {
-    pub fn completed() -> Self {
-        Self {
-            result: AutomaticResult::Completed,
-            reason: None,
-        }
-    }
-    pub fn failed() -> Self {
-        Self {
-            result: AutomaticResult::Failed,
-            reason: Some(AutomaticReason::CheckFailed),
-        }
-    }
-    pub fn skipped(reason: AutomaticReason) -> Self {
-        Self {
-            result: AutomaticResult::Skipped,
-            reason: Some(reason),
         }
     }
 }

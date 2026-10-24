@@ -1162,6 +1162,46 @@ async fn enable(e: &Engine<'_, impl Transport>, id: &str) -> AccountView {
     .unwrap()
 }
 #[tokio::test]
+async fn automatic_round_failure_reports_actual_attempts_and_continues_other_accounts() {
+    let (session, ids) = account_isolation_fixture();
+    let mut queue = vec![(
+        Domain::CodeBuddy,
+        "same-uid",
+        "SYNTHETIC_CODE_A",
+        Endpoint::Status,
+        Err(Failure::NeedsVerification),
+    )];
+    queue.extend(batch_b());
+    let transport = BatchFake::new(queue, false);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    enable(&engine, &ids[0]).await;
+    enable(&engine, &ids[1]).await;
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::failed()
+    );
+    let rows = engine.list().await.unwrap();
+    assert_eq!(rows[0].claim_state, ClaimState::NeedsVerification);
+    assert_eq!(rows[1].claim_state, ClaimState::Claimed);
+    assert!(!rows[2].auto_claim_enabled);
+    assert!(transport.queue.lock().unwrap().is_empty());
+    assert_eq!(
+        transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.2 == Endpoint::Claim)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn automatic_defaults_off_optin_bound_and_stale_setter_rejected() {
     let (s, id) = setup();
     let f = Fake::new(vec![]);
@@ -1170,7 +1210,12 @@ async fn automatic_defaults_off_optin_bound_and_stale_setter_rejected() {
         transport: &f,
         clock: &super::clock::FixedClock(NOW),
     };
-    e.automatic_tick().await.unwrap();
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::Disabled
+        )
+    );
     let before = e.list().await.unwrap().remove(0);
     assert!(!before.auto_claim_enabled);
     let after = enable(&e, &id).await;
@@ -1213,8 +1258,16 @@ async fn opted_in_account_claims_once_and_never_infers_award() {
         clock: &super::clock::FixedClock(NOW),
     };
     enable(&e, &id).await;
-    e.automatic_tick().await.unwrap();
-    e.automatic_tick().await.unwrap();
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::completed()
+    );
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::NotEligible
+        )
+    );
     let row = e.list().await.unwrap().remove(0);
     assert_eq!(row.credited, Some(7.0));
     assert!(row.auto_claim_enabled);
@@ -1285,7 +1338,12 @@ async fn lock_unblock_before_dispatch_invalidates_old_lease_without_write() {
     tick.await.unwrap();
     assert!(!f.calls.lock().unwrap().contains(&Endpoint::Claim));
     s.set_blocked(true);
-    assert!(e.automatic_tick().await.is_err());
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::Locked
+        )
+    );
     s.set_blocked(false);
 }
 #[tokio::test]
@@ -1317,7 +1375,12 @@ async fn pending_survives_optout_reenable_and_future_automatic_ticks_without_rea
     .await
     .unwrap();
     enable(&e, &id).await;
-    e.automatic_tick().await.unwrap();
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::Pending
+        )
+    );
     assert!(e.list().await.unwrap()[0].auto_claim_blocked);
     assert!(store::load(&s, &b).unwrap()[0].pending.is_some());
     assert!(f.calls.lock().unwrap().is_empty());
@@ -1946,7 +2009,10 @@ async fn automatic_failed_account_is_reported_without_starving_other_accounts() 
     };
     enable(&engine, &ids[0]).await;
     enable(&engine, &ids[1]).await;
-    assert_eq!(engine.automatic_tick().await.unwrap(), 1);
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::failed()
+    );
     assert!(transport.queue.lock().unwrap().is_empty());
     let rows = engine.list().await.unwrap();
     assert_eq!(

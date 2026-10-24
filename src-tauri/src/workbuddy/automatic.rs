@@ -1,5 +1,6 @@
 //! Per-account consent and periodic orchestration reuse the original account owner.
 use super::*;
+use crate::automatic_claim::{AutomaticOutcome as Outcome, AutomaticReason as Reason};
 impl<T: Transport> Engine<'_, T> {
     pub async fn set_automatic(
         &self,
@@ -37,12 +38,35 @@ impl<T: Transport> Engine<'_, T> {
         };
         self.persist(&b, rows, i)
     }
-    pub async fn automatic_tick(&self) -> Result<usize, Failure> {
+    pub async fn automatic_tick(&self) -> Result<Outcome, Failure> {
+        if self.session.read().is_err() {
+            return Ok(Outcome::skipped(Reason::Locked));
+        }
         let rows = self.list().await?;
+        let enabled: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.auto_claim_enabled)
+            .collect();
+        if enabled.is_empty() {
+            return Ok(Outcome::skipped(Reason::Disabled));
+        }
+        if !enabled
+            .iter()
+            .any(|row| row.can_set_automatic && !row.auto_claim_blocked && row.can_claim)
+        {
+            return Ok(Outcome::skipped(
+                if enabled.iter().any(|row| row.auto_claim_blocked) {
+                    Reason::Pending
+                } else {
+                    Reason::NotEligible
+                },
+            ));
+        }
         let mut failures = 0;
-        for row in rows.into_iter().filter(|r| {
-            r.auto_claim_enabled && r.can_set_automatic && !r.auto_claim_blocked && r.can_claim
-        }) {
+        for row in enabled
+            .into_iter()
+            .filter(|r| r.can_set_automatic && !r.auto_claim_blocked && r.can_claim)
+        {
             // The final dispatch barrier rechecks this exact identity and policy.
             match self
                 .claim_with_policy(&row.id, Some((row.generation, row.auto_claim_revision)))
@@ -62,6 +86,10 @@ impl<T: Transport> Engine<'_, T> {
                 Ok(_) => {}
             }
         }
-        Ok(failures)
+        Ok(if failures == 0 {
+            Outcome::completed()
+        } else {
+            Outcome::failed()
+        })
     }
 }

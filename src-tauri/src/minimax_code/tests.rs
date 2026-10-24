@@ -2216,6 +2216,89 @@ mod entitlement_owner_tests {
 }
 
 #[tokio::test]
+async fn automatic_round_ignores_accounts_added_after_its_eligibility_snapshot() {
+    struct AddsAccount<'a> {
+        session: &'a SecretSession,
+        added: std::sync::atomic::AtomicBool,
+        inner: Fake,
+    }
+    impl Transport for AddsAccount<'_> {
+        fn request(
+            &self,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                if !self.added.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    access(self.session, None, |d, _| {
+                        let mut other = account();
+                        other.id = "synthetic-later".into();
+                        other.real_user_id = "synthetic-later-user".into();
+                        other.auto_claim_enabled = true;
+                        other.status = Status::Unknown;
+                        d.accounts.push(other);
+                        Ok(((), true))
+                    })
+                    .await?;
+                }
+                self.inner.request(request).await
+            })
+        }
+    }
+    let f = Fixture::new().await;
+    f.seed(|d| d.accounts[0].auto_claim_enabled = true);
+    let transport = AddsAccount {
+        session: &f.session,
+        added: std::sync::atomic::AtomicBool::new(false),
+        inner: Fake::default(),
+    };
+    let engine = Engine {
+        session: &f.session,
+        transport: &transport,
+    };
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::completed()
+    );
+    assert_eq!(
+        *transport.inner.calls.lock().unwrap(),
+        vec![Endpoint::Status, Endpoint::Claim]
+    );
+    let rows = engine.list().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].status, Status::Unknown);
+    assert!(rows[1].operation.is_none());
+}
+
+#[tokio::test]
+async fn automatic_round_locked_or_ineligible_is_explicit_and_sends_nothing() {
+    let f = Fixture::new().await;
+    f.seed(|d| {
+        d.accounts[0].auto_claim_enabled = true;
+        d.accounts[0].credentials = None;
+    });
+    let transport = Fake::default();
+    let engine = Engine {
+        session: &f.session,
+        transport: &transport,
+    };
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::NotEligible
+        )
+    );
+    f.session.set_blocked(true);
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::Locked
+        )
+    );
+    f.session.set_blocked(false);
+    assert!(transport.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn automatic_claim_is_opt_in_per_account_and_never_replays_unknown() {
     let f = Fixture::new().await;
     f.seed(|_| {});
@@ -2224,15 +2307,26 @@ async fn automatic_claim_is_opt_in_per_account_and_never_replays_unknown() {
         session: &f.session,
         transport: &t,
     };
-    engine.automatic_tick().await.unwrap();
+    assert_eq!(
+        engine.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::skipped(
+            crate::automatic_claim::AutomaticReason::Disabled
+        )
+    );
     assert!(t.calls.lock().unwrap().is_empty());
     engine
         .set_automatic("synthetic-account", 1, 0, true)
         .await
         .unwrap();
     *t.claim.lock().unwrap() = Some(Err(Failure::NetworkUnavailable));
-    engine.automatic_tick().await.unwrap();
-    engine.automatic_tick().await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            engine.automatic_tick().await.unwrap(),
+            crate::automatic_claim::AutomaticOutcome::skipped(
+                crate::automatic_claim::AutomaticReason::Pending
+            )
+        );
+    }
     assert_eq!(
         t.calls
             .lock()
@@ -2728,7 +2822,10 @@ async fn automatic_failed_account_reports_error_and_other_account_still_runs() {
     e.set_automatic("synthetic-second", 1, 0, true)
         .await
         .unwrap();
-    assert_eq!(e.automatic_tick().await.unwrap(), 1);
+    assert_eq!(
+        e.automatic_tick().await.unwrap(),
+        crate::automatic_claim::AutomaticOutcome::failed()
+    );
     let rows = e.list().await.unwrap();
     let failed = rows.iter().find(|a| a.id == "synthetic-account").unwrap();
     assert_eq!(failed.auto_claim_failure, Some(Failure::NetworkUnavailable));
