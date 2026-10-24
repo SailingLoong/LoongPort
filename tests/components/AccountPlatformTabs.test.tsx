@@ -1,133 +1,108 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import i18n from "i18next";
 import { beforeEach, expect, it } from "vitest";
 import { AccountPlatformTabs } from "@/components/relay/accounts/AccountPlatformTabs";
 import type { AccountPlatform } from "@/components/relay/accounts/accountPlatforms";
 beforeEach(() => localStorage.clear());
 function Harness() {
-  const [active, setActive] = useState<AccountPlatform | undefined>(
-    "workbuddy",
+  const [active, setActive] = useState<AccountPlatform>();
+  return (
+    <AccountPlatformTabs
+      active={active}
+      onSelect={setActive}
+      platforms={["workbuddy", "trae_cn", "trae"]}
+    />
   );
-  return <AccountPlatformTabs active={active} onSelect={setActive} />;
 }
-it("renders distinct edition tabs with official logos and a persistent add button", () => {
+it("defaults to all accounts and only offers imported platform filters", () => {
   render(<Harness />);
-  expect(screen.getByRole("tab", { name: /TRAE 中国版/ })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: /TRAE 国际版/ })).toBeInTheDocument();
-  expect(
-    screen.getByRole("tab", { name: /MiniMax Code 国内版/ }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole("tab", { name: /MiniMax Code 国际版/ }),
-  ).toBeInTheDocument();
-  expect(screen.getAllByRole("img").length).toBeGreaterThan(6);
-  expect(
-    screen.getByRole("button", { name: "添加平台标签" }),
-  ).toBeInTheDocument();
-});
-it("hides only navigation, safely selects a neighbor and restores without duplicate tabs", async () => {
-  const user = userEvent.setup();
-  const view = render(<Harness />);
-  await user.click(screen.getByRole("button", { name: "隐藏 WorkBuddy 标签" }));
-  expect(
-    screen.queryByRole("tab", { name: "WorkBuddy" }),
-  ).not.toBeInTheDocument();
-  view.unmount();
-  render(<AccountPlatformTabs onSelect={() => {}} />);
-  expect(
-    screen.queryByRole("tab", { name: "WorkBuddy" }),
-  ).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "添加平台标签" }));
-  await user.click(screen.getByRole("button", { name: "添加 WorkBuddy" }));
-  expect(screen.getAllByRole("tab", { name: "WorkBuddy" })).toHaveLength(1);
-});
-it("supports keyboard selection, closing the final tab, and restoring from the empty state", async () => {
-  const user = userEvent.setup();
-  render(<Harness />);
-  const first = screen.getAllByRole("tab")[0];
-  first.focus();
-  await user.keyboard("{ArrowRight}");
-  await waitFor(() => expect(screen.getAllByRole("tab")[1]).toHaveFocus());
-  for (const close of screen.getAllByRole("button", { name: /^隐藏 / }))
-    await user.click(close);
-  expect(screen.queryAllByRole("tab")).toHaveLength(0);
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "添加平台标签" })).toHaveFocus(),
-  );
-  await user.click(screen.getByRole("button", { name: "添加平台标签" }));
-  await user.click(screen.getByRole("button", { name: "添加 WorkBuddy" }));
-  expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
-});
-
-it("temporarily reveals an explicitly opened hidden platform without changing saved visibility", () => {
-  localStorage.setItem(
-    "loongport.account-platform-tabs.v1",
-    JSON.stringify(["codex_oauth"]),
-  );
-  const view = render(
-    <AccountPlatformTabs active="workbuddy" onSelect={() => {}} />,
-  );
-  expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  expect(screen.queryByRole("tab", { name: "Qoder" })).not.toBeInTheDocument();
   expect(
-    JSON.parse(localStorage.getItem("loongport.account-platform-tabs.v1")!),
-  ).toEqual(["codex_oauth"]);
-  view.rerender(
-    <AccountPlatformTabs active="codex_oauth" onSelect={() => {}} />,
-  );
-  expect(
-    screen.queryByRole("tab", { name: "WorkBuddy" }),
+    screen.queryByRole("button", { name: /隐藏|添加平台/ }),
   ).not.toBeInTheDocument();
-});
-
-it("uses compact icon tabs with region badges only for true editions", () => {
-  render(<Harness />);
-  const workbuddy = screen.getByRole("tab", { name: "WorkBuddy" });
-  expect(workbuddy.textContent).toBe("");
-  expect(workbuddy).toHaveClass("h-10", "w-10");
-  expect(workbuddy.querySelector("img")).toHaveClass("h-5", "w-5");
   expect(screen.getByRole("tab", { name: "TRAE 中国版" })).toHaveTextContent(
-    /^CN$/,
+    "CN",
   );
   expect(screen.getByRole("tab", { name: "TRAE 国际版" })).toHaveTextContent(
-    /^INTL$/,
+    "INTL",
   );
-  expect(
-    screen.getByRole("tab", { name: "MiniMax Code 国内版" }),
-  ).toHaveTextContent(/^CN$/);
-  expect(
-    screen.getByRole("tab", { name: "MiniMax Code 国际版" }),
-  ).toHaveTextContent(/^INTL$/);
-  expect(screen.getByRole("tab", { name: "Qoder" }).textContent).toBe("");
-  expect(screen.getByRole("tablist")).toHaveClass("overflow-x-auto");
-  expect(
-    screen
-      .getByRole("button", { name: "添加平台标签" })
-      .closest('[role="tablist"]'),
-  ).toBeNull();
 });
-
-it("shows the full edition name on hover and keyboard focus without expanding the tab", async () => {
+it("selects one platform and restores all without changing legacy preferences", async () => {
+  const user = userEvent.setup();
+  localStorage.setItem("loongport.account-platform-tabs.v1", '["qoder"]');
+  render(<Harness />);
+  await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
+  expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await user.click(screen.getByRole("tab", { name: "全部" }));
+  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(localStorage.getItem("loongport.account-platform-tabs.v1")).toBe(
+    '["qoder"]',
+  );
+});
+it("supports keyboard filtering and cannot delete a filter", async () => {
   const user = userEvent.setup();
   render(<Harness />);
-  const international = screen.getByRole("tab", { name: "TRAE 国际版" });
-  await user.hover(international);
-  expect(await screen.findByRole("tooltip")).toHaveTextContent("TRAE 国际版");
-  await user.unhover(international);
-  const workbuddy = screen.getByRole("tab", { name: "WorkBuddy" });
-  act(() => workbuddy.focus());
+  act(() => screen.getByRole("tab", { name: "全部" }).focus());
+  await user.keyboard("{ArrowRight}");
   await waitFor(() =>
-    expect(screen.getByRole("tooltip")).toHaveTextContent("WorkBuddy"),
+    expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveFocus(),
   );
-  await user.keyboard("{Escape}");
-  await waitFor(() =>
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+  await user.keyboard("{Delete}");
+  expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveAttribute(
+    "aria-selected",
+    "true",
   );
-  expect(workbuddy).toHaveAttribute("aria-selected", "true");
+  await user.keyboard("{Home}");
+  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+it("keeps all reachable with zero accounts and deduplicates platform projections", () => {
+  const { rerender } = render(
+    <AccountPlatformTabs platforms={[]} onSelect={() => {}} />,
+  );
+  expect(screen.getAllByRole("tab")).toHaveLength(1);
+  rerender(
+    <AccountPlatformTabs
+      platforms={["trae_cn", "trae_cn"]}
+      onSelect={() => {}}
+    />,
+  );
+  expect(screen.getAllByRole("tab")).toHaveLength(2);
+});
+it("retains compact real logos and full edition tooltips", async () => {
+  const user = userEvent.setup();
+  render(<Harness />);
+  const cn = screen.getByRole("tab", { name: "TRAE 中国版" });
+  expect(cn).toHaveClass("h-10", "w-10");
+  expect(cn.querySelector("img")).toHaveClass("h-5", "w-5");
+  await user.hover(cn);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("TRAE 中国版");
+});
+
+it("translates both the all-filter label and its visible text", async () => {
+  i18n.addResourceBundle(
+    "en",
+    "translation",
+    { loongport: { accounts: { allPlatforms: "All" } } },
+    true,
+    true,
+  );
+  await i18n.changeLanguage("en");
+  render(<Harness />);
+  expect(screen.getByRole("tab", { name: "All" })).toHaveTextContent(/^All$/);
+  await i18n.changeLanguage("zh");
 });

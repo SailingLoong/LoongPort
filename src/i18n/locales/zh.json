@@ -3802,6 +3802,15 @@
       "source": "社区预告 · codex-reset.com"
     },
     "accounts": {
+      "platformAccounts": "平台账号",
+      "allPlatforms": "全部",
+      "platformFilter": "平台账号筛选",
+      "addAccount": "添加账号",
+      "loadingPlatforms": "正在读取平台账号…",
+      "partialPlatformRead": "部分平台账号读取失败，请稍后重试；已有账号未被删除。",
+      "emptyPlatforms": "尚无已导入的平台账号，添加账号后将在这里显示。",
+      "relayAccounts": "中转站与官方 API",
+      "manageConnection": "管理原有连接",
       "title": "服务与账号",
       "description": "管理已连接的中转站与官方 API。",
       "add": "添加服务",
@@ -3838,7 +3847,9 @@
         "monthly": "月窗口"
       },
       "usageTitle": "用量摘要",
-      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}",
+      "overview": "账号总览",
+      "staleSummary": "读取失败，显示上次读取的账号摘要；当前状态未知。"
     },
     "onboarding": {
       "domain": "中转站网址",

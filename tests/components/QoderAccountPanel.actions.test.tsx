@@ -71,7 +71,7 @@ it("opens the actual original identity and claim dialogs, with no implicit authe
       <QoderAccountPanel />
     </QueryClientProvider>,
   );
-  await screen.findByText("Original Qoder");
+  await screen.findByRole("heading", { name: "Original Qoder" });
   expect(api.context).not.toHaveBeenCalled();
   expect(api.claimContext).not.toHaveBeenCalled();
   expect(api.automaticContext).not.toHaveBeenCalled();
@@ -129,7 +129,7 @@ it("connects the real CN account listing entry without automatic GET, refresh or
       <QoderAccountPanel />
     </QueryClientProvider>,
   );
-  await screen.findByText("Synthetic CN account");
+  await screen.findByRole("heading", { name: "Synthetic CN account" });
   expect(api.readCampaigns).not.toHaveBeenCalled();
   expect(
     screen.queryByRole("button", { name: "Qoder 每日积分" }),

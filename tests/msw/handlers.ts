@@ -174,6 +174,31 @@ export const handlers = [
       },
     ]),
   ),
+  // Default local account inventories. Tests with imported accounts override these.
+  ...[
+    "list_workbuddy_accounts",
+    "list_workbuddy_inference_accounts",
+    "list_minimax_code_accounts",
+    "list_trae_accounts",
+  ].map((command) =>
+    http.post(`${TAURI_ENDPOINT}/${command}`, () => success([])),
+  ),
+  http.post(`${TAURI_ENDPOINT}/get_zcode_account_library`, () =>
+    success({
+      revision: "synthetic-empty",
+      profiles: [],
+      current: null,
+      pending: false,
+      nativeUnconfirmed: false,
+      actions: {
+        canAdd: true,
+        canImport: true,
+        canBackup: false,
+        canEditLabels: false,
+        blockedReason: null,
+      },
+    }),
+  ),
   http.post(`${TAURI_ENDPOINT}/auth_get_status`, async ({ request }) => {
     const { authProvider } = (await request.json()) as { authProvider: string };
     return success({

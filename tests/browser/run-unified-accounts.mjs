@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import {
+  platformAccountFilterName,
+  nativeAccountKeyboardSteps,
+  nativeAccountOverviewCounts,
+} from "./unified-account-locators.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -120,9 +125,26 @@ try {
             name: "账号详情",
             exact: true,
           });
-          await detail
-            .getByRole("heading", { name: "Synthetic account A", exact: true })
+          await main
+            .getByRole("button", {
+              name: "查看 Synthetic account B",
+              exact: true,
+            })
             .waitFor();
+          assert.equal(
+            await detail.count(),
+            0,
+            "All must show summaries without visible native workspaces",
+          );
+          await page.waitForFunction(() => window.unifiedLayout.settled());
+          await page.evaluate(() => document.fonts.ready);
+          await page.screenshot({
+            path: path.join(
+              output,
+              `native-overview-${variant.width}-${variant.language}-${variant.dark ? "dark" : "light"}.png`,
+            ),
+            fullPage: true,
+          });
           await main
             .getByRole("button", {
               name: "查看 Synthetic account B",
@@ -170,7 +192,7 @@ try {
             )
             .waitFor();
           await main
-            .getByText("Synthetic OpenCode workspace with a long label", {
+            .getByText("Synthetic workspace account", {
               exact: true,
             })
             .waitFor();
@@ -190,7 +212,7 @@ try {
           );
           assert.equal(
             await main
-              .getByText("Synthetic OpenCode workspace with a long label", {
+              .getByText("Synthetic workspace account", {
                 exact: true,
               })
               .count(),
@@ -316,7 +338,7 @@ try {
         await main.evaluate((node) => node.scrollTo(0, 0));
         if (scenario === "populated")
           await main
-            .getByText("Synthetic OpenCode workspace with a long label", {
+            .getByText("Synthetic workspace account", {
               exact: true,
             })
             .scrollIntoViewIfNeeded();
@@ -491,7 +513,7 @@ try {
             .waitFor();
         } else if (scenario === "native") {
           const platformTabs = main.getByRole("tablist", {
-            name: "服务平台",
+            name: platformAccountFilterName(t),
             exact: true,
           });
           // Exercise the real status hook for both providers. The fixture exposes
@@ -540,11 +562,7 @@ try {
           await platformTabs
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .focus();
-          for (const [key, name] of [
-            ["Home", "GitHub Copilot"],
-            ["ArrowRight", "ChatGPT"],
-            ["End", "OpenCode"],
-          ]) {
+          for (const [key, name] of nativeAccountKeyboardSteps(t)) {
             await page.keyboard.press(key);
             const selected = platformTabs.getByRole("tab", {
               name,
@@ -580,10 +598,24 @@ try {
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .waitFor();
           assert.equal(
+            await platformTabs
+              .getByRole("tab", {
+                name: t("loongport.accounts.allPlatforms"),
+                exact: true,
+              })
+              .getAttribute("aria-selected"),
+            "true",
+          );
+          for (const name of [
+            "查看 Synthetic account A",
+            "查看 Synthetic WorkBuddy account",
+          ])
+            await main.getByRole("button", { name, exact: true }).waitFor();
+          assert.equal(
             await main
               .getByRole("region", { name: "账号详情", exact: true })
               .count(),
-            0,
+            nativeAccountOverviewCounts.details,
           );
           for (const name of [
             "查看 Synthetic account A",
@@ -591,7 +623,7 @@ try {
           ])
             assert.equal(
               await main.getByRole("button", { name, exact: true }).count(),
-              0,
+              nativeAccountOverviewCounts.accountButtons,
             );
         }
         await page.waitForFunction(() => window.unifiedLayout.settled());

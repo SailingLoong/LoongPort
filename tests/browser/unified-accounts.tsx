@@ -144,6 +144,23 @@ mockIPC(
       }
       case "list_workbuddy_accounts":
         return workbuddyAccounts;
+      case "list_trae_accounts":
+        return [];
+      case "get_zcode_account_library":
+        return {
+          revision: "synthetic-empty",
+          profiles: [],
+          current: null,
+          pending: false,
+          nativeUnconfirmed: false,
+          actions: {
+            canAdd: true,
+            canImport: true,
+            canBackup: false,
+            canEditLabels: false,
+            blockedReason: null,
+          },
+        };
       case "list_workbuddy_inference_accounts":
         return [];
       case "list_minimax_code_accounts":
@@ -225,7 +242,7 @@ function Fixture() {
     scenario === "add" ? "addHub" : "services",
   );
   const [platform, setPlatform] = useState<AccountPlatform | undefined>(
-    scenario === "native" ? "minimax_code" : undefined,
+    undefined,
   );
   const [entryRequest, setEntryRequest] = useState<{
     id: number;

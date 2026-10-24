@@ -3799,6 +3799,15 @@
       "source": "社群預告 · codex-reset.com"
     },
     "accounts": {
+      "platformAccounts": "平台帳號",
+      "allPlatforms": "全部",
+      "platformFilter": "篩選平台帳號",
+      "addAccount": "新增帳號",
+      "loadingPlatforms": "正在讀取平台帳號…",
+      "partialPlatformRead": "部分平台帳號讀取失敗，請稍後重試；已儲存帳號未被刪除。",
+      "emptyPlatforms": "尚無已匯入的平台帳號，新增帳號後將顯示於此。",
+      "relayAccounts": "中轉站與官方 API",
+      "manageConnection": "管理原有連線",
       "title": "服務與帳號",
       "description": "管理已連接的中轉站與官方 API。",
       "add": "新增服務",
@@ -3835,7 +3844,9 @@
         "monthly": "月窗口"
       },
       "usageTitle": "用量摘要",
-      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}",
+      "overview": "帳號總覽",
+      "staleSummary": "讀取失敗，顯示上次讀取的帳號摘要；目前狀態未知。"
     },
     "onboarding": {
       "domain": "中轉站網址",

@@ -5,6 +5,24 @@ import { useTranslation } from "react-i18next";
 import { usePreservedViewActive } from "./PreservedView";
 import { cn } from "@/lib/utils";
 
+const DialogVisibilityContext = React.createContext(true);
+
+/** Hide only portal effects; the native authorization owner keeps its flow alive. */
+export function DialogVisibility({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  const parent = React.useContext(DialogVisibilityContext);
+  return (
+    <DialogVisibilityContext.Provider value={parent && active}>
+      {children}
+    </DialogVisibilityContext.Provider>
+  );
+}
+
 const Dialog = DialogPrimitive.Root;
 
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -92,6 +110,7 @@ const DialogContent = React.forwardRef<
     // 破例的理由就是它：mock 提供 `useTranslation`，不提供那个初始化导出。
     const { t } = useTranslation();
     const viewActive = usePreservedViewActive();
+    const portalVisible = React.useContext(DialogVisibilityContext);
     const variantClass = {
       default:
         "fixed left-1/2 top-1/2 flex flex-col w-full max-w-lg max-h-[90vh] translate-x-[-50%] translate-y-[-50%] border border-border-default bg-background text-foreground shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
@@ -100,41 +119,43 @@ const DialogContent = React.forwardRef<
     }[variant];
 
     return (
-      <DialogPortal>
-        <DialogOverlay zIndex={zIndex} className={overlayClassName} />
-        <DialogPrimitive.Content
-          ref={ref}
-          className={cn(
-            variantClass,
-            DIALOG_Z_INDEX_CLASS[zIndex],
-            className,
-            !viewActive && "!hidden",
-          )}
-          onInteractOutside={(e) => {
-            // 防止点击遮罩层关闭对话框
-            e.preventDefault();
-          }}
-          {...props}
-          hidden={!viewActive || props.hidden}
-        >
-          {children}
-          {/* 放在 children **之后**：它是绝对定位的，DOM 顺序只影响 Tab 焦点次序 ——
+      <React.Activity mode={portalVisible ? "visible" : "hidden"}>
+        <DialogPortal>
+          <DialogOverlay zIndex={zIndex} className={overlayClassName} />
+          <DialogPrimitive.Content
+            ref={ref}
+            className={cn(
+              variantClass,
+              DIALOG_Z_INDEX_CLASS[zIndex],
+              className,
+              !viewActive && "!hidden",
+            )}
+            onInteractOutside={(e) => {
+              // 防止点击遮罩层关闭对话框
+              e.preventDefault();
+            }}
+            {...props}
+            hidden={!viewActive || props.hidden}
+          >
+            {children}
+            {/* 放在 children **之后**：它是绝对定位的，DOM 顺序只影响 Tab 焦点次序 ——
               排在末尾才不会抢在弹窗主内容之前拿到焦点。
 
               `z-10` 是必需的：`DialogHeader` 带 `bg-muted/20` 背景，同层级下
               后面的兄弟节点会盖住它，但 header 是 flex 布局里的实体块 ——
               不提层的话 X 会被 header 的背景吃掉一半。样式抄 `SessionToc` 那份
               （仓里已有的同形范例，AGENTS.md §一「视觉 token 抄上游」）。 */}
-          {showCloseButton && (
-            <DialogPrimitive.Close
-              className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:pointer-events-none"
-              aria-label={closeButtonLabel ?? t("common.close")}
-            >
-              <X className="size-4" />
-            </DialogPrimitive.Close>
-          )}
-        </DialogPrimitive.Content>
-      </DialogPortal>
+            {showCloseButton && (
+              <DialogPrimitive.Close
+                className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:pointer-events-none"
+                aria-label={closeButtonLabel ?? t("common.close")}
+              >
+                <X className="size-4" />
+              </DialogPrimitive.Close>
+            )}
+          </DialogPrimitive.Content>
+        </DialogPortal>
+      </React.Activity>
     );
   },
 );

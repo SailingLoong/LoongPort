@@ -3802,6 +3802,15 @@
       "source": "Community tracker · codex-reset.com"
     },
     "accounts": {
+      "platformAccounts": "Platform accounts",
+      "allPlatforms": "All",
+      "platformFilter": "Filter platform accounts",
+      "addAccount": "Add account",
+      "loadingPlatforms": "Loading platform accounts…",
+      "partialPlatformRead": "Some platform accounts could not be read. Please try again later; saved accounts have not been deleted.",
+      "emptyPlatforms": "No imported platform accounts yet. Add an account to see it here.",
+      "relayAccounts": "Relay & official API accounts",
+      "manageConnection": "Manage connection",
       "title": "Services & accounts",
       "description": "Manage connected relay and official API accounts.",
       "add": "Add service",
@@ -3838,7 +3847,9 @@
         "monthly": "Monthly window"
       },
       "usageTitle": "Usage summary",
-      "usageHeadline": "7 days {{seven}} · 30 days {{thirty}}"
+      "usageHeadline": "7 days {{seven}} · 30 days {{thirty}}",
+      "overview": "Account overview",
+      "staleSummary": "Could not read this platform. Showing the last account summary; current status is unknown."
     },
     "onboarding": {
       "domain": "Relay URL",

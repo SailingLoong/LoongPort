@@ -2,6 +2,7 @@ import {
   Fragment,
   createContext,
   useContext,
+  useEffect,
   useState,
   type ReactNode,
 } from "react";
@@ -12,6 +13,11 @@ import { cn } from "@/lib/utils";
 
 export const AccountApplicationNavigation = createContext<
   (() => void) | undefined
+>(undefined);
+
+/** A navigation request only; selection and account state stay in the native workspace. */
+export const AccountWorkspaceTarget = createContext<
+  { id: string; request: number } | undefined
 >(undefined);
 
 /** Shared presentation, not an account store: every detail/action retains its native owner. */
@@ -29,7 +35,11 @@ export function AccountWorkspace<T extends { id: string }>({
   enabled?: boolean;
 }) {
   const openApplication = useContext(AccountApplicationNavigation);
-  const [selected, setSelected] = useState<string>();
+  const target = useContext(AccountWorkspaceTarget);
+  const [selected, setSelected] = useState<string | undefined>(target?.id);
+  useEffect(() => {
+    if (target) setSelected(target.id);
+  }, [target]);
   const [search, setSearch] = useState("");
   if (!enabled)
     return (
@@ -39,7 +49,9 @@ export function AccountWorkspace<T extends { id: string }>({
         ))}
       </>
     );
-  const current = accounts.find((row) => row.id === selected) ?? accounts[0];
+  const current =
+    accounts.find((row) => row.id === selected) ??
+    (target ? undefined : accounts[0]);
   const filtered = accounts.filter((row) =>
     label(row).toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );

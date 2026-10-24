@@ -3802,6 +3802,15 @@
       "source": "コミュニティ予測 · codex-reset.com"
     },
     "accounts": {
+      "platformAccounts": "プラットフォームアカウント",
+      "allPlatforms": "すべて",
+      "platformFilter": "プラットフォームアカウントの絞り込み",
+      "addAccount": "アカウントを追加",
+      "loadingPlatforms": "プラットフォームアカウントを読み込み中…",
+      "partialPlatformRead": "一部のアカウントを読み込めませんでした。後でもう一度お試しください。保存済みアカウントは削除されていません。",
+      "emptyPlatforms": "まだインポートされたアカウントはありません。追加するとここに表示されます。",
+      "relayAccounts": "中継サービスと公式 API",
+      "manageConnection": "接続を管理",
       "title": "サービスとアカウント",
       "description": "接続済みの中継サービスと公式 API を管理します。",
       "add": "サービスを追加",
@@ -3838,7 +3847,9 @@
         "monthly": "月次ウィンドウ"
       },
       "usageTitle": "使用量サマリー",
-      "usageHeadline": "7日 {{seven}} · 30日 {{thirty}}"
+      "usageHeadline": "7日 {{seven}} · 30日 {{thirty}}",
+      "overview": "アカウント概要",
+      "staleSummary": "読み取りに失敗しました。前回のアカウント概要を表示しています。現在の状態は不明です。"
     },
     "onboarding": {
       "domain": "中継サービスの URL",

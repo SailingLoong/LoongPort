@@ -443,7 +443,11 @@ it("completes visibly, refreshes the saved account, and returns without cancelli
   await act(async () => {
     await vi.advanceTimersToNextTimerAsync();
   });
-  expect(screen.getByText("独立授权 created-provider")).toBeInTheDocument();
+  expect(
+    within(screen.getByLabelText("账号详情")).getByText(
+      "独立授权 created-provider",
+    ),
+  ).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: startLabel }),
   ).not.toBeInTheDocument();
@@ -632,7 +636,9 @@ it("keeps the backend-saved pending row visible after cancelling a new grant ins
     fireEvent.keyDown(document, { key: "Escape" });
   });
   expect(
-    screen.getByRole("heading", { name: "独立授权 created-provider" }),
+    within(screen.getByLabelText("账号详情")).getByText(
+      "独立授权 created-provider",
+    ),
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: loginLabel })).toBeInTheDocument();
   expect(api.start).toHaveBeenCalledTimes(1);
@@ -675,7 +681,9 @@ it("refreshes backend-saved pending records after a failed start without retryin
     fireEvent.keyDown(document, { key: "Escape" });
   });
   expect(
-    screen.getByRole("heading", { name: "独立授权 created-provider" }),
+    within(screen.getByLabelText("账号详情")).getByText(
+      "独立授权 created-provider",
+    ),
   ).toBeInTheDocument();
   expect(api.start).toHaveBeenCalledTimes(1);
   expect(api.openExternal).not.toHaveBeenCalled();

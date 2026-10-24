@@ -48,7 +48,9 @@ it("uses original Codex Qoder rows only and their original identity and claim co
     other: { id: "other", name: "Not Qoder", settingsConfig: {} },
   } as never);
   setup();
-  expect(await screen.findByText("Existing account")).toBeInTheDocument();
+  expect(
+    await screen.findByRole("heading", { name: "Existing account" }),
+  ).toBeInTheDocument();
   expect(providersApi.getAll).toHaveBeenCalledWith("codex");
   expect(
     screen.getByRole("button", { name: "identity:one:r1" }),
@@ -79,7 +81,7 @@ it("refreshes changed original account rows without creating an alternate accoun
     } as never)
     .mockResolvedValueOnce({});
   setup();
-  await screen.findByText("Old account");
+  await screen.findByRole("heading", { name: "Old account" });
   fireEvent.click(screen.getByRole("button", { name: "刷新账号" }));
   await waitFor(() =>
     expect(screen.queryByText("Old account")).not.toBeInTheDocument(),
@@ -109,7 +111,14 @@ it("keeps CN original account IDs separate and never mounts the international cl
     legacy: { id: "legacy", name: "Unknown old source", settingsConfig: {} },
   } as never);
   setup();
-  await screen.findByText("CN account");
+  await screen.findByRole("button", { name: "查看 CN account" });
+  expect(
+    screen.getByRole("button", { name: "claim:global" }),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看 CN account" }));
+  expect(
+    screen.getByRole("heading", { name: "CN account" }),
+  ).toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "identity:cn:cn-generation" }),
   ).toBeInTheDocument();
@@ -126,8 +135,8 @@ it("keeps CN original account IDs separate and never mounts the international cl
     screen.queryByRole("button", { name: "claim:cn" }),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "claim:global" }),
-  ).toBeInTheDocument();
+    screen.queryByRole("button", { name: "claim:global" }),
+  ).not.toBeInTheDocument();
   expect(screen.queryByText("Unknown old source")).not.toBeInTheDocument();
   expect(screen.queryByText("never-show-cn")).not.toBeInTheDocument();
 });
