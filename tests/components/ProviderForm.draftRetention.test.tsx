@@ -287,3 +287,80 @@ it("allows explicit legacy common snippet save and revokes an open editor when t
     save.mockRestore();
   }
 });
+
+it("saves Gemini env after alternating native field and raw editor changes", async () => {
+  const client = createTestQueryClient();
+  const legacy = {
+    modeState: {
+      status: "ready",
+      canWrite: true,
+      writeProtocol: "legacy",
+      blockedReason: null,
+    },
+  };
+  client.setQueryData(["applicationRouting", "gemini"], legacy);
+  vi.mocked(applicationRoutingApi.get).mockResolvedValue(legacy as any);
+  const onSubmit = vi.fn();
+  const { unmount } = render(
+    <QueryClientProvider client={client}>
+      <ProviderForm
+        appId="gemini"
+        providerId="gemini-draft"
+        submitLabel="save"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        initialData={{
+          name: "Gemini draft",
+          category: "third_party",
+          settingsConfig: {
+            env: {
+              GEMINI_API_KEY: "synthetic-initial",
+              GOOGLE_GEMINI_BASE_URL: "https://initial.example",
+              GEMINI_MODEL: "initial-model",
+              EXTRA: "keep",
+            },
+            config: { custom: true },
+          },
+          meta: { commonConfigEnabled: false },
+        }}
+      />
+    </QueryClientProvider>,
+  );
+  try {
+    const keyInput = await screen.findByDisplayValue("synthetic-initial");
+    fireEvent.change(keyInput, { target: { value: " synthetic-field " } });
+    const editors = await screen.findAllByRole("textbox", {
+      name: "configuration JSON",
+    });
+    const raw = [
+      "# retained until a field edit",
+      "GEMINI_API_KEY=obsolete",
+      "GEMINI_API_KEY=synthetic-raw",
+      "GOOGLE_GEMINI_BASE_URL=https://raw.example",
+      "GEMINI_MODEL=raw-model",
+      "EXTRA=keep",
+      "unfinished line",
+    ].join("\n");
+    fireEvent.change(editors[0], { target: { value: raw } });
+    expect(editors[0]).toHaveValue(raw);
+    await waitFor(() => expect(keyInput).toHaveValue("synthetic-raw"));
+    fireEvent.change(screen.getByDisplayValue("raw-model"), {
+      target: { value: " final-model " },
+    });
+    fireEvent.submit(document.querySelector("form")!);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(JSON.parse(onSubmit.mock.calls[0][0].settingsConfig)).toEqual({
+      env: {
+        GEMINI_API_KEY: "synthetic-raw",
+        GOOGLE_GEMINI_BASE_URL: "https://raw.example",
+        GEMINI_MODEL: "final-model",
+        EXTRA: "keep",
+      },
+      config: { custom: true },
+    });
+  } finally {
+    unmount();
+    await client.cancelQueries();
+    client.clear();
+  }
+});
