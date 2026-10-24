@@ -81,13 +81,11 @@ pub(crate) fn anthropic_block_from_openai_reasoning_item(item: &Value) -> Option
         .is_some_and(|value| !value.is_empty());
 
     if has_encrypted_content {
+        // An encrypted-only item (no public summary) is carried as an empty
+        // thinking block, the same shape Anthropic returns for omitted
+        // thinking. Claude Code's VS Code extension cannot render
+        // `redacted_thinking`, and replay decodes both carriers identically.
         let envelope = encode_openai_reasoning_item(item)?;
-        if text.is_empty() {
-            return Some(json!({
-                "type": "redacted_thinking",
-                "data": envelope
-            }));
-        }
         return Some(json!({
             "type": "thinking",
             "thinking": text,
@@ -138,7 +136,84 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_item_without_summary_uses_redacted_thinking() {
+    fn encrypted_only_new_and_legacy_carriers_replay_identical_multiturn_tools() {
+        use super::super::transform_responses::{anthropic_to_responses, responses_to_anthropic};
+
+        let mut new_history = Vec::new();
+        let mut old_history = Vec::new();
+        let mut expected = Vec::new();
+        for round in 0..2 {
+            let original = json!({
+                "id": format!("rs_{round}"), "type": "reasoning", "summary": [],
+                "encrypted_content": format!("opaque_{round}"), "status": "completed",
+                "content": [{"type": "output_text", "text": "not replayable"}]
+            });
+            let response = responses_to_anthropic(json!({
+                "id": format!("resp_{round}"), "model": "gpt-5.6",
+                "status": "completed", "output": [original],
+                "usage": {"input_tokens": 2, "output_tokens": 1}
+            }))
+            .unwrap();
+            let block = response["content"][0].clone();
+            assert_eq!(block["type"], "thinking");
+            assert_eq!(block["thinking"], "");
+            let legacy = json!({"type": "redacted_thinking", "data": block["signature"]});
+            let tool = json!({
+                "type": "tool_use", "id": format!("call_{round}"),
+                "name": "lookup", "input": {"round": round}
+            });
+            let result = json!({
+                "role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": format!("call_{round}"),
+                    "content": "ok"
+                }]
+            });
+            new_history.push(json!({"role": "assistant", "content": [block, tool]}));
+            new_history.push(result.clone());
+            old_history.push(json!({"role": "assistant", "content": [legacy, tool]}));
+            old_history.push(result);
+            expected.push(json!({
+                "id": format!("rs_{round}"), "type": "reasoning", "summary": [],
+                "encrypted_content": format!("opaque_{round}")
+            }));
+        }
+        let replay = |messages| {
+            anthropic_to_responses(
+                json!({"model": "gpt-5.6", "messages": messages}),
+                None,
+                true,
+                false,
+            )
+            .unwrap()
+        };
+        let new_request = replay(new_history);
+        let old_request = replay(old_history);
+        assert_eq!(new_request, old_request);
+        let input = new_request["input"].as_array().unwrap();
+        let reasoning: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .cloned()
+            .collect();
+        assert_eq!(reasoning, expected);
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .count(),
+            2
+        );
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item["type"] == "function_call_output")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn encrypted_item_without_summary_uses_empty_thinking() {
         let item = json!({
             "id": "rs_2",
             "type": "reasoning",
@@ -146,9 +221,18 @@ mod tests {
             "encrypted_content": "opaque"
         });
         let block = anthropic_block_from_openai_reasoning_item(&item).unwrap();
-        assert_eq!(block["type"], "redacted_thinking");
+        assert_eq!(block["type"], "thinking");
+        assert_eq!(block["thinking"], "");
         assert_eq!(
             openai_reasoning_item_from_anthropic_block(&block),
+            Some(item.clone())
+        );
+        // Histories written by older versions still carry redacted_thinking.
+        assert_eq!(
+            openai_reasoning_item_from_anthropic_block(&json!({
+                "type": "redacted_thinking",
+                "data": block["signature"]
+            })),
             Some(item)
         );
     }
