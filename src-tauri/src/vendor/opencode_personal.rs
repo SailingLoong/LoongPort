@@ -214,6 +214,94 @@ pub fn save(
     Ok(id)
 }
 
+/// Request-local fallback captured before protocol conversion. Only Personal
+/// dispatch consumes this hint; other providers retain their session semantics.
+#[cfg(any(feature = "gui", feature = "test-hooks", test))]
+#[derive(Clone, Default)]
+pub(crate) enum PersonalSessionHint {
+    #[default]
+    Legacy,
+    Body(String),
+    InvalidBody,
+}
+
+#[cfg(any(feature = "gui", feature = "test-hooks", test))]
+impl PersonalSessionHint {
+    pub(crate) fn from_original(
+        body: &serde_json::Value,
+        original: &crate::proxy::session::SessionIdResult,
+    ) -> Self {
+        use crate::proxy::session::SessionIdSource;
+        let user_id = body.pointer("/metadata/user_id").and_then(|v| v.as_str());
+        let structured_user = user_id
+            .is_some_and(|v| v.trim_start().starts_with('{') || v.trim_start().starts_with('['));
+        // The legacy parser searches `_session_` anywhere. Do not treat a
+        // substring in a JSON account/device field as a conversation identity.
+        if original.client_provided
+            && !(original.source == SessionIdSource::MetadataUserId && structured_user)
+        {
+            return Self::Legacy;
+        }
+        if let Some(value) = body.get("prompt_cache_key") {
+            return Self::from_value(value);
+        }
+        if structured_user {
+            // Local defensive parsing bound, not a claimed vendor limit.
+            let raw = user_id.unwrap_or_default();
+            if raw.len() > 16 * 1024 {
+                return Self::InvalidBody;
+            }
+            return serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| value.get("session_id").map(Self::from_value))
+                .unwrap_or(Self::InvalidBody);
+        }
+        Self::Legacy
+    }
+
+    fn valid(value: &str) -> bool {
+        // Keep real client IDs, never manufacture or prefix a new identity.
+        !value.trim().is_empty()
+            && value.len() <= 8 * 1024
+            && !value.bytes().any(|b| b.is_ascii_control())
+            && http::HeaderValue::from_str(value).is_ok()
+    }
+
+    fn from_value(value: &serde_json::Value) -> Self {
+        match value.as_str().filter(|value| Self::valid(value)) {
+            Some(value) => Self::Body(value.trim().to_owned()),
+            None => Self::InvalidBody,
+        }
+    }
+
+    pub(crate) fn resolve<'a>(
+        &'a self,
+        headers: &http::HeaderMap,
+        legacy: Option<&'a str>,
+    ) -> Result<Option<&'a str>, crate::proxy::ProxyError> {
+        if matches!(self, Self::Legacy) {
+            // Preserve existing native-header / legacy dual-header policy.
+            return Ok(legacy);
+        }
+        let invalid = || {
+            crate::proxy::ProxyError::InvalidRequest("OpenCode conversation ID is invalid".into())
+        };
+        // Resolve after local header overrides. Presence, even when invalid,
+        // forbids replacing an explicit identity with a new body fallback.
+        if let Some(explicit) = headers.get("x-opencode-session") {
+            if explicit.to_str().ok().is_some_and(Self::valid) {
+                return Ok(None);
+            }
+            return Err(invalid());
+        }
+        match self {
+            Self::Body(value) => Ok(Some(value)),
+            Self::InvalidBody => Err(invalid()),
+            Self::Legacy => unreachable!(),
+        }
+    }
+}
+
 /// Only the new explicit personal-key source uses these headers. Preserve original body/SSE.
 pub fn request_headers(
     plan: &str,
@@ -338,5 +426,101 @@ mod transport_tests {
         ] {
             assert!(request_headers(ZEN, url, &mut headers, Some("fixture-conversation")).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod session_hint_tests {
+    use super::PersonalSessionHint;
+    use crate::proxy::session::extract_session_id;
+    use http::{HeaderMap, HeaderValue};
+    use serde_json::json;
+
+    #[test]
+    fn personal_fallback_is_captured_before_conversion_and_cloned() {
+        let mut body = json!({"prompt_cache_key":" real-client-session "});
+        let original = extract_session_id(&HeaderMap::new(), &body, "codex");
+        let hint = PersonalSessionHint::from_original(&body, &original).clone();
+        body.as_object_mut().unwrap().remove("prompt_cache_key");
+        assert_eq!(
+            hint.resolve(&HeaderMap::new(), None).unwrap(),
+            Some("real-client-session")
+        );
+        assert!(!original.client_provided, "global extraction is unchanged");
+    }
+
+    #[test]
+    fn personal_fallback_respects_final_explicit_header_and_rejects_invalid_presence() {
+        let body = json!({"prompt_cache_key":"body-session"});
+        let original = extract_session_id(&HeaderMap::new(), &body, "codex");
+        let hint = PersonalSessionHint::from_original(&body, &original);
+        let mut final_headers = HeaderMap::new();
+        final_headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("late-explicit-session"),
+        );
+        assert_eq!(hint.resolve(&final_headers, None).unwrap(), None);
+        final_headers.insert("x-opencode-session", HeaderValue::from_static("   "));
+        assert!(
+            matches!(hint.resolve(&final_headers, None), Err(crate::proxy::ProxyError::InvalidRequest(message)) if message == "OpenCode conversation ID is invalid")
+        );
+    }
+
+    #[test]
+    fn personal_fallback_does_not_change_native_header_or_legacy_dual_header_policy() {
+        for (app, header, expected) in [
+            (
+                "codex",
+                "x-session-id",
+                "codex_native-session-fixture-123456",
+            ),
+            (
+                "claude",
+                "x-claude-code-session-id",
+                "native-session-fixture-123456",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header,
+                HeaderValue::from_static("native-session-fixture-123456"),
+            );
+            headers.insert(
+                "x-opencode-session",
+                HeaderValue::from_static("other-explicit"),
+            );
+            let body =
+                json!({"prompt_cache_key":42,"metadata":{"user_id":"{malformed_session_fake"}});
+            let original = extract_session_id(&headers, &body, app);
+            let hint = PersonalSessionHint::from_original(&body, &original);
+            assert_eq!(
+                hint.resolve(&headers, Some(&original.session_id)).unwrap(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn personal_json_account_substrings_are_not_conversations() {
+        let body = json!({"metadata":{"user_id":json!({"account_uuid":"user_account_session_not_a_conversation"}).to_string()}});
+        let original = extract_session_id(&HeaderMap::new(), &body, "claude");
+        assert!(
+            original.client_provided,
+            "fixture exercises the existing substring parser"
+        );
+        let hint = PersonalSessionHint::from_original(&body, &original);
+        assert!(hint
+            .resolve(&HeaderMap::new(), Some(&original.session_id))
+            .is_err());
+        let mut final_headers = HeaderMap::new();
+        final_headers.insert(
+            "x-opencode-session",
+            HeaderValue::from_static("real-explicit"),
+        );
+        assert_eq!(
+            hint.resolve(&final_headers, Some(&original.session_id))
+                .unwrap(),
+            None
+        );
     }
 }

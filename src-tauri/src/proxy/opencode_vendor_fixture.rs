@@ -19,6 +19,10 @@ const ACCOUNT_IDS: [&str; 2] = [
 ];
 const ROW_IDS: [i64; 2] = [701, 702];
 const KEYS: [&str; 2] = ["SYNTHETIC_OPENCODE_KEY_A", "SYNTHETIC_OPENCODE_KEY_B"];
+const PERSONAL_KEYS: [&str; 2] = [
+    "oc_sk_fixture_SyntheticPersonalSecretOnly1234",
+    "oc_sk_fixture_OtherSyntheticPersonalSecret1234",
+];
 const OFFICIAL_OUTPUT: &str = "https://opencode.ai/zen/v1/responses";
 
 fn invalid() -> ProxyError {
@@ -31,20 +35,38 @@ pub(crate) struct FixtureOwner {
     session: Arc<SecretSession>,
     root: PathBuf,
     epoch: u64,
+    accounts: [String; 2],
+    personal_go: bool,
     _home: TestHome,
 }
 impl FixtureOwner {
     /// Generates its own empty physical temporary home and original vault/DB.
     pub(crate) fn new() -> Self {
-        Self::new_inner(true, 2)
+        Self::new_inner(true, 2, false)
     }
     pub(crate) fn with_uninitialized_chain() -> Self {
-        Self::new_inner(false, 2)
+        Self::new_inner(false, 2, false)
     }
     pub(crate) fn with_one_binding() -> Self {
-        Self::new_inner(true, 1)
+        Self::new_inner(true, 1, false)
     }
-    fn new_inner(initialize_chain: bool, bind_count: usize) -> Self {
+    pub(crate) fn personal_go() -> Self {
+        Self::new_inner(true, 2, true)
+    }
+    fn new_inner(initialize_chain: bool, bind_count: usize, personal_go: bool) -> Self {
+        let accounts: [String; 2] = std::array::from_fn(|i| {
+            if personal_go {
+                vendor::opencode_personal::identity(PERSONAL_KEYS[i]).unwrap()
+            } else {
+                ACCOUNT_IDS[i].into()
+            }
+        });
+        let keys = if personal_go { PERSONAL_KEYS } else { KEYS };
+        let plan = if personal_go {
+            vendor::opencode_personal::GO
+        } else {
+            "opencode"
+        };
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
         let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
@@ -77,18 +99,18 @@ impl FixtureOwner {
                 assert_eq!(count, 0, "fixture constructor only seeds an empty DB");
             }
             for i in 0..2 {
-                conn.execute("INSERT INTO loongport_vendor(id,vendor_id,account_id) VALUES(?1,'opencode',?2)", rusqlite::params![ROW_IDS[i], ACCOUNT_IDS[i]]).unwrap();
-                vendor::creds::set_api_key(&conn, &vault, ROW_IDS[i], KEYS[i]).unwrap();
+                conn.execute("INSERT INTO loongport_vendor(id,vendor_id,account_id) VALUES(?1,'opencode',?2)", rusqlite::params![ROW_IDS[i], accounts[i]]).unwrap();
+                vendor::creds::set_api_key(&conn, &vault, ROW_IDS[i], keys[i]).unwrap();
             }
         }
         let ids: [String; 2] =
-            std::array::from_fn(|i| vendor::provision::provider_id_for("opencode", ACCOUNT_IDS[i]));
+            std::array::from_fn(|i| vendor::provision::provider_id_for(plan, &accounts[i]));
         for i in 0..2 {
             // This pure projection is not the provisioning command or key lifecycle.
             // Existing source inventory is credential-free; the original vendor vault owns the key.
-            let zen = vendor::provision::plan_rows_for(Vendor::OpenCode, ACCOUNT_IDS[i], "")
+            let zen = vendor::provision::plan_rows_for(Vendor::OpenCode, &accounts[i], "")
                 .into_iter()
-                .find(|p| p.plan.id_segment == "opencode")
+                .find(|p| p.plan.id_segment == plan)
                 .unwrap();
             let settings = zen
                 .rows
@@ -103,7 +125,7 @@ impl FixtureOwner {
                 None,
             );
             source.meta = Some(ProviderMeta {
-                loongport_vendor_account: Some(ACCOUNT_IDS[i].into()),
+                loongport_vendor_account: Some(accounts[i].clone()),
                 ..Default::default()
             });
             db.save_provider("claude", &source).unwrap();
@@ -114,6 +136,17 @@ impl FixtureOwner {
                     &AppType::Codex
                 )
                 .unwrap());
+                if personal_go {
+                    // Codex now holds the original source reference. Re-bind
+                    // Claude through the same owner, not a hand-built auth DTO.
+                    db.delete_provider("claude", &ids[i]).unwrap();
+                    assert!(crate::services::vendor_source_binding::bind_vendor_source(
+                        &db,
+                        &ids[i],
+                        &AppType::Claude,
+                    )
+                    .unwrap());
+                }
             }
         }
         state::update(
@@ -133,6 +166,8 @@ impl FixtureOwner {
             session,
             root,
             epoch,
+            accounts,
+            personal_go,
             _home: home,
         }
     }
@@ -148,7 +183,11 @@ impl FixtureOwner {
             .1
     }
     pub(crate) fn synthetic_key(&self, index: usize) -> &'static str {
-        KEYS[index]
+        if self.personal_go {
+            PERSONAL_KEYS[index]
+        } else {
+            KEYS[index]
+        }
     }
     pub(crate) fn transport(
         &self,
@@ -172,7 +211,9 @@ impl FixtureOwner {
             root: self.root.clone(),
             epoch: self.epoch,
             ids: self.ids.clone(),
-            url: format!("http://{destination}/zen/v1/responses"),
+            origin: format!("http://{destination}"),
+            accounts: self.accounts.clone(),
+            personal_go: self.personal_go,
             client,
         })
     }
@@ -184,7 +225,9 @@ pub(crate) struct FixtureTransport {
     root: PathBuf,
     epoch: u64,
     ids: [String; 2],
-    url: String,
+    origin: String,
+    accounts: [String; 2],
+    personal_go: bool,
     client: reqwest::Client,
 }
 pub(crate) struct FixtureOutput {
@@ -207,6 +250,7 @@ pub(crate) fn prepare_output(
     session: &Arc<SecretSession>,
     provider: &Provider,
     url: &str,
+    app_type: &AppType,
 ) -> Result<Option<FixtureOutput>, ProxyError> {
     let binding = provider.meta.as_ref().and_then(|m| m.auth_binding.as_ref());
     let Some(binding) = binding.filter(|b| {
@@ -219,7 +263,17 @@ pub(crate) fn prepare_output(
     if !Arc::ptr_eq(session, &fixture.session)
         || session.root().canonicalize().map_err(|_| invalid())? != fixture.root
         || session.lifecycle_epoch() != fixture.epoch
-        || url != OFFICIAL_OUTPUT
+        || !(if fixture.personal_go {
+            match app_type {
+                AppType::Codex => {
+                    url == "https://opencode.ai/inference/go/openai/v1/chat/completions"
+                }
+                AppType::Claude => url == "https://opencode.ai/inference/go/anthropic/v1/messages",
+                _ => false,
+            }
+        } else {
+            url == OFFICIAL_OUTPUT
+        })
     {
         return Err(invalid());
     }
@@ -234,18 +288,23 @@ pub(crate) fn prepare_output(
             .meta
             .as_ref()
             .and_then(|m| m.loongport_vendor_account.as_deref())
-            != Some(ACCOUNT_IDS[index])
-        || crate::relay::provider_config::extract_api_key(
-            &provider.settings_config,
-            &AppType::Codex,
-        )
-        .as_deref()
-            != Some(KEYS[index])
+            != Some(fixture.accounts[index].as_str())
+        || crate::relay::provider_config::extract_api_key(&provider.settings_config, app_type)
+            .as_deref()
+            != Some(if fixture.personal_go {
+                PERSONAL_KEYS[index]
+            } else {
+                KEYS[index]
+            })
     {
         return Err(invalid());
     }
     Ok(Some(FixtureOutput {
-        url: fixture.url.clone(),
+        url: format!(
+            "{}{}",
+            fixture.origin,
+            url::Url::parse(url).map_err(|_| invalid())?.path()
+        ),
         client: fixture.client.clone(),
     }))
 }

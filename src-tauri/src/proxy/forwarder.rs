@@ -259,6 +259,7 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    personal_session_hint: crate::vendor::opencode_personal::PersonalSessionHint,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -443,6 +444,7 @@ impl RequestForwarder {
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            personal_session_hint: Default::default(),
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -454,6 +456,14 @@ impl RequestForwarder {
             max_attempts,
             model_alignment,
         }
+    }
+
+    pub(crate) fn with_personal_session_hint(
+        mut self,
+        hint: crate::vendor::opencode_personal::PersonalSessionHint,
+    ) -> Self {
+        self.personal_session_hint = hint;
+        self
     }
 
     pub(crate) fn with_request_identity(
@@ -3115,12 +3125,16 @@ impl RequestForwarder {
             .get("opencodePersonalKeyPlan")
             .and_then(serde_json::Value::as_str)
         {
+            let personal_session = self.personal_session_hint.resolve(
+                &ordered_headers,
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            )?;
             crate::vendor::opencode_personal::request_headers(
                 plan,
                 &url,
                 &mut ordered_headers,
-                self.session_client_provided
-                    .then_some(self.session_id.as_str()),
+                personal_session,
             )?;
         }
 
@@ -3199,13 +3213,8 @@ impl RequestForwarder {
             &self.router.managed_secret_session(),
             provider,
             &url,
+            app_type,
         )?;
-        #[cfg(all(test, feature = "gui"))]
-        if vendor_fixture.is_some() && !is_socks_proxy && preserve_exact_header_case {
-            return Err(ProxyError::ConfigError(
-                "synthetic_vendor_transport_unavailable".into(),
-            ));
-        }
 
         // 发送请求
         if let Some(fence) = &vendor_fence {
@@ -3286,6 +3295,18 @@ impl RequestForwarder {
         } else {
             // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
             // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
+            // The sealed fixture has already checked the exact official path,
+            // account, vault and epoch. Keep the original native transport and
+            // header-case behavior, changing only its test destination. Never
+            // send synthetic credentials through a configured external proxy.
+            #[cfg(all(test, feature = "gui"))]
+            let url = vendor_fixture.as_ref().map_or(url.as_str(), |fixture| fixture.url());
+            #[cfg(all(test, feature = "gui"))]
+            let upstream_proxy_url = if vendor_fixture.is_some() {
+                None
+            } else {
+                upstream_proxy_url
+            };
             let uri: http::Uri = url.parse().map_err(|e| {
                 ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
             })?;
@@ -5202,6 +5223,7 @@ mod tests {
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            personal_session_hint: Default::default(),
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),

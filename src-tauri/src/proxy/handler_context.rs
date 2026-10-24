@@ -99,6 +99,7 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    personal_session_hint: crate::vendor::opencode_personal::PersonalSessionHint,
     /// 请求体的本地 token 计数（口径见 [`crate::proxy::local_tokens`]，0 = 未采）。
     /// crowd 计数对账的采集事实：与上游回显的 `usage.input_tokens` 在桶里配对，
     /// 判定在服务端。
@@ -206,6 +207,11 @@ impl RequestContext {
 
         // 提取 Session ID
         let session_result = extract_session_id(headers, body, app_type_str);
+        let personal_session_hint =
+            crate::vendor::opencode_personal::PersonalSessionHint::from_original(
+                body,
+                &session_result,
+            );
         let session_id = session_result.session_id.clone();
 
         log::debug!(
@@ -262,6 +268,7 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            personal_session_hint,
             local_input_tokens,
             rectifier_config,
             optimizer_config,
@@ -341,6 +348,7 @@ impl RequestContext {
             self.app_config.auto_failover_enabled,
         )
         .with_request_identity(self.request_identity.clone())
+        .with_personal_session_hint(self.personal_session_hint.clone())
     }
 
     /// 获取 Provider 列表（用于故障转移）
