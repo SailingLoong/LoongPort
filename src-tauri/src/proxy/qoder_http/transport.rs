@@ -255,6 +255,11 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    // These are protocol/classification tests, not a 5s process-performance SLA.
+    // Match the existing qoder_host external-process test budget; production
+    // deadlines and the 2s exit/kill grace remain untouched.
+    const PROCESS_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn host() -> HostConfig {
         let root = std::env::var_os("QODER_HOST_PRODUCT_ROOT")
             .map(PathBuf::from)
@@ -279,9 +284,9 @@ mod tests {
             &host(),
             &request(mode, kind),
             false,
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
+            PROCESS_INTEGRATION_TIMEOUT,
+            PROCESS_INTEGRATION_TIMEOUT,
+            PROCESS_INTEGRATION_TIMEOUT,
             None,
         )
         .await
@@ -335,9 +340,9 @@ mod tests {
                 &host(),
                 &request(mode, "china_qoder_device"),
                 mode == "stream",
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                PROCESS_INTEGRATION_TIMEOUT,
+                PROCESS_INTEGRATION_TIMEOUT,
+                PROCESS_INTEGRATION_TIMEOUT,
                 Some(handler),
             )
             .await;
@@ -407,20 +412,25 @@ mod tests {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             });
+            let trace = tempfile::tempdir().unwrap();
+            let trace_path = trace.path().join("worker.trace");
+            input["testLifecyclePath"] = json!(trace_path);
             let started = std::time::Instant::now();
             let context = || {
                 format!(
-                    "mode={mode} streaming={streaming} elapsed={:?}",
-                    started.elapsed()
+                    "mode={mode} streaming={streaming} elapsed={:?} fixture_stages={}",
+                    started.elapsed(),
+                    std::fs::read_to_string(&trace_path)
+                        .unwrap_or_else(|_| "not-observed".into())
                 )
             };
             let result = forward(
                 &config,
                 &input,
                 streaming,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                PROCESS_INTEGRATION_TIMEOUT,
+                PROCESS_INTEGRATION_TIMEOUT,
+                PROCESS_INTEGRATION_TIMEOUT,
                 Some(handler),
             )
             .await;
@@ -472,5 +482,179 @@ mod tests {
             }
             assert_eq!(calls.load(Ordering::SeqCst), retired, "{}", context());
         }
+    }
+
+    async fn wait_for_fixture_marker(path: &std::path::Path) {
+        // Called with the real clock. A ready marker proves Node has consumed
+        // the request; a timeout here must not masquerade as a deadline pass.
+        tokio::time::timeout(PROCESS_INTEGRATION_TIMEOUT, async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("synthetic worker lifecycle marker missing");
+    }
+
+    fn gated_request(mode: &str, prefix: &std::path::Path) -> (HostConfig, Value) {
+        let mut config = host();
+        config.worker.set_file_name("http-deadline-gated.mjs");
+        let mut input = request(mode, "china_qoder_device");
+        input["testLifecyclePath"] = json!(prefix);
+        (config, input)
+    }
+
+    async fn verify_fixture_cancel_and_exit_callback(dir: &std::path::Path) {
+        // The exit marker proves the fixture entered its exit callback, not
+        // that a parent wait/reap completed. Host reaping tests remain separate.
+        wait_for_fixture_marker(&dir.join("gate.cancelled")).await;
+        wait_for_fixture_marker(&dir.join("gate.exited")).await;
+        assert_eq!(std::fs::read_to_string(dir.join("gate.exited")).unwrap(), "0");
+    }
+
+    #[tokio::test]
+    async fn total_deadline_rejects_ready_partial_body_without_retiring_device() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input) = gated_request("nonstream", &dir.path().join("gate"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: DeviceRejection = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let task = tokio::spawn(async move {
+            forward(
+                &config,
+                &input,
+                false,
+                Duration::ZERO,
+                Duration::ZERO,
+                PROCESS_INTEGRATION_TIMEOUT,
+                Some(handler),
+            )
+            .await
+        });
+        wait_for_fixture_marker(&dir.path().join("gate.ready")).await;
+        assert!(!task.is_finished(), "must still await verified end");
+        // The outer total deadline is armed before spawning the OS child.
+        // Only advance after readiness; resume before real cancellation/exit.
+        tokio::time::pause();
+        tokio::time::advance(PROCESS_INTEGRATION_TIMEOUT).await;
+        tokio::time::resume();
+        let result = tokio::time::timeout(PROCESS_INTEGRATION_TIMEOUT, task)
+            .await
+            .expect("total deadline did not complete")
+            .unwrap();
+        assert!(
+            matches!(result, Err(ProxyError::ForwardFailed(code)) if code == "qoder_http_outcome_unverified")
+        );
+        verify_fixture_cancel_and_exit_callback(dir.path()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn first_verification_and_idle_deadlines_never_promote_unverified_streams() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for mode in ["rejection", "idle"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (config, input) = gated_request(mode, &dir.path().join("gate"));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let handler: DeviceRejection = Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let first_timeout = if mode == "rejection" {
+                PROCESS_INTEGRATION_TIMEOUT
+            } else {
+                Duration::ZERO
+            };
+            let idle_timeout = if mode == "idle" {
+                PROCESS_INTEGRATION_TIMEOUT
+            } else {
+                Duration::ZERO
+            };
+            let response = tokio::time::timeout(
+                PROCESS_INTEGRATION_TIMEOUT,
+                forward(
+                    &config,
+                    &input,
+                    true,
+                    first_timeout,
+                    idle_timeout,
+                    Duration::ZERO,
+                    Some(handler),
+                ),
+            )
+            .await
+            .expect("streaming fixture setup timed out")
+            .unwrap();
+            // forward has already parsed head and first body. Thus the first
+            // timer (when enabled) is armed, independently of OS scheduling.
+            // Each mode enables only its own deadline, so using the wrong
+            // timer cannot satisfy this regression.
+            let crate::proxy::hyper_client::ProxyResponse::Streamed { mut stream, .. } = response
+            else {
+                panic!("expected streaming response");
+            };
+            if mode == "idle" {
+                let first = stream.next().await.unwrap().unwrap();
+                assert!(String::from_utf8_lossy(&first).contains("synthetic prefix"));
+                assert!(!String::from_utf8_lossy(&first).contains("[DONE]"));
+            }
+            wait_for_fixture_marker(&dir.path().join("gate.ready")).await;
+            {
+                let next = stream.next();
+                tokio::pin!(next);
+                // For rejection, this processes the exact auth body but waits
+                // for clean end under first_deadline. For idle, it arms the
+                // post-prefix idle timer. Neither can yield success or retire.
+                assert!(futures::poll!(&mut next).is_pending());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                tokio::time::pause();
+                tokio::time::advance(PROCESS_INTEGRATION_TIMEOUT).await;
+                tokio::time::resume();
+                let error = tokio::time::timeout(PROCESS_INTEGRATION_TIMEOUT, next)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(error.to_string(), "qoder_http_outcome_unverified");
+            }
+            assert!(stream.next().await.is_none());
+            verify_fixture_cancel_and_exit_callback(dir.path()).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "mode={mode}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_ready_transport_drops_worker_without_retiring_device() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input) = gated_request("first", &dir.path().join("gate"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: DeviceRejection = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let task = tokio::spawn(async move {
+            forward(
+                &config,
+                &input,
+                false,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Some(handler),
+            )
+            .await
+        });
+        wait_for_fixture_marker(&dir.path().join("gate.ready")).await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        verify_fixture_cancel_and_exit_callback(dir.path()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
