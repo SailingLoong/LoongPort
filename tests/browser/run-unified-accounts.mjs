@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import {
+  platformAccountFilterName,
+  nativeAccountKeyboardSteps,
+  nativeAccountOverviewCounts,
+} from "./unified-account-locators.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -491,7 +496,7 @@ try {
             .waitFor();
         } else if (scenario === "native") {
           const platformTabs = main.getByRole("tablist", {
-            name: "平台账号筛选",
+            name: platformAccountFilterName(t),
             exact: true,
           });
           // Exercise the real status hook for both providers. The fixture exposes
@@ -540,11 +545,7 @@ try {
           await platformTabs
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .focus();
-          for (const [key, name] of [
-            ["Home", "GitHub Copilot"],
-            ["ArrowRight", "ChatGPT"],
-            ["End", "OpenCode"],
-          ]) {
+          for (const [key, name] of nativeAccountKeyboardSteps(t)) {
             await page.keyboard.press(key);
             const selected = platformTabs.getByRole("tab", {
               name,
@@ -580,10 +581,24 @@ try {
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
             .waitFor();
           assert.equal(
+            await platformTabs
+              .getByRole("tab", {
+                name: t("loongport.accounts.allPlatforms"),
+                exact: true,
+              })
+              .getAttribute("aria-selected"),
+            "true",
+          );
+          for (const name of [
+            "Synthetic account A",
+            "Synthetic WorkBuddy account",
+          ])
+            await main.getByRole("heading", { name, exact: true }).waitFor();
+          assert.equal(
             await main
               .getByRole("region", { name: "账号详情", exact: true })
               .count(),
-            0,
+            nativeAccountOverviewCounts.details,
           );
           for (const name of [
             "查看 Synthetic account A",
@@ -591,7 +606,7 @@ try {
           ])
             assert.equal(
               await main.getByRole("button", { name, exact: true }).count(),
-              0,
+              nativeAccountOverviewCounts.accountButtons,
             );
         }
         await page.waitForFunction(() => window.unifiedLayout.settled());
