@@ -347,6 +347,7 @@ impl RequestContext {
             state.model_alignment.clone(),
             self.app_config.auto_failover_enabled,
         )
+        .with_request_start(self.start_time)
         .with_request_identity(self.request_identity.clone())
         .with_personal_session_hint(self.personal_session_hint.clone())
     }
