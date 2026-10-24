@@ -1,5 +1,93 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// Historical protocol observations, not an actionable model entitlement.
+/// A model_name is an upstream display label, not a verified final model ID.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct QuotaRow {
+    pub model_name: Option<String>,
+    pub fields: BTreeMap<String, serde_json::Number>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum QuotaSource {
+    PersonalWorkspaceOAuthCodingPlanRemains,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct QuotaObservation {
+    pub source: QuotaSource,
+    pub account_id: String,
+    pub region: super::catalog::Region,
+    pub real_user_id: String,
+    pub auth_generation: u64,
+    pub credential_version: u64,
+    /// Captured before the existing read sequence, never refreshed on failure.
+    pub observed_at_ms: i64,
+    pub rows: Vec<QuotaRow>,
+}
+
+impl QuotaObservation {
+    pub(super) fn matches_account(&self, account: &super::catalog::Account) -> bool {
+        self.account_id == account.id
+            && self.region == account.region
+            && self.real_user_id == account.real_user_id
+            && self.auth_generation == account.auth_generation
+            && self.credential_version == account.credential_version
+    }
+}
+
+fn observation_rows(body: &Value) -> Option<Vec<QuotaRow>> {
+    let rows = body.get("model_remains")?.as_array()?;
+    if rows.is_empty() || rows.len() > 128 {
+        return None;
+    }
+    rows.iter()
+        .map(|row| {
+            row.as_object()?;
+            let model_name = match row.get("model_name") {
+                Some(Value::String(name))
+                    if name.len() <= 256 && !name.chars().any(char::is_control) =>
+                {
+                    Some(name.clone())
+                }
+                None | Some(Value::Null) => None,
+                _ => return None,
+            };
+            // Preserve numeric protocol values without rounding, deriving or
+            // adding concurrent windows. Never retain the response, group or token.
+            let mut fields = BTreeMap::new();
+            for key in [
+                "current_interval_status",
+                "current_interval_remaining_percent",
+                "current_interval_usage_count",
+                "current_interval_total_count",
+                "end_time",
+                "current_weekly_status",
+                "current_weekly_remaining_percent",
+                "current_weekly_usage_count",
+                "current_weekly_total_count",
+                "weekly_end_time",
+            ] {
+                match row.get(key) {
+                    Some(Value::Number(number)) => {
+                        fields.insert(key.to_owned(), number.clone());
+                    }
+                    None | Some(Value::Null) => {}
+                    _ => return None,
+                }
+            }
+            if fields.is_empty() {
+                return None;
+            }
+            Some(QuotaRow { model_name, fields })
+        })
+        .collect()
+}
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuotaWindow {
@@ -179,13 +267,16 @@ async fn query<T: Transport>(
     Ok(response)
 }
 /// Informational read only, on an explicitly refreshed original account. No
-/// credential refresh, claim, plan purchase, persistence, or routing eligibility.
+/// credential refresh, claim, plan purchase, or routing eligibility. Only a
+/// bounded quota observation is saved in the existing encrypted account owner.
 pub(crate) async fn read<T: Transport>(
     session: &SecretSession,
     transport: &T,
     expected: &AccountView,
 ) -> Result<Entitlement, Failure> {
     let snapshot = catalog::snapshot(session, &expected.id).await?;
+    let observed_at_ms = catalog::now_ms();
+    let mut observed_rows = None;
     if snapshot.account.auth_generation != expected.auth_generation
         || snapshot.account.credential_version != expected.credential_version
         || snapshot.account.real_user_id != expected.real_user_id
@@ -302,6 +393,7 @@ pub(crate) async fn read<T: Transport>(
         )
         .await
         {
+            observed_rows = observation_rows(&response.body);
             result.quota = project_quota(&response.body);
             if result.quota.is_some() {
                 result.quota_state = QuotaState::Available;
@@ -312,7 +404,32 @@ pub(crate) async fn read<T: Transport>(
     // publish even the earlier membership snapshot.
     catalog::access(session, Some(&snapshot.binding), |d, _| {
         current(d, &snapshot)?;
-        Ok((result, false))
+        let account = catalog::matched(d, &snapshot)?;
+        let dirty = if let Some(rows) = observed_rows {
+            // A late request cannot replace a newer observation for this owner.
+            // Failed reads retain history without manufacturing a fresh timestamp.
+            let newer = account.quota_observation.as_ref().is_some_and(|old| {
+                old.matches_account(account) && old.observed_at_ms >= observed_at_ms
+            });
+            if newer {
+                false
+            } else {
+                account.quota_observation = Some(QuotaObservation {
+                    source: QuotaSource::PersonalWorkspaceOAuthCodingPlanRemains,
+                    account_id: account.id.clone(),
+                    region: account.region,
+                    real_user_id: account.real_user_id.clone(),
+                    auth_generation: snapshot.account.auth_generation,
+                    credential_version: snapshot.account.credential_version,
+                    observed_at_ms,
+                    rows,
+                });
+                true
+            }
+        } else {
+            false
+        };
+        Ok((result, dirty))
     })
     .await
 }

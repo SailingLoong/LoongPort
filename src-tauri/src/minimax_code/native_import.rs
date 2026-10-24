@@ -393,6 +393,7 @@ pub(crate) async fn save(
                 i
             } else {
                 d.accounts.push(Account {
+                    quota_observation: None,
                     id: catalog::account_id(&b.vault.vault_id, flow.preview.region, uid),
                     label: label.clone(),
                     region: flow.preview.region,
