@@ -229,6 +229,7 @@ impl<T: Transport> Engine<'_, T> {
         }
         if credits.updated_at.is_some() {
             rows[i].credits = credits;
+            rows[i].credits.observed_generation = Some(rows[i].generation);
         }
         rows[i].claim_day = day;
         self.persist(&b, rows, i)
@@ -311,6 +312,7 @@ impl<T: Transport> Engine<'_, T> {
             rows[i].credited = None;
             if credits.updated_at.is_some() {
                 rows[i].credits = credits.clone();
+                rows[i].credits.observed_generation = Some(rows[i].generation);
             }
             if rows[i].pending.is_some() {
                 self.resolve_pending(&mut rows[i], status, &credits);
@@ -391,6 +393,7 @@ impl<T: Transport> Engine<'_, T> {
         }
         if credits.updated_at.is_some() {
             rows[i].credits = credits;
+            rows[i].credits.observed_generation = Some(rows[i].generation);
         }
         self.persist(&b, rows, i)
     }

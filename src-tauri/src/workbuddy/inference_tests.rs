@@ -1405,3 +1405,133 @@ async fn workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order(
         );
     }
 }
+
+#[tokio::test]
+async fn expiry_owner_model_discovery_and_meter_join_require_same_credential_generation() {
+    use crate::relay::entitlement_expiry::*;
+    let f = Fixture::new(true);
+    let t = Fake::with(vec![json_reply(
+        200,
+        json!({"code":0,"data":{
+        "agents":[{"name":"cli","models":["m","free"]}],
+        "models":[{"id":"m","credits":"x0.03"},{"id":"free","credits":"0"}],"modelPromotions":[]}}),
+    )]);
+    f.lease(0).await.models_with(&t, 1000).await.unwrap();
+    f.change(|rows| {
+        let empty=json!({"code":0,"data":{"Accounts":[],"TotalCount":0}});
+        let summary=json!({"code":0,"data":{"Packages":[{"PackageCode":"p","CapacityUnit":"credits"}]}});
+        let paid=json!({"code":0,"data":{"Accounts":[
+            {"ResourceId":"later","PackageCode":"p","CapacityRemainPrecise":4,"DeductionEndTime":"2026-10-26T00:00:00Z"},
+            {"ResourceId":"earlier","PackageCode":"p","CapacityRemainPrecise":2,"DeductionEndTime":"2026-10-25T00:00:00Z"}],"TotalCount":100}});
+        rows[0].credits=super::super::credits::normalize(&summary,&paid,&empty,1000);
+        rows[0].credits.observed_generation=Some(rows[0].generation);
+    });
+    let rank = |candidates| {
+        project_and_order(
+            candidates,
+            &["m".into()],
+            Policy::EarliestExpiry,
+            1000,
+            5000,
+        )
+    };
+    let candidates = super::super::credits::expiry_candidates(&f.session, &f.ids[0], "m", 1000)
+        .await
+        .unwrap();
+    let ranked = rank(candidates);
+    assert_eq!(ranked[0].candidate.bucket_id, "earlier");
+    assert!(matches!(ranked[0].priority, Priority::KnownExpiryMs(_)));
+    let free = super::super::credits::expiry_candidates(&f.session, &f.ids[0], "free", 1000)
+        .await
+        .unwrap();
+    assert!(
+        project_and_order(free, &["free".into()], Policy::EarliestExpiry, 1000, 5000)
+            .iter()
+            .all(|c| matches!(c.priority, Priority::Unknown(_)))
+    );
+    assert!(
+        super::super::credits::expiry_candidates(&f.session, &f.ids[1], "m", 1000)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let binding = store::binding(&f.session).unwrap();
+    let original = store::load(&f.session, &binding).unwrap()[0]
+        .credits
+        .clone();
+    for exclusion in ["unit", "daily", "slice", "unreported"] {
+        f.change(|rows| {
+            rows[0].credits = original.clone();
+            for observation in &mut rows[0].credits.expiry_observations {
+                match exclusion {
+                    "unit" => observation.capacity_unit = Some(json!("tokens")),
+                    "daily" => observation.package_code = Some("TCACA_code_001_PqouKr6QWV".into()),
+                    "slice" => observation.capacity_type = Some(json!(4)),
+                    _ if observation.source != "summary" => {
+                        observation.package_code = Some("unreported".into());
+                        observation.capacity_unit = Some(json!("credits"));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let candidates = super::super::credits::expiry_candidates(&f.session, &f.ids[0], "m", 1000)
+            .await
+            .unwrap();
+        assert!(
+            rank(candidates)
+                .iter()
+                .all(|c| matches!(c.priority, Priority::Unknown(_))),
+            "{exclusion}"
+        );
+    }
+    f.change(|rows| rows[0].credits = original);
+    f.change(|rows| rows[0].generation += 1);
+    assert!(rank(
+        super::super::credits::expiry_candidates(&f.session, &f.ids[0], "m", 1000)
+            .await
+            .unwrap()
+    )
+    .iter()
+    .all(|c| matches!(c.priority, Priority::Unknown(_))));
+}
+
+async fn expiry_review_snapshot_case(future: bool) {
+    use crate::relay::entitlement_expiry::*;
+    let f = Fixture::new(true);
+    let t = Fake::with(vec![json_reply(
+        200,
+        json!({"code":0,"data":{
+        "agents":[{"name":"cli","models":["m"]}],"models":[{"id":"m","credits":"x0.03"}],"modelPromotions":[]}}),
+    )]);
+    f.lease(0).await.models_with(&t, 1000).await.unwrap();
+    f.change(|rows| {
+        rows[0].credits=super::super::credits::normalize(
+            &json!({"code":0,"data":{"Packages":[{"PackageCode":"p","CapacityUnit":"credits"}]}}),
+            &json!({"code":0,"data":{"Accounts":[{"ResourceId":"r","PackageCode":"p","CapacityRemainPrecise":4,"DeductionEndTime":"2026-10-26T00:00:00Z"}]}}),&json!({}),1000);
+        if future { rows[0].credit_models.as_mut().unwrap().observed_at_ms=2000; }
+        else { rows[0].generation+=1; }
+        rows[0].credits.observed_generation=Some(rows[0].generation);
+    });
+    let candidates = super::super::credits::expiry_candidates(&f.session, &f.ids[0], "m", 1000)
+        .await
+        .unwrap();
+    let ranked = project_and_order(
+        candidates,
+        &["m".into()],
+        Policy::EarliestExpiry,
+        1000,
+        5000,
+    );
+    assert!(ranked
+        .iter()
+        .all(|c| matches!(c.priority, Priority::Unknown(_))));
+}
+#[tokio::test]
+async fn expiry_review_future_model_observation_cannot_hide_behind_older_credits() {
+    expiry_review_snapshot_case(true).await;
+}
+#[tokio::test]
+async fn expiry_review_new_meter_generation_does_not_relabel_old_model_snapshot() {
+    expiry_review_snapshot_case(false).await;
+}

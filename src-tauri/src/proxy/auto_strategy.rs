@@ -1,12 +1,12 @@
-//! Legacy setting keys plus shared model and pricing facts.
-//! Policy ranking and affinity have been retired in favor of application priority.
+//! Application priority remains the default. Legacy price/speed settings are
+//! inert; only an explicit known-expiry choice enables positive entitlement hints.
 
 use crate::database::Database;
 use crate::provider::Provider;
 
 /// settings 表里「某应用自动模式是否开启」的 key 前缀（`auto_mode_enabled_<app>`）。
 pub const SETTING_ENABLED_PREFIX: &str = "auto_mode_enabled_";
-/// settings 表里全局策略的 key（`cheapest` / `fastest`）。
+/// 全局策略 key：旧值保持应用顺序；`known_expiry_first` 显式启用临期提示。
 pub const SETTING_STRATEGY: &str = "auto_mode_strategy";
 /// settings 表里「某应用模型偏好」的 key 前缀（`auto_mode_model_<app>`）。
 /// `None` = 不限模型（全部托管档位都进候选）。
@@ -45,9 +45,11 @@ pub fn set_manual_order(
 /// 自动模式策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoStrategy {
-    /// 价格最低：按档位倍率升序（默认）。
+    /// Legacy default value: retain application priority.
     Cheapest,
-    /// 响应最快：按平均首字耗时升序。
+    /// Explicit positive entitlement-expiry hints; legacy values keep priority order.
+    KnownExpiryFirst,
+    /// Legacy speed value: retain application priority.
     Fastest,
 }
 
@@ -56,6 +58,7 @@ impl AutoStrategy {
     pub fn from_setting_value(value: &str) -> Self {
         match value {
             "fastest" => Self::Fastest,
+            "known_expiry_first" => Self::KnownExpiryFirst,
             _ => Self::Cheapest,
         }
     }
@@ -63,6 +66,7 @@ impl AutoStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Cheapest => "cheapest",
+            Self::KnownExpiryFirst => "known_expiry_first",
             Self::Fastest => "fastest",
         }
     }
@@ -154,7 +158,7 @@ pub fn auto_mode_models(providers: &indexmap::IndexMap<String, Provider>) -> Vec
     models
 }
 
-/// 看板命令展示用的单价入口：与排序同一份实现（唯源），别在看板侧再算一遍。
+/// 看板展示单价的唯源；单价与倍率不参与权益失效排序。
 pub(crate) fn effective_unit_price(
     db: &Database,
     tier: &Provider,
@@ -182,6 +186,16 @@ fn tier_unit_price(
     let input: f64 = input.parse().ok()?;
     let output: f64 = output.parse().ok()?;
     Some(input + output)
+}
+
+/// This opt-in is independent of permission to fail over. Manual mode remains
+/// ordered. Reading an old cheapest/fastest value never enables a new policy.
+pub(crate) fn known_expiry_first(db: &Database, app: &str) -> bool {
+    get_strategy(db) == AutoStrategy::KnownExpiryFirst
+        && db
+            .get_setting(&format!("{SETTING_MODE_PREFIX}{app}"))
+            .ok()
+            .is_some_and(|mode| mode.as_deref() != Some("manual"))
 }
 
 #[cfg(test)]

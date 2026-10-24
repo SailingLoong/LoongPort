@@ -1959,3 +1959,27 @@ async fn automatic_failed_account_is_reported_without_starving_other_accounts() 
     );
     assert!(!transport.calls.lock().unwrap().contains(&Endpoint::Claim));
 }
+#[tokio::test]
+async fn expiry_sampling_generation_is_saved_by_refresh_but_hidden_from_view() {
+    let (session, id) = setup();
+    let binding = store::binding(&session).unwrap();
+    let mut rows = store::load(&session, &binding).unwrap();
+    rows[0].generation = 7;
+    store::save(&session, &binding, rows).unwrap();
+    let mut q = resource(42.0);
+    q.push(status(false));
+    let transport = Fake::new(q);
+    let engine = Engine {
+        session: &session,
+        transport: &transport,
+        clock: &super::clock::FixedClock(NOW),
+    };
+    let view = engine.refresh(&id).await.unwrap();
+    let rows = store::load(&session, &binding).unwrap();
+    assert_eq!(rows[0].credits.observed_generation, Some(7));
+    assert_eq!(rows[0].credits.updated_at, Some(NOW));
+    assert!(!rows[0].credits.expiry_observations.is_empty());
+    assert!(view.credits.expiry_observations.is_empty());
+    assert_eq!(view.credits.observed_generation, None);
+    assert!(!transport.calls.lock().unwrap().contains(&Endpoint::Claim));
+}

@@ -84,6 +84,7 @@ import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import { ApplicationInlineSelection } from "./ApplicationInlineSelection";
 import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
 import { ApplicationModelSettingsDialog } from "./ApplicationModelSettingsDialog";
+import { ExpiryStrategySelect } from "./ExpiryStrategySelect";
 import { useTierEditGuard } from "@/components/relay/useTierEditGuard";
 
 /** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
@@ -828,6 +829,9 @@ export function ApplicationWorkspace({
                     </Tooltip>
                   </TooltipProvider>
                 </div>
+              )}
+              {isProxyAppId(appId) && (
+                <ExpiryStrategySelect appId={appId} disabled={mutationBusy} />
               )}
               {chainEditing && (
                 <OrderProfilesMenu

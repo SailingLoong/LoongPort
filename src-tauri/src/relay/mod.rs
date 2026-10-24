@@ -50,3 +50,5 @@ pub mod stats;
 pub mod transit;
 
 pub use managed::{is_managed, reject_if_managed};
+
+pub mod entitlement_expiry;

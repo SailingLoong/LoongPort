@@ -52,6 +52,14 @@ pub(crate) struct Authorization {
     expires_ms: i64,
     refresh_expires_ms: Option<i64>,
 }
+impl Authorization {
+    pub(super) fn matches_credit_snapshot(
+        &self,
+        snapshot: &super::credits::CreditModelSnapshot,
+    ) -> bool {
+        self.grant_id == snapshot.grant_id && self.credential_version == snapshot.credential_version
+    }
+}
 impl Drop for Authorization {
     fn drop(&mut self) {
         self.access.zeroize();
@@ -1025,6 +1033,29 @@ impl Lease {
         while let Some(result) = screened.next().await {
             result.map_err(|_| owner_error(Failure::Unconfirmed))?;
         }
+        // Cache only existing authenticated discovery, under the same owner
+        // fence; routing never performs a new query or replaces credentials.
+        let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+        let (mut rows, index) = self.owner.rows(&self.session).map_err(owner_error)?;
+        if !rows[index]
+            .inference
+            .as_ref()
+            .is_some_and(|g| same_grant(g, &self.grant, true))
+        {
+            return Err(owner_error(Failure::ExpiredAuthorization));
+        }
+        rows[index].credit_models = Some(super::credits::CreditModelSnapshot {
+            observed_at_ms: now,
+            generation: rows[index].generation,
+            credential_binding: rows[index].credential_binding(),
+            grant_id: self.grant.grant_id.clone(),
+            credential_version: self.grant.credential_version,
+            data: super::credits::CreditModelSnapshot::facts(data(&env).map_err(owner_error)?),
+        });
+        if store::save(&self.session, &self.owner.binding, rows).is_err() {
+            // Optional ranking evidence must not make successful discovery fail.
+            log::warn!("workbuddy.credit_snapshot.cache_unavailable");
+        }
         Ok(models)
     }
     #[cfg(not(test))]
@@ -1265,6 +1296,9 @@ fn safe_error_value(upstream_status: u16, code: Option<i64>, refusal: bool) -> V
 #[path = "inference_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+type FixtureCapture = Arc<Mutex<Vec<(String, Value)>>>;
+
 /// Original-router fixture seam only. A trusted extension supplies this object;
 /// no client JSON/header or production settings can override upstream origins.
 #[cfg(test)]
@@ -1277,6 +1311,7 @@ pub(crate) struct FixtureTransport {
     synthetic_grants: Vec<(String, String)>,
     client: reqwest::Client,
     attempts: Arc<std::sync::atomic::AtomicUsize>,
+    memory: Option<FixtureCapture>,
 }
 #[cfg(test)]
 impl FixtureTransport {
@@ -1335,7 +1370,58 @@ impl FixtureTransport {
             synthetic_grants,
             client,
             attempts: Default::default(),
+            memory: None,
         })
+    }
+    /// Same synthetic-owner guard as the loopback fixture, with only the final
+    /// HTTP transport replaced in memory. No sockets or production override.
+    pub(crate) fn in_process(session: &SecretSession) -> Result<Self, Failure> {
+        let mut fixture = Self::loopback(session, "http://127.0.0.1/")?;
+        fixture.memory = Some(Default::default());
+        Ok(fixture)
+    }
+    pub(crate) fn captured(&self) -> Vec<(String, Value)> {
+        self.memory.as_ref().unwrap().lock().unwrap().clone()
+    }
+    pub(crate) async fn cache_expiry_fixture(
+        &self,
+        session: &SecretSession,
+        id: &str,
+        observations: [Value; 3],
+        now: i64,
+    ) -> Result<(), Failure> {
+        let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
+        if session.root() != self.root
+            || store::binding(session)? != self.binding
+            || session.lifecycle_epoch() != self.epoch
+        {
+            return Err(Failure::ExpiredAuthorization);
+        }
+        let mut rows = store::load(session, &self.binding)?;
+        let row = rows
+            .iter_mut()
+            .find(|r| r.account.id(&self.binding.vault_id) == id)
+            .ok_or(Failure::UnsupportedContext)?;
+        let grant = row.inference.as_ref().ok_or(Failure::UnsupportedContext)?;
+        if !self
+            .synthetic_grants
+            .iter()
+            .any(|(account, g)| account == id && g == &grant.grant_id)
+        {
+            return Err(Failure::UnsupportedContext);
+        }
+        let [summary, detail, models] = observations;
+        row.credits = super::credits::normalize(&summary, &detail, &json!({}), now);
+        row.credits.observed_generation = Some(row.generation);
+        row.credit_models = Some(super::credits::CreditModelSnapshot {
+            observed_at_ms: now,
+            generation: row.generation,
+            credential_binding: row.credential_binding(),
+            grant_id: grant.grant_id.clone(),
+            credential_version: grant.credential_version,
+            data: super::credits::CreditModelSnapshot::facts(&models),
+        });
+        store::save(session, &self.binding, rows)
     }
     pub(crate) fn attempts(&self) -> usize {
         self.attempts.load(std::sync::atomic::Ordering::Acquire)
@@ -1423,6 +1509,32 @@ impl Transport for FixtureTransport {
         Box::pin(async move {
             self.attempts
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if let Some(memory) = &self.memory {
+                if request.endpoint != Endpoint::Chat {
+                    return Err(ProxyError::Internal("synthetic.unexpected_endpoint".into()));
+                }
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let model = body["model"].clone();
+                memory.lock().unwrap().push((
+                    request
+                        .headers
+                        .get("authorization")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    body,
+                ));
+                let chunk = json!({"id":"synthetic-response","object":"chat.completion.chunk","model":model,
+                    "choices":[{"index":0,"delta":{"role":"assistant","content":"synthetic response"},"finish_reason":null}]});
+                let done = json!({"id":"synthetic-response","object":"chat.completion.chunk","model":model,
+                    "choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}});
+                return Ok(ProxyResponse::buffered(
+                    http::StatusCode::OK,
+                    safe_headers(&http::HeaderMap::new(), true),
+                    Bytes::from(format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n")),
+                ));
+            }
             let mut url = self.origin.clone();
             url.set_path(request.endpoint.path());
             if let Some((k, v)) = request.query {

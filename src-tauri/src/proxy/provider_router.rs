@@ -46,6 +46,9 @@ pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
     account_capacity: super::account_capacity::AccountCapacity,
+    #[cfg(test)]
+    pub(super) expiry_test_evidence:
+        std::sync::Mutex<HashMap<String, Vec<crate::relay::entitlement_expiry::Evidence>>>,
     /// 熔断器管理器 - key 格式: "app_type:provider_id"
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
 }
@@ -57,6 +60,8 @@ impl ProviderRouter {
         Self {
             db,
             account_capacity,
+            #[cfg(test)]
+            expiry_test_evidence: std::sync::Mutex::new(HashMap::new()),
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -233,6 +238,78 @@ impl ProviderRouter {
 
     pub fn preferred_model(&self, app_type: &str, provider: &Provider) -> Option<String> {
         super::application_routing::model_for_provider(&self.db, app_type, provider)
+    }
+
+    pub(crate) fn known_expiry_first(&self, app: &str) -> bool {
+        super::auto_strategy::known_expiry_first(&self.db, app)
+    }
+
+    /// Positive hint from the selected owner only. Five-minute freshness is
+    /// deliberately bounded; stale/missing observations do not trigger refresh.
+    #[cfg(any(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn expiry_hint(
+        &self,
+        provider: &Provider,
+        final_model: &str,
+        now: i64,
+    ) -> Option<i64> {
+        use crate::relay::entitlement_expiry::*;
+        #[cfg(test)]
+        if let Some(facts) = self
+            .expiry_test_evidence
+            .lock()
+            .ok()?
+            .get(&provider.id)
+            .cloned()
+        {
+            return project_and_order(
+                facts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, evidence)| Candidate {
+                        account_id: provider.id.clone(),
+                        final_model: final_model.into(),
+                        bucket_id: i.to_string(),
+                        evidence,
+                    })
+                    .collect(),
+                &[final_model.into()],
+                Policy::EarliestExpiry,
+                now,
+                300_000,
+            )
+            .into_iter()
+            .find_map(|c| match c.priority {
+                Priority::KnownExpiryMs(at) => Some(at),
+                _ => None,
+            });
+        }
+        #[cfg(any(feature = "gui", test))]
+        if let Some((super::managed_accounts::AccountKind::WorkBuddy, id)) =
+            super::managed_accounts::selected(provider)
+        {
+            let candidates = crate::workbuddy::credits::expiry_candidates(
+                self.db.secret_session(),
+                &id,
+                final_model,
+                now,
+            )
+            .await
+            .ok()?;
+            return project_and_order(
+                candidates,
+                &[final_model.into()],
+                Policy::EarliestExpiry,
+                now,
+                300_000,
+            )
+            .into_iter()
+            .find_map(|c| match c.priority {
+                Priority::KnownExpiryMs(at) => Some(at),
+                _ => None,
+            });
+        }
+        None
     }
 
     /// Keep explicit selection first, then try only later persistent priorities.
