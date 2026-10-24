@@ -3,6 +3,7 @@ use super::{
     catalog::{self, *},
     http::{Endpoint, Request, Response, Transport},
 };
+use crate::automatic_claim::{AutomaticOutcome as Outcome, AutomaticReason as Reason};
 use crate::secrets::session::SecretSession;
 use serde::Deserialize;
 use serde_json::Value;
@@ -410,15 +411,31 @@ impl<T: Transport> Engine<'_, T> {
     }
     /// No local midnight/reset/credit arithmetic. The existing owner consults the
     /// live panel, then applies its durable intent and same-day receipt protection.
-    pub async fn automatic_tick(&self) -> Result<usize, Failure> {
+    pub async fn automatic_tick(&self) -> Result<Outcome, Failure> {
+        if self.session.read().is_err() {
+            return Ok(Outcome::skipped(Reason::Locked));
+        }
+        let enabled: Vec<_> = self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|view| view.auto_claim_enabled)
+            .collect();
+        if enabled.is_empty() {
+            return Ok(Outcome::skipped(Reason::Disabled));
+        }
+        if !enabled.iter().any(|view| view.authorized) {
+            return Ok(Outcome::skipped(Reason::NotEligible));
+        }
         let mut failures = 0;
-        for view in self.list().await? {
-            if !view.auto_claim_enabled || !view.authorized {
-                continue;
-            }
+        let mut pending = false;
+        for view in enabled.into_iter().filter(|view| view.authorized) {
             let result = self
                 .claim_with_policy(&view.id, Some(view.auto_claim_revision))
                 .await;
+            // Summarize this round's returned observations, not a later catalog
+            // that may include new accounts or a different consent generation.
+            pending |= matches!(&result, Ok(account) if account.status == Status::Unknown);
             let error = result.err();
             if error.is_some() {
                 failures += 1;
@@ -440,7 +457,13 @@ impl<T: Transport> Engine<'_, T> {
             })
             .await?;
         }
-        Ok(failures)
+        Ok(if failures != 0 {
+            Outcome::failed()
+        } else if pending {
+            Outcome::skipped(Reason::Pending)
+        } else {
+            Outcome::completed()
+        })
     }
     pub async fn retire(&self, id: &str) -> Result<(), Failure> {
         catalog::access(self.session, None, |d, _| {
