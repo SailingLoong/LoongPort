@@ -6,7 +6,8 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::sync_support::{
-    post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
+    attach_warning, post_sync_warning_from_result, run_post_import_sync,
+    success_payload_with_warning,
 };
 use crate::database::backup::BackupEntry;
 use crate::database::Database;
@@ -213,12 +214,12 @@ pub fn list_db_backups() -> Result<Vec<BackupEntry>, String> {
     Database::list_backups().map_err(|e| e.to_string())
 }
 
-/// Restore database from a backup file
+/// Restore database from a backup file, retaining the safety ID and projection warnings.
 #[tauri::command]
 pub async fn restore_db_backup(
     state: State<'_, AppState>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
     run_with_database_restore_lock(move || {
@@ -227,14 +228,24 @@ pub async fn restore_db_backup(
                 let _skill_state_guard = skill_state_write_guard();
                 db.restore_from_backup(&filename)?
             };
-            let warning =
-                post_sync_warning_from_result(Ok(run_post_import_sync(&app_state_for_sync)));
-            if let Some(message) = warning {
-                // This legacy command returns only the restored filename, so keep
-                // restore success and surface incomplete projection in the log.
-                log::warn!("[Restore] post-import sync warning: {message}");
+            let post_sync = run_post_import_sync(&app_state_for_sync);
+            if let Err(error) = &post_sync {
+                log::warn!("[Restore] post-import sync warning: {error}");
             }
-            Ok::<_, AppError>(restored)
+            // Parser errors can include source lines containing credentials.
+            // Keep diagnostics local; the IPC result only needs a safe warning.
+            let warning = post_sync_warning_from_result(Ok(post_sync.map_err(|_| {
+                AppError::Message(
+                    "Some live configuration or runtime state could not be synchronized. See local logs."
+                        .into(),
+                )
+            })));
+            // The database is already committed. A projection warning must not
+            // turn this into a failed restore or cause the caller to apply it again.
+            Ok::<_, AppError>(attach_warning(
+                json!({ "success": true, "backupId": restored }),
+                warning,
+            ))
         })
     })
     .await

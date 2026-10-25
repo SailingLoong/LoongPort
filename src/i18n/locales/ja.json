@@ -618,6 +618,7 @@
       "confirmTitle": "バックアップの復元を確認",
       "confirmMessage": "このバックアップを復元すると現在のデータベースが上書きされます。安全バックアップが先に作成されます。",
       "restoreSuccess": "復元成功！安全バックアップが作成されました",
+      "restorePartialSuccess": "データベースは復元されましたが、一部の同期が完了していません。",
       "restoreFailed": "復元に失敗しました",
       "safetyBackupId": "安全バックアップID",
       "intervalLabel": "自動バックアップ間隔",

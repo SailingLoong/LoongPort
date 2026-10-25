@@ -618,6 +618,7 @@
       "confirmTitle": "Confirm Restore",
       "confirmMessage": "Restoring this backup will overwrite the current database. A safety backup will be created first.",
       "restoreSuccess": "Restore successful! Safety backup created",
+      "restorePartialSuccess": "Database restored; some synchronization is incomplete.",
       "restoreFailed": "Restore failed",
       "safetyBackupId": "Safety Backup ID",
       "intervalLabel": "Auto-backup Interval",
