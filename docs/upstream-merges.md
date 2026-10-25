@@ -33,6 +33,8 @@
 
 | 2026-10-21 | PR641 后续本地候选（未提交远端） | 定点复用 cf312f6af42c31c2248d0e818020b6e52073cd51 | 1 | 未执行 merge（按原文件定点移植） | 无，依赖不变 | 两个 MCP 开关命令共用现有 per-App 切换锁，内部同步核心不重复拿锁；补并发开关、同 App 切换锁交错、跨 App 独立及 live I/O 失败重试测试。2026-10-21 Serena 既有验证入口运行 31/31（29 个 MCP 集成、2 个锁单测）通过，fmt 与 all-targets clippy 退出 0；不是全量或实号验收，纯写入阶段故障未注入，profile／全量同步旧无锁路径及 DB/live 事务缺口未扩大修复。 |
 
+| 2026-10-24 | 本次变更 | 部分吸收 7ecce7c79e0deab7f30912b48405b0b93683fe3a | 1（仅两个 carrier 生产 hunk） | 未执行 merge（原文件定点复用） | 无，依赖不变 | reasoning_bridge 与 streaming_responses 的 encrypted-only 新输出统一为 thinking + signature；保留旧 redacted_thinking 读取与 replay 白名单。未吸收独立的 done-summary 补尾 hunk，不代表完整提交已同步。补流／非流／JSON 回退、历史载体多轮工具回放、terminal snapshot 去重及输出后错误测试；本地无 Rust 工具链，编译、测试与格式检查待 CI，真实客户端待 beta 验收。 |
+
 ## 关联
 
 2026-10-07：继续复用固定 v4.0.2 的 `live/project/{claude,codex,gemini,grok}` 与 `mode/contract` 原模块及测试。适配现有 `toml_edit` 位置参数、模式扩展字段和 Codex 模型目录文件名 owner；当前与历史生成目录名称统一由 `codex_config` 判断。保留 beta.4 版本及 ZCode V2 安全存储、命令入口。此段为投影和契约基础，尚未启用新的运行时写入；完整升级、恢复及原生验收继续按实际候选记录。
