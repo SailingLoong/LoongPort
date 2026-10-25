@@ -1583,3 +1583,91 @@ fn locked_toggles_interleave_with_real_provider_switch_and_mcp_resync() {
         );
     }
 }
+
+#[test]
+fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    type Importer = fn(&cc_switch_lib::AppState) -> Result<usize, AppError>;
+    let importers: [(AppType, Importer); 6] = [
+        (AppType::Claude, McpService::import_from_claude),
+        (AppType::Codex, McpService::import_from_codex),
+        (AppType::Gemini, McpService::import_from_gemini),
+        (AppType::GrokBuild, McpService::import_from_grokbuild),
+        (AppType::OpenCode, McpService::import_from_opencode),
+        (AppType::Hermes, McpService::import_from_hermes),
+    ];
+    for (app, import) in importers {
+        reset_test_fs();
+        let home = ensure_test_home();
+        let opencode_dir = home.join("mcp-import-opencode");
+        let hermes_dir = home.join("mcp-import-hermes");
+        update_settings(AppSettings {
+            opencode_config_dir: Some(opencode_dir.to_string_lossy().into_owned()),
+            hermes_config_dir: Some(hermes_dir.to_string_lossy().into_owned()),
+            ..AppSettings::default()
+        })
+        .expect("set isolated native directories");
+        let json_text = serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "shared": {"command": "echo", "args": ["imported"]},
+                "fresh": {"command": "echo", "args": ["fresh"]}
+            }
+        }))
+        .unwrap();
+        let toml_text = "[mcp_servers.shared]\ncommand = \"echo\"\nargs = [\"imported\"]\n[mcp_servers.fresh]\ncommand = \"echo\"\nargs = [\"fresh\"]\n";
+        let files = [
+            (get_claude_mcp_path(), json_text.clone()),
+            (get_codex_config_path(), toml_text.to_string()),
+            (home.join(".gemini/settings.json"), json_text),
+            (get_grok_config_path(), toml_text.to_string()),
+            (opencode_dir.join("opencode.json"), serde_json::to_string_pretty(&json!({
+                "mcp": {
+                    "shared": {"type": "local", "command": ["echo", "imported"]},
+                    "fresh": {"type": "local", "command": ["echo", "fresh"]}
+                }
+            })).unwrap()),
+            (hermes_dir.join("config.yaml"), "mcp_servers:\n  shared:\n    command: echo\n    args: [imported]\n  fresh:\n    command: echo\n    args: [fresh]\n".to_string()),
+        ];
+        for (path, text) in &files {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let state = create_test_state().expect("create test state");
+        let existing = McpServer {
+            id: "shared".to_string(),
+            name: "User-owned name".to_string(),
+            server: json!({"type": "stdio", "command": "original", "args": ["keep"]}),
+            apps: McpApps {
+                claude: true,
+                ..Default::default()
+            },
+            description: Some("Keep description".to_string()),
+            homepage: Some("https://example.com/home".to_string()),
+            docs: Some("https://example.com/docs".to_string()),
+            tags: vec!["user-tag".to_string()],
+        };
+        state.db.save_mcp_server(&existing).unwrap();
+        let mut expected = existing.clone();
+        expected.apps.set_enabled_for(&app, true);
+        assert_eq!(import(&state).unwrap(), 1, "first import for {app:?}");
+        assert_eq!(import(&state).unwrap(), 0, "repeat import for {app:?}");
+        let servers = state.db.get_all_mcp_servers().unwrap();
+        assert_eq!(servers.len(), 2, "server count for {app:?}");
+        assert_eq!(
+            serde_json::to_value(servers.get("shared").unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "existing metadata for {app:?}"
+        );
+        let fresh = servers.get("fresh").unwrap();
+        assert_eq!(fresh.apps.enabled_apps(), vec![app.clone()]);
+        assert_eq!(fresh.server["command"], "echo");
+        assert_eq!(fresh.server["args"], json!(["fresh"]));
+        for (path, text) in &files {
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                *text,
+                "import must not rewrite {path:?}"
+            );
+        }
+    }
+}
