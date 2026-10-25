@@ -16,6 +16,7 @@ use crate::proxy::usage::parser::TokenUsage;
 use crate::services::usage_stats::{
     effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
 };
+use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -264,40 +265,44 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
     let file_modified = metadata_modified_nanos(&metadata);
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let (checkpoint, has_byte_offset) = get_jsonl_sync_state(db, &file_path_str)?;
+    let last_offset = checkpoint.line_offset;
 
-    // 文件未变化则跳过
-    if file_modified <= last_modified {
+    // mtime alone cannot detect same-timestamp appends. Legacy schemas without
+    // a byte checkpoint conservatively rescan, retaining line/id deduplication.
+    if checkpoint.matches_file(file_modified, metadata.len()) {
         return Ok((0, 0));
     }
 
     // 从上次偏移位置开始增量解析
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
-
+    let mut reader = BufReader::new(file);
+    let mut line_buffer = Vec::new();
+    let mut byte_offset = 0i64;
     let mut line_offset: i64 = 0;
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
     let mut current_session_id: Option<String> = None;
 
-    for line_result in reader.lines() {
+    while read_complete_jsonl_line(&mut reader, &mut line_buffer)? {
         line_offset += 1;
+        byte_offset = byte_offset.saturating_add(line_buffer.len() as i64);
 
         // 跳过已处理的行
         if line_offset <= last_offset {
             continue;
         }
 
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
+        let line = match std::str::from_utf8(&line_buffer) {
+            Ok(line) => line,
+            Err(_) => continue, // A terminated malformed record, not a pending tail.
         };
 
         if line.trim().is_empty() {
             continue;
         }
 
-        let value: serde_json::Value = match serde_json::from_str(&line) {
+        let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -385,6 +390,8 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
         }
     }
 
+    checkpoint.validate_progress(line_offset, byte_offset)?;
+
     // 有效记录和游标必须一起提交。任何数据库错误都回滚本文件本轮写入，
     // 保留原游标，让下次同步即使文件未变化也能重试；坏行仍在解析阶段跳过。
     let conn = lock_conn!(db.conn);
@@ -428,11 +435,129 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
     }
 
     // 更新同步状态
-    update_sync_state_on_conn(&tx, &file_path_str, file_modified, line_offset)?;
+    update_jsonl_sync_state_on_conn(
+        &tx,
+        &file_path_str,
+        JsonlSyncState {
+            modified: file_modified,
+            line_offset,
+            byte_offset: Some(byte_offset),
+        },
+        has_byte_offset,
+    )?;
     tx.commit()
         .map_err(|e| AppError::Database(format!("提交 Claude 会话写入事务失败: {e}")))?;
 
     Ok((imported, skipped))
+}
+
+/// A forward-only JSONL checkpoint. Unknown byte proof requires a rescan;
+/// schemas retaining version 17 legitimately have no last_byte_offset column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct JsonlSyncState {
+    pub modified: i64,
+    pub line_offset: i64,
+    pub byte_offset: Option<i64>,
+}
+
+impl JsonlSyncState {
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Self> {
+        // NULL or an unrecognized legacy byte value is not evidence of EOF.
+        let byte_offset = match row.get_ref(start + 2)? {
+            rusqlite::types::ValueRef::Integer(value) if value >= 0 => Some(value),
+            _ => None,
+        };
+        Ok(Self {
+            modified: row.get(start)?,
+            line_offset: row.get(start + 1)?,
+            byte_offset,
+        })
+    }
+
+    pub(crate) fn matches_file(self, modified: i64, size: u64) -> bool {
+        self.modified == modified && self.byte_offset.is_some_and(|offset| offset as u64 == size)
+    }
+
+    pub(crate) fn validate_progress(self, lines: i64, bytes: i64) -> Result<(), AppError> {
+        if lines < self.line_offset || self.byte_offset.is_some_and(|offset| bytes < offset) {
+            return Err(AppError::Config(
+                "完整 JSONL 记录未达到已提交游标，保留原同步进度".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Accept terminated records (including bad ones), or valid JSON at EOF without
+/// a newline. An unfinished JSON/UTF-8 tail stays before the durable checkpoint.
+/// Counting this buffer's length avoids BufReader read-ahead affecting offsets.
+pub(crate) fn read_complete_jsonl_line(
+    reader: &mut impl BufRead,
+    buffer: &mut Vec<u8>,
+) -> Result<bool, AppError> {
+    buffer.clear();
+    let read = reader
+        .read_until(b'\n', buffer)
+        .map_err(|error| AppError::Config(format!("读取 JSONL 记录失败: {error}")))?;
+    Ok(read > 0
+        && (buffer.ends_with(b"\n") || serde_json::from_slice::<serde_json::Value>(buffer).is_ok()))
+}
+
+pub(crate) fn has_jsonl_byte_offset(conn: &rusqlite::Connection) -> Result<bool, AppError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_log_sync') WHERE name = 'last_byte_offset')",
+        [], |row| row.get(0),
+    ).map_err(|error| AppError::Database(format!("检查 JSONL 游标列失败: {error}")))
+}
+
+fn get_jsonl_sync_state(
+    db: &Database,
+    file_path: &str,
+) -> Result<(JsonlSyncState, bool), AppError> {
+    let conn = lock_conn!(db.conn);
+    let has_byte_offset = has_jsonl_byte_offset(&conn)?;
+    let sql = if has_byte_offset {
+        "SELECT last_modified, last_line_offset, last_byte_offset FROM session_log_sync WHERE file_path = ?1"
+    } else {
+        "SELECT last_modified, last_line_offset, NULL FROM session_log_sync WHERE file_path = ?1"
+    };
+    let state = conn
+        .query_row(sql, [file_path], |row| JsonlSyncState::from_row(row, 0))
+        .optional()
+        .map_err(|error| AppError::Database(format!("读取 JSONL 同步游标失败: {error}")))?
+        .unwrap_or_default();
+    Ok((state, has_byte_offset))
+}
+
+/// JSONL-specific UPSERT preserves optional fields owned by other code. Call
+/// within the data transaction; the no-column path never migrates the schema.
+pub(crate) fn update_jsonl_sync_state_on_conn(
+    conn: &rusqlite::Connection,
+    file_path: &str,
+    state: JsonlSyncState,
+    has_byte_offset: bool,
+) -> Result<(), AppError> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let result = if has_byte_offset {
+        conn.prepare_cached(
+            "INSERT INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset)
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(file_path) DO UPDATE SET
+             last_modified = excluded.last_modified, last_line_offset = excluded.last_line_offset,
+             last_synced_at = excluded.last_synced_at, last_byte_offset = excluded.last_byte_offset"
+        ).and_then(|mut stmt| stmt.execute(rusqlite::params![file_path, state.modified, state.line_offset, now, state.byte_offset]))
+    } else {
+        conn.prepare_cached(
+            "INSERT INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(file_path) DO UPDATE SET
+             last_modified = excluded.last_modified, last_line_offset = excluded.last_line_offset,
+             last_synced_at = excluded.last_synced_at"
+        ).and_then(|mut stmt| stmt.execute(rusqlite::params![file_path, state.modified, state.line_offset, now]))
+    };
+    result.map_err(|error| AppError::Database(format!("更新 JSONL 同步游标失败: {error}")))?;
+    Ok(())
 }
 
 /// 获取 session_log_sync 表中某条目的同步进度。

@@ -19,7 +19,8 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
-    metadata_modified_nanos, update_sync_state, update_sync_state_on_conn, SessionSyncResult,
+    has_jsonl_byte_offset, metadata_modified_nanos, read_complete_jsonl_line,
+    update_jsonl_sync_state_on_conn, JsonlSyncState, SessionSyncResult,
 };
 use crate::services::usage_stats::{
     find_model_pricing, has_suspected_codex_session_duplicate, should_skip_session_insert, DedupKey,
@@ -214,6 +215,7 @@ struct ParsedCodexFile {
     parent: ParentResolution,
     token_events: Vec<ParsedTokenEvent>,
     line_offset: i64,
+    byte_offset: i64,
     has_billable_tokens: bool,
 }
 
@@ -472,27 +474,32 @@ fn token_snapshot_source(payload: &serde_json::Value) -> Option<String> {
 /// - `pricing`：模型定价 pass 级缓存。定价表在 pass 进行中被修改时本 pass
 ///   仍用旧价，下一个同步 pass 生效。
 struct CodexSyncPass {
-    cursors: HashMap<String, (i64, i64)>,
+    cursors: HashMap<String, JsonlSyncState>,
+    has_byte_offset: bool,
     pricing: HashMap<String, Option<ModelPricing>>,
 }
 
 impl CodexSyncPass {
     fn load(db: &Database) -> Result<Self, AppError> {
         let conn = lock_conn!(db.conn);
+        let has_byte_offset = has_jsonl_byte_offset(&conn)?;
+        let sql = if has_byte_offset {
+            "SELECT file_path, last_modified, last_line_offset, last_byte_offset FROM session_log_sync"
+        } else {
+            "SELECT file_path, last_modified, last_line_offset, NULL FROM session_log_sync"
+        };
         let mut stmt = conn
-            .prepare("SELECT file_path, last_modified, last_line_offset FROM session_log_sync")
+            .prepare(sql)
             .map_err(|e| AppError::Database(format!("预载同步游标失败: {e}")))?;
         let cursors = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
-                ))
+                Ok((row.get::<_, String>(0)?, JsonlSyncState::from_row(row, 1)?))
             })
             .and_then(|rows| rows.collect::<Result<HashMap<_, _>, _>>())
             .map_err(|e| AppError::Database(format!("预载同步游标失败: {e}")))?;
         Ok(Self {
             cursors,
+            has_byte_offset,
             pricing: HashMap::new(),
         })
     }
@@ -501,11 +508,15 @@ impl CodexSyncPass {
 fn get_codex_sync_state(
     db: &Database,
     file_path: &Path,
-    cursors: &HashMap<String, (i64, i64)>,
-) -> Result<(i64, i64), AppError> {
+    pass: &CodexSyncPass,
+) -> Result<JsonlSyncState, AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
-    let state = cursors.get(&file_path_str).copied().unwrap_or((0, 0));
-    if state != (0, 0)
+    let state = pass
+        .cursors
+        .get(&file_path_str)
+        .copied()
+        .unwrap_or_default();
+    if state != JsonlSyncState::default()
         || file_path
             .parent()
             .and_then(Path::file_name)
@@ -522,19 +533,26 @@ fn get_codex_sync_state(
     let backslash_suffix = format!("\\{file_name}");
     // 与原 SQL 等价：ORDER BY last_line_offset DESC, last_modified DESC LIMIT 1
     // → 在快照上按 (offset, modified) 取最大。
-    let inherited = cursors
+    let inherited = pass
+        .cursors
         .iter()
         .filter(|(path, _)| {
             path.as_str() != file_path_str
                 && (path.ends_with(&slash_suffix) || path.ends_with(&backslash_suffix))
         })
-        .map(|(_, &(modified, offset))| (offset, modified))
-        .max();
+        .map(|(_, state)| *state)
+        .max_by_key(|state| (state.line_offset, state.modified));
 
     match inherited {
-        Some((offset, modified)) => {
-            update_sync_state(db, &file_path_str, modified, offset)?;
-            Ok((modified, offset))
+        Some(inherited) => {
+            let conn = lock_conn!(db.conn);
+            update_jsonl_sync_state_on_conn(
+                &conn,
+                &file_path_str,
+                inherited,
+                pass.has_byte_offset,
+            )?;
+            Ok(inherited)
         }
         None => Ok(state),
     }
@@ -763,7 +781,9 @@ fn parse_codex_file(
 ) -> Result<ParsedCodexFile, AppError> {
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
+    let mut line_buffer = Vec::new();
+    let mut byte_offset = 0i64;
     let mut root_meta_seen = false;
     let mut root_timestamp = None;
     let mut parent = ParentResolution::None;
@@ -784,9 +804,10 @@ fn parse_codex_file(
     let mut line_offset = 0i64;
     let mut has_billable_tokens = false;
 
-    for line_result in reader.lines() {
+    while read_complete_jsonl_line(&mut reader, &mut line_buffer)? {
         line_offset += 1;
-        let line = match line_result {
+        byte_offset = byte_offset.saturating_add(line_buffer.len() as i64);
+        let line = match std::str::from_utf8(&line_buffer) {
             Ok(line) => line,
             Err(_) => continue,
         };
@@ -804,7 +825,7 @@ fn parse_codex_file(
             continue;
         }
 
-        let value: serde_json::Value = match serde_json::from_str(&line) {
+        let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(_) => continue,
         };
@@ -965,6 +986,7 @@ fn parse_codex_file(
         parent,
         token_events,
         line_offset,
+        byte_offset,
         has_billable_tokens,
     })
 }
@@ -1148,10 +1170,12 @@ fn sync_single_codex_file(
     let file_size = metadata.len();
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_codex_sync_state(db, file_path, &pass.cursors)?;
+    let checkpoint = get_codex_sync_state(db, file_path, pass)?;
+    let last_offset = checkpoint.line_offset;
 
-    // 文件未变化则跳过
-    if file_modified <= last_modified {
+    // A missing byte checkpoint (including schema 17) requires a conservative
+    // full parse; Codex needs the prefix for cumulative counters and event IDs.
+    if checkpoint.matches_file(file_modified, file_size) {
         return Ok(CodexFileSyncResult::default());
     }
 
@@ -1183,8 +1207,20 @@ fn sync_single_codex_file(
     }
 
     let parsed = parse_codex_file(file_path, thread_id_from_filename(file_path))?;
+    checkpoint.validate_progress(parsed.line_offset, parsed.byte_offset)?;
+    let next_checkpoint = JsonlSyncState {
+        modified: file_modified,
+        line_offset: parsed.line_offset,
+        byte_offset: Some(parsed.byte_offset),
+    };
     if !parsed.has_billable_tokens {
-        update_sync_state(db, &file_path_str, file_modified, parsed.line_offset)?;
+        let conn = lock_conn!(db.conn);
+        update_jsonl_sync_state_on_conn(
+            &conn,
+            &file_path_str,
+            next_checkpoint,
+            pass.has_byte_offset,
+        )?;
         return Ok(CodexFileSyncResult::default());
     }
     let Some(root_thread_id) = parsed.root_thread_id.as_deref() else {
@@ -1339,7 +1375,12 @@ fn sync_single_codex_file(
         if is_last_batch {
             // 游标推进与最后一批数据同事务提交：中途崩溃时两者一起回滚，
             // 不会出现"游标已推进但数据缺失"的丢数据窗口。
-            update_sync_state_on_conn(&tx, &file_path_str, file_modified, parsed.line_offset)?;
+            update_jsonl_sync_state_on_conn(
+                &tx,
+                &file_path_str,
+                next_checkpoint,
+                pass.has_byte_offset,
+            )?;
         }
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交 Codex 会话写入事务失败: {e}")))?;
@@ -1350,7 +1391,13 @@ fn sync_single_codex_file(
     }
 
     if to_insert.is_empty() {
-        update_sync_state(db, &file_path_str, file_modified, parsed.line_offset)?;
+        let conn = lock_conn!(db.conn);
+        update_jsonl_sync_state_on_conn(
+            &conn,
+            &file_path_str,
+            next_checkpoint,
+            pass.has_byte_offset,
+        )?;
     }
     Ok(result)
 }
@@ -1516,6 +1563,7 @@ fn find_codex_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<Mod
 mod tests {
     use super::*;
     use crate::services::session_usage::get_sync_state;
+    use crate::services::session_usage::update_sync_state;
     use tempfile::tempdir;
 
     const PARENT_ID: &str = "00000000-0000-4000-8000-000000000001";
