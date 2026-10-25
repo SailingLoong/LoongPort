@@ -15,7 +15,10 @@ import { ArrowLeft, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AppId } from "@/lib/api";
-import { PreservedView } from "@/components/ui/PreservedView";
+import {
+  PreservedView,
+  usePreservedViewActive,
+} from "@/components/ui/PreservedView";
 import { ServiceConfiguration } from "./onboarding/ServiceConfiguration";
 import type { ConnectedService } from "./onboarding/useServiceOnboarding";
 import {
@@ -49,6 +52,8 @@ export function AddHubPage({
   entryRequest?: { id: number; tab: AddHubTab; intent?: ServiceEntryIntent };
 }) {
   const { t } = useTranslation();
+  const viewActive = usePreservedViewActive();
+  const entryFocus = useRef<HTMLDivElement>(null);
   const [sourceIntent, setSourceIntent] = useState<
     ServiceEntryIntent | undefined
   >(entryRequest?.intent);
@@ -107,8 +112,21 @@ export function AddHubPage({
     setConfiguring(false);
   }
 
+  useEffect(() => {
+    if (viewActive && !configuring && !sourceIntent)
+      entryFocus.current?.focus();
+  }, [viewActive, configuring, sourceIntent, entryRequest?.id]);
+
   return (
-    <div className="page-content h-full overflow-auto">
+    <div
+      ref={entryFocus}
+      tabIndex={-1}
+      role="region"
+      aria-label={t("loongport.addEntry.title", {
+        defaultValue: "添加服务与账号",
+      })}
+      className="page-content h-full overflow-auto focus:outline-none"
+    >
       {sourceIntent && (
         <section className="space-y-4" aria-label="服务接入">
           <Button variant="ghost" onClick={() => closeSource(sourceRevision)}>
@@ -174,7 +192,7 @@ export function AddHubPage({
               <ArrowLeft className="h-4 w-4" />
               {t("common.back")}
             </Button>
-            <TabsList>
+            <TabsList className="flex h-auto min-w-0 max-w-full flex-wrap justify-start">
               {sourceAppId !== "mcode" && (
                 <>
                   <TabsTrigger value="accounts">

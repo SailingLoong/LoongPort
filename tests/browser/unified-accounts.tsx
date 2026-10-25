@@ -10,8 +10,12 @@ import type {
 } from "@/lib/api/automaticClaim";
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { PreservedView } from "@/components/ui/PreservedView";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
-import { PAGE_HEADER_HEIGHT } from "@/components/shell/layout";
+import {
+  PAGE_HEADER_HEIGHT,
+  SERVICES_CONTENT_CLASS_NAME,
+} from "@/components/shell/layout";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 import { AddHubPage, type AddHubTab } from "@/components/relay/AddHubPage";
 import type { AccountPlatform } from "@/components/relay/accounts/accountPlatforms";
@@ -29,6 +33,19 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get("scenario") ?? "populated";
 const language = params.get("lang") === "zh" ? "zh" : "en";
 const rejectedCommands: string[] = [];
+const alignment = scenario === "alignment";
+const alignmentControls = { failPolicy: false, failReads: false };
+const qoderPolicy = {
+  providerId: "synthetic-qoder",
+  credentialGeneration: "synthetic-g1",
+  revision: 1,
+  policyVersion: 2,
+  enabled: false,
+  canEnable: true,
+  reason: null,
+  subject: null,
+};
+
 const automaticStatusReads = { workbuddy: 0, minimaxCode: 0 };
 const automaticSnapshots = Object.fromEntries(
   (["workbuddy", "minimaxCode"] as const).map((provider) => [
@@ -89,7 +106,7 @@ const workbuddyAccounts: WorkBuddyAccount[] = [
     autoClaimEnabled: false,
     autoClaimRevision: 0,
     autoClaimPolicyVersion: 1,
-    canSetAutomatic: false,
+    canSetAutomatic: alignment,
     autoClaimBlocked: false,
     canRefresh: false,
     canClaim: false,
@@ -103,6 +120,12 @@ const workbuddyAccounts: WorkBuddyAccount[] = [
     },
   },
 ];
+if (alignment)
+  workbuddyAccounts.push({
+    ...workbuddyAccounts[0],
+    id: "synthetic-workbuddy-b",
+    label: "Synthetic WorkBuddy B",
+  });
 const nativeAccounts: MiniMaxCodeAccount[] = ["A", "B"].map((id) => ({
   id: `synthetic-${id}`,
   label: `Synthetic account ${id}`,
@@ -112,6 +135,8 @@ const nativeAccounts: MiniMaxCodeAccount[] = ["A", "B"].map((id) => ({
   authGeneration: 1,
   credentialVersion: 1,
   authorized: true,
+  autoClaimEnabled: false,
+  autoClaimRevision: 1,
   status: "unknown",
   canClaim: false,
   canRefresh: true,
@@ -143,7 +168,58 @@ mockIPC(
         return { ...automaticSnapshots[provider] };
       }
       case "list_workbuddy_accounts":
+        if (alignmentControls.failReads)
+          throw new Error("Synthetic read failure");
         return workbuddyAccounts;
+      case "set_workbuddy_automatic_claim": {
+        const args = payload as {
+          id: string;
+          enabled: boolean;
+          generation: number;
+          revision: number;
+          policyVersion: number;
+        };
+        const row = workbuddyAccounts.find((row) => row.id === args.id)!;
+        if (alignmentControls.failPolicy && args.id === "synthetic-workbuddy-b")
+          throw new Error("Synthetic policy failure");
+        if (
+          row.generation !== args.generation ||
+          row.autoClaimRevision !== args.revision
+        )
+          throw new Error("Synthetic stale owner");
+        row.autoClaimEnabled = args.enabled;
+        row.autoClaimRevision++;
+        return { ...row };
+      }
+      case "set_minimax_code_automatic_claim": {
+        const args = payload as {
+          id: string;
+          enabled: boolean;
+          authGeneration: number;
+          policyRevision: number;
+        };
+        const row = nativeAccounts.find((row) => row.id === args.id)!;
+        if (
+          row.authGeneration !== args.authGeneration ||
+          row.autoClaimRevision !== args.policyRevision
+        )
+          throw new Error("Synthetic stale owner");
+        row.autoClaimEnabled = args.enabled;
+        row.autoClaimRevision!++;
+        return { ...row };
+      }
+      case "qoder_daily_automatic_context":
+        return { ...qoderPolicy };
+      case "set_qoder_daily_automatic": {
+        const args = (
+          payload as { request: { enabled: boolean; expectedRevision: number } }
+        ).request;
+        if (args.expectedRevision !== qoderPolicy.revision)
+          throw new Error("Synthetic stale owner");
+        qoderPolicy.enabled = args.enabled;
+        qoderPolicy.revision++;
+        return { ...qoderPolicy };
+      }
       case "list_trae_accounts":
         return [];
       case "get_zcode_account_library":
@@ -186,7 +262,18 @@ mockIPC(
       case "get_common_config_snippet":
         return null;
       case "get_providers":
-        return {};
+        if (alignmentControls.failReads)
+          throw new Error("Synthetic read failure");
+        return alignment && (payload as { app: string }).app === "codex"
+          ? {
+              "synthetic-qoder": {
+                id: "synthetic-qoder",
+                name: "Synthetic Qoder",
+                settingsConfig: {},
+                meta: { providerType: "qoder_cn_device" },
+              },
+            }
+          : {};
       case "get_service_sources":
         return [];
       case "relay_list_directory":
@@ -231,6 +318,7 @@ const client = new QueryClient({
 Object.assign(window, {
   unifiedLayout: {
     rejectedCommands,
+    alignmentControls,
     automaticStatusReads,
     completeAutomaticCheck,
     settled: () => client.isFetching() === 0,
@@ -275,13 +363,17 @@ function Fixture() {
         className="fixed left-[var(--sidebar-width)] right-0 top-0 z-50 border-b border-border-default bg-background"
         style={{ height: PAGE_HEADER_HEIGHT }}
       >
-        <div className="page-header flex h-full items-center gap-4">
+        <div
+          className={`${SERVICES_CONTENT_CLASS_NAME} flex h-full items-center gap-4`}
+        >
           {platform && (
             <Button variant="ghost" onClick={back}>
               {i18n.t("common.back")}
             </Button>
           )}
-          <h1 className="text-lg font-semibold">{i18n.t("client.services")}</h1>
+          <h1 className="text-[26px] font-semibold">
+            {i18n.t("client.services")}
+          </h1>
         </div>
       </header>
       <main
@@ -289,11 +381,11 @@ function Fixture() {
         data-layout-view={view}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto"
       >
-        {view === "addHub" ? (
+        <PreservedView active={view === "addHub"}>
           <AddHubPage
             sourceAppId="codex"
             entryRequest={entryRequest}
-            onBack={back}
+            onBack={() => setView("services")}
             onAddProvider={async () => {
               throw new Error("Synthetic fixture does not save providers");
             }}
@@ -302,7 +394,8 @@ function Fixture() {
               setView("services");
             }}
           />
-        ) : (
+        </PreservedView>
+        <PreservedView active={view === "services"}>
           <ServicesPage
             appId="codex"
             platform={platform}
@@ -311,7 +404,7 @@ function Fixture() {
             onOpenApp={() => undefined}
             onBack={back}
           />
-        )}
+        </PreservedView>
       </main>
     </div>
   );

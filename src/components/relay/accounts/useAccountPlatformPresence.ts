@@ -1,9 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { readZCodeSourcePreference } from "@/lib/zcodeSourcePreference";
-import { authApi } from "@/lib/api/auth";
-import { workbuddyApi } from "@/lib/api/workbuddy";
-import { minimaxCodeApi } from "@/lib/api/minimaxCode";
-import { traeAccountsApi } from "@/lib/api/traeAccounts";
+import { authApi, type ManagedAuthAccount } from "@/lib/api/auth";
+import {
+  workbuddyApi,
+  type WorkBuddyAccount,
+  type WorkBuddyInferenceState,
+} from "@/lib/api/workbuddy";
+import { minimaxCodeApi, type MiniMaxCodeAccount } from "@/lib/api/minimaxCode";
+import { traeAccountsApi, type TraeAccountView } from "@/lib/api/traeAccounts";
 import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
 import { providersApi } from "@/lib/api/providers";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
@@ -11,6 +15,11 @@ import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { PROVIDER_SWITCHED, VENDOR_ACCOUNTS_CHANGED } from "@/lib/api/events";
 import type { AccountPlatform } from "./accountPlatforms";
+import {
+  qoderDailyApi,
+  type QoderAutomaticContext,
+} from "@/lib/api/qoderDaily";
+import { zcodeClaimApi, type ClaimState } from "@/lib/api/zcodeClaim";
 import type { AppId } from "@/lib/api/types";
 
 export interface PlatformConnection {
@@ -27,6 +36,19 @@ export interface PlatformAccountSummary {
   identity?: string;
   status?: string;
   app?: AppId;
+  automaticReadFailed?: boolean;
+  snapshot?:
+    | { kind: "auth"; value: ManagedAuthAccount }
+    | { kind: "workbuddy"; value: WorkBuddyAccount }
+    | { kind: "minimax"; value: MiniMaxCodeAccount }
+    | { kind: "trae"; value: TraeAccountView }
+    | {
+        kind: "qoder";
+        value: QoderAutomaticContext;
+        source: "internationalQoderPat" | "chinaQoderPat" | "chinaQoderDevice";
+      }
+    | { kind: "zcode"; value: ClaimState; dataRoot?: string };
+  inferenceState?: WorkBuddyInferenceState;
 }
 export interface PlatformPresenceSnapshot {
   accounts?: PlatformAccountSummary[];
@@ -51,6 +73,9 @@ export async function readAccountPlatformPresence(
       status?: string;
       identity?: string;
       app?: AppId;
+      automaticReadFailed?: boolean;
+      snapshot?: PlatformAccountSummary["snapshot"];
+      inferenceState?: WorkBuddyInferenceState;
     }[],
   ) => {
     accounts.push(
@@ -80,6 +105,7 @@ export async function readAccountPlatformPresence(
             (await authApi.authGetStatus(platform)).accounts.map((row) => ({
               id: row.id,
               label: row.login,
+              snapshot: { kind: "auth" as const, value: row },
             })),
           ),
       }),
@@ -95,6 +121,7 @@ export async function readAccountPlatformPresence(
             id: row.id,
             label: row.label,
             status: row.claimState,
+            snapshot: { kind: "workbuddy", value: row },
           })),
         ),
     },
@@ -109,6 +136,7 @@ export async function readAccountPlatformPresence(
             id: row.id,
             status: row.state,
             identity: "HTTP",
+            inferenceState: row.state,
           })),
         ),
     },
@@ -128,6 +156,7 @@ export async function readAccountPlatformPresence(
                 label: row.label,
                 status: row.status,
                 identity: row.region === "cn" ? "CN" : "Global",
+                snapshot: { kind: "minimax", value: row },
               })),
           ),
         );
@@ -150,6 +179,7 @@ export async function readAccountPlatformPresence(
                 id: row.id,
                 status: row.status,
                 identity: row.realm,
+                snapshot: { kind: "trae", value: row },
               })),
           ),
         );
@@ -158,20 +188,26 @@ export async function readAccountPlatformPresence(
     {
       source: "zcode",
       platforms: ["zcode"],
-      read: async () =>
-        add(
+      read: async () => {
+        const dataRoot = readZCodeSourcePreference()?.dataRoot || undefined;
+        const library = await zcodeAccountsApi.library(dataRoot);
+        const state = library.profiles.length
+          ? await zcodeClaimApi.state(dataRoot).catch(() => null)
+          : null;
+        return add(
           "zcode",
           "zcode",
-          (
-            await zcodeAccountsApi.library(
-              readZCodeSourcePreference()?.dataRoot || undefined,
-            )
-          ).profiles.map((row) => ({
+          library.profiles.map((row) => ({
             id: row.id,
             label: row.label,
             identity: row.family,
+            automaticReadFailed: !state,
+            snapshot: state
+              ? { kind: "zcode", value: state, dataRoot }
+              : undefined,
           })),
-        ),
+        );
+      },
     },
     ...PROVIDER_STORE_APP_IDS.map((app) => ({
       source: `provider:${app}`,
@@ -189,8 +225,28 @@ export async function readAccountPlatformPresence(
             )
           ) {
             present.add("qoder");
+            const receivedPolicy = await qoderDailyApi
+              .automaticContext(provider.id)
+              .catch(() => null);
+            const policy =
+              receivedPolicy?.providerId === provider.id
+                ? receivedPolicy
+                : null;
             add(`provider:${app}`, "qoder", [
               {
+                automaticReadFailed: !policy,
+                snapshot: policy
+                  ? {
+                      kind: "qoder",
+                      value: policy,
+                      source:
+                        provider.meta?.providerType === "qoder_sdk"
+                          ? "internationalQoderPat"
+                          : provider.meta?.providerType === "qoder_cn_device"
+                            ? "chinaQoderDevice"
+                            : "chinaQoderPat",
+                    }
+                  : undefined,
                 id: provider.id,
                 label: provider.name,
                 identity:
@@ -256,6 +312,12 @@ export async function readAccountPlatformPresence(
   // Connection presence follows its exact app owner, never an unrelated failure.
   if (connections.length) platforms.add("openrouter");
   else platforms.delete("openrouter");
+  for (const account of accounts) {
+    if (account.source === "workbuddy")
+      account.inferenceState = accounts.find(
+        (row) => row.source === "workbuddy-inference" && row.id === account.id,
+      )?.inferenceState;
+  }
   return {
     accounts,
     platforms: [...platforms],

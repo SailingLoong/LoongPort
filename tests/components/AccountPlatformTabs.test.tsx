@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import i18n from "i18next";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { AccountPlatformTabs } from "@/components/relay/accounts/AccountPlatformTabs";
 import type { AccountPlatform } from "@/components/relay/accounts/accountPlatforms";
 beforeEach(() => localStorage.clear());
@@ -18,7 +18,7 @@ function Harness() {
 }
 it("defaults to all accounts and only offers imported platform filters", () => {
   render(<Harness />);
-  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -42,8 +42,8 @@ it("selects one platform and restores all without changing legacy preferences", 
     "aria-selected",
     "true",
   );
-  await user.click(screen.getByRole("tab", { name: "全部" }));
-  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -54,7 +54,7 @@ it("selects one platform and restores all without changing legacy preferences", 
 it("supports keyboard filtering and cannot delete a filter", async () => {
   const user = userEvent.setup();
   render(<Harness />);
-  act(() => screen.getByRole("tab", { name: "全部" }).focus());
+  act(() => screen.getByRole("tab", { name: "全部账号" }).focus());
   await user.keyboard("{ArrowRight}");
   await waitFor(() =>
     expect(screen.getByRole("tab", { name: "WorkBuddy" })).toHaveFocus(),
@@ -65,7 +65,7 @@ it("supports keyboard filtering and cannot delete a filter", async () => {
     "true",
   );
   await user.keyboard("{Home}");
-  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -105,4 +105,19 @@ it("translates both the all-filter label and its visible text", async () => {
   render(<Harness />);
   expect(screen.getByRole("tab", { name: "All" })).toHaveTextContent(/^All$/);
   await i18n.changeLanguage("zh");
+});
+
+it("scrolls the keyboard-selected filter into view", async () => {
+  const scroll = vi.fn();
+  const original = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = scroll;
+  try {
+    render(<Harness />);
+    screen.getByRole("tab", { name: "全部账号" }).focus();
+    await userEvent.setup().keyboard("{End}");
+    await waitFor(() => expect(scroll).toHaveBeenCalled());
+    expect(screen.getByRole("tab", { name: "TRAE 国际版" })).toHaveFocus();
+  } finally {
+    HTMLElement.prototype.scrollIntoView = original;
+  }
 });

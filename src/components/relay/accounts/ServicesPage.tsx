@@ -1,3 +1,4 @@
+import { SERVICES_CONTENT_CLASS_NAME } from "@/components/shell/layout";
 import { DialogVisibility } from "@/components/ui/dialog";
 import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
 import { QoderAccountPanel } from "./QoderAccountPanel";
@@ -6,7 +7,18 @@ import {
   AccountWorkspace,
   AccountWorkspaceTarget,
 } from "./AccountWorkspace";
-import { AccountPlatformTabs } from "./AccountPlatformTabs";
+import {
+  AccountPlatformTabs,
+  AccountPlatformLogo,
+} from "./AccountPlatformTabs";
+import {
+  automaticClaimKey,
+  automaticPolicyStamp,
+} from "./automaticClaimSettings";
+import { AutomaticClaimControls } from "./AutomaticClaimControls";
+import { AccountOverviewCard } from "./AccountOverviewCard";
+import { usePreservedViewActive } from "@/components/ui/PreservedView";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   serviceEntryIntent,
   type ServiceEntryIntent,
@@ -17,7 +29,7 @@ import {
   accountPlatformLabel,
   type AccountPlatform,
 } from "./accountPlatforms";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
@@ -25,10 +37,12 @@ import {
   ArrowRight,
   Loader2,
   Plus,
+  RefreshCw,
   Server,
   ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -97,16 +111,39 @@ function useAccountActivity() {
 
 export function ServicesPage(props: ServicesPageProps) {
   const { t } = useTranslation();
+  const viewActive = usePreservedViewActive();
+  const addTrigger = useRef<HTMLButtonElement>(null);
+  const returnAddFocus = useRef(false);
+  const addReturnTarget = useRef<HTMLElement | null>(null);
+  const openAddHub: ServicesPageProps["onOpenAddHub"] = (tab, options) => {
+    addReturnTarget.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    returnAddFocus.current = true;
+    if (options) props.onOpenAddHub(tab, options);
+    else props.onOpenAddHub(tab);
+  };
   const [localPlatform, setLocalPlatform] = useState<
     AccountPlatform | undefined
   >(props.platform);
   const [blocked, setBlocked] = useState(false);
+  const [section, setSection] = useState("platform");
+  const [filter, setFilter] = useState<AccountPlatform | undefined>();
+  const [refreshing, setRefreshing] = useState(false);
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimUnconfirmed, setClaimUnconfirmed] = useState<
+    Record<string, string>
+  >({});
   const [entered, setEntered] = useState<AccountPlatform[]>([]);
   const [targets, setTargets] = useState<
     Partial<Record<AccountPlatform, { id: string; request: number }>>
   >({});
-  const { accounts: serviceAccounts, error: serviceAccountsError } =
-    useServiceAccounts();
+  const {
+    accounts: serviceAccounts,
+    error: serviceAccountsError,
+    reload,
+  } = useServiceAccounts();
   const routedOpenCode =
     props.account?.kind === "vendor" &&
     serviceAccounts.some(
@@ -143,6 +180,14 @@ export function ServicesPage(props: ServicesPageProps) {
   const available = accountPlatforms
     .filter((item) => present.has(item.id))
     .map((item) => item.id);
+  const filterMissing =
+    filter !== undefined &&
+    !presence.isPending &&
+    !unavailable.has(filter) &&
+    !available.includes(filter);
+  useEffect(() => {
+    if (filterMissing) setFilter(undefined);
+  }, [filterMissing]);
   // Only visited managers stay mounted; switching views must not cancel authorization.
   const displayed = [...new Set([...entered, ...(active ? [active] : [])])];
   const openSummary = (platform: AccountPlatform, id: string) => {
@@ -153,36 +198,214 @@ export function ServicesPage(props: ServicesPageProps) {
     }));
     select(platform);
   };
+  const overviewAccounts = (presence.data?.accounts ?? []).filter(
+    (row) =>
+      row.source !== "workbuddy-inference" ||
+      !presence.data?.accounts?.some(
+        (other) => other.source === "workbuddy" && other.id === row.id,
+      ),
+  );
+  const visiblePlatforms = filter
+    ? available.filter((id) => id === filter)
+    : available;
+  const qoderRegions = [
+    ...new Set(
+      overviewAccounts
+        .filter((row) => row.platform === "qoder")
+        .map((row) => row.identity),
+    ),
+  ];
+  const qoderEdition =
+    qoderRegions.length === 1
+      ? qoderRegions[0] === "CN"
+        ? "CN"
+        : qoderRegions[0] === "Global"
+          ? "INTL"
+          : undefined
+      : undefined;
+  const allPlatformAccounts = [
+    ...overviewAccounts,
+    ...serviceAccounts
+      .filter((row) => row.kind === "vendor" && row.row.vendorId === "opencode")
+      .map((row) => ({
+        source: "vendor",
+        platform: "opencode" as const,
+        id: String(row.id),
+        label: row.row.accountLabel || accountName(row),
+      })),
+  ];
+  const visibleAccounts = allPlatformAccounts.filter(
+    (row) => !filter || row.platform === filter,
+  );
+  const visibleCount = visibleAccounts.length;
+  const refresh = async () => {
+    if (refreshing || blocked) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([presence.refetch(), reload()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  useEffect(() => {
+    if (active) setSection("platform");
+    else if (props.account) setSection("relay");
+  }, [active, props.account]);
+  useEffect(() => {
+    if (viewActive && returnAddFocus.current) {
+      returnAddFocus.current = false;
+      const target = addReturnTarget.current;
+      if (target?.isConnected) target.focus();
+      else addTrigger.current?.focus();
+    }
+  }, [viewActive, active]);
   return (
     <AccountApplicationNavigation.Provider
       value={() => props.onOpenApp(props.appId)}
     >
-      <div className="space-y-6">
-        <section
+      <Tabs
+        value={section}
+        onValueChange={setSection}
+        className={cn(SERVICES_CONTENT_CLASS_NAME, "space-y-5 py-5")}
+      >
+        <TabsList
+          aria-label={t("loongport.accounts.sourceType", {
+            defaultValue: "来源类型",
+          })}
+          className="h-auto w-full justify-start gap-6 rounded-none border-b border-border bg-transparent p-0"
+        >
+          {[
+            [
+              "platform",
+              t("loongport.accounts.platformAccounts", {
+                defaultValue: "平台账号",
+              }),
+            ],
+            [
+              "relay",
+              t("loongport.accounts.relayTab", { defaultValue: "中转站" }),
+            ],
+          ].map(([value, label]) => (
+            <TabsTrigger
+              key={value}
+              value={value}
+              disabled={blocked || claimBusy}
+              className="rounded-none border-b-2 border-transparent px-1 pb-3 pt-0 text-sm font-medium text-muted-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+            >
+              {label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <TabsContent
+          value="platform"
+          forceMount
+          hidden={section !== "platform"}
           aria-label={t("loongport.accounts.platformAccounts", {
             defaultValue: "平台账号",
           })}
           className="space-y-4"
         >
-          <header className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">
-              {t("loongport.accounts.platformAccounts", {
-                defaultValue: "平台账号",
-              })}
-            </h2>
-            <Button
-              disabled={blocked}
-              onClick={() => props.onOpenAddHub("accounts")}
-            >
-              <Plus className="h-4 w-4" />
-              {t("loongport.accounts.addAccount", { defaultValue: "添加账号" })}
-            </Button>
-          </header>
           <AccountPlatformTabs
-            active={active}
+            active={filter}
+            editions={{ qoder: qoderEdition }}
             platforms={available}
-            onSelect={select}
-            disabled={blocked}
+            disabled={blocked || claimBusy}
+            onSelect={(value) => {
+              if (blocked) return;
+              setFilter(value);
+              select(undefined);
+            }}
+          />
+          <header className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 max-w-full items-center gap-2">
+              {active && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={blocked || claimBusy}
+                  onClick={() => select(undefined)}
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  {t("loongport.accounts.backToOverview", {
+                    defaultValue: "返回账号",
+                  })}
+                </Button>
+              )}
+              <h2 className="min-w-0 truncate text-lg font-semibold">
+                {filter
+                  ? accountPlatformLabel(
+                      accountPlatforms.find((item) => item.id === filter)!,
+                    )
+                  : t("loongport.accounts.allAccounts", {
+                      defaultValue: "全部账号",
+                    })}
+              </h2>
+              <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                {t("loongport.accounts.accountCount", {
+                  defaultValue: "{{count}} 个账号",
+                  count: visibleCount,
+                })}
+              </span>
+            </div>
+            <div className="flex max-w-full flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                className="h-10"
+                aria-busy={refreshing || presence.isFetching}
+                disabled={
+                  blocked || claimBusy || refreshing || presence.isFetching
+                }
+                onClick={() => void refresh()}
+              >
+                <RefreshCw
+                  className={cn("h-4 w-4", refreshing && "animate-spin")}
+                />
+                {t("loongport.accounts.refreshStatus", {
+                  defaultValue: "刷新状态",
+                })}
+              </Button>
+              <Button
+                ref={addTrigger}
+                className="h-10"
+                disabled={blocked || claimBusy}
+                onClick={() => {
+                  openAddHub("accounts");
+                }}
+              >
+                <Plus className="h-4 w-4" />
+                {t("loongport.accounts.addAccount", {
+                  defaultValue: "添加账号",
+                })}
+              </Button>
+            </div>
+          </header>
+          <AutomaticClaimControls
+            accounts={visibleAccounts}
+            scope={
+              filter
+                ? accountPlatformLabel(
+                    accountPlatforms.find((item) => item.id === filter)!,
+                  )
+                : t("loongport.accounts.allAccounts", {
+                    defaultValue: "全部账号",
+                  })
+            }
+            unavailable={
+              filter
+                ? new Set(
+                    [...unavailable].filter((platform) => platform === filter),
+                  )
+                : unavailable
+            }
+            disabled={
+              blocked || refreshing || presence.isFetching || presence.isPending
+            }
+            onRefresh={presence.refetch}
+            onBusyChange={setClaimBusy}
+            unconfirmed={claimUnconfirmed}
+            onUnconfirmed={(issues) =>
+              setClaimUnconfirmed((previous) => ({ ...previous, ...issues }))
+            }
           />
           {presence.isPending && (
             <p role="status" className="text-sm text-muted-foreground">
@@ -207,20 +430,21 @@ export function ServicesPage(props: ServicesPageProps) {
             </p>
           )}
           {!active &&
-            available.map((platform) => {
+            visiblePlatforms.map((platform) => {
               const definition = accountPlatforms.find(
                 (item) => item.id === platform,
               )!;
-              const summaries =
-                presence.data?.accounts?.filter(
-                  (row) =>
-                    row.platform === platform &&
-                    (row.source !== "workbuddy-inference" ||
-                      !presence.data?.accounts?.some(
-                        (other) =>
-                          other.source === "workbuddy" && other.id === row.id,
-                      )),
-                ) ?? [];
+              const summaries = overviewAccounts.filter(
+                (row) => row.platform === platform,
+              );
+              const groupEdition =
+                "edition" in definition
+                  ? definition.edition === "国际版"
+                    ? "INTL"
+                    : "CN"
+                  : platform === "qoder"
+                    ? qoderEdition
+                    : undefined;
               const vendors =
                 platform === "opencode"
                   ? serviceAccounts.filter(
@@ -233,83 +457,61 @@ export function ServicesPage(props: ServicesPageProps) {
                 <section
                   key={platform}
                   aria-label={`${accountPlatformLabel(definition)} · ${t("loongport.accounts.overview", { defaultValue: "账号总览" })}`}
-                  className="overflow-hidden rounded-xl border border-border bg-card"
+                  className="space-y-3"
                 >
-                  <header className="flex items-center justify-between border-b border-border px-4 py-2">
-                    <h3 className="text-sm font-semibold">
-                      {accountPlatformLabel(definition)}
-                    </h3>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={blocked}
-                      onClick={() => select(platform)}
-                    >
-                      {t("common.view", { defaultValue: "查看" })}
-                    </Button>
+                  <header className="flex items-center gap-2 pt-1">
+                    <AccountPlatformLogo platform={definition} />
+                    <h3 className="text-sm font-semibold">{definition.name}</h3>
+                    {groupEdition && (
+                      <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                        {groupEdition}
+                      </span>
+                    )}
+                    <span className="text-sm text-muted-foreground">
+                      {summaries.length + vendors.length}
+                    </span>
                   </header>
                   {unavailable.has(platform) && (
-                    <p
-                      role="status"
-                      className="px-4 py-2 text-xs text-muted-foreground"
-                    >
+                    <p role="status" className="text-xs text-muted-foreground">
                       {t("loongport.accounts.staleSummary", {
                         defaultValue:
                           "读取失败，显示上次读取的账号摘要；当前状态未知。",
                       })}
                     </p>
                   )}
-                  <ul className="divide-y divide-border">
+                  <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
                     {summaries.map((row) => (
-                      <li key={`${row.source}:${row.app ?? ""}:${row.id}`}>
-                        <button
-                          type="button"
-                          aria-label={`查看 ${row.label}`}
-                          disabled={blocked}
-                          onClick={() =>
-                            openSummary(
-                              platform,
-                              row.app ? `${row.app}:${row.id}` : row.id,
-                            )
-                          }
-                          className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <span className="min-w-0 break-all font-medium">
-                            {row.label}
-                          </span>
-                          <span className="text-xs text-muted-foreground">
-                            {row.app
-                              ? getAppDisplayName(row.app, t)
-                              : row.identity}
-                            {row.app || row.identity ? " · " : ""}
-                            {unavailable.has(platform)
-                              ? t("common.unknown", { defaultValue: "未知" })
-                              : row.status
-                                ? t(
-                                    `${platform === "workbuddy" ? (row.source === "workbuddy-inference" ? "workbuddy.inference.state" : "workbuddy.state") : platform.startsWith("minimax_code") ? "minimaxCode.status" : "trae.status"}.${row.status}`,
-                                    { defaultValue: row.status },
-                                  )
-                                : t("common.unknown", { defaultValue: "未知" })}
-                          </span>
-                        </button>
-                      </li>
+                      <AccountOverviewCard
+                        key={`${row.source}:${row.app ?? ""}:${row.id}`}
+                        account={row}
+                        automaticUnconfirmed={
+                          claimUnconfirmed[automaticClaimKey(row)] ===
+                          automaticPolicyStamp(row)
+                        }
+                        unavailable={unavailable.has(platform)}
+                        disabled={blocked || claimBusy}
+                        onOpen={() =>
+                          openSummary(
+                            platform,
+                            row.app ? `${row.app}:${row.id}` : row.id,
+                          )
+                        }
+                      />
                     ))}
                     {vendors.map((row) => (
-                      <li key={row.id}>
-                        <button
-                          type="button"
-                          disabled={blocked}
-                          aria-label={`查看 ${row.row.accountLabel || accountName(row)}`}
-                          className="w-full px-4 py-3 text-left text-sm hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => {
-                            openSummary(platform, String(row.id));
-                          }}
-                        >
-                          {row.row.accountLabel || accountName(row)}
-                        </button>
-                      </li>
+                      <AccountOverviewCard
+                        key={row.id}
+                        account={{
+                          source: "vendor",
+                          platform,
+                          id: String(row.id),
+                          label: row.row.accountLabel || accountName(row),
+                        }}
+                        disabled={blocked || claimBusy}
+                        onOpen={() => openSummary(platform, String(row.id))}
+                      />
                     ))}
-                  </ul>
+                  </div>
                 </section>
               );
             })}
@@ -319,10 +521,13 @@ export function ServicesPage(props: ServicesPageProps) {
               hidden={active !== platform}
               className="rounded-xl border border-border bg-card"
             >
-              <DialogVisibility active={active === platform}>
+              <DialogVisibility
+                active={section === "platform" && active === platform}
+              >
                 <AccountWorkspaceTarget.Provider value={targets[platform]}>
                   <ServicesPageContent
                     {...props}
+                    onOpenAddHub={openAddHub}
                     platform={platform}
                     onOpenPlatform={select}
                     onNavigationBlockedChange={(value) => {
@@ -360,6 +565,7 @@ export function ServicesPage(props: ServicesPageProps) {
                   {platform === "opencode" && (
                     <ServicesPageContent
                       {...props}
+                      onOpenAddHub={openAddHub}
                       platform={undefined}
                       accountKind="opencode"
                     />
@@ -368,8 +574,11 @@ export function ServicesPage(props: ServicesPageProps) {
               </DialogVisibility>
             </div>
           ))}
-        </section>
-        <section
+        </TabsContent>
+        <TabsContent
+          value="relay"
+          forceMount
+          hidden={section !== "relay"}
           aria-label={t("loongport.accounts.relayAccounts", {
             defaultValue: "中转站与官方 API",
           })}
@@ -385,8 +594,8 @@ export function ServicesPage(props: ServicesPageProps) {
             platform={undefined}
             accountKind="relay-and-vendor"
           />
-        </section>
-      </div>
+        </TabsContent>
+      </Tabs>
     </AccountApplicationNavigation.Provider>
   );
 }

@@ -84,6 +84,97 @@ beforeEach(() => {
   localStorage.clear();
   native.mockReset().mockImplementation(defaultRead);
 });
+
+it.each([
+  [["qoder_cn_device"], "CN"],
+  [["qoder_sdk"], "INTL"],
+  [["qoder_cn_device", "qoder_sdk"], null],
+] as const)(
+  "shows a Qoder edition only when the native inventory has one region: %s",
+  async (types, expected) => {
+    native.mockImplementation(async (command) =>
+      command === "get_providers"
+        ? Object.fromEntries(
+            types.map((type, index) => [
+              String(index),
+              {
+                id: String(index),
+                name: `Qoder ${index}`,
+                settingsConfig: {},
+                meta: { providerType: type },
+              },
+            ]),
+          )
+        : defaultRead(command),
+    );
+    render(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <ServicesPage
+          appId="codex"
+          onOpenApp={vi.fn()}
+          onOpenAddHub={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    const tab = await screen.findByRole("tab", { name: "Qoder" });
+    if (expected) expect(within(tab).getByText(expected)).toBeVisible();
+    else expect(within(tab).queryByText(/CN|INTL/)).not.toBeInTheDocument();
+  },
+);
+
+it("keeps a newer owner read when an older refresh completes after cancellation", async () => {
+  let reads = 0;
+  let finishOlder!: (rows: unknown[]) => void;
+  native.mockImplementation(async (command) => {
+    if (command !== "list_workbuddy_accounts") return defaultRead(command);
+    reads += 1;
+    if (reads === 1) return [{ id: "wb", label: "Initial account" }];
+    if (reads === 2)
+      return new Promise<unknown[]>((resolve) => {
+        finishOlder = resolve;
+      });
+    return [
+      { id: "wb", label: "Newest account", credits: { totalRemaining: 22 } },
+    ];
+  });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("button", { name: "查看 Initial account" });
+  const refresh = screen.getByRole("button", { name: "刷新状态" });
+  await user.click(refresh);
+  expect(refresh).toBeDisabled();
+  await user.click(refresh);
+  expect(reads).toBe(2);
+  await act(async () => {
+    await client.refetchQueries({ queryKey: accountPlatformPresenceKey });
+  });
+  expect(
+    screen.getByRole("button", { name: "查看 Newest account" }),
+  ).toBeVisible();
+  await act(async () => {
+    finishOlder([
+      { id: "wb", label: "Older account", credits: { totalRemaining: 11 } },
+    ]);
+  });
+  expect(
+    screen.queryByRole("button", { name: "查看 Older account" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "查看 Newest account" }),
+  ).toBeVisible();
+  expect(screen.getByText("22")).toBeVisible();
+});
 it("shows all imported platform accounts by default, filters without hiding, and keeps relay accounts separate", async () => {
   const user = userEvent.setup();
   const onOpenAddHub = vi.fn();
@@ -106,18 +197,23 @@ it("shows all imported platform accounts by default, filters without hiding, and
   expect(
     screen.queryByText("Native account: workbuddy"),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "平台账号" })).toBeInTheDocument();
-  expect(
-    screen.getByRole("region", { name: "中转站与官方 API" }),
-  ).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+  expect(screen.getByRole("tabpanel", { name: "平台账号" })).toBeVisible();
+  expect(screen.getByRole("tab", { name: "中转站" })).toHaveAttribute(
+    "aria-selected",
+    "false",
+  );
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
   expect(screen.queryByRole("tab", { name: "Qoder" })).not.toBeInTheDocument();
   await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
+  expect(
+    screen.queryByText("Native account: workbuddy"),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看 Saved account" }));
   expect(screen.getByText("Native account: workbuddy")).toBeInTheDocument();
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   expect(screen.getByText("Native account: workbuddy")).not.toBeVisible();
   expect(
     screen.getByRole("button", { name: "查看 Saved account" }),
@@ -234,11 +330,12 @@ it("preserves an entered native manager through All, failed reads and confirmed 
     </QueryClientProvider>,
   );
   await user.click(await screen.findByRole("tab", { name: "WorkBuddy" }));
+  await user.click(screen.getByRole("button", { name: "查看 Saved account" }));
   const session = await screen.findByRole("button", {
     name: "Native session workbuddy: 0",
   });
   await user.click(session);
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   expect(session).not.toBeVisible();
   native.mockImplementation(async (command: string): Promise<unknown> => {
     if (command === "list_workbuddy_accounts")
@@ -256,6 +353,7 @@ it("preserves an entered native manager through All, failed reads and confirmed 
   ).toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent("读取失败");
   await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
+  await user.click(screen.getByRole("button", { name: "查看 Saved account" }));
   expect(
     screen.getByRole("button", { name: "Native session workbuddy: 1" }),
   ).toBe(session);
@@ -428,7 +526,7 @@ it("opens the exact OpenCode account across real mutually exclusive route callba
   );
   expect(await screen.findByText("Native detail vendor:42")).toBeVisible();
   expect(screen.queryByText("Native detail vendor:41")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   await user.click(screen.getByRole("button", { name: "查看 OpenCode 41" }));
   expect(await screen.findByText("Native detail vendor:41")).toBeVisible();
   expect(screen.queryByText("Native detail vendor:42")).not.toBeInTheDocument();
@@ -541,7 +639,7 @@ it("opens the exact OpenRouter connection when two apps use the same provider ID
       within(detail).getByRole("button", { name: "管理原有连接" }),
     );
     expect(onOpenApp).toHaveBeenLastCalledWith("codex");
-    await user.click(screen.getByRole("tab", { name: "全部" }));
+    await user.click(screen.getByRole("tab", { name: "全部账号" }));
     await user.click(
       screen.getByRole("button", { name: "查看 Connection claude" }),
     );

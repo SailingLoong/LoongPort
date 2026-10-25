@@ -1,4 +1,32 @@
 {
+  "claimSettings": {
+    "title": "自动领取管理",
+    "heading": "自动领取",
+    "pending": "部分设置待确认",
+    "off": "自动领取未开启",
+    "allOn": "全部开启",
+    "partial": "部分开启",
+    "scope": "当前范围：{{scope}} · {{count}} 个账号 · 已开启 {{enabled}} 个",
+    "enable": "全部开启",
+    "disable": "全部关闭",
+    "notice": "仅更改当前范围内可设置的已有账号；新增账号需另行开启。自动领取与推理授权分别管理。",
+    "saving": "正在保存自动领取设置…",
+    "saved": "已确认 {{count}} 个账号的设置",
+    "uncertain": "设置结果未确认，请刷新后查看",
+    "readFailed": "账号状态读取失败，请刷新",
+    "reason": {
+      "actionRequired": "领取需要处理，请打开账号查看",
+      "pending": "领取结果待确认",
+      "ineligible": "当前活动不可领取",
+      "unavailable": "当前账号暂不可开启，请打开账号查看",
+      "busy": "账号领取操作进行中",
+      "readFailed": "自动领取设置读取失败，请刷新",
+      "unsupported": "未提供自动领取设置",
+      "unknown": "自动领取设置未知，请刷新",
+      "source": "当前账号来源不支持自动领取",
+      "identity": "无法确认领取身份，请打开账号查看"
+    }
+  },
   "app": {
     "title": "LoongPort",
     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"
@@ -3803,7 +3831,7 @@
     },
     "accounts": {
       "platformAccounts": "平台账号",
-      "allPlatforms": "全部",
+      "allPlatforms": "全部账号",
       "platformFilter": "平台账号筛选",
       "addAccount": "添加账号",
       "loadingPlatforms": "正在读取平台账号…",

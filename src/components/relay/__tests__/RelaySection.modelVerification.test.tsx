@@ -220,6 +220,15 @@ function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
   );
 }
 
+// The unified page now defaults to platform accounts. Relay lifecycle tests
+// enter its visible relay tab through the same user action as the real page.
+async function renderRelayEntry(ui: Parameters<typeof render>[0]) {
+  const view = render(ui);
+  const relayTab = screen.queryByRole("tab", { name: "中转站" });
+  if (relayTab) await userEvent.setup().click(relayTab);
+  return view;
+}
+
 const tier = (
   providerId: string,
   appId: "codex" | "claude" | "gemini" | "codex-image" = "codex",
@@ -404,7 +413,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("refreshes the selected account only after an explicit click and warns about cross-app deletion", async () => {
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -442,7 +451,7 @@ describe("RelaySection model verification ownership", () => {
         useAccountSessionStartup();
         return null;
       }
-      render(
+      await renderRelayEntry(
         <QueryClientProvider client={createTestQueryClient()}>
           <Startup />
           <ServicesPage
@@ -483,7 +492,7 @@ describe("RelaySection model verification ownership", () => {
       { ...relay, canQueryBalance: false },
       { ...relay, id: 2, siteName: "Second relay", canQueryBalance: false },
     ]);
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -530,7 +539,7 @@ describe("RelaySection model verification ownership", () => {
         declaredOrigin: "https://relay.example",
         applied: [],
       });
-      render(
+      await renderRelayEntry(
         <QueryClientProvider client={createTestQueryClient()}>
           <ServicesPage
             appId="gemini"
@@ -567,7 +576,7 @@ describe("RelaySection model verification ownership", () => {
 
   it("keeps an accessible corner delete control on account cards", async () => {
     api.listRelays.mockResolvedValue([{ ...relay, canQueryBalance: false }]);
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -597,7 +606,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("keeps tier management out of the account detail view", async () => {
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -690,7 +699,7 @@ describe("RelaySection model verification ownership", () => {
     api.listRelays.mockResolvedValue([
       { ...relay, usageBlockers: [{ app: "claude", tierName: "Standard" }] },
     ]);
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -724,7 +733,7 @@ describe("RelaySection model verification ownership", () => {
         },
       ],
     });
-    render(
+    await renderRelayEntry(
       <QueryClientProvider client={createTestQueryClient()}>
         <ServicesPage
           appId="codex"
@@ -1096,7 +1105,7 @@ describe("RelaySection model verification ownership", () => {
           const mutate =
             operation === "apply" ? api.applySiteConfig : api.resetSiteConfig;
           mutate.mockResolvedValue({ applied: ["provider-a"] });
-          render(
+          await renderRelayEntry(
             <QueryClientProvider client={createTestQueryClient()}>
               {entry === "accounts" ? (
                 <ServicesPage
