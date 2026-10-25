@@ -93,7 +93,7 @@ beforeEach(() => {
   }));
 });
 
-function setup(appId: AppId = "gemini") {
+async function setup(appId: AppId = "gemini") {
   const onOpenApp = vi.fn();
   const onOpenAddHub = vi.fn();
   const client = new QueryClient({
@@ -108,12 +108,16 @@ function setup(appId: AppId = "gemini") {
       />
     </QueryClientProvider>,
   );
-  return { client, onOpenApp, onOpenAddHub, user: userEvent.setup() };
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("tab", { name: "loongport.accounts.relayTab" }),
+  );
+  return { client, onOpenApp, onOpenAddHub, user };
 }
 
 describe("ServicesPage", () => {
   it("lists all account kinds independently of the selected application's vendor support", async () => {
-    setup();
+    await setup();
     expect(await screen.findByText("Example Relay")).toBeInTheDocument();
     expect(screen.getByText("Example Official")).toBeInTheDocument();
     expect(screen.getByText("loongport.accounts.relay")).toBeInTheDocument();
@@ -132,7 +136,7 @@ describe("ServicesPage", () => {
   });
 
   it("opens only the chosen account's existing operations and returns to an updated global list", async () => {
-    const { user } = setup();
+    const { user } = await setup();
     await screen.findByText("Example Official");
     await user.click(
       screen.getAllByRole("button", { name: "loongport.accounts.detail" })[1],
@@ -174,7 +178,7 @@ describe("ServicesPage", () => {
         ],
       },
     ]);
-    const { user, onOpenApp, client } = setup();
+    const { user, onOpenApp, client } = await setup();
     const invalidate = vi.spyOn(client, "invalidateQueries");
     await screen.findByText("Example Official");
     await user.click(
@@ -193,10 +197,13 @@ describe("ServicesPage", () => {
   });
 
   it("navigates configured apps and the actual add flow", async () => {
-    const { user, onOpenApp, onOpenAddHub } = setup();
+    const { user, onOpenApp, onOpenAddHub } = await setup();
     await screen.findByText("Example Official");
     await user.click(screen.getByRole("button", { name: "Codex" }));
     expect(onOpenApp).toHaveBeenCalledWith("codex");
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.accounts.platformAccounts" }),
+    );
     await user.click(
       screen.getByRole("button", { name: "loongport.accounts.addAccount" }),
     );
@@ -233,7 +240,7 @@ it("leaves back navigation to the shell for a routed account detail", async () =
 });
 
 it("shows account details inline without a visibility toggle", async () => {
-  setup();
+  await setup();
   await screen.findByText("Example Official");
   // 账号信息常驻：标签（并进「label · app · 状态」一行）与余额直接可见，
   // 不再有「显示/隐藏账号信息」开关。
@@ -285,6 +292,9 @@ describe("ServicesPage 账号卡活动状态行", () => {
       </QueryClientProvider>,
     );
     const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.accounts.relayTab" }),
+    );
     await user.click(await screen.findByText("start"));
     expect(
       await screen.findByText("loongport.accounts.importingTiers"),
@@ -334,6 +344,9 @@ describe("ServicesPage 账号卡活动状态行", () => {
       </QueryClientProvider>,
     );
     const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.accounts.relayTab" }),
+    );
     await user.click(await screen.findByText("run-and-fail"));
     expect(
       await screen.findByText("loongport.accounts.importFailedLine"),

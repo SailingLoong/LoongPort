@@ -36,11 +36,13 @@ export function AccountPlatformTabs({
   platforms,
   onSelect,
   disabled = false,
+  editions = {},
 }: {
   active?: AccountPlatform;
   platforms: readonly AccountPlatform[];
   onSelect: (value: AccountPlatform | undefined) => void;
   disabled?: boolean;
+  editions?: Partial<Record<AccountPlatform, "CN" | "INTL">>;
 }) {
   const { t } = useTranslation();
   const allLabel = t("loongport.accounts.allPlatforms", {
@@ -66,6 +68,13 @@ export function AccountPlatformTabs({
           const item = accountPlatforms.find((item) => item.id === id);
           const label = item ? accountPlatformLabel(item) : allLabel;
           const selected = active === id;
+          const edition =
+            item &&
+            ("edition" in item
+              ? item.edition === "国际版"
+                ? "INTL"
+                : "CN"
+              : editions[item.id]);
           return (
             <Tooltip key={id ?? "all"}>
               <TooltipTrigger asChild>
@@ -107,20 +116,20 @@ export function AccountPlatformTabs({
                   }}
                   className={cn(
                     "relative flex h-10 shrink-0 items-center justify-center rounded-lg border text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    item ? "w-10" : "px-3",
-                    item && "edition" in item && "pb-2",
+                    item ? "w-10" : "w-[84px] px-3",
+                    edition && "pb-2",
                     selected
                       ? "border-primary/40 bg-primary/10 text-primary"
                       : "border-transparent hover:bg-muted",
                   )}
                 >
                   {item ? <AccountPlatformLogo platform={item} /> : allLabel}
-                  {item && "edition" in item && (
+                  {edition && (
                     <span
                       aria-hidden="true"
                       className="absolute bottom-0.5 left-1/2 -translate-x-1/2 rounded bg-background/90 px-0.5 text-[8px] font-semibold leading-[10px]"
                     >
-                      {item.edition === "国际版" ? "INTL" : "CN"}
+                      {edition}
                     </span>
                   )}
                 </button>

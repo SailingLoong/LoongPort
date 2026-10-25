@@ -1,9 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { readZCodeSourcePreference } from "@/lib/zcodeSourcePreference";
-import { authApi } from "@/lib/api/auth";
-import { workbuddyApi } from "@/lib/api/workbuddy";
-import { minimaxCodeApi } from "@/lib/api/minimaxCode";
-import { traeAccountsApi } from "@/lib/api/traeAccounts";
+import { authApi, type ManagedAuthAccount } from "@/lib/api/auth";
+import {
+  workbuddyApi,
+  type WorkBuddyAccount,
+  type WorkBuddyInferenceState,
+} from "@/lib/api/workbuddy";
+import { minimaxCodeApi, type MiniMaxCodeAccount } from "@/lib/api/minimaxCode";
+import { traeAccountsApi, type TraeAccountView } from "@/lib/api/traeAccounts";
 import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
 import { providersApi } from "@/lib/api/providers";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
@@ -27,6 +31,12 @@ export interface PlatformAccountSummary {
   identity?: string;
   status?: string;
   app?: AppId;
+  snapshot?:
+    | { kind: "auth"; value: ManagedAuthAccount }
+    | { kind: "workbuddy"; value: WorkBuddyAccount }
+    | { kind: "minimax"; value: MiniMaxCodeAccount }
+    | { kind: "trae"; value: TraeAccountView };
+  inferenceState?: WorkBuddyInferenceState;
 }
 export interface PlatformPresenceSnapshot {
   accounts?: PlatformAccountSummary[];
@@ -51,6 +61,8 @@ export async function readAccountPlatformPresence(
       status?: string;
       identity?: string;
       app?: AppId;
+      snapshot?: PlatformAccountSummary["snapshot"];
+      inferenceState?: WorkBuddyInferenceState;
     }[],
   ) => {
     accounts.push(
@@ -80,6 +92,7 @@ export async function readAccountPlatformPresence(
             (await authApi.authGetStatus(platform)).accounts.map((row) => ({
               id: row.id,
               label: row.login,
+              snapshot: { kind: "auth" as const, value: row },
             })),
           ),
       }),
@@ -95,6 +108,7 @@ export async function readAccountPlatformPresence(
             id: row.id,
             label: row.label,
             status: row.claimState,
+            snapshot: { kind: "workbuddy", value: row },
           })),
         ),
     },
@@ -109,6 +123,7 @@ export async function readAccountPlatformPresence(
             id: row.id,
             status: row.state,
             identity: "HTTP",
+            inferenceState: row.state,
           })),
         ),
     },
@@ -128,6 +143,7 @@ export async function readAccountPlatformPresence(
                 label: row.label,
                 status: row.status,
                 identity: row.region === "cn" ? "CN" : "Global",
+                snapshot: { kind: "minimax", value: row },
               })),
           ),
         );
@@ -150,6 +166,7 @@ export async function readAccountPlatformPresence(
                 id: row.id,
                 status: row.status,
                 identity: row.realm,
+                snapshot: { kind: "trae", value: row },
               })),
           ),
         );
@@ -256,6 +273,12 @@ export async function readAccountPlatformPresence(
   // Connection presence follows its exact app owner, never an unrelated failure.
   if (connections.length) platforms.add("openrouter");
   else platforms.delete("openrouter");
+  for (const account of accounts) {
+    if (account.source === "workbuddy")
+      account.inferenceState = accounts.find(
+        (row) => row.source === "workbuddy-inference" && row.id === account.id,
+      )?.inferenceState;
+  }
   return {
     accounts,
     platforms: [...platforms],

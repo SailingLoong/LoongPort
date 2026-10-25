@@ -50,6 +50,13 @@ describe("AddHubPage", () => {
     listVendorAccounts.mockReset();
   });
 
+  it("moves entry focus into the visible add page", () => {
+    renderHub("codex");
+    expect(
+      screen.getByRole("region", { name: "loongport.addEntry.title" }),
+    ).toHaveFocus();
+  });
+
   it("lands on accounts and reaches the relay directory before switching in place", async () => {
     const user = userEvent.setup();
     listVendorAccounts.mockResolvedValue({ supported: true, accounts: [] });

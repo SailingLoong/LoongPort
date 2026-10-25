@@ -100,8 +100,11 @@ for (const language of ["en", "zh"]) {
     ).toHaveLength(0);
     await user.click(minimax);
     expect(
-      within(main).getByRole("heading", { name: "Synthetic account B" }),
-    ).toBeInTheDocument();
+      within(main).getByRole("button", { name: "查看 Synthetic account B" }),
+    ).toBeVisible();
+    expect(
+      within(main).queryByRole("heading", { name: "Synthetic account B" }),
+    ).not.toBeInTheDocument();
     await user.click(
       within(main).getByRole("button", { name: "查看 Synthetic account A" }),
     );
@@ -119,13 +122,6 @@ for (const language of ["en", "zh"]) {
     expect(
       within(main).getByRole("heading", { name: "Synthetic account B" }),
     ).toBeInTheDocument();
-    await user.click(minimax);
-    for (const [key, name] of nativeAccountKeyboardSteps(t)) {
-      await user.keyboard(`{${key}}`);
-      const selected = within(tablist).getByRole("tab", { name });
-      expect(selected).toHaveAttribute("aria-selected", "true");
-      await waitFor(() => expect(selected).toHaveFocus());
-    }
     await user.click(
       within(document.querySelector("[data-layout-header]")).getByRole(
         "button",
@@ -136,6 +132,18 @@ for (const language of ["en", "zh"]) {
       expect(
         within(main).queryAllByRole("region", { name: "账号详情" }),
       ).toHaveLength(nativeAccountOverviewCounts.details),
+    );
+    await user.click(minimax);
+    for (const [key, name] of nativeAccountKeyboardSteps(t)) {
+      await user.keyboard(`{${key}}`);
+      const selected = within(tablist).getByRole("tab", { name });
+      expect(selected).toHaveAttribute("aria-selected", "true");
+      await waitFor(() => expect(selected).toHaveFocus());
+    }
+    await user.click(
+      within(tablist).getByRole("tab", {
+        name: t("loongport.accounts.allPlatforms"),
+      }),
     );
     for (const name of [
       "查看 Synthetic account A",
