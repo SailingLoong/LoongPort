@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
@@ -10,12 +9,10 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::diagnostics::{format_error_chain, DiagnosticEvent, ResultLogExt};
 use crate::error::AppError;
+use crate::services::auto_sync::next_auto_sync_batch;
 use crate::services::s3_sync;
 use crate::services::sync_protocol::should_trigger_auto_sync_for_table;
 use crate::settings::{self, S3SyncSettings};
-
-const AUTO_SYNC_DEBOUNCE_MS: u64 = 1000;
-pub(crate) const MAX_AUTO_SYNC_WAIT_MS: u64 = 10_000;
 
 static DB_CHANGE_TX: OnceLock<Sender<String>> = OnceLock::new();
 static AUTO_SYNC_SUPPRESS_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -60,16 +57,6 @@ pub(crate) fn enqueue_change_signal(tx: &Sender<String>, table: &str) -> bool {
             false
         }
     }
-}
-
-pub(crate) fn auto_sync_wait_duration(started_at: Instant, now: Instant) -> Option<Duration> {
-    let max_wait = Duration::from_millis(MAX_AUTO_SYNC_WAIT_MS);
-    let debounce = Duration::from_millis(AUTO_SYNC_DEBOUNCE_MS);
-    let elapsed = now.saturating_duration_since(started_at);
-    if elapsed >= max_wait {
-        return None;
-    }
-    Some(debounce.min(max_wait - elapsed))
 }
 
 fn should_run_auto_sync(settings: Option<&S3SyncSettings>) -> bool {
@@ -173,20 +160,7 @@ async fn run_worker_loop(
     mut rx: Receiver<String>,
     app: tauri::AppHandle,
 ) {
-    while let Some(first_table) = rx.recv().await {
-        let started_at = Instant::now();
-        let mut merged_count = 1usize;
-
-        while let Some(wait_for) = auto_sync_wait_duration(started_at, Instant::now()) {
-            let timeout = tokio::time::timeout(wait_for, rx.recv()).await;
-
-            match timeout {
-                Ok(Some(_)) => merged_count += 1,
-                Ok(None) => return,
-                Err(_) => break,
-            }
-        }
-
+    while let Some((first_table, merged_count)) = next_auto_sync_batch(&mut rx).await {
         log::debug!(
             "{}",
             DiagnosticEvent::new("sync.auto.upload", "started")
@@ -216,13 +190,11 @@ async fn run_worker_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_sync_wait_duration, enqueue_change_signal, is_auto_sync_suppressed,
-        should_run_auto_sync, should_trigger_for_table, AutoSyncSuppressionGuard,
-        MAX_AUTO_SYNC_WAIT_MS,
+        enqueue_change_signal, is_auto_sync_suppressed, should_run_auto_sync,
+        should_trigger_for_table, AutoSyncSuppressionGuard,
     };
     use crate::settings::S3SyncSettings;
     use serial_test::serial;
-    use std::time::{Duration, Instant};
     use tokio::sync::mpsc::channel;
 
     #[test]
@@ -241,15 +213,13 @@ mod tests {
         {
             let _guard = AutoSyncSuppressionGuard::new();
             assert!(is_auto_sync_suppressed());
+            {
+                let _nested = AutoSyncSuppressionGuard::new();
+                assert!(is_auto_sync_suppressed());
+            }
+            assert!(is_auto_sync_suppressed());
         }
         assert!(!is_auto_sync_suppressed());
-    }
-
-    #[test]
-    fn max_wait_caps_flush_latency_for_continuous_events() {
-        let started = Instant::now();
-        let later = started + Duration::from_millis(MAX_AUTO_SYNC_WAIT_MS + 1);
-        assert!(auto_sync_wait_duration(started, later).is_none());
     }
 
     #[tokio::test]
