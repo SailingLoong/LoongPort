@@ -732,17 +732,10 @@ impl ProviderAdapter for CodexAdapter {
                 if let Some(url) = crate::grok_config::extract_base_url(config_str) {
                     return Ok(url.trim_end_matches('/').to_string());
                 }
-                if let Some(start) = config_str.find("base_url = \"") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('"') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-                if let Some(start) = config_str.find("base_url = '") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('\'') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
+                // Use the same selected-provider semantics as live configuration
+                // and credential resolution; never scan inactive tables or comments.
+                if let Some(url) = extract_codex_base_url_from_toml(config_str) {
+                    return Ok(url.trim_end_matches('/').to_string());
                 }
             }
         }
