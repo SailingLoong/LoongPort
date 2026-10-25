@@ -31,6 +31,7 @@ const paths = [
 const inferencePaths = [
   "authorization",
   "authorize",
+  "disable",
   "availableModels",
   "cancel",
   "failed",
@@ -65,6 +66,9 @@ it.each(Object.entries({ en, zh, "zh-TW": zhTW, ja }))(
       expect(at(locale, `workbuddy.inference.${key}`), key).toEqual(
         expect.any(String),
       );
+    expect(at(locale, "workbuddy.state.checkinRestricted")).toEqual(
+      expect.any(String),
+    );
     expect(at(locale, "automaticStatus.lastCheckedAt")).toContain("{{time}}");
     expect(at(locale, "automaticStatus.nextCheckAt")).toContain("{{time}}");
   },
@@ -75,6 +79,31 @@ it("distinguishes Chinese automatic checks from claims and inference authorizati
     "检查完成不等于领取成功",
   );
   expect(at(zh, "workbuddy.inference.identityNotice")).toContain(
-    "保留原有签到登录",
+    "登录凭据不足或已失效",
+  );
+  expect(at(zh, "workbuddy.inference.identityNotice")).toContain(
+    "未确认的领取记录会保留",
+  );
+  expect(at(zh, "workbuddy.inference.state.needsAuthorization")).toContain(
+    "已有完整登录可直接启用",
+  );
+  expect(at(zh, "workbuddy.inference.authorize")).toBe("允许用于推理");
+  expect(at(zh, "workbuddy.inference.disable")).toBe("停止推理");
+});
+
+it("does not require a second login in existing localized inference controls", () => {
+  expect(at(zhTW, "workbuddy.inference.authorize")).toBe("允許用於推理");
+  expect(at(zhTW, "workbuddy.inference.state.needsAuthorization")).toContain(
+    "完整登入可直接啟用",
+  );
+  expect(at(zhTW, "workbuddy.inference.identityNotice")).toContain(
+    "未確認的領取記錄會保留",
+  );
+  expect(at(ja, "workbuddy.inference.authorize")).toBe("推論での利用を許可");
+  expect(at(ja, "workbuddy.inference.state.needsAuthorization")).toContain(
+    "完全なログイン認証情報",
+  );
+  expect(at(ja, "workbuddy.inference.identityNotice")).toContain(
+    "未確認の受領記録は保持",
   );
 });

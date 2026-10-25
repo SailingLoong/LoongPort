@@ -1,3 +1,5 @@
+#![cfg(all(feature = "gui", any(debug_assertions, feature = "test-hooks")))]
+
 //! Synthetic upstream boundary; this is not real-account inference acceptance.
 #[tokio::test]
 async fn one_login_retains_one_complete_grant_with_separate_purpose_consent() {

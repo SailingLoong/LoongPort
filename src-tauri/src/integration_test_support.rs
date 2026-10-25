@@ -134,6 +134,7 @@ pub async fn verify_zcode_claim_native(app: tauri::AppHandle) {
 }
 
 /// WorkBuddy synthetic upstream, real encrypted owner and authorization consumers.
+#[cfg(feature = "gui")]
 pub async fn verify_workbuddy_shared_authorization(case: &str) {
     crate::workbuddy::integration_fixture::verify(case).await;
 }
