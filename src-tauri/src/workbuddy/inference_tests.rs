@@ -194,7 +194,9 @@ async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin()
     let b = store::binding(&f.session).unwrap();
     let rows = store::load(&f.session, &b).unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].account.token, "old-checkin-a");
+    assert!(rows[0].account.token.is_empty());
+    assert!(rows[0].shared_authorization);
+    assert!(rows[0].inference_allowed());
     assert_eq!(rows[0].account.id(&b.vault_id), f.ids[0]);
     assert_eq!(rows[0].inference.as_ref().unwrap().access, "new-authorized");
     assert!(rows[1].inference.is_none());

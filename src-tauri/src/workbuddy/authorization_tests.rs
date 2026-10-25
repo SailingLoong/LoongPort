@@ -3,7 +3,7 @@ use crate::secrets::session::SecretSession;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Mutex};
 fn token() -> Value {
-    json!({"code":0,"data":{"accessToken":"SYNTHETIC_TOKEN_CANARY","domain":"www.codebuddy.cn"}})
+    json!({"code":0,"data":{"accessToken":"SYNTHETIC_TOKEN_CANARY","refreshToken":"SYNTHETIC_REFRESH_CANARY","expiresIn":3600,"domain":"www.codebuddy.cn"}})
 }
 fn profile() -> Value {
     json!({"code":0,"data":{"uid":"synthetic-account","nickname":"Synthetic","domain":"www.codebuddy.cn"}})
@@ -152,7 +152,8 @@ async fn official_pending_codes_wait_then_save_only_after_verified_profile() {
         let rows = store::load(&session, &store::binding(&session).unwrap()).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].account.uid, "synthetic-account");
-        assert!(rows[0].inference.is_none());
+        assert!(rows[0].inference.is_some());
+        assert!(!rows[0].inference_allowed());
         assert!(transport.0.lock().unwrap().is_empty());
     }
 }

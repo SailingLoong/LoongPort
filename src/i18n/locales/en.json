@@ -4944,20 +4944,22 @@
       "claimed": "Claimed",
       "alreadyClaimed": "Already claimed",
       "unavailable": "Currently unavailable",
-      "needsVerification": "Verification required"
+      "needsVerification": "Verification required",
+      "checkinRestricted": "Check-in request refused (credit reads still work)"
     },
     "inference": {
       "authorization": "Inference authorization",
-      "authorize": "Authorize inference separately",
+      "authorize": "Allow inference",
+      "disable": "Stop inference",
       "availableModels": "Available inference models",
       "cancel": "Cancel inference authorization",
       "failed": "Inference authorization or model discovery did not complete. Select the matching account and try again; check-in login is unaffected.",
       "finish": "I have authorized inference",
-      "identityNotice": "Authorize the same WorkBuddy account in the same region. The existing check-in login is retained.",
+      "identityNotice": "This login is incomplete or expired. Authorize the same WorkBuddy account in the same region. Unresolved check-in records are retained.",
       "models": "Discover inference models",
       "open": "Open inference authorization",
       "state": {
-        "needsAuthorization": "Separate inference authorization required (check-in is unaffected)",
+        "needsAuthorization": "Inference is not enabled; a complete login can be reused",
         "ready": "Inference authorization saved (actual consumption is not verified)",
         "refreshRequired": "Inference authorization needs refresh",
         "expired": "Inference authorization expired (authorize inference again)"

@@ -16,6 +16,24 @@ impl Fake {
     }
 }
 impl Transport for Fake {
+    // Engine-only fixtures stay synthetic. Credential/dispatch ownership is exercised
+    // independently through the real owner in workbuddy_shared_authorization.
+    fn shared_request<'a>(
+        &'a self,
+        _session: &'a std::sync::Arc<SecretSession>,
+        snapshot: &'a SavedAccount,
+        endpoint: Endpoint,
+        _policy: Option<(u64, u64)>,
+        _day: Option<&'a str>,
+        clock: &'a dyn super::clock::Clock,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+        Box::pin(async move {
+            self.request(endpoint, Some(&snapshot.account), None, clock.now_ms())
+                .await
+                .map_err(DispatchFailure::OutcomeUnknown)
+        })
+    }
+
     fn request<'a>(
         &'a self,
         e: Endpoint,
@@ -225,7 +243,7 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
         (
             Endpoint::AuthToken,
             Ok(
-                json!({"code":0,"data":{"accessToken":"SYNTHETIC_REAUTHORIZED_TOKEN","domain":"www.codebuddy.cn"}}),
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_REAUTHORIZED_TOKEN","refreshToken":"SYNTHETIC_REFRESH_CANARY","expiresIn":3600,"domain":"www.codebuddy.cn"}}),
             ),
         ),
         (
@@ -248,7 +266,9 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
     let rows = store::load(&s, &b).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].account.id(&b.vault_id), id);
-    assert_eq!(rows[0].account.token, "SYNTHETIC_REAUTHORIZED_TOKEN");
+    assert!(rows[0].account.token.is_empty());
+    assert!(rows[0].shared_authorization);
+    assert!(rows[0].inference.is_some());
     assert_eq!(serde_json::to_value(&rows[0].pending).unwrap(), pending);
     assert!(!authorization
         .calls
@@ -1405,7 +1425,7 @@ async fn reauthorization_revokes_automatic_consent_even_for_same_token() {
         (
             Endpoint::AuthToken,
             Ok(
-                json!({"code":0,"data":{"accessToken":"SYNTHETIC_TOKEN_CANARY","domain":"www.codebuddy.cn"}}),
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_TOKEN_CANARY","refreshToken":"SYNTHETIC_REFRESH_CANARY","expiresIn":3600,"domain":"www.codebuddy.cn"}}),
             ),
         ),
         (
@@ -1655,7 +1675,7 @@ async fn late_claim_receipt_cannot_overwrite_reauthorized_account_or_revive_cons
         (
             Endpoint::AuthToken,
             Ok(
-                json!({"code":0,"data":{"accessToken":"SYNTHETIC_NEW_TOKEN","domain":"www.codebuddy.cn"}}),
+                json!({"code":0,"data":{"accessToken":"SYNTHETIC_NEW_TOKEN","refreshToken":"SYNTHETIC_REFRESH_CANARY","expiresIn":3600,"domain":"www.codebuddy.cn"}}),
             ),
         ),
         (
@@ -1672,7 +1692,9 @@ async fn late_claim_receipt_cannot_overwrite_reauthorized_account_or_revive_cons
     let saved = store::load(&s, &b).unwrap().remove(0);
     assert!(saved.generation > before.generation);
     assert!(!saved.automatic_enabled());
-    assert_eq!(saved.account.token, "SYNTHETIC_NEW_TOKEN");
+    assert!(saved.account.token.is_empty());
+    assert!(saved.shared_authorization);
+    assert!(saved.inference.is_some());
     assert!(saved.pending == pending);
     assert_eq!(saved.credited, None);
     enable(&e, &id).await;
@@ -1870,7 +1892,7 @@ async fn refresh_late_result_rejects_relogin_generation_token_identity_deletion_
                     (
                         Endpoint::AuthToken,
                         Ok(
-                            json!({"code":0,"data":{"accessToken":"SYNTHETIC_RELOGIN_TOKEN","domain":"www.codebuddy.cn"}}),
+                            json!({"code":0,"data":{"accessToken":"SYNTHETIC_RELOGIN_TOKEN","refreshToken":"SYNTHETIC_REFRESH_CANARY","expiresIn":3600,"domain":"www.codebuddy.cn"}}),
                         ),
                     ),
                     (

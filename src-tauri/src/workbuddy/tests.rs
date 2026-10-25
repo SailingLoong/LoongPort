@@ -243,6 +243,7 @@ fn official_transport_is_cn_only_and_never_places_credentials_in_urls() {
         assert!(request_url(e, None, None).is_err());
     }
     let url = request_url(Endpoint::AuthState, None, None).unwrap();
+    assert_eq!(url.host_str(), Some("copilot.tencent.com"));
     assert!(url
         .query_pairs()
         .any(|(k, v)| k == "platform" && v == "workbuddy"));

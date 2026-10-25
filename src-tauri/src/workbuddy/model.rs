@@ -82,6 +82,14 @@ pub(crate) struct SavedAccount {
     pub attempted_day: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) inference: Option<super::inference::Authorization>,
+    // Provenance, not an inferred permission: legacy access-only rows never cross hosts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) shared_authorization: bool,
+    // None preserves an existing explicitly authorized legacy inference grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) inference_consent: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) inference_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) credit_models: Option<super::credits::CreditModelSnapshot>,
     pub account: Account,
@@ -90,6 +98,12 @@ pub(crate) struct SavedAccount {
     pub claim_day: String,
     pub credited: Option<f64>,
     pub pending: Option<Attempt>,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 impl SavedAccount {
     pub fn new(account: Account) -> Self {
@@ -101,6 +115,9 @@ impl SavedAccount {
             auto_claim_credential: None,
             attempted_day: None,
             inference: None,
+            shared_authorization: false,
+            inference_consent: None,
+            inference_revision: 0,
             credit_models: None,
             account,
             credits: Credits::default(),
@@ -110,12 +127,22 @@ impl SavedAccount {
             pending: None,
         }
     }
+    pub(super) fn inference_allowed(&self) -> bool {
+        self.inference_consent.unwrap_or(self.inference.is_some())
+    }
     pub fn credential_binding(&self) -> String {
         let mut hash = Sha256::new();
         for value in [
             self.account.domain.host(),
             &self.account.uid,
-            &self.account.token,
+            if self.shared_authorization {
+                self.inference
+                    .as_ref()
+                    .map(|grant| grant.id())
+                    .unwrap_or("")
+            } else {
+                &self.account.token
+            },
         ] {
             hash.update((value.len() as u64).to_be_bytes());
             hash.update(value.as_bytes());
@@ -128,7 +155,11 @@ impl SavedAccount {
             && self.auto_claim_credential.as_deref() == Some(&self.credential_binding())
     }
     pub fn can_set_automatic(&self) -> bool {
-        !self.account.token.is_empty() && self.claim_state != ClaimState::NeedsVerification
+        (if self.shared_authorization {
+            self.inference.is_some()
+        } else {
+            !self.account.token.is_empty()
+        }) && self.claim_state != ClaimState::NeedsVerification
     }
     pub fn view(&self, owner: &str, day: &str) -> AccountView {
         let same_day = self.claim_day == day;

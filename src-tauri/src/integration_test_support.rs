@@ -132,3 +132,14 @@ pub fn verify_normal_upgrade_startup(case: &str) {
 pub async fn verify_zcode_claim_native(app: tauri::AppHandle) {
     crate::zcode_accounts::claim_runtime::test_support::verify(app).await;
 }
+
+/// WorkBuddy synthetic upstream, real encrypted owner and authorization consumers.
+pub async fn verify_workbuddy_shared_authorization(case: &str) {
+    crate::workbuddy::integration_fixture::verify(case).await;
+}
+
+/// MiniMax synthetic upstream, real shared account refresh owner.
+#[cfg(feature = "gui")]
+pub async fn verify_minimax_refresh_owner(case: &str) {
+    crate::minimax_code::refresh_owner_fixture::verify(case).await;
+}

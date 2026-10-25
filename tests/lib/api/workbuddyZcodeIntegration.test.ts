@@ -82,3 +82,12 @@ it("inference commands use the selected original account and opaque flow identif
     ["discover_workbuddy_inference_models", { id: "original-account" }],
   ]);
 });
+
+it("inference permission is a dedicated command, not another login", async () => {
+  await workbuddyApi.setInferenceConsent("account-a", true);
+  await workbuddyApi.setInferenceConsent("account-a", false);
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["set_workbuddy_inference_consent", { id: "account-a", enabled: true }],
+    ["set_workbuddy_inference_consent", { id: "account-a", enabled: false }],
+  ]);
+});

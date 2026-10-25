@@ -4944,23 +4944,25 @@
       "claimed": "已领",
       "alreadyClaimed": "已领过",
       "unavailable": "暂不可领",
-      "needsVerification": "需验证"
+      "needsVerification": "需验证",
+      "checkinRestricted": "领取接口拒绝请求（积分读取仍有效）"
     },
     "inference": {
       "authorization": "推理授权",
-      "authorize": "单独授权推理",
+      "authorize": "允许用于推理",
+      "disable": "停止推理",
       "availableModels": "可用推理模型",
       "cancel": "取消推理授权",
       "failed": "推理授权或模型发现未完成，请选择对应账号后重试；签到登录不受影响。",
       "finish": "我已完成推理授权",
-      "identityNotice": "请在同一区域授权同一个 WorkBuddy 账号；此操作保留原有签到登录。",
+      "identityNotice": "当前登录凭据不足或已失效，请在同一区域重新授权同一个 WorkBuddy 账号。未确认的领取记录会保留。",
       "models": "查询推理模型",
       "open": "打开推理授权页",
       "state": {
-        "needsAuthorization": "推理需要单独授权（不影响签到）",
+        "needsAuthorization": "尚未允许推理；已有完整登录可直接启用",
         "ready": "推理授权已保存（实际消费尚未验收）",
         "refreshRequired": "推理授权需要刷新",
-        "expired": "推理授权已过期（请单独重新授权）"
+        "expired": "登录凭据已过期，请补充授权"
       }
     }
   },

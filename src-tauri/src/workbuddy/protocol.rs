@@ -28,6 +28,18 @@ impl Endpoint {
     }
 }
 pub(crate) trait Transport: Send + Sync {
+    fn shared_request<'a>(
+        &'a self,
+        _session: &'a std::sync::Arc<crate::secrets::session::SecretSession>,
+        _snapshot: &'a super::model::SavedAccount,
+        _endpoint: Endpoint,
+        _policy: Option<(u64, u64)>,
+        _day: Option<&'a str>,
+        _clock: &'a dyn super::clock::Clock,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+        Box::pin(async { Err(DispatchFailure::NotDispatched(Failure::UnsupportedContext)) })
+    }
+
     fn claim<'a>(
         &'a self,
         account: &'a Account,

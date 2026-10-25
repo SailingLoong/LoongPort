@@ -33,7 +33,7 @@ pub(crate) fn request_url(
     state: Option<&str>,
 ) -> Result<reqwest::Url, Failure> {
     let host = match endpoint {
-        Endpoint::AuthState | Endpoint::AuthToken => "www.codebuddy.cn",
+        Endpoint::AuthState | Endpoint::AuthToken | Endpoint::Profile => "copilot.tencent.com",
         _ => account.ok_or(Failure::NeedsVerification)?.domain.host(),
     };
     let mut url = reqwest::Url::parse(&format!("https://{host}{}", endpoint.path()))
@@ -73,6 +73,20 @@ pub(crate) fn body(endpoint: Endpoint, now: i64) -> Value {
     }
 }
 impl Transport for OfficialHttp {
+    fn shared_request<'a>(
+        &'a self,
+        session: &'a std::sync::Arc<crate::secrets::session::SecretSession>,
+        snapshot: &'a super::model::SavedAccount,
+        endpoint: Endpoint,
+        policy: Option<(u64, u64)>,
+        day: Option<&'a str>,
+        clock: &'a dyn super::clock::Clock,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, DispatchFailure>> + Send + 'a>> {
+        Box::pin(super::inference::account_request(
+            session, snapshot, endpoint, policy, day, clock,
+        ))
+    }
+
     fn claim<'a>(
         &'a self,
         account: &'a Account,
@@ -118,6 +132,24 @@ async fn send(
         client.post(url).json(&body(endpoint, now))
     };
     request = request.header("Accept", "application/json");
+    if matches!(
+        endpoint,
+        Endpoint::AuthState | Endpoint::AuthToken | Endpoint::Profile
+    ) {
+        request = request
+            .header("User-Agent", "WorkBuddy/5.5.6")
+            .header("X-Requested-With", "XMLHttpRequest");
+    }
+    if endpoint == Endpoint::AuthState {
+        for header in [
+            "X-No-Authorization",
+            "X-No-User-Id",
+            "X-No-Enterprise-Id",
+            "X-No-Department-Info",
+        ] {
+            request = request.header(header, "true");
+        }
+    }
     if let Some(account) = account {
         request = request
             .bearer_auth(&account.token)

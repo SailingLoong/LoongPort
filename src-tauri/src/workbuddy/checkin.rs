@@ -12,6 +12,7 @@ pub(crate) enum ClaimState {
     AlreadyClaimed,
     Unavailable,
     NeedsVerification,
+    CheckinRestricted,
 }
 
 pub(crate) fn code(v: &Value) -> Option<i64> {
@@ -22,6 +23,9 @@ pub(crate) fn success(v: &Value) -> bool {
     matches!(code(v), Some(0 | 200))
 }
 fn error_state(v: &Value) -> ClaimState {
+    if v.get("loongportCheckinRestricted").and_then(Value::as_bool) == Some(true) {
+        return ClaimState::CheckinRestricted;
+    }
     match code(v) {
         Some(401 | 403 | 10085) => ClaimState::NeedsVerification,
         Some(1001) => ClaimState::AlreadyClaimed,
@@ -69,7 +73,7 @@ pub(crate) fn reconcile(
     }
     if matches!(
         receipt,
-        ClaimState::NeedsVerification | ClaimState::Unavailable
+        ClaimState::NeedsVerification | ClaimState::Unavailable | ClaimState::CheckinRestricted
     ) {
         return (receipt, None);
     }

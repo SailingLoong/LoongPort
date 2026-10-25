@@ -18,3 +18,6 @@ pub(crate) mod clock;
 
 pub(crate) mod inference;
 pub(crate) mod inference_commands;
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub(crate) mod integration_fixture;

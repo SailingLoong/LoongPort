@@ -281,7 +281,7 @@ fn start_workbuddy_automatic_claim(app: tauri::AppHandle) {
         let db = db.clone();
         async move {
             crate::workbuddy::engine::Engine {
-                session: db.secret_session(),
+                session: &db.secrets,
                 transport: &crate::workbuddy::http::OfficialHttp,
                 clock: &crate::workbuddy::clock::SystemClock,
             }

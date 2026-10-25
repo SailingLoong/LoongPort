@@ -541,7 +541,105 @@ pub(crate) async fn cancel(session: &SecretSession, id: &str) -> Result<(), Fail
     map.remove(id);
     Ok(())
 }
+// A flight stores only completion, never another copy of credentials. Its weak
+// registry exists only while this attempt has participants. It does not claim
+// crash/restart recovery or change later independent retry policy.
+struct RefreshFlight {
+    binding: Binding,
+    auth_generation: u64,
+    credential_version: u64,
+    result: tokio::sync::watch::Sender<Option<Result<(), Failure>>>,
+}
+struct RefreshLeader(std::sync::Arc<RefreshFlight>, bool);
+impl RefreshLeader {
+    fn finish(mut self, result: Result<(), Failure>) {
+        self.0.result.send_replace(Some(result));
+        self.1 = false;
+    }
+}
+impl Drop for RefreshLeader {
+    fn drop(&mut self) {
+        if self.1 {
+            // A dropped leader cannot prove that an accepted refresh did not
+            // rotate the upstream token. Existing waiters must not replay it.
+            self.0
+                .result
+                .send_replace(Some(Err(Failure::NetworkUnavailable)));
+        }
+    }
+}
+fn refresh_flight(
+    session: &SecretSession,
+    snapshot: &Snapshot,
+) -> Result<(std::sync::Arc<RefreshFlight>, bool), Failure> {
+    type Flights = HashMap<(PathBuf, String), std::sync::Weak<RefreshFlight>>;
+    static FLIGHTS: OnceLock<Mutex<Flights>> = OnceLock::new();
+    let mut flights = FLIGHTS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| Failure::StorageUnavailable)?;
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    let key = (session.root().to_path_buf(), snapshot.account.id.clone());
+    if let Some(flight) = flights.get(&key).and_then(std::sync::Weak::upgrade) {
+        if flight.binding == snapshot.binding
+            && flight.auth_generation == snapshot.account.auth_generation
+            && flight.credential_version == snapshot.account.credential_version
+        {
+            return Ok((flight, false));
+        }
+    }
+    let (result, _) = tokio::sync::watch::channel(None);
+    let flight = std::sync::Arc::new(RefreshFlight {
+        binding: snapshot.binding.clone(),
+        auth_generation: snapshot.account.auth_generation,
+        credential_version: snapshot.account.credential_version,
+        result,
+    });
+    flights.insert(key, std::sync::Arc::downgrade(&flight));
+    Ok((flight, true))
+}
 pub(super) async fn refresh_snapshot<T: Transport>(
+    session: &SecretSession,
+    transport: &T,
+    snapshot: &Snapshot,
+) -> Result<Snapshot, Failure> {
+    let (flight, leader) = refresh_flight(session, snapshot)?;
+    if leader {
+        let guard = RefreshLeader(flight, true);
+        let result = refresh_snapshot_once(session, transport, snapshot).await;
+        guard.finish(result.as_ref().map(|_| ()).map_err(|error| *error));
+        return result;
+    }
+    let mut completion = flight.result.subscribe();
+    loop {
+        let result = *completion.borrow_and_update();
+        if let Some(result) = result {
+            result?;
+            // Never use an old leader result across revoke/re-login/vault change.
+            // Read the original owner, rather than cache a second secret owner.
+            return catalog::access(session, Some(&snapshot.binding), |document, binding| {
+                let account = catalog::matched(document, snapshot)?;
+                account.usable()?;
+                if account.credential_version <= snapshot.account.credential_version {
+                    return Err(Failure::StaleIdentity);
+                }
+                Ok((
+                    Snapshot {
+                        binding: binding.clone(),
+                        account: account.clone(),
+                    },
+                    false,
+                ))
+            })
+            .await;
+        }
+        completion
+            .changed()
+            .await
+            .map_err(|_| Failure::NetworkUnavailable)?;
+    }
+}
+async fn refresh_snapshot_once<T: Transport>(
     session: &SecretSession,
     transport: &T,
     snapshot: &Snapshot,
