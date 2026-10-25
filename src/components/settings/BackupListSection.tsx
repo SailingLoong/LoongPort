@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Pencil, RotateCcw, Check, X, Download, Trash2 } from "lucide-react";
@@ -79,23 +79,41 @@ export function BackupListSection({
   const [editingFilename, setEditingFilename] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  const restorePending = useRef(false);
   const handleRestore = async () => {
-    if (!confirmFilename) return;
+    if (!confirmFilename || restorePending.current) return;
+    restorePending.current = true;
     try {
-      const safetyId = await restore(confirmFilename);
+      const result = await restore(confirmFilename);
       setConfirmFilename(null);
-      toast.success(
-        t("settings.backupManager.restoreSuccess", {
-          defaultValue: "Restore successful! Safety backup created",
-        }),
-        {
-          description: safetyId
-            ? `${t("settings.backupManager.safetyBackupId", { defaultValue: "Safety Backup ID" })}: ${safetyId}`
-            : undefined,
-          duration: 6000,
-          closeButton: true,
-        },
-      );
+      const options = {
+        description: result.backupId
+          ? `${t("settings.backupManager.safetyBackupId", { defaultValue: "Safety Backup ID" })}: ${result.backupId}`
+          : undefined,
+        duration: 6000,
+        closeButton: true,
+      };
+      if (result.warning) {
+        toast.warning(
+          t("settings.backupManager.restorePartialSuccess", {
+            defaultValue:
+              "Database restored; some synchronization is incomplete.",
+          }),
+          {
+            ...options,
+            description: [result.warning, options.description]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        );
+      } else {
+        toast.success(
+          t("settings.backupManager.restoreSuccess", {
+            defaultValue: "Restore successful! Safety backup created",
+          }),
+          options,
+        );
+      }
     } catch (error) {
       const detail =
         extractErrorMessage(error) ||
@@ -103,6 +121,8 @@ export function BackupListSection({
           defaultValue: "Restore failed",
         });
       toast.error(detail);
+    } finally {
+      restorePending.current = false;
     }
   };
 

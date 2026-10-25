@@ -19,6 +19,8 @@ export function useBackupManager() {
   });
 
   const restoreMutation = useMutation({
+    // An IPC rejection can follow a committed restore; never replay automatically.
+    retry: false,
     mutationFn: (filename: string) => backupsApi.restoreDbBackup(filename),
     onSuccess: async () => {
       // Invalidate all queries to refresh data from restored database
