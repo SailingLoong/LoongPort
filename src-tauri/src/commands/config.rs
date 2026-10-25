@@ -323,6 +323,7 @@ pub async fn set_common_config_snippet(
         &app_type,
         snippet,
     )
+    .await
 }
 
 #[cfg(test)]

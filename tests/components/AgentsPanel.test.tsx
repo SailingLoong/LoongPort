@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -270,4 +270,39 @@ it("removes an accidental empty analysis without discarding the draft", async ()
   expect(
     screen.queryByRole("button", { name: "移除分析 1" }),
   ).not.toBeInTheDocument();
+});
+
+it("ignores an older task list after cancellation changes the backend canCancel fact", async () => {
+  let completeOldRead!: (value: unknown) => void;
+  let reads = 0;
+  let cancelled = false;
+  const task = (canCancel: boolean) => [
+    { taskId: "task", status: "accepted", canCancel, runs: [] },
+  ];
+  call.mockImplementation(async (command) => {
+    if (command === "cancel_agents_task") {
+      cancelled = true;
+      return task(false);
+    }
+    if (command === "list_agents_tasks") {
+      reads++;
+      if (reads === 2)
+        return await new Promise((resolve) => {
+          completeOldRead = resolve;
+        });
+      return task(!cancelled);
+    }
+    return [];
+  });
+  const user = userEvent.setup();
+  render(<AgentsPanel />);
+  const cancel = await screen.findByRole("button", { name: "取消任务" });
+  await user.click(screen.getByRole("button", { name: "刷新状态" }));
+  await user.click(cancel);
+  await waitFor(() => expect(cancel).toBeDisabled());
+  await act(async () => {
+    completeOldRead(task(true));
+  });
+  expect(cancel).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent("不代表远端已停止");
 });

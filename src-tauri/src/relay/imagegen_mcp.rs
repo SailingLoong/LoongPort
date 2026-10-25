@@ -79,7 +79,15 @@ pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
 /// 1. 生图栏里没有托管档位了（没有可绑定的东西）；
 /// 2. 用户关了开关（`settings::imagegen_mcp_enabled`，见那里的文档：只要注册着，
 ///    工具描述就占宿主每次会话的上下文 —— 只想直接生图的用户要的是**根本不注册**）。
-pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
+pub async fn sync_registration(state: &AppState) -> Result<(), AppError> {
+    // Read the registration inputs only after acquiring their write ownership.
+    let _guards = McpService::lock_all_apps(state).await;
+    sync_registration_unlocked(state)
+}
+
+/// Caller owns all canonical MCP app guards, including across a settings commit.
+/// This complete local projection must not yield or reacquire those guards.
+pub(crate) fn sync_registration_unlocked(state: &AppState) -> Result<(), AppError> {
     crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
         &crate::live::engine::DeviceStore::for_device(),
     )?;
@@ -96,7 +104,7 @@ pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
         } else {
             "用户关闭了「在 CLI 对话中提供生图工具」"
         };
-        let removed = McpService::delete_server(state, IMAGEGEN_MCP_ID)?;
+        let removed = McpService::delete_server_unlocked(state, IMAGEGEN_MCP_ID)?;
         if removed {
             log::info!("{reason}，撤掉生图 MCP 记录");
         }
@@ -109,7 +117,7 @@ pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
         .to_str()
         .ok_or_else(|| AppError::Message("可执行文件路径不是有效的 UTF-8".into()))?;
 
-    McpService::upsert_server(state, registration_server(exe_str))
+    McpService::upsert_server_unlocked(state, registration_server(exe_str))
 }
 
 fn registration_server(exe: &str) -> McpServer {

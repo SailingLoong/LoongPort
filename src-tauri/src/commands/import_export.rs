@@ -126,10 +126,11 @@ pub async fn import_from_cc_switch(
 
 #[tauri::command]
 pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<Value, String> {
-    let db = state.db.clone();
+    // Keep the live writer's original proxy/lock owner. Rebuilding AppState from
+    // just the database creates unrelated application locks for the same files.
+    let app_state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let app_state = AppState::new(db).unwrap();
-        ProviderService::sync_current_to_live(&app_state)?;
+        futures::executor::block_on(ProviderService::sync_current_to_live(&app_state))?;
         Ok::<_, AppError>(json!({
             "success": true,
             "message": "Live configuration synchronized"

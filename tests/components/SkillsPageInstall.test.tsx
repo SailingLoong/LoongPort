@@ -20,16 +20,15 @@ let discoverableSkillsMock: DiscoverableSkill[] = [];
 let skillReposMock: SkillRepo[] = [];
 const refetchDiscoverableMock = vi.fn();
 
-// Stable cache so repeated renders see referentially-equal data.
-// SkillsPage has `useEffect([skillsShResult, ...])` that calls setState — a
-// fresh object every render would loop forever.
 const searchCache = new Map<
   string,
   {
-    data: SkillsShSearchResult | undefined;
+    data: { pages: SkillsShSearchResult[] } | undefined;
     isLoading: boolean;
     isFetching: boolean;
-    isPlaceholderData?: boolean;
+    hasNextPage: boolean;
+    fetchNextPage: () => void;
+    resetSearch: () => void;
   }
 >();
 
@@ -40,11 +39,13 @@ const setSearchResult = (
   state: Partial<{
     isLoading: boolean;
     isFetching: boolean;
-    isPlaceholderData: boolean;
   }> = {},
 ) => {
   searchCache.set(`${query}:${offset}`, {
-    data: result,
+    data: result ? { pages: [result] } : undefined,
+    hasNextPage: false,
+    fetchNextPage: vi.fn(),
+    resetSearch: vi.fn(),
     isLoading: false,
     isFetching: false,
     ...state,
@@ -83,10 +84,17 @@ vi.mock("@/hooks/useSkills", () => ({
   useRemoveSkillRepo: () => ({
     mutateAsync: vi.fn(),
   }),
-  useSearchSkillsSh: (query: string, _limit: number, offset: number) => {
-    const cached = searchCache.get(`${query}:${offset}`);
+  useSearchSkillsSh: (query: string) => {
+    const cached = searchCache.get(`${query}:0`);
     if (cached) return cached;
-    return { data: undefined, isLoading: false, isFetching: false };
+    return {
+      data: undefined,
+      isLoading: false,
+      isFetching: false,
+      hasNextPage: false,
+      fetchNextPage: vi.fn(),
+      resetSearch: vi.fn(),
+    };
   },
 }));
 

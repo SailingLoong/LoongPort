@@ -1466,6 +1466,7 @@ fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<()
     Ok(())
 }
 
+/// Caller owns the canonical app guard through provider and MCP projection.
 pub(crate) fn sync_current_provider_for_app_to_live(
     state: &AppState,
     app_type: &AppType,
@@ -1493,7 +1494,7 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     Ok(())
 }
 
-fn sync_current_provider_for_app_respecting_takeover(
+async fn sync_current_provider_for_app_respecting_takeover(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<(), AppError> {
@@ -1507,7 +1508,10 @@ fn sync_current_provider_for_app_respecting_takeover(
         return Ok(());
     };
 
-    let has_live_backup = futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+    let has_live_backup = state
+        .db
+        .get_live_backup(app_type.as_str())
+        .await
         .ok()
         .flatten()
         .is_some();
@@ -1522,12 +1526,11 @@ fn sync_current_provider_for_app_respecting_takeover(
         if matches!(app_type, AppType::ClaudeDesktop) {
             write_live_with_common_config_for_state(state, app_type, provider)?;
         } else {
-            futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            state
+                .proxy_service
+                .update_live_backup_from_provider_inner(app_type.as_str(), provider, None)
+                .await
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
         }
         return Ok(());
     }
@@ -1542,14 +1545,22 @@ fn sync_current_provider_for_app_respecting_takeover(
 /// 这确保了配置导入后无效 ID 会自动 fallback 到数据库。
 ///
 /// For additive mode apps (OpenCode), all providers are synced instead of just the current one.
-pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
+pub async fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     let mut failures = Vec::new();
+    let mut mcp_failures = Vec::new();
 
     // Sync providers based on mode
     for app_type in AppType::all() {
         if matches!(app_type, AppType::Pi | AppType::Mcode) {
             continue;
         }
+        // Provider snapshots and whole-file writes share the same owner as MCP.
+        // Complete this app's native write and MCP projection before the next
+        // await; cancellation while waiting for another app cannot strip MCP.
+        let guard = state
+            .proxy_service
+            .lock_switch_for_app(app_type.as_str())
+            .await;
         let result = if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)
@@ -1557,8 +1568,13 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
             // Switch mode: sync only current provider. During proxy takeover,
             // update the restore backup instead of rewriting the taken-over
             // live file.
-            sync_current_provider_for_app_respecting_takeover(state, &app_type)
+            sync_current_provider_for_app_respecting_takeover(state, &app_type).await
         };
+
+        if let Err(error) = McpService::sync_enabled_for_app(state, &app_type) {
+            mcp_failures.push(format!("{}: {error}", app_type.as_str()));
+        }
+        drop(guard);
 
         if let Err(error) = result {
             log::warn!("同步 Provider 到 {app_type:?} 失败: {error}");
@@ -1566,7 +1582,13 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         }
     }
 
-    if let Err(error) = super::ProviderService::sync_non_provider_live(state) {
+    if !mcp_failures.is_empty() {
+        failures.push(format!(
+            "mcp: 部分应用 MCP 同步失败: {}",
+            mcp_failures.join("; ")
+        ));
+    }
+    if let Err(error) = super::ProviderService::sync_skills_to_live(state) {
         failures.push(error.to_string());
     }
 
@@ -1672,14 +1694,27 @@ impl super::ProviderService {
     }
 
     /// Shared post-import projection of configuration owned outside providers.
-    pub(crate) fn sync_non_provider_live(state: &AppState) -> Result<(), AppError> {
+    pub(crate) async fn sync_non_provider_live(state: &AppState) -> Result<(), AppError> {
         let mut failures = Vec::new();
         // MCP sync is already best-effort per application. Preserve its aggregate
         // error while continuing with Skills.
-        if let Err(error) = McpService::sync_all_enabled(state) {
+        // Provider/configuration-import guards have been released by the caller.
+        if let Err(error) = McpService::sync_all_enabled(state).await {
             failures.push(format!("mcp: {error}"));
         }
 
+        if let Err(error) = Self::sync_skills_to_live(state) {
+            failures.push(error.to_string());
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(failures.join("; ")))
+        }
+    }
+
+    fn sync_skills_to_live(state: &AppState) -> Result<(), AppError> {
+        let mut failures = Vec::new();
         // Skill sync
         for app_type in AppType::all() {
             if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type)
@@ -2667,7 +2702,8 @@ mod tests {
             .expect("设成当前项");
 
         // 整条遍历必须成功 —— 报错会让排在生图栏之后的 app 全都同步不到。
-        sync_current_to_live(&state).expect("导入后的全量同步不该被生图栏中断");
+        futures::executor::block_on(sync_current_to_live(&state))
+            .expect("导入后的全量同步不该被生图栏中断");
     }
 
     /// 而 `write_live_snapshot` 本身仍然必须拒绝生图栏。

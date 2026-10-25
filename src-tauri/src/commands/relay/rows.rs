@@ -338,10 +338,10 @@ async fn reset_tier_config_impl(
     app_type: AppType,
 ) -> Result<(), AppError> {
     let state = app_handle.state::<AppState>();
-    reset_tier_config_in_state(state.inner(), provider_id, app_type)
+    reset_tier_config_in_state(state.inner(), provider_id, app_type).await
 }
 
-pub(crate) fn reset_tier_config_in_state(
+pub(crate) async fn reset_tier_config_in_state(
     state: &AppState,
     provider_id: &str,
     app_type: AppType,
@@ -356,6 +356,11 @@ pub(crate) fn reset_tier_config_in_state(
         ));
     }
 
+    // Own the snapshot, persistent reset and live projection as one local phase.
+    let _guard = state
+        .proxy_service
+        .lock_switch_for_app(app_type.as_str())
+        .await;
     let verification_scope =
         crate::relay::model_verification::types::TargetScope::new(provider_id, app_type.as_str());
     state.model_verification.cancel_scope(&verification_scope);
@@ -548,7 +553,14 @@ pub(crate) fn reset_tier_config_in_state(
         .map(|current| current == restored.id)
         .unwrap_or(false);
     if is_current {
-        refresh_live_for_current_tiers(state, std::slice::from_ref(&app_type));
+        if let Err(e) =
+            ProviderService::sync_current_provider_for_app_locked(state, app_type.clone()).await
+        {
+            log::warn!(
+                "刷新 {} 的当前配置失败（记录已保存，切换一次即生效）: {e}",
+                app_type.as_str()
+            );
+        }
     }
 
     Ok(())
@@ -900,14 +912,21 @@ fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
 /// 那些记录会永久留在 provider 列表里。切官方放在删档位之前，则是让被安置的档位
 /// 先卸下「当前项」身份、删除全走常规路径（见 [`switch_affected_apps_to_official`]）。
 #[tauri::command]
-pub fn relay_remove_site(
+pub async fn relay_remove_site(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: i64,
     force: Option<bool>,
 ) -> Result<(), String> {
-    remove_site_impl(state.inner(), id, force.unwrap_or(false), Some(&app))
-        .map_err(|e| e.to_string())
+    // Force removal performs synchronous provider/lifecycle work. Keep that
+    // whole local operation off runtime workers, including its MCP reconciliation.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        remove_site_impl(&state, id, force.unwrap_or(false), Some(&app))
+    })
+    .await
+    .map_err(|e| format!("删除站点失败: {e}"))?
+    .map_err(|e| e.to_string())
 }
 
 pub(crate) fn remove_site_impl(
@@ -1002,7 +1021,9 @@ pub(crate) fn remove_site_impl(
     //
     // 失败只 warn：站点记录马上就删了，不该因为一个 MCP 记录撤不掉而让「删站点」失败
     // （与上面那段清理档位同一条原则）。
-    if let Err(e) = imagegen_mcp::sync_registration(state) {
+    // Caller runs this local phase on a blocking thread. Individual provider
+    // operations above have returned and released their application guards.
+    if let Err(e) = futures::executor::block_on(imagegen_mcp::sync_registration(state)) {
         log::warn!("删除站点 {site_origin} 后同步生图工具记录失败: {e}");
     }
 
@@ -1596,6 +1617,7 @@ mod tests {
             .expect("start run");
 
         let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .await
             .expect_err("missing key must reject reset");
 
         assert!(error.to_string().contains("密钥"));
@@ -1642,6 +1664,7 @@ mod tests {
             .expect("install failure trigger");
 
         let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .await
             .expect_err("provider save must fail");
 
         assert!(matches!(error, AppError::Database(_)));
@@ -1677,7 +1700,9 @@ mod tests {
             .await
             .expect("start run");
 
-        reset_tier_config_in_state(&state, &provider_id, AppType::Codex).expect("reset succeeds");
+        reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .await
+            .expect("reset succeeds");
 
         let rows = state
             .model_verification
@@ -1773,8 +1798,12 @@ mod tests {
             db.set_available_models(app_type.as_str(), &provider_id, &models)
                 .expect("save remote inventory");
 
-            reset_tier_config_in_state(&state, &provider_id, app_type.clone())
-                .expect("reset succeeds");
+            futures::executor::block_on(reset_tier_config_in_state(
+                &state,
+                &provider_id,
+                app_type.clone(),
+            ))
+            .expect("reset succeeds");
 
             let after = state
                 .db

@@ -1088,24 +1088,36 @@ async fn provision_impl(
     // （接管时更新备份而不是覆盖 live 文件），而 `switch` 会多跑一遍切换语义
     // （接管态下走 `hot_switch_provider_inner`）—— 那不是这里要的。
     // `commands::relay` 的两条同型路径也用它，三处一份写法。
-    for app_type in provision::VENDOR_APPS {
-        if vendor == Vendor::OpenCode && crate::vendor::opencode_personal::is_account(&account_id) {
-            continue;
+    // The records are committed. Enqueue the existing local reconciliation before
+    // the next await; dropping the command must not cancel a started projection.
+    let refresh_state = state.clone();
+    let refresh_ids = written_provider_ids.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        for app_type in provision::VENDOR_APPS {
+            if vendor == Vendor::OpenCode
+                && crate::vendor::opencode_personal::is_account(&account_id)
+            {
+                continue;
+            }
+            let is_current = ProviderService::current(&refresh_state, app_type.clone())
+                .ok()
+                .map(|current| refresh_ids.contains(&current))
+                .unwrap_or(false);
+            if !is_current {
+                continue;
+            }
+            if let Err(e) = futures::executor::block_on(
+                ProviderService::sync_current_provider_for_app(&refresh_state, app_type.clone()),
+            ) {
+                log::warn!(
+                    "刷新 {} 的当前配置失败（记录已保存，切换一次即生效）: {e}",
+                    app_type.as_str()
+                );
+            }
         }
-        let is_current = ProviderService::current(state, app_type.clone())
-            .ok()
-            .map(|current| written_provider_ids.contains(&current))
-            .unwrap_or(false);
-        if !is_current {
-            continue;
-        }
-        if let Err(e) = ProviderService::sync_current_provider_for_app(state, app_type.clone()) {
-            log::warn!(
-                "刷新 {} 的当前配置失败（记录已保存，切换一次即生效）: {e}",
-                app_type.as_str()
-            );
-        }
-    }
+    })
+    .await
+    .map_err(|error| AppError::Message(format!("刷新官网配置任务失败: {error}")))?;
 
     Ok(VendorProvisionSummary {
         // 多 plan 后一个账号有多个 provider id；给「主」id（第一个 plan）保持旧契约，
@@ -1235,10 +1247,12 @@ pub async fn vendor_reset_plan_config(
     provider_id: String,
     app_id: String,
 ) -> Result<(), String> {
-    vendor_reset_plan_config_impl(state.inner(), &provider_id, &app_id).map_err(|e| e.to_string())
+    vendor_reset_plan_config_impl(state.inner(), &provider_id, &app_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-fn vendor_reset_plan_config_impl(
+async fn vendor_reset_plan_config_impl(
     state: &AppState,
     provider_id: &str,
     app_id: &str,
@@ -1262,8 +1276,10 @@ fn vendor_reset_plan_config_impl(
             ))
         })?;
 
-    let settings_guard =
-        futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+    let _settings_guard = state
+        .proxy_service
+        .lock_switch_for_app(app_type.as_str())
+        .await;
     let existing = state
         .db
         .get_provider_by_id(provider_id, app_type.as_str())
@@ -1331,8 +1347,7 @@ fn vendor_reset_plan_config_impl(
         .set_user_edited(app_type.as_str(), provider_id, false)
         .map_err(|e| AppError::Database(format!("清除已手工维护标记失败: {e}")))?;
 
-    drop(settings_guard);
-
+    // Retain the existing guard through projection: no post-commit lock wait.
     // 恢复的若正是当前在用的那条，落地文件要跟着走 —— 不刷的话 CLI 读到的仍是
     // 用户改坏的那份，而「恢复默认」恰恰是他在档位坏了时点的按钮。
     // 失败只 warn：DB 已经存对了，手工切一次就能生效（同 provision 结尾那段）。
@@ -1342,7 +1357,9 @@ fn vendor_reset_plan_config_impl(
         .as_deref()
         == Some(provider_id);
     if is_current {
-        if let Err(e) = ProviderService::sync_current_provider_for_app(state, app_type.clone()) {
+        if let Err(e) =
+            ProviderService::sync_current_provider_for_app_locked(state, app_type.clone()).await
+        {
             log::warn!("恢复默认配置后刷新 {} 落地配置失败: {e}", app_type.as_str());
         }
     }
@@ -2680,7 +2697,9 @@ mod tests {
             crate::relay::provider_config::extract_model(&refreshed.settings_config).as_deref(),
             Some("deepseek-v4.1-flash-free")
         );
-        vendor_reset_plan_config_impl(&state, &source, "codex").unwrap();
+        vendor_reset_plan_config_impl(&state, &source, "codex")
+            .await
+            .unwrap();
         let restored = state
             .db
             .get_provider_by_id(&source, "codex")

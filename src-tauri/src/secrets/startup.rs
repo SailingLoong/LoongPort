@@ -2928,7 +2928,7 @@ mod upgrade_handoff_tests {
                 "history" => crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(&state.db).map(|_| ()),
                 "templates" => crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(&state.db).map(|_| ()),
                 "official_history" => crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket().map(|_| ()),
-                "imagegen_mcp" => crate::relay::imagegen_mcp::sync_registration(&state),
+                "imagegen_mcp" => futures::executor::block_on(crate::relay::imagegen_mcp::sync_registration(&state)),
                 "catalog" => crate::services::provider::refresh_current_codex_catalog_projection(&state).map(|_| ()),
                 _ => unreachable!(),
             }.map_err(super::super::error::public_code);

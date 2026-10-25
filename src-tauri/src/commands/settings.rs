@@ -115,6 +115,9 @@ pub async fn save_settings(
     let unify_codex_enabled = settings.unify_codex_session_history;
     let mut previous_unify_codex_enabled = false;
     let mut previous_unify_migrate_existing = None;
+    // Acquire projection ownership before the first settings commit so cancellation
+    // while queued cannot leave the new Codex setting without its live projection.
+    let _codex_guard = state.proxy_service.lock_switch_for_app("codex").await;
     // Merge backend-owned facts and persist under the same settings write lock.
     crate::settings::mutate_settings(|current| {
         previous_unify_codex_enabled = current.unify_codex_session_history;
@@ -136,7 +139,8 @@ pub async fn save_settings(
         // Compensate only the failed live-setting change. A concurrent sharing
         // decision or attribution write must survive this rollback.
         if let Err(err) =
-            crate::services::provider::reapply_current_codex_official_live(state.inner())
+            crate::services::provider::reapply_current_codex_official_live_locked(state.inner())
+                .await
         {
             log::warn!("统一 Codex 会话历史开关变更后重写 live 配置失败，回滚设置: {err}");
             if let Err(rollback_err) = crate::settings::mutate_settings(|current| {

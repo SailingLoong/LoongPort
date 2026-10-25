@@ -1,8 +1,10 @@
 import {
   useMutation,
   useQuery,
+  useInfiniteQuery,
   useQueryClient,
   keepPreviousData,
+  type InfiniteData,
 } from "@tanstack/react-query";
 import {
   skillsApi,
@@ -368,22 +370,53 @@ export function useUpdateSkill() {
 
 // ========== skills.sh 搜索 ==========
 
-/**
- * 搜索 skills.sh 公共目录
- * 使用 300ms staleTime 和 keepPreviousData 实现平滑搜索体验
- */
-export function useSearchSkillsSh(
-  query: string,
-  limit: number,
-  offset: number,
-) {
-  return useQuery({
-    queryKey: ["skills", "skillssh", query, limit, offset],
-    queryFn: () => skillsApi.searchSkillsSh(query, limit, offset),
+/** Search pages have one cache owner, including refreshes after installation. */
+export function useSearchSkillsSh(query: string, limit: number) {
+  const queryClient = useQueryClient();
+  const queryKey = ["skills", "skillssh", query, limit];
+  const search = useInfiniteQuery({
+    queryKey,
+    queryFn: ({ pageParam }) =>
+      skillsApi.searchSkillsSh(query, limit, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, _pages, lastOffset) => {
+      const nextOffset = lastOffset + limit;
+      return nextOffset < lastPage.totalCount ? nextOffset : undefined;
+    },
     enabled: query.length >= 2,
     staleTime: 5 * 60 * 1000,
-    placeholderData: keepPreviousData,
   });
+  return {
+    ...search,
+    resetSearch: async (nextQuery = query) => {
+      const target = {
+        queryKey: ["skills", "skillssh", nextQuery, limit],
+        exact: true,
+      };
+      const cached = queryClient.getQueryData<
+        InfiniteData<SkillsShSearchResult>
+      >(target.queryKey);
+      if (!cached || cached.pages.length <= 1) {
+        if (queryClient.getQueryState(target.queryKey)?.status === "error") {
+          await queryClient.invalidateQueries(target);
+        }
+        return;
+      }
+
+      await queryClient.cancelQueries(target);
+      // Keep the first page visible if refreshing fails, and let invalidation
+      // replace it rather than clearing a successful result out of the cache.
+      queryClient.setQueryData<InfiniteData<SkillsShSearchResult>>(
+        target.queryKey,
+        (data) =>
+          data && {
+            pages: data.pages.slice(0, 1),
+            pageParams: data.pageParams.slice(0, 1),
+          },
+      );
+      await queryClient.invalidateQueries(target);
+    },
+  };
 }
 
 // ========== 辅助类型 ==========

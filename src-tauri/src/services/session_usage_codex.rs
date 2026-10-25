@@ -1301,9 +1301,9 @@ fn sync_single_codex_file(
     }
 
     // 分批事务写库：逐行 autocommit（journal_mode=delete 下每行一整套
-    // journal 建立/fsync/删除）是全量重导的最大耗时项。批内单条插入失败
-    // 沿用旧行为跳过该条继续；某批 commit 失败则该批整体回滚且游标不推进，
-    // 下一 pass 重扫时由 request_id 主键 + 指纹去重兜底，不会双算。
+    // journal 建立/fsync/删除）是全量重导的最大耗时项。任一插入或 commit
+    // 失败都回滚当前批且不推进游标；已提交批次在下一 pass 重扫时由
+    // request_id 主键 + 指纹去重兜底，不会双算。
     let batch_count = to_insert.len().div_ceil(CODEX_INSERT_BATCH_SIZE);
     for (batch_index, batch) in to_insert.chunks(CODEX_INSERT_BATCH_SIZE).enumerate() {
         let is_last_batch = batch_index + 1 == batch_count;
@@ -1332,7 +1332,7 @@ fn sync_single_codex_file(
                 Ok(false) => batch_skipped += 1,
                 Err(e) => {
                     log::warn!("[CODEX-SYNC] 插入失败 ({request_id}): {e}");
-                    batch_skipped += 1;
+                    return Err(e);
                 }
             }
         }

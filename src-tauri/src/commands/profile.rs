@@ -188,22 +188,28 @@ pub fn clear_current_profile(state: State<'_, AppState>, scope: String) -> Resul
 
 /// 应用项目快照（只作用于发起页所属分组内的应用）。
 ///
-/// 注意：必须保持同步命令（跑在 Tauri 线程池）——`ProviderService::switch`
-/// 内部使用 block_on 获取切换锁，放进 async 命令会在运行时线程上 panic。
+/// The service contains synchronous provider/lifecycle operations. Keep the
+/// entire application on an explicit blocking thread, never a runtime worker.
 #[tauri::command]
-pub fn apply_profile(
+pub async fn apply_profile(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     scope: String,
 ) -> Result<Vec<String>, String> {
     let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
-    let (warnings, should_stop_proxy) =
-        ProfileService::apply(&state, &id, scope).map_err(|e| e.to_string())?;
+    let apply_state = state.inner().clone();
+    let apply_id = id.clone();
+    let (warnings, should_stop_proxy) = tauri::async_runtime::spawn_blocking(move || {
+        ProfileService::apply(&apply_state, &apply_id, scope)
+    })
+    .await
+    .map_err(|e| format!("应用项目失败: {e}"))?
+    .map_err(|e| e.to_string())?;
 
     if should_stop_proxy {
-        // sync 命令线程没有 Tokio runtime，无法直接 await stop()；
-        // 把停止服务放到 Tauri async runtime，停止后再补发事件刷新 UI。
+        // Preserve the existing completion order: stop asynchronously, then
+        // emit the applied-profile events with the final proxy state.
         let app_handle = app.clone();
         let profile_id = id.clone();
         let proxy_service = state.proxy_service.clone();

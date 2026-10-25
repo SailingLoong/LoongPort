@@ -210,8 +210,20 @@ fn profile_snapshot_apply_roundtrip_restores_configuration() {
     // Desktop 现在有自己的项目分组；Claude 分组 apply 不应再影响 Desktop
     #[cfg(any(target_os = "macos", windows))]
     ProviderService::switch(&state, AppType::ClaudeDesktop, "d2").expect("switch desktop to d2");
-    McpService::toggle_app(&state, "m1", AppType::Claude, false).expect("disable m1");
-    McpService::toggle_app(&state, "m2", AppType::Claude, true).expect("enable m2");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m1",
+        AppType::Claude,
+        false,
+    ))
+    .expect("disable m1");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m2",
+        AppType::Claude,
+        true,
+    ))
+    .expect("enable m2");
     SkillService::toggle_app(&state.db, "local:test-skill", &AppType::Claude, false)
         .expect("disable skill");
     PromptService::enable_prompt(&state, AppType::Claude, "pr2").expect("enable pr2");
@@ -572,8 +584,20 @@ fn switching_profile_autosaves_previous_profile_state() {
 
     // ---- 在 A 下改到状态 Y（p2 / m2 / pr2），然后据此创建 Project B ----
     ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
-    McpService::toggle_app(&state, "m1", AppType::Claude, false).expect("disable m1");
-    McpService::toggle_app(&state, "m2", AppType::Claude, true).expect("enable m2");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m1",
+        AppType::Claude,
+        false,
+    ))
+    .expect("disable m1");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m2",
+        AppType::Claude,
+        true,
+    ))
+    .expect("enable m2");
     PromptService::enable_prompt(&state, AppType::Claude, "pr2").expect("enable pr2");
 
     let project_b = ProfileService::create(&state, "Project B", ProfileScope::Claude)
@@ -617,8 +641,20 @@ fn switching_profile_autosaves_previous_profile_state() {
 
     // ---- 在 B 下改回状态 X，再切换回 A ----
     ProviderService::switch(&state, AppType::Claude, "p1").expect("switch to p1");
-    McpService::toggle_app(&state, "m1", AppType::Claude, true).expect("enable m1");
-    McpService::toggle_app(&state, "m2", AppType::Claude, false).expect("disable m2");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m1",
+        AppType::Claude,
+        true,
+    ))
+    .expect("enable m1");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "m2",
+        AppType::Claude,
+        false,
+    ))
+    .expect("disable m2");
     PromptService::enable_prompt(&state, AppType::Claude, "pr1").expect("enable pr1");
 
     let (warnings, _) = ProfileService::apply(&state, &project_a.id, ProfileScope::Claude)

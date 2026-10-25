@@ -295,8 +295,11 @@ fn refreshing_the_current_tiers_key_updates_the_live_config() {
     // 只能靠「源码里那两处调用还在吗」来守。两条测试合起来才覆盖完整链路。
     //
     // （第二路 review 实测过：只有这条测试时，把命令层那两段注释掉全绿。）
-    ProviderService::sync_current_provider_for_app(&state, AppType::Codex)
-        .expect("同步当前项的落地配置不该失败");
+    futures::executor::block_on(ProviderService::sync_current_provider_for_app(
+        &state,
+        AppType::Codex,
+    ))
+    .expect("同步当前项的落地配置不该失败");
 
     let written = std::fs::read_to_string(get_codex_config_path()).expect("读 config.toml");
     let parsed: toml::Table = written.parse().expect("落盘的 config.toml 必须可解析");
