@@ -1103,6 +1103,49 @@ wire_api = "responses"
     }
 
     #[test]
+    fn test_extract_base_url_from_selected_config_provider() {
+        let adapter = CodexAdapter::new();
+        let configs = [
+            // 另一个 provider 表排在选中表前面。
+            r#"model_provider = "relay"
+
+[model_providers.azure]
+name = "Azure"
+base_url = "https://azure.example.com/v1"
+env_key = "AZURE_OPENAI_API_KEY"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+"#,
+            // 当前 URL 上方有一行被注释掉的旧 URL。
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+# base_url = "https://old-relay.example.com/v1"
+base_url = "https://relay.example.com/v1"
+"#,
+            // `=` 两侧无空格。
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url="https://relay.example.com/v1/"
+"#,
+        ];
+
+        for config in configs {
+            let provider = create_provider(json!({ "config": config }));
+            assert_eq!(
+                adapter.extract_base_url(&provider).unwrap(),
+                "https://relay.example.com/v1",
+                "config:\n{config}"
+            );
+        }
+    }
+
+    #[test]
     fn test_extract_auth_from_auth_field() {
         let adapter = CodexAdapter::new();
         let provider = create_provider(json!({
