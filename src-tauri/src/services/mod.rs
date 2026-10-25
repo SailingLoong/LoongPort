@@ -7,6 +7,8 @@ pub(crate) mod app_update_stage;
 pub mod application_overview;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod application_selection;
+#[cfg(any(feature = "gui", test))]
+mod auto_sync;
 pub(crate) mod backup_transfer;
 pub mod balance;
 pub mod codex_oauth_models;
