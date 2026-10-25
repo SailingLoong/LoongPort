@@ -54,7 +54,28 @@ impl Client {
     }
 }
 
-fn fixture(client: Client) -> (tauri::App<tauri::test::MockRuntime>, Connection, PathBuf) {
+// MockRuntime's core plugins retain AppHandle cycles, so dropping a raw App
+// does not release managed AppState/SQLite. Keep ownership scoped to this fixture.
+struct FixtureApp(tauri::App<tauri::test::MockRuntime>);
+
+impl FixtureApp {
+    fn state(&self) -> tauri::State<'_, AppState> {
+        self.0.state::<AppState>()
+    }
+}
+
+impl Drop for FixtureApp {
+    #[allow(deprecated)]
+    fn drop(&mut self) {
+        // SAFETY: this private wrapper exposes only a borrow tied to &self, never
+        // an AppHandle. Every sync future is awaited before teardown; no IPC
+        // handler is installed. Thus no State reference survives this removal.
+        // Tauri's unmanage is deprecated because callers must ensure this lifetime.
+        drop(self.0.unmanage::<AppState>());
+    }
+}
+
+fn fixture(client: Client) -> (FixtureApp, Connection, PathBuf) {
     support::reset_test_fs();
     let home = support::ensure_test_home();
     std::env::set_var("OPENCODE_DB", home.join("absent-opencode.db"));
@@ -75,7 +96,7 @@ fn fixture(client: Client) -> (tauri::App<tauri::test::MockRuntime>, Connection,
         .manage(state)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
-    (app, conn, file)
+    (FixtureApp(app), conn, file)
 }
 
 async fn within_deadline<T>(future: impl Future<Output = T>) -> T {
@@ -124,7 +145,7 @@ async fn append_checkpoint(client: Client, same_mtime: bool) {
     let (app, conn, file) = fixture(client);
     fs::write(&file, format!("{}{}\n", client.header(), client.usage(1))).unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
@@ -137,19 +158,19 @@ async fn append_checkpoint(client: Client, same_mtime: bool) {
     let next_nanos = if same_mtime { 100_000_000 } else { 900_000_000 };
     append(&file, &format!("{}\n", client.usage(2)), next_nanos);
     assert!(fs::metadata(&file).unwrap().len() > old_len);
-    let second = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let second = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     let after_second = totals(&conn);
     let after_cursor = cursor(&conn, &file);
-    let repeat = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let repeat = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     if same_mtime {
         // This is delayed visibility, not permanent loss: a later mtime change
         // still exposes the unconsumed appended record on the current code.
         set_mtime(&file, 900_000_000);
-        let recovered = within_deadline(sync_session_usage(app.state::<AppState>()))
+        let recovered = within_deadline(sync_session_usage(app.state()))
             .await
             .unwrap();
         assert_eq!(
@@ -202,23 +223,23 @@ async fn incomplete_tail_checkpoint(client: Client, has_previous_complete: bool)
     )
     .unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, u32::from(has_previous_complete));
     assert!(first.errors.is_empty());
     let premature_cursor = cursor(&conn, &file);
-    let paused = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let paused = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(paused.imported, 0);
     assert!(paused.errors.is_empty());
     append(&file, &format!("{}\n", &second_line[cut..]), 900_000_000);
-    let finished = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let finished = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     let finished_totals = totals(&conn);
-    let repeated = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let repeated = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(finished.imported, 1,
@@ -235,14 +256,14 @@ async fn valid_tail_without_newline(client: Client) {
     let (app, conn, file) = fixture(client);
     fs::write(&file, format!("{}{}", client.header(), client.usage(1))).unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
     assert!(first.errors.is_empty());
     assert_eq!(totals(&conn), (1, 1, 1));
     append(&file, "\n", 900_000_000);
-    let repeat = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let repeat = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(repeat.imported, 0);
@@ -337,7 +358,7 @@ async fn optional_byte_checkpoint(client: Client) {
     let split = pending.len() / 2;
     fs::write(&file, format!("{prefix}{}", &pending[..split])).unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
@@ -354,7 +375,7 @@ async fn optional_byte_checkpoint(client: Client) {
     )
     .unwrap();
     append(&file, &format!("{}\n", &pending[split..]), 100_000_000);
-    let complete = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let complete = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(complete.imported, 1);
@@ -378,7 +399,7 @@ async fn optional_byte_checkpoint(client: Client) {
         Some(fs::metadata(&file).unwrap().len() as i64)
     );
     conn.execute_batch("CREATE TRIGGER reject_checkpoint_write BEFORE INSERT ON session_log_sync BEGIN SELECT RAISE(FAIL, 'temporary byte checkpoint write failure'); END;").unwrap();
-    let unchanged = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let unchanged = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(unchanged.imported, 0);
@@ -387,7 +408,7 @@ async fn optional_byte_checkpoint(client: Client) {
         "known unchanged byte checkpoint must skip unnecessary writes: {unchanged:?}"
     );
     append(&file, &format!("{}\n", client.usage(3)), 100_000_000);
-    let failed = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let failed = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(failed.errors.len(), 1);
@@ -397,7 +418,7 @@ async fn optional_byte_checkpoint(client: Client) {
     assert_eq!(cursor(&conn, &file), committed_cursor);
     conn.execute_batch("DROP TRIGGER reject_checkpoint_write;")
         .unwrap();
-    let retried = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let retried = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(retried.imported, 1);
@@ -421,7 +442,7 @@ async fn malformed_lines_and_split_utf8_tail(client: Client) {
     initial.extend_from_slice(&pending.as_bytes()[..split]);
     fs::write(&file, &initial).unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
@@ -431,7 +452,7 @@ async fn malformed_lines_and_split_utf8_tail(client: Client) {
     tail.write_all(b"\n").unwrap();
     drop(tail);
     set_mtime(&file, 900_000_000);
-    let finished = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let finished = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(
@@ -448,7 +469,7 @@ async fn unknown_optional_byte_checkpoint(client: Client) {
     enable_optional_byte_checkpoint(&conn);
     fs::write(&file, format!("{}{}\n", client.header(), client.usage(1))).unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
@@ -461,7 +482,7 @@ async fn unknown_optional_byte_checkpoint(client: Client) {
             rusqlite::params![unknown, file.to_string_lossy().as_ref()],
         )
         .unwrap();
-        let retried = within_deadline(sync_session_usage(app.state::<AppState>()))
+        let retried = within_deadline(sync_session_usage(app.state()))
             .await
             .unwrap();
         assert_eq!(retried.imported, 0);
@@ -514,7 +535,7 @@ async fn codex_archived_growth_inherits_only_consumed_bytes() {
     )
     .unwrap();
     set_mtime(&file, 100_000_000);
-    let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let first = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(first.imported, 1);
@@ -527,7 +548,7 @@ async fn codex_archived_growth_inherits_only_consumed_bytes() {
         &format!("{}\n", Client::Codex.usage(2)),
         100_000_000,
     );
-    let second = within_deadline(sync_session_usage(app.state::<AppState>()))
+    let second = within_deadline(sync_session_usage(app.state()))
         .await
         .unwrap();
     assert_eq!(
@@ -559,10 +580,14 @@ async fn truncation_keeps_existing_checkpoint(client: Client) {
         )
         .unwrap();
         set_mtime(&file, 100_000_000);
-        let first = within_deadline(sync_session_usage(app.state::<AppState>()))
+        let first = within_deadline(sync_session_usage(app.state()))
             .await
             .unwrap();
-        assert_eq!(first.imported, 2);
+        assert_eq!(
+            first.imported, 2,
+            "{client:?}, optional_columns={optional_columns}: {first:?}"
+        );
+        assert!(first.errors.is_empty());
         let original = cursor(&conn, &file);
         let original_byte = if optional_columns {
             byte_cursor(&conn, &file)
@@ -571,7 +596,7 @@ async fn truncation_keeps_existing_checkpoint(client: Client) {
         };
         fs::write(&file, format!("{}{}\n", client.header(), client.usage(1))).unwrap();
         set_mtime(&file, 900_000_000);
-        let shortened = within_deadline(sync_session_usage(app.state::<AppState>()))
+        let shortened = within_deadline(sync_session_usage(app.state()))
             .await
             .unwrap();
         assert_eq!(
@@ -595,3 +620,20 @@ boundary_case!(
     codex_truncation_does_not_reset_checkpoint,
     truncation_keeps_existing_checkpoint(Client::Codex)
 );
+
+#[tokio::test]
+async fn fixture_releases_database_before_next_schema() {
+    let _guard = support::test_mutex()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for client in [Client::Claude, Client::Codex] {
+        let (app, conn, _file) = fixture(client);
+        let db = std::sync::Arc::downgrade(&app.state().db);
+        drop(conn);
+        drop(app);
+        assert!(
+            db.upgrade().is_none(),
+            "{client:?} fixture must release SQLite before the next schema resets its files"
+        );
+    }
+}
