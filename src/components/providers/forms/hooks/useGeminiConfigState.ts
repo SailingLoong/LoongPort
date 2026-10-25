@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 
 interface UseGeminiConfigStateProps {
   initialData?: {
@@ -15,9 +15,6 @@ export function useGeminiConfigState({
 }: UseGeminiConfigStateProps) {
   const [geminiEnv, setGeminiEnvState] = useState("");
   const [geminiConfig, setGeminiConfigState] = useState("");
-  const [geminiApiKey, setGeminiApiKey] = useState("");
-  const [geminiBaseUrl, setGeminiBaseUrl] = useState("");
-  const [geminiModel, setGeminiModel] = useState("");
   const [envError, setEnvError] = useState("");
   const [configError, setConfigError] = useState("");
 
@@ -86,37 +83,17 @@ export function useGeminiConfigState({
       // 设置 config
       const configObj = (config as any).config || {};
       setGeminiConfigState(JSON.stringify(configObj, null, 2));
-
-      // 提取 API Key、Base URL 和 Model
-      if (typeof env.GEMINI_API_KEY === "string") {
-        setGeminiApiKey(env.GEMINI_API_KEY);
-      }
-      if (typeof env.GOOGLE_GEMINI_BASE_URL === "string") {
-        setGeminiBaseUrl(env.GOOGLE_GEMINI_BASE_URL);
-      }
-      if (typeof env.GEMINI_MODEL === "string") {
-        setGeminiModel(env.GEMINI_MODEL);
-      }
     }
   }, [initialData, envObjToString]);
 
-  // 从 geminiEnv 中提取并同步 API Key、Base URL 和 Model
-  useEffect(() => {
-    const envObj = envStringToObj(geminiEnv);
-    const extractedKey = envObj.GEMINI_API_KEY || "";
-    const extractedBaseUrl = envObj.GOOGLE_GEMINI_BASE_URL || "";
-    const extractedModel = envObj.GEMINI_MODEL || "";
-
-    if (extractedKey !== geminiApiKey) {
-      setGeminiApiKey(extractedKey);
-    }
-    if (extractedBaseUrl !== geminiBaseUrl) {
-      setGeminiBaseUrl(extractedBaseUrl);
-    }
-    if (extractedModel !== geminiModel) {
-      setGeminiModel(extractedModel);
-    }
-  }, [geminiEnv, envStringToObj, geminiApiKey, geminiBaseUrl, geminiModel]);
+  // The raw env draft owns these values; fields are projections, not mirrors.
+  const envFields = useMemo(
+    () => envStringToObj(geminiEnv),
+    [geminiEnv, envStringToObj],
+  );
+  const geminiApiKey = envFields.GEMINI_API_KEY || "";
+  const geminiBaseUrl = envFields.GOOGLE_GEMINI_BASE_URL || "";
+  const geminiModel = envFields.GEMINI_MODEL || "";
 
   // 验证 Gemini Config JSON
   const validateGeminiConfig = useCallback((value: string): string => {
@@ -154,7 +131,6 @@ export function useGeminiConfigState({
   const handleGeminiApiKeyChange = useCallback(
     (key: string) => {
       const trimmed = key.trim();
-      setGeminiApiKey(trimmed);
 
       const envObj = envStringToObj(geminiEnv);
       envObj.GEMINI_API_KEY = trimmed;
@@ -168,7 +144,6 @@ export function useGeminiConfigState({
   const handleGeminiBaseUrlChange = useCallback(
     (url: string) => {
       const sanitized = url.trim().replace(/\/+$/, "");
-      setGeminiBaseUrl(sanitized);
 
       const envObj = envStringToObj(geminiEnv);
       envObj.GOOGLE_GEMINI_BASE_URL = sanitized;
@@ -182,7 +157,6 @@ export function useGeminiConfigState({
   const handleGeminiModelChange = useCallback(
     (model: string) => {
       const trimmed = model.trim();
-      setGeminiModel(trimmed);
 
       const envObj = envStringToObj(geminiEnv);
       envObj.GEMINI_MODEL = trimmed;
@@ -216,25 +190,6 @@ export function useGeminiConfigState({
 
       setGeminiEnv(envString);
       setGeminiConfig(configString);
-
-      // 提取 API Key、Base URL 和 Model
-      if (typeof env.GEMINI_API_KEY === "string") {
-        setGeminiApiKey(env.GEMINI_API_KEY);
-      } else {
-        setGeminiApiKey("");
-      }
-
-      if (typeof env.GOOGLE_GEMINI_BASE_URL === "string") {
-        setGeminiBaseUrl(env.GOOGLE_GEMINI_BASE_URL);
-      } else {
-        setGeminiBaseUrl("");
-      }
-
-      if (typeof env.GEMINI_MODEL === "string") {
-        setGeminiModel(env.GEMINI_MODEL);
-      } else {
-        setGeminiModel("");
-      }
     },
     [envObjToString, setGeminiEnv, setGeminiConfig],
   );
