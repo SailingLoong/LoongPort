@@ -309,6 +309,143 @@ fn legacy_original_transaction_restores_provider_pointers_model_and_native_on_co
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn legacy_cross_provider_commit_failure_restores_both_rows_pointers_model_and_native() {
+    let f = LegacyFixture::new();
+    let incoming = crate::provider::Provider::with_id(
+        "incoming".into(),
+        "Synthetic incoming".into(),
+        serde_json::json!({"env":{"ANTHROPIC_BASE_URL":"https://incoming.example","ANTHROPIC_AUTH_TOKEN":"incoming-fixture-key","ANTHROPIC_MODEL":"incoming-default"},"modelCatalog":{"models":[{"model":"incoming-default"},{"model":"incoming-selected"}]}}),
+        None,
+    );
+    f.state.db.save_provider("claude", &incoming).unwrap();
+    let mut change = f.change();
+    change.selection = Some(TierSelection {
+        provider_id: "incoming".into(),
+        model: Some("incoming-selected".into()),
+    });
+    let review = f.review(&change);
+    let row = |id: &str| {
+        serde_json::to_value(
+            f.state
+                .db
+                .get_provider_by_id(id, "claude")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let before_outgoing = row("custom");
+    let before_incoming = row("incoming");
+    let before_live = f.live();
+    assert_eq!(
+        f.state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("custom")
+    );
+    let read_journal = || {
+        let vault = f.state.db.secret_session().read().unwrap();
+        crate::mode::state::load_app(
+            &crate::live::engine::DeviceStore::for_device(),
+            &vault,
+            "claude",
+        )
+        .unwrap()
+    };
+    let before_journal = serde_json::to_value(read_journal()).unwrap();
+    let reached_commit = std::cell::Cell::new(false);
+    let _lock = futures::executor::block_on(f.state.proxy_service.lock_switch_for_app("claude"));
+    verify_legacy_routing_review(&f.state, &AppType::Claude, &change, &review).unwrap();
+    let error = select_legacy_locked_with_commit(
+        &f.state,
+        &AppType::Claude,
+        change.selection.as_ref().unwrap(),
+        || {
+            // Prove the failure happens after an actual A -> B switch, not before
+            // mutation or after editing only A's model.
+            assert_eq!(
+                f.state
+                    .db
+                    .get_current_provider("claude")
+                    .unwrap()
+                    .as_deref(),
+                Some("incoming")
+            );
+            assert_eq!(
+                crate::settings::get_current_provider_ready(&AppType::Claude)
+                    .unwrap()
+                    .as_deref(),
+                Some("incoming")
+            );
+            assert_eq!(
+                crate::proxy::auto_strategy::get_model_pref_checked(&f.state.db, "claude")
+                    .unwrap()
+                    .as_deref(),
+                Some("incoming-selected")
+            );
+            assert_eq!(
+                row("incoming")["settingsConfig"]["env"]["ANTHROPIC_MODEL"],
+                "incoming-selected"
+            );
+            let live: serde_json::Value = serde_json::from_slice(&f.live()).unwrap();
+            assert_eq!(
+                live["env"]["ANTHROPIC_BASE_URL"],
+                "https://incoming.example"
+            );
+            assert_eq!(live["env"]["ANTHROPIC_MODEL"], "incoming-selected");
+            assert_ne!(before_live, f.live());
+            reached_commit.set(true);
+            Err(AppError::Config(
+                "synthetic cross-provider commit rejected".into(),
+            ))
+        },
+    )
+    .unwrap_err();
+    assert!(reached_commit.get());
+    assert!(error
+        .to_string()
+        .contains("synthetic cross-provider commit rejected"));
+    assert_eq!(f.live(), before_live);
+    assert_eq!(row("custom"), before_outgoing);
+    assert_eq!(row("incoming"), before_incoming);
+    assert_eq!(
+        f.state
+            .db
+            .get_current_provider("claude")
+            .unwrap()
+            .as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider_ready(&AppType::Claude)
+            .unwrap()
+            .as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        crate::proxy::auto_strategy::get_model_pref_checked(&f.state.db, "claude")
+            .unwrap()
+            .as_deref(),
+        Some("model-one")
+    );
+    let journal = read_journal();
+    if let Some(entry) = journal.apps.get("claude") {
+        assert!(entry.pending.is_none());
+        assert!(entry.last_save.is_none());
+    }
+    assert_eq!(serde_json::to_value(journal).unwrap(), before_journal);
+}
+
 #[cfg(feature = "gui")]
 #[test]
 #[serial_test::serial]
