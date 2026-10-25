@@ -383,11 +383,21 @@ impl ConfigService {
         Ok(())
     }
 
-    pub(crate) fn set_common_config_snippet(
+    pub(crate) async fn set_common_config_snippet(
         state: &crate::store::AppState,
         app_type: &str,
         snippet: String,
     ) -> Result<(), String> {
+        let provider_app = if matches!(app_type, "claude" | "codex" | "gemini") {
+            Some(AppType::from_str(app_type).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+        let _guard = match provider_app.as_ref() {
+            Some(app) => Some(state.proxy_service.lock_switch_for_app(app.as_str()).await),
+            None => None,
+        };
+        // A queued writer may outlive a schema upgrade; admit only under ownership.
         Self::admit_legacy_snippet_write(state, app_type)?;
         let is_cleared = snippet.trim().is_empty();
         let old_snippet = state
@@ -421,10 +431,12 @@ impl ConfigService {
             .set_config_snippet_cleared(app_type, is_cleared)
             .map_err(|e| e.to_string())?;
 
-        if matches!(app_type, "claude" | "codex" | "gemini") {
-            let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
-            crate::services::provider::ProviderService::sync_current_provider_for_app(state, app)
-                .map_err(|e| e.to_string())?;
+        if let Some(app) = provider_app {
+            crate::services::provider::ProviderService::sync_current_provider_for_app_locked(
+                state, app,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
 
         if app_type == "omo"

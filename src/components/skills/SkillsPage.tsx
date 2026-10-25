@@ -103,10 +103,6 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     const [searchSource, setSearchSource] = useState<SkillsPageSource>("repos");
     const [skillsShInput, setSkillsShInput] = useState("");
     const [skillsShQuery, setSkillsShQuery] = useState("");
-    const [skillsShOffset, setSkillsShOffset] = useState(0);
-    const [accumulatedResults, setAccumulatedResults] = useState<
-      SkillsShDiscoverableSkill[]
-    >([]);
 
     // currentApp 用于安装时的默认应用
     const currentApp = initialApp;
@@ -125,27 +121,19 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       data: skillsShResult,
       isLoading: loadingSkillsSh,
       isFetching: fetchingSkillsSh,
-      isPlaceholderData: placeholderSkillsSh,
-    } = useSearchSkillsSh(skillsShQuery, SKILLSSH_PAGE_SIZE, skillsShOffset);
-
-    // 当搜索结果返回时累积
-    useEffect(() => {
-      if (skillsShResult && !placeholderSkillsSh) {
-        if (skillsShOffset === 0) {
-          setAccumulatedResults(skillsShResult.skills);
-        } else {
-          setAccumulatedResults((prev) => [...prev, ...skillsShResult.skills]);
-        }
-      }
-    }, [skillsShResult, skillsShOffset, placeholderSkillsSh]);
+      isError: failedSkillsSh,
+      hasNextPage: hasMoreSkillsSh,
+      fetchNextPage,
+      resetSearch,
+    } = useSearchSkillsSh(skillsShQuery, SKILLSSH_PAGE_SIZE);
+    const skillsShResults =
+      skillsShResult?.pages.flatMap((page) => page.skills) ?? [];
 
     // 手动提交搜索
     const handleSkillsShSearch = () => {
       const trimmed = skillsShInput.trim();
       if (trimmed.length < 2) return;
-      if (trimmed === skillsShQuery && skillsShOffset === 0) return;
-      setSkillsShOffset(0);
-      setAccumulatedResults([]);
+      void resetSearch(trimmed);
       setSkillsShQuery(trimmed);
     };
 
@@ -202,7 +190,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       let skill: DiscoverableSkill | undefined;
 
       if (searchSource === "skillssh") {
-        const found = accumulatedResults.find((s) => s.key === key);
+        const found = skillsShResults.find((s) => s.key === key);
         if (found) {
           skill = toDiscoverableSkill(found);
         }
@@ -315,11 +303,8 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       });
     }, [skills, searchQuery, filterRepo, filterStatus]);
 
-    // 是否有更多 skills.sh 结果
-    const hasMoreSkillsSh =
-      skillsShResult && accumulatedResults.length < skillsShResult.totalCount;
     const searchingSkillsSh =
-      (loadingSkillsSh || fetchingSkillsSh) && accumulatedResults.length === 0;
+      (loadingSkillsSh || fetchingSkillsSh) && skillsShResults.length === 0;
 
     // 无仓库配置时默认切换到 skills.sh；仓库发现结果为空时仍保留仓库视图，方便手动刷新重试。
     const effectiveSource =
@@ -552,54 +537,51 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                       {t("skills.skillssh.searchPlaceholder")}
                     </p>
                   </div>
-                ) : accumulatedResults.length === 0 ? (
+                ) : skillsShResults.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-48 text-center">
                     <p className="text-lg font-medium text-foreground">
-                      {t("skills.skillssh.noResults", {
-                        query: skillsShQuery,
-                      })}
+                      {failedSkillsSh
+                        ? t("skills.skillssh.error")
+                        : t("skills.skillssh.noResults", {
+                            query: skillsShQuery,
+                          })}
                     </p>
                   </div>
                 ) : (
-                  <>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {accumulatedResults.map((skill) => {
-                        return (
-                          <SkillCard
-                            key={skill.key}
-                            skill={toDiscoverableSkill(skill)}
-                            installs={skill.installs}
-                            onInstall={handleInstall}
-                            onUninstall={handleUninstall}
-                          />
-                        );
-                      })}
-                    </div>
-
-                    {/* 加载更多 + 底部信息 */}
-                    <div className="mt-6 flex flex-col items-center gap-2">
-                      {hasMoreSkillsSh && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={fetchingSkillsSh}
-                          onClick={() =>
-                            setSkillsShOffset(
-                              (prev) => prev + SKILLSSH_PAGE_SIZE,
-                            )
-                          }
-                        >
-                          {fetchingSkillsSh ? (
-                            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                          ) : null}
-                          {t("skills.skillssh.loadMore")}
-                        </Button>
-                      )}
-                      <p className="text-xs text-muted-foreground">
-                        {t("skills.skillssh.poweredBy")}
-                      </p>
-                    </div>
-                  </>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {skillsShResults.map((skill) => {
+                      return (
+                        <SkillCard
+                          key={skill.key}
+                          skill={toDiscoverableSkill(skill)}
+                          installs={skill.installs}
+                          onInstall={handleInstall}
+                          onUninstall={handleUninstall}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+                {/* 加载更多 + 底部信息 */}
+                {(skillsShResults.length > 0 || hasMoreSkillsSh) && (
+                  <div className="mt-6 flex flex-col items-center gap-2">
+                    {hasMoreSkillsSh && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={fetchingSkillsSh}
+                        onClick={() => void fetchNextPage()}
+                      >
+                        {fetchingSkillsSh ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                        ) : null}
+                        {t("skills.skillssh.loadMore")}
+                      </Button>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {t("skills.skillssh.poweredBy")}
+                    </p>
+                  </div>
                 )}
               </>
             )}

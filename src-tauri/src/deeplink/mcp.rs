@@ -37,7 +37,7 @@ pub struct McpImportError {
 ///
 /// This function handles batch import of MCP servers from standard MCP JSON format.
 /// If a server already exists, only the apps flags are merged (existing config preserved).
-pub fn import_mcp_from_deeplink(
+pub async fn import_mcp_from_deeplink(
     state: &AppState,
     request: DeepLinkImportRequest,
 ) -> Result<McpImportResult, AppError> {
@@ -89,6 +89,7 @@ pub fn import_mcp_from_deeplink(
     }
 
     // Get existing servers to check for duplicates
+    let _guards = McpService::lock_all_apps(state).await;
     let existing_servers = state.db.get_all_mcp_servers()?;
 
     // Import each MCP server
@@ -128,7 +129,7 @@ pub fn import_mcp_from_deeplink(
             }
         };
 
-        match McpService::upsert_server(state, server) {
+        match McpService::upsert_server_unlocked(state, server) {
             Ok(_) => {
                 imported_ids.push(id.clone());
                 log::info!("Successfully imported/updated MCP server: {id}");

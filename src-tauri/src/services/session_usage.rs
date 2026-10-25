@@ -385,7 +385,12 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
         }
     }
 
-    // 写入数据库
+    // 有效记录和游标必须一起提交。任何数据库错误都回滚本文件本轮写入，
+    // 保留原游标，让下次同步即使文件未变化也能重试；坏行仍在解析阶段跳过。
+    let conn = lock_conn!(db.conn);
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::Database(format!("开启 Claude 会话写入事务失败: {e}")))?;
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
 
@@ -416,18 +421,16 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             msg.message_id
         );
 
-        match insert_session_log_entry(db, &request_id, msg) {
-            Ok(true) => imported += 1,
-            Ok(false) => skipped += 1,
-            Err(e) => {
-                log::warn!("[SESSION-SYNC] 插入失败 ({}): {e}", msg.message_id);
-                skipped += 1;
-            }
+        match insert_session_log_entry(&tx, &request_id, msg)? {
+            true => imported += 1,
+            false => skipped += 1,
         }
     }
 
     // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    update_sync_state_on_conn(&tx, &file_path_str, file_modified, line_offset)?;
+    tx.commit()
+        .map_err(|e| AppError::Database(format!("提交 Claude 会话写入事务失败: {e}")))?;
 
     Ok((imported, skipped))
 }
@@ -495,12 +498,10 @@ pub(crate) fn update_sync_state_on_conn(
 
 /// 插入单条会话日志到 proxy_request_logs，返回是否成功插入 (true=新插入, false=已存在)
 fn insert_session_log_entry(
-    db: &Database,
+    conn: &rusqlite::Connection,
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-
     let created_at = msg
         .timestamp
         .as_ref()
@@ -525,7 +526,7 @@ fn insert_session_log_entry(
         cache_creation_tokens: msg.cache_creation_tokens,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
+    if should_skip_session_insert(conn, request_id, &dedup_key)? {
         return Ok(false);
     }
 
@@ -539,7 +540,7 @@ fn insert_session_log_entry(
         message_id: None,
     };
 
-    let pricing = find_model_pricing_for_session(&conn, &msg.model);
+    let pricing = find_model_pricing_for_session(conn, &msg.model);
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -787,10 +788,10 @@ mod tests {
             session_id: Some("session-1".to_string()),
         };
 
-        let inserted = insert_session_log_entry(&db, "session:msg_1", &msg)?;
+        let conn = lock_conn!(db.conn);
+        let inserted = insert_session_log_entry(&conn, "session:msg_1", &msg)?;
         assert!(!inserted);
 
-        let conn = lock_conn!(db.conn);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
             row.get(0)
         })?;

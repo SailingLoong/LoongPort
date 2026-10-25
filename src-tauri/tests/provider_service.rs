@@ -1142,7 +1142,8 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
     // 统一会话开关变更触发的 reapply 会整体重写 live config.toml（有意设计），
     // 写完必须重新投影 DB 里启用的 MCP，否则用户的 MCP 会静默失效。
     let reapplied =
-        cc_switch_lib::reapply_current_codex_official_live(&state).expect("reapply official live");
+        futures::executor::block_on(cc_switch_lib::reapply_current_codex_official_live(&state))
+            .expect("reapply official live");
     assert!(
         reapplied,
         "current provider is official, reapply should run"
@@ -1241,8 +1242,9 @@ fn reapply_codex_official_live_projects_mcp_despite_broken_claude_json() {
     let claude_json = cc_switch_lib::get_claude_mcp_path();
     std::fs::write(&claude_json, "{ not valid json").expect("seed broken claude json");
 
-    let reapplied = cc_switch_lib::reapply_current_codex_official_live(&state)
-        .expect("MCP projection failure must degrade to a warning, not fail the toggle");
+    let reapplied =
+        futures::executor::block_on(cc_switch_lib::reapply_current_codex_official_live(&state))
+            .expect("MCP projection failure must degrade to a warning, not fail the toggle");
     assert!(
         reapplied,
         "current provider is official, reapply should run"
@@ -1390,7 +1392,7 @@ fn sync_all_enabled_reports_broken_app_but_projects_the_rest() {
     let claude_json = cc_switch_lib::get_claude_mcp_path();
     std::fs::write(&claude_json, "{ not valid json").expect("seed broken claude json");
 
-    let err = cc_switch_lib::McpService::sync_all_enabled(&state)
+    let err = futures::executor::block_on(cc_switch_lib::McpService::sync_all_enabled(&state))
         .expect_err("broken claude live must surface as an aggregated error");
     let message = err.to_string();
     assert!(
@@ -1693,8 +1695,11 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
     futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
         .expect("enable takeover");
 
-    ProviderService::sync_current_provider_for_app(&state, AppType::Claude)
-        .expect("sync current provider should succeed");
+    futures::executor::block_on(ProviderService::sync_current_provider_for_app(
+        &state,
+        AppType::Claude,
+    ))
+    .expect("sync current provider should succeed");
 
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read live settings after sync");

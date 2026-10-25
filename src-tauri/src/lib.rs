@@ -819,10 +819,15 @@ fn initialize_runtime(
             Err(e) => log::warn!("✗ Failed to import Pi providers: {e}"),
         }
 
+        // This freshly constructed proxy has not been published with app.manage
+        // yet. Its switch locks have no other owner; only this startup boundary
+        // synchronously drives the async MCP writers.
         // 生图 MCP 是「生图栏里是否有托管档位」的派生状态。启动时无条件对齐一次，
         // 覆盖升级后已有档位但从未再次 provision、以及应用升级后可执行路径变化的情况。
         // 其余触发点：provision 收尾、生图开关写入、删站点/账号（都在数据层）。
-        if let Err(e) = crate::relay::imagegen_mcp::sync_registration(&app_state) {
+        if let Err(e) =
+            futures::executor::block_on(crate::relay::imagegen_mcp::sync_registration(&app_state))
+        {
             log::warn!("启动时同步生图 MCP 失败（下次 provision 或重启会重试）: {e}");
         }
 
@@ -894,7 +899,9 @@ fn initialize_runtime(
         if app_state.db.is_mcp_table_empty().unwrap_or(false) {
             log::info!("MCP table empty, importing from live configurations...");
 
-            match crate::services::mcp::McpService::import_from_claude(&app_state) {
+            match futures::executor::block_on(crate::services::mcp::McpService::import_from_claude(
+                &app_state,
+            )) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from Claude");
                 }
@@ -902,7 +909,9 @@ fn initialize_runtime(
                 Err(e) => log::warn!("✗ Failed to import Claude MCP: {e}"),
             }
 
-            match crate::services::mcp::McpService::import_from_codex(&app_state) {
+            match futures::executor::block_on(crate::services::mcp::McpService::import_from_codex(
+                &app_state,
+            )) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from Codex");
                 }
@@ -910,7 +919,9 @@ fn initialize_runtime(
                 Err(e) => log::warn!("✗ Failed to import Codex MCP: {e}"),
             }
 
-            match crate::services::mcp::McpService::import_from_gemini(&app_state) {
+            match futures::executor::block_on(crate::services::mcp::McpService::import_from_gemini(
+                &app_state,
+            )) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from Gemini");
                 }
@@ -918,7 +929,9 @@ fn initialize_runtime(
                 Err(e) => log::warn!("✗ Failed to import Gemini MCP: {e}"),
             }
 
-            match crate::services::mcp::McpService::import_from_grokbuild(&app_state) {
+            match futures::executor::block_on(
+                crate::services::mcp::McpService::import_from_grokbuild(&app_state),
+            ) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from Grok Build");
                 }
@@ -926,7 +939,9 @@ fn initialize_runtime(
                 Err(e) => log::warn!("✗ Failed to import Grok Build MCP: {e}"),
             }
 
-            match crate::services::mcp::McpService::import_from_opencode(&app_state) {
+            match futures::executor::block_on(
+                crate::services::mcp::McpService::import_from_opencode(&app_state),
+            ) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from OpenCode");
                 }
@@ -934,7 +949,9 @@ fn initialize_runtime(
                 Err(e) => log::warn!("✗ Failed to import OpenCode MCP: {e}"),
             }
 
-            match crate::services::mcp::McpService::import_from_hermes(&app_state) {
+            match futures::executor::block_on(crate::services::mcp::McpService::import_from_hermes(
+                &app_state,
+            )) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} MCP server(s) from Hermes");
                 }

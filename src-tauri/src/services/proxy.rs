@@ -7556,6 +7556,7 @@ wire_api = "responses"
             .expect("enable Codex takeover");
 
         crate::services::provider::ProviderService::sync_current_to_live(&state)
+            .await
             .expect("sync current providers while Codex is taken over");
 
         let live_auth: Value =
@@ -7680,6 +7681,7 @@ wire_api = "responses"
         );
 
         crate::services::provider::ProviderService::sync_current_to_live(&state)
+            .await
             .expect("sync current providers during takeover activation");
 
         let live_auth: Value =

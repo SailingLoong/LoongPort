@@ -25,13 +25,22 @@ pub async fn read_claude_mcp_config() -> Result<Option<String>, String> {
 
 /// 新增或更新一个 MCP 服务器条目
 #[tauri::command]
-pub async fn upsert_claude_mcp_server(id: String, spec: serde_json::Value) -> Result<bool, String> {
+pub async fn upsert_claude_mcp_server(
+    state: State<'_, AppState>,
+    id: String,
+    spec: serde_json::Value,
+) -> Result<bool, String> {
+    let _guard = state.proxy_service.lock_switch_for_app("claude").await;
     claude_mcp::upsert_mcp_server(&id, spec).map_err(|e| e.to_string())
 }
 
 /// 删除一个 MCP 服务器条目
 #[tauri::command]
-pub async fn delete_claude_mcp_server(id: String) -> Result<bool, String> {
+pub async fn delete_claude_mcp_server(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<bool, String> {
+    let _guard = state.proxy_service.lock_switch_for_app("claude").await;
     claude_mcp::delete_mcp_server(&id).map_err(|e| e.to_string())
 }
 
@@ -82,6 +91,7 @@ pub async fn upsert_mcp_server_in_config(
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
 
     // 读取现有的服务器（如果存在）
+    let _guards = McpService::lock_all_apps(&state).await;
     let existing_server = {
         let servers = state.db.get_all_mcp_servers().map_err(|e| e.to_string())?;
         servers.get(&id).cloned()
@@ -125,7 +135,7 @@ pub async fn upsert_mcp_server_in_config(
         new_server.apps.opencode = true;
     }
 
-    McpService::upsert_server(&state, new_server)
+    McpService::upsert_server_unlocked(&state, new_server)
         .map(|_| true)
         .map_err(|e| e.to_string())
 }
@@ -137,7 +147,9 @@ pub async fn delete_mcp_server_in_config(
     _app: String, // 参数保留用于向后兼容，但在统一结构中不再需要
     id: String,
 ) -> Result<bool, String> {
-    McpService::delete_server(&state, &id).map_err(|e| e.to_string())
+    McpService::delete_server(&state, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 兼容旧入口，与 toggle_mcp_app 共用加锁的切换路径。
@@ -175,13 +187,17 @@ pub async fn upsert_mcp_server(
     state: State<'_, AppState>,
     server: McpServer,
 ) -> Result<(), String> {
-    McpService::upsert_server(&state, server).map_err(|e| e.to_string())
+    McpService::upsert_server(&state, server)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 删除 MCP 服务器
 #[tauri::command]
 pub async fn delete_mcp_server(state: State<'_, AppState>, id: String) -> Result<bool, String> {
-    McpService::delete_server(&state, &id).map_err(|e| e.to_string())
+    McpService::delete_server(&state, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 切换 MCP 服务器在指定应用的启用状态
@@ -201,7 +217,9 @@ pub async fn toggle_mcp_app(
 /// 从所有应用导入 MCP 服务器（复用已有的导入逻辑）
 #[tauri::command]
 pub async fn import_mcp_from_apps(state: State<'_, AppState>) -> Result<usize, String> {
-    McpService::import_from_all_apps(&state).map_err(|e| e.to_string())
+    McpService::import_from_all_apps(&state)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

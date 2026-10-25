@@ -4713,10 +4713,12 @@ fn modern_legacy_common_snippet_writes_are_frozen() {
         .unwrap();
     let before = crate::Database::content_digest(&fixture.state.db.conn.lock().unwrap()).unwrap();
     let live = read_current(&fixture.path).unwrap();
-    let generic = crate::services::config::ConfigService::set_common_config_snippet(
-        &fixture.state,
-        "claude",
-        "{\"includeCoAuthoredBy\":true}".into(),
+    let generic = futures::executor::block_on(
+        crate::services::config::ConfigService::set_common_config_snippet(
+            &fixture.state,
+            "claude",
+            "{\"includeCoAuthoredBy\":true}".into(),
+        ),
     );
     let legacy = crate::services::config::ConfigService::set_claude_common_config_snippet(
         &fixture.state,
@@ -4733,8 +4735,52 @@ fn modern_legacy_common_snippet_writes_are_frozen() {
     assert_eq!(read_current(&fixture.path).unwrap(), live);
 }
 
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn queued_snippet_write_rechecks_schema_after_upgrade() {
+    use std::future::Future;
+    use std::task::{Context, Poll};
+    let fixture = Fixture::for_app_with_schema(AppType::Codex, false);
+    let before = fixture.state.db.get_config_snippet("codex").unwrap();
+    let live = read_current(&fixture.path).unwrap();
+    let guard = fixture
+        .runtime
+        .block_on(fixture.state.proxy_service.lock_switch_for_app("codex"));
+    let mut command = Box::pin(
+        crate::services::config::ConfigService::set_common_config_snippet(
+            &fixture.state,
+            "codex",
+            "model_reasoning_effort = \"high\"\n".into(),
+        ),
+    );
+    let waker = futures::task::noop_waker();
+    assert!(matches!(
+        command.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    // The same migration function used by upgrade staging, not a version stamp.
+    crate::Database::apply_upstream4_migrations_on_conn(&fixture.state.db.conn.lock().unwrap())
+        .unwrap();
+    drop(guard);
+    let result = command.as_mut().poll(&mut Context::from_waker(&waker));
+    eprintln!(
+        "post-upgrade queued snippet result={result:?}, stored={:?}",
+        fixture.state.db.get_config_snippet("codex").unwrap()
+    );
+    assert!(
+        matches!(result, Poll::Ready(Err(ref error)) if error == "mode.legacy_common_config_frozen"),
+        "queued source17 write must be re-admitted after the real schema upgrade"
+    );
+    assert_eq!(
+        fixture.state.db.get_config_snippet("codex").unwrap(),
+        before
+    );
+    assert_eq!(read_current(&fixture.path).unwrap(), live);
+}
+
 #[cfg(feature = "test-hooks")]
 pub(crate) fn verify_legacy_snippet_freeze() -> Result<(), AppError> {
+    queued_snippet_write_rechecks_schema_after_upgrade();
     modern_legacy_common_snippet_writes_are_frozen();
     modern_manual_import_does_not_mutate_frozen_snippet();
     legacy_snippet_freeze_preserves_reads_recovery_and_source17();
@@ -4779,11 +4825,11 @@ fn legacy_snippet_freeze_preserves_reads_recovery_and_source17() {
                 let live = read_current(&fixture.path).unwrap();
                 for value in ["", original] {
                     assert_eq!(
-                        ConfigService::set_common_config_snippet(
+                        futures::executor::block_on(ConfigService::set_common_config_snippet(
                             &fixture.state,
                             app.as_str(),
                             value.into()
-                        )
+                        ))
                         .unwrap_err(),
                         "mode.legacy_common_config_frozen"
                     );
@@ -4824,11 +4870,11 @@ fn legacy_snippet_freeze_preserves_reads_recovery_and_source17() {
                     Some(original)
                 );
             } else {
-                ConfigService::set_common_config_snippet(
+                futures::executor::block_on(ConfigService::set_common_config_snippet(
                     &fixture.state,
                     app.as_str(),
                     original.into(),
-                )
+                ))
                 .unwrap();
                 assert_eq!(
                     fixture
@@ -4839,8 +4885,12 @@ fn legacy_snippet_freeze_preserves_reads_recovery_and_source17() {
                         .as_deref(),
                     Some(original)
                 );
-                ConfigService::set_common_config_snippet(&fixture.state, app.as_str(), "".into())
-                    .unwrap();
+                futures::executor::block_on(ConfigService::set_common_config_snippet(
+                    &fixture.state,
+                    app.as_str(),
+                    "".into(),
+                ))
+                .unwrap();
                 assert!(fixture
                     .state
                     .db

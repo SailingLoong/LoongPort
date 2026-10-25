@@ -68,54 +68,57 @@ async fn restore_official_login_impl(
     // 这个标志**只对 macOS 生效**（`around` 里那个 `cfg!`）：Windows 实测不回写
     // `~/.codex`（`auth.json` 整个启停周期 mtime 未变），那边理由不成立 ⇒ 不中止。
     // 见 `chatgpt_app::around` 的文档。
-    let (outcome, chatgpt) = chatgpt_app::around(true, || {
-        // ── 备份 auth.json ──
-        //
-        // 在切换之前做，且失败就**中止**（`?`）—— 这一步的全部意义是「删之前留后路」，
-        // 留不下后路就不该往下走，那是拿用户的 OAuth 登录去赌。
-        // 没有这个文件是正常状态（从没登录过 ChatGPT），不是错误。
-        let backup_path = backup_codex_auth(
-            app_handle.state::<AppState>().db.secret_session(),
-            &auth_path,
-        )?;
+    let state = app_handle.state::<AppState>().inner().clone();
+    // The existing local backup/switch/remove sequence waits on app ownership.
+    // Keep it together on a blocking thread, then emit events after success.
+    let (outcome, chatgpt) = tauri::async_runtime::spawn_blocking(move || {
+        chatgpt_app::around(true, || {
+            // ── 备份 auth.json ──
+            //
+            // 在切换之前做，且失败就**中止**（`?`）—— 这一步的全部意义是「删之前留后路」，
+            // 留不下后路就不该往下走，那是拿用户的 OAuth 登录去赌。
+            // 没有这个文件是正常状态（从没登录过 ChatGPT），不是错误。
+            let backup_path = backup_codex_auth(state.db.secret_session(), &auth_path)?;
 
-        // ── 切到 codex-official ──
-        //
-        // 走 cc-switch 既有链路，不另写落盘逻辑。失败时 `around` 会把 ChatGPT 开回去，
-        // 而配置没动、`auth.json` 还在原处（备份是拷贝不是移动）⇒ 用户手上的状态与
-        // 操作前完全一样。
-        let switched = {
-            let state = app_handle.state::<AppState>();
-            ProviderService::switch(
-                &state,
-                AppType::Codex,
-                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
-            )
-            .map_err(|e| AppError::Config(format!("切回官方登录失败：{e}。配置未改动")))?
-        };
+            // ── 切到 codex-official ──
+            //
+            // 走 cc-switch 既有链路，不另写落盘逻辑。失败时 `around` 会把 ChatGPT 开回去，
+            // 而配置没动、`auth.json` 还在原处（备份是拷贝不是移动）⇒ 用户手上的状态与
+            // 操作前完全一样。
+            let switched = {
+                ProviderService::switch(
+                    &state,
+                    AppType::Codex,
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                )
+                .map_err(|e| AppError::Config(format!("切回官方登录失败：{e}。配置未改动")))?
+            };
 
-        let mut warnings = switched.warnings;
+            let mut warnings = switched.warnings;
 
-        // ── 删 auth.json ──**必须在切 provider 之后** ──
-        //
-        // 反过来的话中间有个窗口既没 bearer token 也没登录态。只做一半的后果各不相同
-        // 且都很糟：只删 `auth.json` ⇒ 仍走中转站（token 还在 `config.toml` 里）；
-        // 只切 provider ⇒ 走 ChatGPT auth 模式但没登录态 ⇒ 报 credentials incomplete。
-        //
-        // 删失败**不回滚切换**：那时 codex 已经是官方 provider（没有 bearer token 了），
-        // 回滚等于把用户送回中转站路由 —— 而他刚刚明确要求离开那里。如实报出来让他
-        // 手动删，比擅自撤销他的决定好。
-        if auth_path.exists() {
-            if let Err(e) = crate::config::delete_file(&auth_path) {
-                warnings.push(format!(
-                    "已切到官方 provider，但删除登录态失败：{e}。请手动删除 {} 后重新登录。",
-                    auth_path.display()
-                ));
+            // ── 删 auth.json ──**必须在切 provider 之后** ──
+            //
+            // 反过来的话中间有个窗口既没 bearer token 也没登录态。只做一半的后果各不相同
+            // 且都很糟：只删 `auth.json` ⇒ 仍走中转站（token 还在 `config.toml` 里）；
+            // 只切 provider ⇒ 走 ChatGPT auth 模式但没登录态 ⇒ 报 credentials incomplete。
+            //
+            // 删失败**不回滚切换**：那时 codex 已经是官方 provider（没有 bearer token 了），
+            // 回滚等于把用户送回中转站路由 —— 而他刚刚明确要求离开那里。如实报出来让他
+            // 手动删，比擅自撤销他的决定好。
+            if auth_path.exists() {
+                if let Err(e) = crate::config::delete_file(&auth_path) {
+                    warnings.push(format!(
+                        "已切到官方 provider，但删除登录态失败：{e}。请手动删除 {} 后重新登录。",
+                        auth_path.display()
+                    ));
+                }
             }
-        }
 
-        Ok((backup_path, warnings))
-    })?;
+            Ok((backup_path, warnings))
+        })
+    })
+    .await
+    .map_err(|error| AppError::Message(format!("恢复官方登录任务执行失败: {error}")))??;
 
     let (backup_path, mut warnings) = outcome;
     warnings.extend(chatgpt.warnings);

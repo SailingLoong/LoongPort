@@ -196,10 +196,12 @@ pub async fn relay_imagegen_reveal_image(
 
 /// 切换「在 CLI 对话中提供生图工具（MCP）」并立刻对齐注册。
 #[tauri::command]
-pub fn relay_set_imagegen_mcp_enabled(
+pub async fn relay_set_imagegen_mcp_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), AppError> {
+    // Cancellation while queued must leave both the setting and projection untouched.
+    let _guards = crate::services::McpService::lock_all_apps(&state).await;
     crate::settings::set_imagegen_mcp_enabled(enabled)?;
-    imagegen_mcp::sync_registration(&state)
+    imagegen_mcp::sync_registration_unlocked(&state)
 }

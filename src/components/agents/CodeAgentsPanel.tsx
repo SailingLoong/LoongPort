@@ -76,7 +76,10 @@ export function CodeAgentsPanel() {
         if (active.current) setModels(values);
       })
       .catch(() => {
-        if (active.current) setError(t("codeAgents.modelsFailed"));
+        if (active.current) {
+          // Optional model suggestions must not hide an operation's outcome.
+          setError((current) => current || t("codeAgents.modelsFailed"));
+        }
       });
     const timer = setInterval(() => void refresh(), 3000);
     return () => {

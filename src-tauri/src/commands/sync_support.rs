@@ -7,7 +7,9 @@ use crate::store::AppState;
 
 pub(crate) fn run_post_import_sync(app_state: &AppState) -> Result<(), AppError> {
     let mut failures = Vec::new();
-    if let Err(error) = ProviderService::sync_current_to_live(app_state) {
+    if let Err(error) =
+        futures::executor::block_on(ProviderService::sync_current_to_live(app_state))
+    {
         failures.push(format!("live configuration: {error}"));
     }
     finish_post_import_sync(app_state, failures)
@@ -17,7 +19,9 @@ pub(crate) fn run_post_import_sync(app_state: &AppState) -> Result<(), AppError>
 /// application locks. Continue with shared auxiliary projections exactly once.
 pub(crate) fn run_post_import_sync_after_providers(app_state: &AppState) -> Result<(), AppError> {
     let mut failures = Vec::new();
-    if let Err(error) = ProviderService::sync_non_provider_live(app_state) {
+    if let Err(error) =
+        futures::executor::block_on(ProviderService::sync_non_provider_live(app_state))
+    {
         failures.push(format!("live configuration: {error}"));
     }
     finish_post_import_sync(app_state, failures)

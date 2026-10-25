@@ -408,7 +408,15 @@ async fn provision_relay(
 ) -> Result<ProvisionSummary, AppError> {
     let batch = provision_backend(site_account, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    let result = persist_provision_batch(state.inner(), site_account, batch);
+    // Keep the existing synchronous provider/SQLite phase off runtime workers.
+    // It shares the original AppState so all native writers use the same locks.
+    let persist_state = state.inner().clone();
+    let persist_account = site_account.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        persist_provision_batch(&persist_state, &persist_account, batch)
+    })
+    .await
+    .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?;
     mark_pricing_after_success(
         state.inner(),
         site_account.id,
@@ -740,7 +748,7 @@ pub(crate) fn persist_provision_batch(
         });
     }
 
-    refresh_live_for_current_tiers(state, &refresh_live);
+    futures::executor::block_on(refresh_live_for_current_tiers(state, &refresh_live));
 
     let removed = prune_stale_tiers(state, &site_account.site_origin, batch.account_id, &keep)?;
     if removed > 0 {
@@ -758,7 +766,9 @@ pub(crate) fn persist_provision_batch(
     //
     // 失败只 warn：档位已经存对了，不该因为一个 MCP 记录写不下去就把「获取密钥」
     // 整个报成失败（用户会以为连密钥都没拿到）。
-    if let Err(e) = imagegen_mcp::sync_registration(state) {
+    // This entire local phase is entered on a blocking thread; per-provider
+    // guards above are released before acquiring the MCP application locks.
+    if let Err(e) = futures::executor::block_on(imagegen_mcp::sync_registration(state)) {
         log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
     }
 
@@ -821,9 +831,11 @@ pub(crate) fn persist_provision_batch(
 /// ⚠️ **收成一个函数是为了让命令层这一步可测**：两个调用方都吃 `&tauri::AppHandle`
 /// （单测里造不出来），所以原来那两段内联代码**没有任何测试覆盖得到** ——
 /// 第二路 review 实测：把它们注释掉，2578 条测试全绿。
-pub(crate) fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
+pub(crate) async fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
     for app_type in app_types {
-        if let Err(e) = ProviderService::sync_current_provider_for_app(state, app_type.clone()) {
+        if let Err(e) =
+            ProviderService::sync_current_provider_for_app(state, app_type.clone()).await
+        {
             log::warn!(
                 "刷新 {} 的当前配置失败（记录已保存，切换一次即生效）: {e}",
                 app_type.as_str()
@@ -2291,7 +2303,7 @@ mod tests {
             &rows_src[start..start + end]
         };
         assert!(
-            reset.contains("refresh_live_for_current_tiers("),
+            reset.contains("sync_current_provider_for_app_locked("),
             "⭐ `reset_tier_config_impl` 不再刷新 live config —— \
                  那会让「恢复默认配置」这个按钮对当前项**整体无效**（改坏的配置就在 live 文件里）"
         );

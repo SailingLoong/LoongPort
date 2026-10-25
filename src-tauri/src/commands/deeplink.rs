@@ -25,9 +25,9 @@ pub fn merge_deeplink_config(
 
 /// Import a provider from a deep link request (legacy, kept for compatibility)
 #[tauri::command]
-pub fn import_from_deeplink(
+pub async fn import_from_deeplink(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     request: DeepLinkImportRequest,
 ) -> Result<String, String> {
     log::info!(
@@ -37,8 +37,12 @@ pub fn import_from_deeplink(
     );
 
     let target_app = request.app.clone();
-    let (provider_id, did_switch_current) =
-        import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+    let app_state = state.inner().clone();
+    let (provider_id, did_switch_current) = tauri::async_runtime::spawn_blocking(move || {
+        import_provider_from_deeplink(&app_state, request).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("供应商导入任务执行失败: {e}"))??;
 
     // ⚠️ 切了 current 就必须广播 provider-switched：RelaySection 靠它 reload，
     // 否则托管档位高亮停留在旧项（deeplink 导入改了 current 却没人通知界面）。
@@ -68,8 +72,15 @@ pub async fn import_from_deeplink_unified(
     match request.resource.as_str() {
         "provider" => {
             let target_app = request.app.clone();
+            // Provider import includes synchronous switching. Keep all of that
+            // local phase off the async runtime while it waits for app ownership.
+            let app_state = state.inner().clone();
             let (provider_id, did_switch_current) =
-                import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+                tauri::async_runtime::spawn_blocking(move || {
+                    import_provider_from_deeplink(&app_state, request).map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| format!("供应商导入任务执行失败: {e}"))??;
 
             // ⚠️ 同上：切了 current 必须广播，RelaySection 靠它 reload。
             if did_switch_current {
@@ -95,7 +106,9 @@ pub async fn import_from_deeplink_unified(
             }))
         }
         "mcp" => {
-            let result = import_mcp_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+            let result = import_mcp_from_deeplink(&state, request)
+                .await
+                .map_err(|e| e.to_string())?;
             // Add type field to the result
             Ok(serde_json::json!({
                 "type": "mcp",

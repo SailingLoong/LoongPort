@@ -442,6 +442,12 @@ impl ProfileService {
 
             // 3. MCP diff（最小 toggle：仅动目标态≠当前态的条目；None = 该侧未拍过，不动）
             if let Some(Some(target_ids)) = payload.mcp.get(app) {
+                // Profile application runs on a blocking thread. Own the app
+                // before reading/planning the diff, not just each final toggle;
+                // provider/lifecycle work above has already released its locks.
+                let _guard = futures::executor::block_on(
+                    state.proxy_service.lock_switch_for_app(app.as_str()),
+                );
                 let servers = state.db.get_all_mcp_servers()?;
                 let current: Vec<(String, bool)> = servers
                     .values()

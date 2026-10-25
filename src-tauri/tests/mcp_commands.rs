@@ -310,7 +310,8 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
     let config = MultiAppConfig::default();
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    let changed = McpService::import_from_claude(&state).expect("import mcp from claude succeeds");
+    let changed = futures::executor::block_on(McpService::import_from_claude(&state))
+        .expect("import mcp from claude succeeds");
     assert!(
         changed > 0,
         "import should report inserted or normalized entries"
@@ -358,7 +359,8 @@ command = "echo"
     fs::write(&config_path, original).expect("seed codex config");
 
     let state = create_test_state().expect("create test state");
-    let changed = McpService::import_from_codex(&state).expect("import from codex");
+    let changed = futures::executor::block_on(McpService::import_from_codex(&state))
+        .expect("import from codex");
     assert!(changed > 0, "should import servers from Codex config");
 
     let after = fs::read_to_string(&config_path).expect("read codex config");
@@ -385,7 +387,8 @@ fn import_mcp_from_codex_infers_http_from_url_without_type() {
     .expect("seed codex config");
 
     let state = create_test_state().expect("create test state");
-    let changed = McpService::import_from_codex(&state).expect("import from codex");
+    let changed = futures::executor::block_on(McpService::import_from_codex(&state))
+        .expect("import from codex");
     assert!(changed > 0, "should import the url-only server");
 
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
@@ -465,7 +468,8 @@ command = "echo"
         })
         .expect("seed existing mcp server");
 
-    let changed = McpService::import_from_claude(&state).expect("import from claude");
+    let changed = futures::executor::block_on(McpService::import_from_claude(&state))
+        .expect("import from claude");
     assert_eq!(changed, 0, "existing server should not count as new");
 
     let after = fs::read_to_string(&codex_config_path).expect("read codex config");
@@ -497,8 +501,8 @@ fn import_mcp_from_claude_invalid_json_preserves_state() {
 
     let state = create_test_state().expect("create test state");
 
-    let err =
-        McpService::import_from_claude(&state).expect_err("invalid json should bubble up error");
+    let err = futures::executor::block_on(McpService::import_from_claude(&state))
+        .expect_err("invalid json should bubble up error");
     match err {
         AppError::McpValidation(msg) => assert!(
             msg.contains("解析 ~/.claude.json 失败"),
@@ -546,7 +550,7 @@ fn import_from_all_apps_reports_broken_app_but_imports_the_rest() {
 
     let state = create_test_state().expect("create test state");
 
-    let err = McpService::import_from_all_apps(&state)
+    let err = futures::executor::block_on(McpService::import_from_all_apps(&state))
         .expect_err("broken codex config must surface, not be swallowed as zero imports");
     let message = err.to_string();
     assert!(
@@ -577,7 +581,7 @@ fn upsert_reports_broken_claude_but_still_projects_to_codex() {
     fs::write(get_codex_config_path(), "").expect("seed Codex config");
 
     let state = create_test_state().expect("create test state");
-    let error = McpService::upsert_server(
+    let error = futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "imagegen".to_string(),
@@ -593,7 +597,7 @@ fn upsert_reports_broken_claude_but_still_projects_to_codex() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect_err("the broken Claude projection must still be reported");
 
     assert!(error.to_string().contains("claude"));
@@ -652,8 +656,13 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
     let state = create_test_state_with_config(&config).expect("create test state");
 
     // v3.7.0: 使用 toggle_app 替代 set_enabled
-    McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
-        .expect("toggle_app should succeed");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "codex-server",
+        AppType::Codex,
+        true,
+    ))
+    .expect("toggle_app should succeed");
 
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
     let entry = servers.get("codex-server").expect("codex server exists");
@@ -691,7 +700,7 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
     let state = create_test_state().expect("create test state");
 
     // 先插入一个未启用 Codex 的 MCP 服务器（避免 upsert 触发同步）
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "codex-server".to_string(),
@@ -713,12 +722,17 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("insert server without syncing");
 
     // 启用 Codex：目录缺失时应跳过写入（不创建 ~/.codex/config.toml）
-    McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
-        .expect("toggle codex should succeed even when ~/.codex is missing");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "codex-server",
+        AppType::Codex,
+        true,
+    ))
+    .expect("toggle codex should succeed even when ~/.codex is missing");
 
     assert!(
         !home.join(".codex").exists(),
@@ -737,7 +751,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
 
     // 先创建一个启用 Claude 的 MCP 服务器
     let state = support::create_test_state().expect("create test state");
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "echo".to_string(),
@@ -759,7 +773,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("upsert should sync to Claude live config");
 
     // 确认已写入 ~/.claude.json
@@ -772,7 +786,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
     );
 
     // 再次 upsert：取消勾选 Claude（apps.claude=false），应从 Claude live 配置中移除
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "echo".to_string(),
@@ -794,7 +808,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("upsert disabling app should remove from Claude live config");
 
     let text = fs::read_to_string(&mcp_path).expect("read ~/.claude.json after disable");
@@ -888,8 +902,9 @@ command = "echo"
 
     let state = support::create_test_state().expect("create test state");
 
-    McpService::import_from_claude(&state).expect("import from claude");
-    McpService::import_from_codex(&state).expect("import from codex");
+    futures::executor::block_on(McpService::import_from_claude(&state))
+        .expect("import from claude");
+    futures::executor::block_on(McpService::import_from_codex(&state)).expect("import from codex");
 
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
     let entry = servers.get("shared").expect("shared server exists");
@@ -923,7 +938,8 @@ fn import_mcp_from_gemini_sse_url_only_is_valid() {
     .expect("seed ~/.gemini/settings.json");
 
     let state = support::create_test_state().expect("create test state");
-    let changed = McpService::import_from_gemini(&state).expect("import from gemini");
+    let changed = futures::executor::block_on(McpService::import_from_gemini(&state))
+        .expect("import from gemini");
     assert!(changed > 0, "should import at least 1 server");
 
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
@@ -953,7 +969,7 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
     let state = create_test_state().expect("create test state");
 
     // 先插入一个未启用 Gemini 的 MCP 服务器（避免 upsert 触发同步）
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "gemini-server".to_string(),
@@ -975,12 +991,17 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("insert server without syncing");
 
     // 启用 Gemini：目录缺失时应跳过写入（不创建 ~/.gemini/settings.json）
-    McpService::toggle_app(&state, "gemini-server", AppType::Gemini, true)
-        .expect("toggle gemini should succeed even when ~/.gemini is missing");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "gemini-server",
+        AppType::Gemini,
+        true,
+    ))
+    .expect("toggle gemini should succeed even when ~/.gemini is missing");
 
     assert!(
         !home.join(".gemini").exists(),
@@ -1009,7 +1030,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
     let state = create_test_state().expect("create test state");
 
     // 先插入一个未启用 Claude 的 MCP 服务器（避免 upsert 触发同步）
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "claude-server".to_string(),
@@ -1031,12 +1052,17 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("insert server without syncing");
 
     // 启用 Claude：配置缺失时应跳过写入（不创建 ~/.claude.json）
-    McpService::toggle_app(&state, "claude-server", AppType::Claude, true)
-        .expect("toggle claude should succeed even when ~/.claude is missing");
+    futures::executor::block_on(McpService::toggle_app_locked(
+        &state,
+        "claude-server",
+        AppType::Claude,
+        true,
+    ))
+    .expect("toggle claude should succeed even when ~/.claude is missing");
 
     assert!(
         !home.join(".claude.json").exists(),
@@ -1065,7 +1091,7 @@ fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
     );
 
     let state = create_test_state().expect("create test state");
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "claude-default".to_string(),
@@ -1087,7 +1113,7 @@ fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("sync default Claude MCP");
 
     assert!(
@@ -1122,7 +1148,7 @@ fn custom_claude_dir_writes_mcp_inside_config_dir() {
     );
 
     let state = create_test_state().expect("create test state");
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "claude-custom".to_string(),
@@ -1144,7 +1170,7 @@ fn custom_claude_dir_writes_mcp_inside_config_dir() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("sync custom Claude MCP");
 
     assert!(
@@ -1202,7 +1228,7 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
     );
 
     let state = create_test_state().expect("create test state");
-    McpService::upsert_server(
+    futures::executor::block_on(McpService::upsert_server(
         &state,
         McpServer {
             id: "custom-only".to_string(),
@@ -1224,7 +1250,7 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
             docs: None,
             tags: Vec::new(),
         },
-    )
+    ))
     .expect("sync custom Claude MCP");
 
     let text = fs::read_to_string(&expected_mcp_path).expect("read custom Claude MCP");
@@ -1389,7 +1415,7 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
         })
         .expect("save enabled server");
 
-    McpService::sync_all_enabled(&state).expect("reconcile mcp");
+    futures::executor::block_on(McpService::sync_all_enabled(&state)).expect("reconcile mcp");
 
     let text = fs::read_to_string(&mcp_path).expect("read claude mcp");
     let value: serde_json::Value = serde_json::from_str(&text).expect("parse claude mcp");
@@ -1589,12 +1615,24 @@ fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     type Importer = fn(&cc_switch_lib::AppState) -> Result<usize, AppError>;
     let importers: [(AppType, Importer); 6] = [
-        (AppType::Claude, McpService::import_from_claude),
-        (AppType::Codex, McpService::import_from_codex),
-        (AppType::Gemini, McpService::import_from_gemini),
-        (AppType::GrokBuild, McpService::import_from_grokbuild),
-        (AppType::OpenCode, McpService::import_from_opencode),
-        (AppType::Hermes, McpService::import_from_hermes),
+        (AppType::Claude, |state| {
+            futures::executor::block_on(McpService::import_from_claude(state))
+        }),
+        (AppType::Codex, |state| {
+            futures::executor::block_on(McpService::import_from_codex(state))
+        }),
+        (AppType::Gemini, |state| {
+            futures::executor::block_on(McpService::import_from_gemini(state))
+        }),
+        (AppType::GrokBuild, |state| {
+            futures::executor::block_on(McpService::import_from_grokbuild(state))
+        }),
+        (AppType::OpenCode, |state| {
+            futures::executor::block_on(McpService::import_from_opencode(state))
+        }),
+        (AppType::Hermes, |state| {
+            futures::executor::block_on(McpService::import_from_hermes(state))
+        }),
     ];
     for (app, import) in importers {
         reset_test_fs();

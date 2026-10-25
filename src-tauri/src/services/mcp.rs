@@ -10,13 +10,44 @@ use crate::store::AppState;
 pub struct McpService;
 
 impl McpService {
+    /// Whole-row mutations can affect every MCP application, including a flag
+    /// enabled by a concurrent toggle. Acquire the fixed supported-app sequence
+    /// before reading any old row; it is a subsequence of configuration import's
+    /// AppType::all() order. Never call while already owning an app switch lock.
+    pub(crate) async fn lock_all_apps(state: &AppState) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut guards = Vec::new();
+        for app in AppType::all().filter(|app| {
+            matches!(
+                app,
+                AppType::Claude
+                    | AppType::Codex
+                    | AppType::Gemini
+                    | AppType::GrokBuild
+                    | AppType::OpenCode
+                    | AppType::Hermes
+            )
+        }) {
+            guards.push(state.proxy_service.lock_switch_for_app(app.as_str()).await);
+        }
+        guards
+    }
+
     /// 获取所有 MCP 服务器（统一结构）
     pub fn get_all_servers(state: &AppState) -> Result<IndexMap<String, McpServer>, AppError> {
         state.db.get_all_mcp_servers()
     }
 
     /// 添加或更新 MCP 服务器
-    pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
+    pub async fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
+        let _guards = Self::lock_all_apps(state).await;
+        Self::upsert_server_unlocked(state, server)
+    }
+
+    /// Caller owns all MCP app locks, including while constructing merged input.
+    pub(crate) fn upsert_server_unlocked(
+        state: &AppState,
+        server: McpServer,
+    ) -> Result<(), AppError> {
         // 读取旧状态：用于处理“编辑时取消勾选某个应用”的场景（需要从对应 live 配置中移除）
         let prev_apps = state
             .db
@@ -54,7 +85,13 @@ impl McpService {
     }
 
     /// 删除 MCP 服务器
-    pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
+    pub async fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
+        Self::delete_server_unlocked(state, id)
+    }
+
+    /// Caller owns all MCP app locks through the database deletion and cleanup.
+    pub(crate) fn delete_server_unlocked(state: &AppState, id: &str) -> Result<bool, AppError> {
         let server = state.db.get_all_mcp_servers()?.shift_remove(id);
 
         if let Some(server) = server {
@@ -82,7 +119,7 @@ impl McpService {
     }
 
     /// 切换指定应用的启用状态；调用方负责持有该应用的切换锁。
-    pub fn toggle_app(
+    pub(crate) fn toggle_app(
         state: &AppState,
         server_id: &str,
         app: AppType,
@@ -233,7 +270,8 @@ impl McpService {
     /// 其余应用——各应用的 live 文件互相独立，一处损坏没有理由让其他
     /// 应用的 MCP 状态陈旧。全部跑完后若有失败，聚合成一个错误上报，
     /// 保留调用方的可见性。
-    pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
+    pub async fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let servers = Self::get_all_servers(state)?;
 
         let mut failures: Vec<String> = Vec::new();
@@ -257,6 +295,8 @@ impl McpService {
     /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
     /// 定向重投影，避免把无关应用的失败面（如 ~/.claude.json 坏 JSON）
     /// 牵连进目标应用的关键路径。
+    /// Caller owns the canonical app guard before this database snapshot.
+    /// This is the deliberately unlocked projection core for provider writers.
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
         Self::project_servers_to_app(state, &servers, app)
@@ -331,19 +371,20 @@ impl McpService {
 
     /// [已废弃] 设置 MCP 服务器在指定应用的启用状态（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use toggle_app instead")]
-    pub fn set_enabled(
+    pub async fn set_enabled(
         state: &AppState,
         app: AppType,
         id: &str,
         enabled: bool,
     ) -> Result<bool, AppError> {
-        Self::toggle_app(state, id, app, enabled)?;
+        Self::toggle_app_locked(state, id, app, enabled).await?;
         Ok(true)
     }
 
     /// [已废弃] 同步启用的 MCP 到指定应用（兼容旧 API）
     #[deprecated(since = "3.7.0", note = "Use sync_all_enabled instead")]
-    pub fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
+    pub async fn sync_enabled(state: &AppState, app: AppType) -> Result<(), AppError> {
+        let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
         let servers = Self::get_all_servers(state)?;
 
         for server in servers.values() {
@@ -356,7 +397,8 @@ impl McpService {
     }
 
     /// 从 Claude 导入 MCP，不反向写回原生配置。
-    pub fn import_from_claude(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_claude(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_claude(&mut temp_config)?;
         if count == 0 {
@@ -366,7 +408,8 @@ impl McpService {
     }
 
     /// 从 Codex 导入 MCP，不反向写回原生配置。
-    pub fn import_from_codex(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_codex(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_codex(&mut temp_config)?;
         if count == 0 {
@@ -376,7 +419,8 @@ impl McpService {
     }
 
     /// 从 Gemini 导入 MCP，不反向写回原生配置。
-    pub fn import_from_gemini(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_gemini(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_gemini(&mut temp_config)?;
         if count == 0 {
@@ -386,7 +430,8 @@ impl McpService {
     }
 
     /// 从 Grok Build 导入 MCP，不反向写回原生配置。
-    pub fn import_from_grokbuild(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_grokbuild(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_grokbuild(&mut temp_config)?;
         if count == 0 {
@@ -396,7 +441,8 @@ impl McpService {
     }
 
     /// 从 OpenCode 导入 MCP，不反向写回原生配置。
-    pub fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_opencode(&mut temp_config)?;
         if count == 0 {
@@ -406,7 +452,8 @@ impl McpService {
     }
 
     /// 从 Hermes 导入 MCP，不反向写回原生配置。
-    pub fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
+        let _guards = Self::lock_all_apps(state).await;
         let mut temp_config = crate::app_config::MultiAppConfig::default();
         let count = crate::mcp::import_from_hermes(&mut temp_config)?;
         if count == 0 {
@@ -417,7 +464,8 @@ impl McpService {
 
     /// Merge by ID without replacing user metadata or projecting live config.
     /// Native readers, per-app error handling and database write boundaries stay
-    /// with their existing owners; this only removes the duplicated merge loop.
+    /// with their existing owners. Caller owns all MCP app locks from the native
+    /// read through this merge; imports still never project back to live files.
     fn persist_imported_servers(
         state: &AppState,
         servers: Option<&HashMap<String, McpServer>>,
@@ -449,17 +497,17 @@ impl McpService {
     /// 全部跑完后若有失败，聚合成一个错误上报——历史实现逐应用
     /// `unwrap_or(0)` 吞错，坏文件只会表现为"导入成功 0 个"，用户
     /// 无从得知哪个应用出了问题。
-    pub fn import_from_all_apps(state: &AppState) -> Result<usize, AppError> {
+    pub async fn import_from_all_apps(state: &AppState) -> Result<usize, AppError> {
         let mut total = 0;
         let mut failures: Vec<String> = Vec::new();
 
         let results: [(&str, Result<usize, AppError>); 6] = [
-            ("claude", Self::import_from_claude(state)),
-            ("codex", Self::import_from_codex(state)),
-            ("gemini", Self::import_from_gemini(state)),
-            ("grokbuild", Self::import_from_grokbuild(state)),
-            ("opencode", Self::import_from_opencode(state)),
-            ("hermes", Self::import_from_hermes(state)),
+            ("claude", Self::import_from_claude(state).await),
+            ("codex", Self::import_from_codex(state).await),
+            ("gemini", Self::import_from_gemini(state).await),
+            ("grokbuild", Self::import_from_grokbuild(state).await),
+            ("opencode", Self::import_from_opencode(state).await),
+            ("hermes", Self::import_from_hermes(state).await),
         ];
         for (app, result) in results {
             match result {
