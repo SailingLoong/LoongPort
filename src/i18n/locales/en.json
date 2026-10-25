@@ -1,4 +1,32 @@
 {
+  "claimSettings": {
+    "title": "Automatic claims management",
+    "heading": "Automatic claims",
+    "pending": "Some settings are unconfirmed",
+    "off": "Automatic claims are off",
+    "allOn": "All enabled",
+    "partial": "Partly enabled",
+    "scope": "Scope: {{scope}} · {{count}} accounts · {{enabled}} enabled",
+    "enable": "Enable all",
+    "disable": "Disable all",
+    "notice": "Changes apply only to existing accounts in this scope. Enable newly added accounts separately. Claim consent and inference authorization are managed separately.",
+    "saving": "Saving automatic claim settings…",
+    "saved": "Confirmed settings for {{count}} accounts",
+    "uncertain": "Setting not confirmed. Refresh to check.",
+    "readFailed": "Account status could not be read. Refresh to try again.",
+    "reason": {
+      "actionRequired": "Claims need attention. Open the account to check.",
+      "pending": "Claim result is unconfirmed",
+      "ineligible": "This activity cannot be claimed",
+      "unavailable": "Cannot enable this account. Open it to check.",
+      "busy": "A claim operation is in progress",
+      "readFailed": "Claim settings could not be read. Refresh to try again.",
+      "unsupported": "Automatic claim settings are not available",
+      "unknown": "Claim settings are unknown. Refresh to check.",
+      "source": "This account source does not support automatic claims",
+      "identity": "Claim identity could not be confirmed. Open the account to check."
+    }
+  },
   "app": {
     "title": "LoongPort",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
@@ -3803,7 +3831,7 @@
     },
     "accounts": {
       "platformAccounts": "Platform accounts",
-      "allPlatforms": "All",
+      "allPlatforms": "All accounts",
       "platformFilter": "Filter platform accounts",
       "addAccount": "Add account",
       "loadingPlatforms": "Loading platform accounts…",

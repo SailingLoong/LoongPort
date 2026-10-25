@@ -71,7 +71,10 @@ import {
 import { PreservedView } from "@/components/ui/PreservedView";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
-import { PAGE_HEADER_HEIGHT } from "@/components/shell/layout";
+import {
+  PAGE_HEADER_HEIGHT,
+  SERVICES_CONTENT_CLASS_NAME,
+} from "@/components/shell/layout";
 import { FeatureHub } from "@/components/shell/FeatureHub";
 import {
   CLIENT_VIEWS,
@@ -1493,7 +1496,12 @@ function App() {
         }
       >
         <div
-          className="flex h-full items-center justify-between gap-4 page-header"
+          className={cn(
+            "flex h-full items-center justify-between gap-4",
+            currentView === "services"
+              ? SERVICES_CONTENT_CLASS_NAME
+              : "page-header",
+          )}
           {...DRAG_REGION_ATTR}
           style={{ ...DRAG_REGION_STYLE } as any}
         >
@@ -1519,7 +1527,12 @@ function App() {
                     {t("common.back")}
                   </Button>
                 )}
-                <h1 className="text-lg font-semibold">
+                <h1
+                  className={cn(
+                    "font-semibold",
+                    currentView === "services" ? "text-[26px]" : "text-lg",
+                  )}
+                >
                   {currentView === "services" && t("client.services")}
                   {currentView === "records" && t("client.records")}
                   {currentView === "usage" && t("usage.title")}

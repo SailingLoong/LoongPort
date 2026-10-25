@@ -46,14 +46,18 @@ export function AccountPlatformTabs({
 }) {
   const { t } = useTranslation();
   const allLabel = t("loongport.accounts.allPlatforms", {
-    defaultValue: "全部",
+    defaultValue: "全部账号",
   });
   const displayed = [...new Set(platforms)];
   const choices: (AccountPlatform | undefined)[] = [undefined, ...displayed];
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const choose = (id: AccountPlatform | undefined) => {
     onSelect(id);
-    requestAnimationFrame(() => refs.current.get(id ?? "all")?.focus());
+    requestAnimationFrame(() => {
+      const target = refs.current.get(id ?? "all");
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    });
   };
   return (
     <TooltipProvider delayDuration={350}>
@@ -62,7 +66,7 @@ export function AccountPlatformTabs({
         aria-label={t("loongport.accounts.platformFilter", {
           defaultValue: "平台账号筛选",
         })}
-        className="flex min-w-0 gap-1 overflow-x-auto border-b border-border p-1 pb-2"
+        className="flex min-w-0 gap-2 scroll-px-1 overflow-x-auto border-b border-border p-1 pb-2"
       >
         {choices.map((id) => {
           const item = accountPlatforms.find((item) => item.id === id);
@@ -116,11 +120,11 @@ export function AccountPlatformTabs({
                   }}
                   className={cn(
                     "relative flex h-10 shrink-0 items-center justify-center rounded-lg border text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    item ? "w-10" : "w-[84px] px-3",
+                    item ? "w-10" : "min-w-[84px] px-3",
                     edition && "pb-2",
                     selected
                       ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-transparent hover:bg-muted",
+                      : "border-border hover:bg-muted",
                   )}
                 >
                   {item ? <AccountPlatformLogo platform={item} /> : allLabel}

@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { automaticClaimSetting } from "./automaticClaimSettings";
 import type { PlatformAccountSummary } from "./useAccountPlatformPresence";
 
 /** Display only the original owner's snapshots. Claim receipts never imply inference health. */
@@ -6,11 +7,13 @@ export function AccountOverviewCard({
   account,
   unavailable = false,
   disabled = false,
+  automaticUnconfirmed = false,
   onOpen,
 }: {
   account: PlatformAccountSummary;
   unavailable?: boolean;
   disabled?: boolean;
+  automaticUnconfirmed?: boolean;
   onOpen: () => void;
 }) {
   const { t } = useTranslation();
@@ -23,7 +26,7 @@ export function AccountOverviewCard({
       ? unreported
       : enabled
         ? t("loongport.accounts.automaticEnabled", { defaultValue: "开启" })
-        : t("loongport.accounts.automaticDisabled", { defaultValue: "关闭" });
+        : t("claimSettings.off", { defaultValue: "自动领取未开启" });
   let authorization = unknown;
   let quota = unknown;
   let autoClaim = unreported;
@@ -63,6 +66,18 @@ export function AccountOverviewCard({
         : unknown;
     autoClaim = automatic(snapshot.value.autoCheckinEnabled);
   }
+  const policy = automaticClaimSetting(account);
+  if (snapshot?.kind === "qoder" || snapshot?.kind === "zcode")
+    autoClaim = automatic(policy.enabled);
+  const claimIssue = automaticUnconfirmed
+    ? t("claimSettings.uncertain", {
+        defaultValue: "设置结果未确认，请刷新后查看",
+      })
+    : policy.reason
+      ? t(policy.reason)
+      : null;
+  if (automaticUnconfirmed)
+    autoClaim = t("common.unknown", { defaultValue: "未知" });
   if (account.inferenceState) {
     const states = {
       ready: t("loongport.accounts.inferenceCredentialsReady", {
@@ -132,6 +147,11 @@ export function AccountOverviewCard({
           </span>
         ))}
       </span>
+      {claimIssue && (
+        <span className="mt-1 block break-words text-xs text-muted-foreground">
+          {unavailable ? unknown : claimIssue}
+        </span>
+      )}
     </button>
   );
 }

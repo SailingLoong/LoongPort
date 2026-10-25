@@ -105,7 +105,7 @@ it("filters summaries repeatedly without opening an account manager", async () =
   expect(
     screen.queryByText("Original account manager"),
   ).not.toBeInTheDocument();
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   expect(
     screen.getByRole("button", { name: "查看 Other account" }),
   ).toBeVisible();
@@ -117,7 +117,7 @@ it("shows four facts without converting a successful claim into inference or bal
   for (const label of ["授权", "额度 / 积分", "自动领取", "推理消费"])
     expect(within(card).getByText(label)).toBeVisible();
   expect(within(card).getByText("未验证")).toBeVisible();
-  expect(within(card).getByText("关闭")).toBeVisible();
+  expect(within(card).getByText("自动领取未开启")).toBeVisible();
   expect(within(card).queryByText(/999|已接通|已连接/)).not.toBeInTheDocument();
 });
 
@@ -176,5 +176,40 @@ it("restores focus to the unified add trigger after returning from the add page"
   const trigger = screen.getByRole("button", { name: "添加账号" });
   await user.click(trigger);
   await user.click(screen.getByRole("button", { name: "Return from add" }));
+  expect(trigger).toHaveFocus();
+});
+
+it("restores focus after opening add from an account manager", async () => {
+  function Shell() {
+    const [adding, setAdding] = useState(false);
+    return (
+      <>
+        <PreservedView active={!adding}>
+          <ServicesPage
+            appId="codex"
+            platform="workbuddy"
+            onOpenApp={vi.fn()}
+            onOpenAddHub={() => setAdding(true)}
+          />
+        </PreservedView>
+        {adding && (
+          <button onClick={() => setAdding(false)}>
+            Return from manager add
+          </button>
+        )}
+      </>
+    );
+  }
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Shell />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  const trigger = screen.getByRole("button", { name: "添加账号" });
+  await user.click(trigger);
+  await user.click(
+    screen.getByRole("button", { name: "Return from manager add" }),
+  );
   expect(trigger).toHaveFocus();
 });

@@ -202,7 +202,7 @@ it("shows all imported platform accounts by default, filters without hiding, and
     "aria-selected",
     "false",
   );
-  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -213,7 +213,7 @@ it("shows all imported platform accounts by default, filters without hiding, and
   ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "查看 Saved account" }));
   expect(screen.getByText("Native account: workbuddy")).toBeInTheDocument();
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   expect(screen.getByText("Native account: workbuddy")).not.toBeVisible();
   expect(
     screen.getByRole("button", { name: "查看 Saved account" }),
@@ -335,7 +335,7 @@ it("preserves an entered native manager through All, failed reads and confirmed 
     name: "Native session workbuddy: 0",
   });
   await user.click(session);
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   expect(session).not.toBeVisible();
   native.mockImplementation(async (command: string): Promise<unknown> => {
     if (command === "list_workbuddy_accounts")
@@ -526,7 +526,7 @@ it("opens the exact OpenCode account across real mutually exclusive route callba
   );
   expect(await screen.findByText("Native detail vendor:42")).toBeVisible();
   expect(screen.queryByText("Native detail vendor:41")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("tab", { name: "全部" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
   await user.click(screen.getByRole("button", { name: "查看 OpenCode 41" }));
   expect(await screen.findByText("Native detail vendor:41")).toBeVisible();
   expect(screen.queryByText("Native detail vendor:42")).not.toBeInTheDocument();
@@ -639,7 +639,7 @@ it("opens the exact OpenRouter connection when two apps use the same provider ID
       within(detail).getByRole("button", { name: "管理原有连接" }),
     );
     expect(onOpenApp).toHaveBeenLastCalledWith("codex");
-    await user.click(screen.getByRole("tab", { name: "全部" }));
+    await user.click(screen.getByRole("tab", { name: "全部账号" }));
     await user.click(
       screen.getByRole("button", { name: "查看 Connection claude" }),
     );

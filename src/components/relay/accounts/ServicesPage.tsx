@@ -1,3 +1,4 @@
+import { SERVICES_CONTENT_CLASS_NAME } from "@/components/shell/layout";
 import { DialogVisibility } from "@/components/ui/dialog";
 import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
 import { QoderAccountPanel } from "./QoderAccountPanel";
@@ -10,6 +11,11 @@ import {
   AccountPlatformTabs,
   AccountPlatformLogo,
 } from "./AccountPlatformTabs";
+import {
+  automaticClaimKey,
+  automaticPolicyStamp,
+} from "./automaticClaimSettings";
+import { AutomaticClaimControls } from "./AutomaticClaimControls";
 import { AccountOverviewCard } from "./AccountOverviewCard";
 import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -108,6 +114,16 @@ export function ServicesPage(props: ServicesPageProps) {
   const viewActive = usePreservedViewActive();
   const addTrigger = useRef<HTMLButtonElement>(null);
   const returnAddFocus = useRef(false);
+  const addReturnTarget = useRef<HTMLElement | null>(null);
+  const openAddHub: ServicesPageProps["onOpenAddHub"] = (tab, options) => {
+    addReturnTarget.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    returnAddFocus.current = true;
+    if (options) props.onOpenAddHub(tab, options);
+    else props.onOpenAddHub(tab);
+  };
   const [localPlatform, setLocalPlatform] = useState<
     AccountPlatform | undefined
   >(props.platform);
@@ -115,6 +131,10 @@ export function ServicesPage(props: ServicesPageProps) {
   const [section, setSection] = useState("platform");
   const [filter, setFilter] = useState<AccountPlatform | undefined>();
   const [refreshing, setRefreshing] = useState(false);
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimUnconfirmed, setClaimUnconfirmed] = useState<
+    Record<string, string>
+  >({});
   const [entered, setEntered] = useState<AccountPlatform[]>([]);
   const [targets, setTargets] = useState<
     Partial<Record<AccountPlatform, { id: string; request: number }>>
@@ -203,14 +223,21 @@ export function ServicesPage(props: ServicesPageProps) {
           ? "INTL"
           : undefined
       : undefined;
-  const visibleCount =
-    overviewAccounts.filter((row) => !filter || row.platform === filter)
-      .length +
-    (!filter || filter === "opencode"
-      ? serviceAccounts.filter(
-          (row) => row.kind === "vendor" && row.row.vendorId === "opencode",
-        ).length
-      : 0);
+  const allPlatformAccounts = [
+    ...overviewAccounts,
+    ...serviceAccounts
+      .filter((row) => row.kind === "vendor" && row.row.vendorId === "opencode")
+      .map((row) => ({
+        source: "vendor",
+        platform: "opencode" as const,
+        id: String(row.id),
+        label: row.row.accountLabel || accountName(row),
+      })),
+  ];
+  const visibleAccounts = allPlatformAccounts.filter(
+    (row) => !filter || row.platform === filter,
+  );
+  const visibleCount = visibleAccounts.length;
   const refresh = async () => {
     if (refreshing || blocked) return;
     setRefreshing(true);
@@ -227,7 +254,9 @@ export function ServicesPage(props: ServicesPageProps) {
   useEffect(() => {
     if (viewActive && returnAddFocus.current) {
       returnAddFocus.current = false;
-      if (!active) addTrigger.current?.focus();
+      const target = addReturnTarget.current;
+      if (target?.isConnected) target.focus();
+      else addTrigger.current?.focus();
     }
   }, [viewActive, active]);
   return (
@@ -237,7 +266,7 @@ export function ServicesPage(props: ServicesPageProps) {
       <Tabs
         value={section}
         onValueChange={setSection}
-        className="mx-auto w-full max-w-6xl space-y-5 px-6 py-5"
+        className={cn(SERVICES_CONTENT_CLASS_NAME, "space-y-5 py-5")}
       >
         <TabsList
           aria-label={t("loongport.accounts.sourceType", {
@@ -260,7 +289,7 @@ export function ServicesPage(props: ServicesPageProps) {
             <TabsTrigger
               key={value}
               value={value}
-              disabled={blocked}
+              disabled={blocked || claimBusy}
               className="rounded-none border-b-2 border-transparent px-1 pb-3 pt-0 text-sm font-medium text-muted-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
             >
               {label}
@@ -280,7 +309,7 @@ export function ServicesPage(props: ServicesPageProps) {
             active={filter}
             editions={{ qoder: qoderEdition }}
             platforms={available}
-            disabled={blocked}
+            disabled={blocked || claimBusy}
             onSelect={(value) => {
               if (blocked) return;
               setFilter(value);
@@ -293,7 +322,7 @@ export function ServicesPage(props: ServicesPageProps) {
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={blocked}
+                  disabled={blocked || claimBusy}
                   onClick={() => select(undefined)}
                 >
                   <ArrowLeft className="h-4 w-4" />
@@ -302,7 +331,7 @@ export function ServicesPage(props: ServicesPageProps) {
                   })}
                 </Button>
               )}
-              <h2 className="min-w-0 truncate text-base font-semibold">
+              <h2 className="min-w-0 truncate text-lg font-semibold">
                 {filter
                   ? accountPlatformLabel(
                       accountPlatforms.find((item) => item.id === filter)!,
@@ -323,7 +352,9 @@ export function ServicesPage(props: ServicesPageProps) {
                 variant="outline"
                 className="h-10"
                 aria-busy={refreshing || presence.isFetching}
-                disabled={blocked || refreshing || presence.isFetching}
+                disabled={
+                  blocked || claimBusy || refreshing || presence.isFetching
+                }
                 onClick={() => void refresh()}
               >
                 <RefreshCw
@@ -336,10 +367,9 @@ export function ServicesPage(props: ServicesPageProps) {
               <Button
                 ref={addTrigger}
                 className="h-10"
-                disabled={blocked}
+                disabled={blocked || claimBusy}
                 onClick={() => {
-                  returnAddFocus.current = true;
-                  props.onOpenAddHub("accounts");
+                  openAddHub("accounts");
                 }}
               >
                 <Plus className="h-4 w-4" />
@@ -349,6 +379,34 @@ export function ServicesPage(props: ServicesPageProps) {
               </Button>
             </div>
           </header>
+          <AutomaticClaimControls
+            accounts={visibleAccounts}
+            scope={
+              filter
+                ? accountPlatformLabel(
+                    accountPlatforms.find((item) => item.id === filter)!,
+                  )
+                : t("loongport.accounts.allAccounts", {
+                    defaultValue: "全部账号",
+                  })
+            }
+            unavailable={
+              filter
+                ? new Set(
+                    [...unavailable].filter((platform) => platform === filter),
+                  )
+                : unavailable
+            }
+            disabled={
+              blocked || refreshing || presence.isFetching || presence.isPending
+            }
+            onRefresh={presence.refetch}
+            onBusyChange={setClaimBusy}
+            unconfirmed={claimUnconfirmed}
+            onUnconfirmed={(issues) =>
+              setClaimUnconfirmed((previous) => ({ ...previous, ...issues }))
+            }
+          />
           {presence.isPending && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("loongport.accounts.loadingPlatforms", {
@@ -379,18 +437,13 @@ export function ServicesPage(props: ServicesPageProps) {
               const summaries = overviewAccounts.filter(
                 (row) => row.platform === platform,
               );
-              const identities = [
-                ...new Set(
-                  summaries.map((row) => row.identity).filter(Boolean),
-                ),
-              ];
               const groupEdition =
                 "edition" in definition
                   ? definition.edition === "国际版"
                     ? "INTL"
                     : "CN"
-                  : platform === "qoder" && identities.length === 1
-                    ? identities[0]
+                  : platform === "qoder"
+                    ? qoderEdition
                     : undefined;
               const vendors =
                 platform === "opencode"
@@ -431,8 +484,12 @@ export function ServicesPage(props: ServicesPageProps) {
                       <AccountOverviewCard
                         key={`${row.source}:${row.app ?? ""}:${row.id}`}
                         account={row}
+                        automaticUnconfirmed={
+                          claimUnconfirmed[automaticClaimKey(row)] ===
+                          automaticPolicyStamp(row)
+                        }
                         unavailable={unavailable.has(platform)}
-                        disabled={blocked}
+                        disabled={blocked || claimBusy}
                         onOpen={() =>
                           openSummary(
                             platform,
@@ -450,7 +507,7 @@ export function ServicesPage(props: ServicesPageProps) {
                           id: String(row.id),
                           label: row.row.accountLabel || accountName(row),
                         }}
-                        disabled={blocked}
+                        disabled={blocked || claimBusy}
                         onOpen={() => openSummary(platform, String(row.id))}
                       />
                     ))}
@@ -470,6 +527,7 @@ export function ServicesPage(props: ServicesPageProps) {
                 <AccountWorkspaceTarget.Provider value={targets[platform]}>
                   <ServicesPageContent
                     {...props}
+                    onOpenAddHub={openAddHub}
                     platform={platform}
                     onOpenPlatform={select}
                     onNavigationBlockedChange={(value) => {
@@ -507,6 +565,7 @@ export function ServicesPage(props: ServicesPageProps) {
                   {platform === "opencode" && (
                     <ServicesPageContent
                       {...props}
+                      onOpenAddHub={openAddHub}
                       platform={undefined}
                       accountKind="opencode"
                     />

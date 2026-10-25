@@ -15,6 +15,11 @@ import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { PROVIDER_SWITCHED, VENDOR_ACCOUNTS_CHANGED } from "@/lib/api/events";
 import type { AccountPlatform } from "./accountPlatforms";
+import {
+  qoderDailyApi,
+  type QoderAutomaticContext,
+} from "@/lib/api/qoderDaily";
+import { zcodeClaimApi, type ClaimState } from "@/lib/api/zcodeClaim";
 import type { AppId } from "@/lib/api/types";
 
 export interface PlatformConnection {
@@ -31,11 +36,18 @@ export interface PlatformAccountSummary {
   identity?: string;
   status?: string;
   app?: AppId;
+  automaticReadFailed?: boolean;
   snapshot?:
     | { kind: "auth"; value: ManagedAuthAccount }
     | { kind: "workbuddy"; value: WorkBuddyAccount }
     | { kind: "minimax"; value: MiniMaxCodeAccount }
-    | { kind: "trae"; value: TraeAccountView };
+    | { kind: "trae"; value: TraeAccountView }
+    | {
+        kind: "qoder";
+        value: QoderAutomaticContext;
+        source: "internationalQoderPat" | "chinaQoderPat" | "chinaQoderDevice";
+      }
+    | { kind: "zcode"; value: ClaimState; dataRoot?: string };
   inferenceState?: WorkBuddyInferenceState;
 }
 export interface PlatformPresenceSnapshot {
@@ -61,6 +73,7 @@ export async function readAccountPlatformPresence(
       status?: string;
       identity?: string;
       app?: AppId;
+      automaticReadFailed?: boolean;
       snapshot?: PlatformAccountSummary["snapshot"];
       inferenceState?: WorkBuddyInferenceState;
     }[],
@@ -175,20 +188,26 @@ export async function readAccountPlatformPresence(
     {
       source: "zcode",
       platforms: ["zcode"],
-      read: async () =>
-        add(
+      read: async () => {
+        const dataRoot = readZCodeSourcePreference()?.dataRoot || undefined;
+        const library = await zcodeAccountsApi.library(dataRoot);
+        const state = library.profiles.length
+          ? await zcodeClaimApi.state(dataRoot).catch(() => null)
+          : null;
+        return add(
           "zcode",
           "zcode",
-          (
-            await zcodeAccountsApi.library(
-              readZCodeSourcePreference()?.dataRoot || undefined,
-            )
-          ).profiles.map((row) => ({
+          library.profiles.map((row) => ({
             id: row.id,
             label: row.label,
             identity: row.family,
+            automaticReadFailed: !state,
+            snapshot: state
+              ? { kind: "zcode", value: state, dataRoot }
+              : undefined,
           })),
-        ),
+        );
+      },
     },
     ...PROVIDER_STORE_APP_IDS.map((app) => ({
       source: `provider:${app}`,
@@ -206,8 +225,28 @@ export async function readAccountPlatformPresence(
             )
           ) {
             present.add("qoder");
+            const receivedPolicy = await qoderDailyApi
+              .automaticContext(provider.id)
+              .catch(() => null);
+            const policy =
+              receivedPolicy?.providerId === provider.id
+                ? receivedPolicy
+                : null;
             add(`provider:${app}`, "qoder", [
               {
+                automaticReadFailed: !policy,
+                snapshot: policy
+                  ? {
+                      kind: "qoder",
+                      value: policy,
+                      source:
+                        provider.meta?.providerType === "qoder_sdk"
+                          ? "internationalQoderPat"
+                          : provider.meta?.providerType === "qoder_cn_device"
+                            ? "chinaQoderDevice"
+                            : "chinaQoderPat",
+                    }
+                  : undefined,
                 id: provider.id,
                 label: provider.name,
                 identity:

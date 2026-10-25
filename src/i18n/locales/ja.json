@@ -1,4 +1,32 @@
 {
+  "claimSettings": {
+    "title": "自動受取の管理",
+    "heading": "自動受取",
+    "pending": "一部の設定は未確認",
+    "off": "自動受取は未設定",
+    "allOn": "すべて有効",
+    "partial": "一部有効",
+    "scope": "対象：{{scope}} · {{count}} アカウント · {{enabled}} 件有効",
+    "enable": "すべて有効にする",
+    "disable": "すべて無効にする",
+    "notice": "現在の対象に含まれる既存アカウントのみ変更します。追加したアカウントは個別に有効にしてください。自動受取への同意と推論の認可は別に管理します。",
+    "saving": "自動受取の設定を保存中…",
+    "saved": "{{count}} 件の設定を確認しました",
+    "uncertain": "設定結果が未確認です。更新して確認してください。",
+    "readFailed": "アカウント情報を取得できません。更新してください。",
+    "reason": {
+      "actionRequired": "受取に対応が必要です。アカウントを開いて確認してください。",
+      "pending": "受取結果は未確認です",
+      "ineligible": "現在の特典は受け取れません",
+      "unavailable": "現在有効にできません。アカウントを開いて確認してください。",
+      "busy": "受取処理が進行中です",
+      "readFailed": "自動受取の設定を取得できません。更新してください。",
+      "unsupported": "自動受取の設定は提供されていません",
+      "unknown": "自動受取の設定は不明です。更新してください。",
+      "source": "このアカウント種別は自動受取に対応していません",
+      "identity": "受取用の本人情報を確認できません。アカウントを開いてください。"
+    }
+  },
   "app": {
     "title": "LoongPort",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
@@ -3803,7 +3831,7 @@
     },
     "accounts": {
       "platformAccounts": "プラットフォームアカウント",
-      "allPlatforms": "すべて",
+      "allPlatforms": "すべてのアカウント",
       "platformFilter": "プラットフォームアカウントの絞り込み",
       "addAccount": "アカウントを追加",
       "loadingPlatforms": "プラットフォームアカウントを読み込み中…",
