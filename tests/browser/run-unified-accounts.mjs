@@ -182,6 +182,15 @@ try {
         }
         await page.waitForFunction(() => window.unifiedLayout.settled());
         await page.evaluate(() => document.fonts.ready);
+        if (scenario === "empty" || scenario === "populated") {
+          // Relay records live in their own tab in the approved account layout.
+          await main
+            .getByRole("tab", {
+              name: t("loongport.accounts.relayTab") ?? "中转站",
+              exact: true,
+            })
+            .click();
+        }
         if (scenario === "populated") {
           await main
             .getByText(
@@ -191,6 +200,12 @@ try {
               },
             )
             .waitFor();
+          await main
+            .getByRole("tab", {
+              name: t("loongport.accounts.platformAccounts"),
+              exact: true,
+            })
+            .click();
           await main
             .getByText("Synthetic workspace account", {
               exact: true,
@@ -218,6 +233,14 @@ try {
               .count(),
             0,
           );
+        }
+        if (scenario === "empty") {
+          await main
+            .getByRole("tab", {
+              name: t("loongport.accounts.platformAccounts"),
+              exact: true,
+            })
+            .click();
         }
         geometry = await page.evaluate(() => {
           const bounds = (selector) => {
@@ -523,6 +546,15 @@ try {
             ["workbuddy", "WorkBuddy"],
           ]) {
             await platformTabs.getByRole("tab", { name, exact: true }).click();
+            await main
+              .getByRole("button", {
+                name:
+                  provider === "minimaxCode"
+                    ? "查看 Synthetic account A"
+                    : "查看 Synthetic WorkBuddy account",
+                exact: true,
+              })
+              .click();
             const status = main.getByRole("region", {
               name: t("automaticStatus.title"),
               exact: true,
@@ -590,9 +622,11 @@ try {
               `Platform ${name} must remain keyboard reachable and hit-visible`,
             );
           }
-          await page
-            .locator("[data-layout-header]")
-            .getByRole("button", { name: t("common.back"), exact: true })
+          await platformTabs
+            .getByRole("tab", {
+              name: t("loongport.accounts.allPlatforms"),
+              exact: true,
+            })
             .click();
           await main
             .getByRole("tab", { name: "MiniMax Code 国内版", exact: true })
