@@ -37,8 +37,8 @@ const PLATFORM: &str = "workbuddy";
 const MAX_JSON: usize = 4 * 1024 * 1024;
 const EARLY_MS: i64 = 60_000;
 
-/// Backend-only second grant on the SAME encrypted account row. No Debug and
-/// no UI DTO exposure. The legacy check-in access token remains untouched.
+/// Complete canonical account credential in the original encrypted row.
+/// The serialized slot remains compatible; purpose consent is stored separately.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Authorization {
@@ -53,6 +53,9 @@ pub(crate) struct Authorization {
     refresh_expires_ms: Option<i64>,
 }
 impl Authorization {
+    pub(super) fn id(&self) -> &str {
+        &self.grant_id
+    }
     pub(super) fn matches_credit_snapshot(
         &self,
         snapshot: &super::credits::CreditModelSnapshot,
@@ -77,6 +80,8 @@ struct Owner {
     // Detect replacement of the legacy row without sending its token anywhere.
     legacy_fingerprint: [u8; 32],
     original_grant_id: Option<String>,
+    inference_revision: Option<u64>,
+    inference_required: bool,
 }
 impl Owner {
     fn from_row(session: &SecretSession, binding: VaultMetadata, row: &SavedAccount) -> Self {
@@ -88,6 +93,8 @@ impl Owner {
             legacy_fingerprint: Sha256::digest(row.account.token.as_bytes()).into(),
             original_grant_id: row.inference.as_ref().map(|g| g.grant_id.clone()),
             binding,
+            inference_revision: None,
+            inference_required: false,
         }
     }
     fn rows(&self, session: &SecretSession) -> Result<(Vec<SavedAccount>, usize), Failure> {
@@ -101,7 +108,10 @@ impl Owner {
             .ok_or(Failure::ExpiredAuthorization)?;
         let row = &rows[index];
         let fingerprint: [u8; 32] = Sha256::digest(row.account.token.as_bytes()).into();
-        if row.account.uid != self.uid
+        if self.inference_revision.is_some_and(|revision| {
+            (self.inference_required && !row.inference_allowed())
+                || row.inference_revision != revision
+        }) || row.account.uid != self.uid
             || row.account.domain != self.domain
             || fingerprint != self.legacy_fingerprint
             || row.inference.as_ref().map(|g| g.grant_id.as_str())
@@ -336,6 +346,69 @@ fn new_grant(
     })
 }
 
+pub(super) fn grant_from_login(
+    session: &SecretSession,
+    row: &SavedAccount,
+    token: &Value,
+    profile: &Value,
+    now: i64,
+) -> Result<Authorization, Failure> {
+    let owner = Owner::from_row(session, store::binding(session)?, row);
+    new_grant(&owner, token, profile, now)
+}
+
+/// Explicit permission only; never opens a browser or transmits credentials.
+/// false revokes inference leases but preserves the shared login and claim state.
+pub(crate) async fn set_inference_consent(
+    session: &SecretSession,
+    account_id: &str,
+    enabled: bool,
+) -> Result<bool, Failure> {
+    let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
+    let binding = store::binding(session)?;
+    let mut rows = store::load(session, &binding)?;
+    let row = rows
+        .iter_mut()
+        .find(|r| r.account.id(&binding.vault_id) == account_id)
+        .ok_or(Failure::UnsupportedContext)?;
+    if enabled {
+        let Some(grant) = row.inference.as_ref() else {
+            return Ok(false);
+        };
+        if !valid_grant(grant, row)
+            || grant
+                .refresh_expires_ms
+                .is_some_and(|expiry| expiry <= now_ms())
+        {
+            return Ok(false);
+        }
+        if !row.shared_authorization {
+            // This grant came from the fixed canonical origin; the legacy token does not.
+            // Retain unresolved claims and explicit automatic consent, binding it to the
+            // same verified identity/grant instead of a duplicate, expiring access token.
+            let automatic = row.automatic_enabled();
+            row.account.token.zeroize();
+            row.shared_authorization = true;
+            row.generation = row
+                .generation
+                .checked_add(1)
+                .ok_or(Failure::StorageUnavailable)?;
+            row.auto_claim_revision = row
+                .auto_claim_revision
+                .checked_add(1)
+                .ok_or(Failure::StorageUnavailable)?;
+            row.auto_claim_credential = automatic.then(|| row.credential_binding());
+        }
+    }
+    row.inference_revision = row
+        .inference_revision
+        .checked_add(1)
+        .ok_or(Failure::StorageUnavailable)?;
+    row.inference_consent = Some(enabled);
+    store::save(session, &binding, rows)?;
+    Ok(true)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Endpoint {
     State,
@@ -344,6 +417,7 @@ pub(super) enum Endpoint {
     Refresh,
     Models,
     Chat,
+    Account(super::protocol::Endpoint),
 }
 impl Endpoint {
     fn path(self) -> &'static str {
@@ -354,6 +428,7 @@ impl Endpoint {
             Self::Refresh => "/v2/plugin/auth/token/refresh",
             Self::Models => "/v3/config",
             Self::Chat => "/v2/chat/completions",
+            Self::Account(endpoint) => endpoint.path(),
         }
     }
     fn method(self) -> http::Method {
@@ -495,6 +570,26 @@ async fn send_cancellable<T: Transport>(
     request: Request,
     cancellation: Option<&CancellationHandle>,
 ) -> Result<ProxyResponse, ProxyError> {
+    send_admitted(
+        session,
+        owner,
+        grant,
+        transport,
+        request,
+        cancellation,
+        None,
+    )
+    .await
+}
+async fn send_admitted<T: Transport>(
+    session: &SecretSession,
+    owner: &Owner,
+    grant: Option<&Authorization>,
+    transport: &T,
+    request: Request,
+    cancellation: Option<&CancellationHandle>,
+    admission: Option<&shared_account::Admission<'_>>,
+) -> Result<ProxyResponse, ProxyError> {
     let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
     let mut pending = None;
     let mut ready = None;
@@ -510,8 +605,16 @@ async fn send_cancellable<T: Transport>(
                 _ => return Err(owner_error(Failure::ExpiredAuthorization)),
             }
         }
+        if let Some(admission) = admission {
+            admission
+                .check(session, &rows, &owner.binding)
+                .map_err(owner_error)?;
+        }
         // Create AND first-poll under the original owner admission fence. No
         // owner/vault guard is retained across a pending network operation.
+        if let Some(admission) = admission {
+            admission.dispatched();
+        }
         let mut future = transport.request(request);
         match future
             .as_mut()
@@ -581,7 +684,7 @@ pub(crate) async fn list_inference_accounts(
         .iter()
         .map(|row| {
             let state = match row.inference.as_ref() {
-                Some(grant) if valid_grant(grant, row) => {
+                Some(grant) if row.inference_allowed() && valid_grant(grant, row) => {
                     if grant.expires_ms > now.saturating_add(EARLY_MS) {
                         InferenceState::Ready
                     } else if grant.refresh_expires_ms.is_some_and(|expiry| expiry <= now) {
@@ -648,7 +751,11 @@ impl PendingAuthorization {
                 .iter()
                 .find(|r| r.account.id(&b.vault_id) == account_id)
                 .ok_or(Failure::UnsupportedContext)?;
-            Owner::from_row(&session, b, row)
+            let mut owner = Owner::from_row(&session, b, row);
+            // A supplemental login may start while inference is off, but cannot
+            // outlive a later explicit permission change and silently turn it on.
+            owner.inference_revision = Some(row.inference_revision);
+            owner
         };
         let mut h = headers();
         for k in [
@@ -816,7 +923,25 @@ impl PendingAuthorization {
         let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
         self.cancellation.check()?;
         let (mut rows, index) = self.owner.rows(&self.session)?;
-        rows[index].inference = Some(grant);
+        let row = &mut rows[index];
+        let automatic = row.automatic_enabled();
+        row.inference = Some(grant);
+        row.shared_authorization = true;
+        row.account.token.zeroize();
+        row.inference_consent = Some(true);
+        row.inference_revision = row
+            .inference_revision
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
+        row.generation = row
+            .generation
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
+        row.auto_claim_revision = row
+            .auto_claim_revision
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
+        row.auto_claim_credential = automatic.then(|| row.credential_binding());
         store::save(&self.session, &self.owner.binding, rows)?;
         self.state.zeroize();
         self.expires_ms = 0;
@@ -860,6 +985,13 @@ impl Lease {
         session: Arc<SecretSession>,
         account_id: &str,
     ) -> Result<Self, Failure> {
+        Self::acquire_for_purpose(session, account_id, true).await
+    }
+    async fn acquire_for_purpose(
+        session: Arc<SecretSession>,
+        account_id: &str,
+        inference: bool,
+    ) -> Result<Self, Failure> {
         let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
         let binding = store::binding(&session)?;
         let rows = store::load(&session, &binding)?;
@@ -867,11 +999,16 @@ impl Lease {
             .iter()
             .find(|r| r.account.id(&binding.vault_id) == account_id)
             .ok_or(Failure::UnsupportedContext)?;
+        if (inference && !row.inference_allowed()) || (!inference && !row.shared_authorization) {
+            return Err(Failure::NeedsVerification);
+        }
         let grant = row.inference.clone().ok_or(Failure::NeedsVerification)?;
         if !valid_grant(&grant, row) {
             return Err(Failure::NeedsVerification);
         }
-        let owner = Owner::from_row(&session, binding, row);
+        let mut owner = Owner::from_row(&session, binding, row);
+        owner.inference_revision = inference.then_some(row.inference_revision);
+        owner.inference_required = inference;
         Ok(Self {
             session,
             owner,
@@ -1579,3 +1716,11 @@ impl Lease {
         self.dispatch_with(body, timeout, fixture, now_ms()).await
     }
 }
+
+#[path = "shared_account.rs"]
+mod shared_account;
+pub(super) use shared_account::request as account_request;
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+#[path = "shared_account_fixture.rs"]
+pub(super) mod shared_account_fixture;

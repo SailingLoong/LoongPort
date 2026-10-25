@@ -245,6 +245,15 @@ export function WorkBuddyAccounts({
     try {
       if (previous) await workbuddyApi.cancelInferenceLogin(previous.flowId);
       if (!current()) return;
+      const reused = await workbuddyApi.setInferenceConsent(accountId, true);
+      if (!current()) return;
+      if (reused) {
+        setInferenceTarget(null);
+        await loadAccounts();
+        await loadInferenceAccounts();
+        return;
+      }
+      // Only legacy/incomplete or expired credentials require a browser step.
       const flow = await workbuddyApi.beginInferenceLogin(accountId);
       if (!current() || flow.accountId !== accountId) {
         await workbuddyApi.cancelInferenceLogin(flow.flowId);
@@ -257,6 +266,26 @@ export function WorkBuddyAccounts({
       if (current()) setInferenceFailed(true);
     } finally {
       if (current()) {
+        inferenceOperation.current = null;
+        setInferenceBusy(null);
+      }
+    }
+  };
+  const disableInference = async (accountId: string) => {
+    if (inferenceOperation.current) return;
+    closeInference();
+    const generation = inferenceGeneration.current;
+    inferenceOperation.current = `disable:${accountId}`;
+    setInferenceBusy("begin");
+    try {
+      await workbuddyApi.setInferenceConsent(accountId, false);
+      if (alive.current && generation === inferenceGeneration.current)
+        await loadInferenceAccounts();
+    } catch {
+      if (alive.current && generation === inferenceGeneration.current)
+        setInferenceFailed(true);
+    } finally {
+      if (alive.current && generation === inferenceGeneration.current) {
         inferenceOperation.current = null;
         setInferenceBusy(null);
       }
@@ -833,6 +862,22 @@ export function WorkBuddyAccounts({
                       defaultValue: "Authorize inference",
                     })}
                   </Button>
+                  {inferenceAccounts.some(
+                    (row) =>
+                      row.id === account.id &&
+                      ["ready", "refreshRequired"].includes(row.state),
+                  ) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy !== null || inferenceBusy !== null}
+                      onClick={() => void disableInference(account.id)}
+                    >
+                      {t("workbuddy.inference.disable", {
+                        defaultValue: "Stop inference",
+                      })}
+                    </Button>
+                  )}
                 </>
               );
               const inference = (

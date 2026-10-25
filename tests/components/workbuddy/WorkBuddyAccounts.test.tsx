@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   finishLogin: vi.fn(),
   listInferenceAccounts: vi.fn(),
   beginInferenceLogin: vi.fn(),
+  setInferenceConsent: vi.fn(),
   pollInferenceLogin: vi.fn(),
   cancelInferenceLogin: vi.fn(),
   discoverModels: vi.fn(),
@@ -68,6 +69,7 @@ beforeEach(() => {
   api.listInferenceAccounts.mockResolvedValue([
     { id: row.id, state: "needsAuthorization" },
   ]);
+  api.setInferenceConsent.mockResolvedValue(false);
   api.beginInferenceLogin.mockResolvedValue({
     flowId: "inference-a",
     accountId: row.id,
@@ -1379,3 +1381,34 @@ it.each([
       ).toHaveTextContent("workbuddy.state.claimed");
   },
 );
+
+it("reuses a complete login for inference without a second browser or claim", async () => {
+  api.setInferenceConsent.mockResolvedValue(true);
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("Synthetic account");
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.inference.authorize" }),
+  );
+  await waitFor(() =>
+    expect(api.setInferenceConsent).toHaveBeenCalledWith(row.id, true),
+  );
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.openExternal).not.toHaveBeenCalled();
+  expect(api.claim).not.toHaveBeenCalled();
+  expect(api.setAutomatic).not.toHaveBeenCalled();
+});
+
+it("stops inference without cancelling shared login or automatic claims", async () => {
+  api.listInferenceAccounts.mockResolvedValue([{ id: row.id, state: "ready" }]);
+  api.setInferenceConsent.mockResolvedValue(true);
+  render(<WorkBuddyAccounts />);
+  await userEvent.click(
+    await screen.findByRole("button", { name: "workbuddy.inference.disable" }),
+  );
+  await waitFor(() =>
+    expect(api.setInferenceConsent).toHaveBeenCalledWith(row.id, false),
+  );
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.setAutomatic).not.toHaveBeenCalled();
+  expect(api.claim).not.toHaveBeenCalled();
+});

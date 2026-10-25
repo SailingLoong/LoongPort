@@ -5,7 +5,8 @@ export type WorkBuddyClaimState =
   | "claimed"
   | "alreadyClaimed"
   | "unavailable"
-  | "needsVerification";
+  | "needsVerification"
+  | "checkinRestricted";
 export interface WorkBuddyAccount {
   generation: number;
   autoClaimEnabled: boolean;
@@ -60,6 +61,8 @@ export interface WorkBuddyInferenceModel {
   name: string;
 }
 export const workbuddyApi = {
+  setInferenceConsent: (id: string, enabled: boolean) =>
+    invoke<boolean>("set_workbuddy_inference_consent", { id, enabled }),
   setAutomatic: (account: WorkBuddyAccount, enabled: boolean) =>
     invoke<WorkBuddyAccount>("set_workbuddy_automatic_claim", {
       id: account.id,

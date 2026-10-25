@@ -20,7 +20,7 @@ pub(crate) async fn set_workbuddy_automatic_claim(
     enabled: bool,
 ) -> Result<AccountView, Failure> {
     let account = Engine {
-        session: state.db.secret_session(),
+        session: &state.db.secrets,
         transport: &OfficialHttp,
         clock: &SystemClock,
     }
@@ -37,7 +37,7 @@ pub(crate) async fn set_workbuddy_automatic_claim(
 pub(crate) async fn list_workbuddy_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<AccountView>, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     Engine {
         session,
         transport: &OfficialHttp,
@@ -51,7 +51,7 @@ pub(crate) async fn refresh_workbuddy_account(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<AccountView, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     Engine {
         session,
         transport: &OfficialHttp,
@@ -64,7 +64,7 @@ pub(crate) async fn refresh_workbuddy_account(
 pub(crate) async fn refresh_all_workbuddy_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<AccountView>, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     Engine {
         session,
         transport: &OfficialHttp,
@@ -78,7 +78,7 @@ pub(crate) async fn claim_workbuddy_today(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<AccountView, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     Engine {
         session,
         transport: &OfficialHttp,
@@ -91,7 +91,7 @@ pub(crate) async fn claim_workbuddy_today(
 pub(crate) async fn claim_all_workbuddy_today(
     state: State<'_, AppState>,
 ) -> Result<Vec<ClaimResult>, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     Engine {
         session,
         transport: &OfficialHttp,
@@ -104,7 +104,7 @@ pub(crate) async fn claim_all_workbuddy_today(
 pub(crate) async fn begin_workbuddy_authorization(
     state: State<'_, AppState>,
 ) -> Result<authorization::Login, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     authorization::begin(
         session,
         &OfficialHttp,
@@ -117,7 +117,7 @@ pub(crate) async fn finish_workbuddy_authorization(
     state: State<'_, AppState>,
     flow_id: String,
 ) -> Result<authorization::AuthorizationResult, Failure> {
-    let session = state.db.secret_session();
+    let session = &state.db.secrets;
     authorization::finish(
         session,
         &OfficialHttp,
@@ -175,4 +175,15 @@ pub(crate) fn get_automatic_claim_status(
     provider: crate::maintenance::scheduler::AutomaticProvider,
 ) -> crate::maintenance::scheduler::AutomaticStatus {
     crate::maintenance::scheduler::automatic_registry().status(provider)
+}
+
+/// Inference purpose consent is not a second login and never revokes check-in.
+#[tauri::command]
+pub(crate) async fn set_workbuddy_inference_consent(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<bool, Failure> {
+    crate::workbuddy::inference::set_inference_consent(state.db.secret_session(), &id, enabled)
+        .await
 }

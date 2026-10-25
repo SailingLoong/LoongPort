@@ -4944,23 +4944,25 @@
       "claimed": "受取済み",
       "alreadyClaimed": "すでに受取済み",
       "unavailable": "現在受取不可",
-      "needsVerification": "認証が必要"
+      "needsVerification": "認証が必要",
+      "checkinRestricted": "チェックインのリクエストが拒否されました（クレジットの読み取りは有効です）"
     },
     "inference": {
       "authorization": "推論の認証",
-      "authorize": "推論を個別に認証",
+      "authorize": "推論での利用を許可",
+      "disable": "推論での利用を停止",
       "availableModels": "利用可能な推論モデル",
       "cancel": "推論の認証をキャンセル",
       "failed": "推論の認証またはモデル検出を完了できませんでした。対応するアカウントで再試行してください。チェックイン用ログインには影響しません。",
       "finish": "推論の認証を完了しました",
-      "identityNotice": "同じ地域の同じ WorkBuddy アカウントを認証してください。既存のチェックイン用ログインは保持されます。",
+      "identityNotice": "ログイン認証情報が不足しているか失効しています。同じ地域の同じ WorkBuddy アカウントを再認証してください。未確認の受領記録は保持されます。",
       "models": "推論モデルを検索",
       "open": "推論の認証ページを開く",
       "state": {
-        "needsAuthorization": "推論には別途認証が必要（チェックインには影響しません）",
+        "needsAuthorization": "推論での利用は未許可です。完全なログイン認証情報があれば、そのまま有効にできます",
         "ready": "推論の認証を保存済み（実際の消費は未検証）",
         "refreshRequired": "推論の認証を更新してください",
-        "expired": "推論の認証が失効（推論を個別に再認証してください）"
+        "expired": "ログイン認証情報の有効期限が切れています。再認証してください"
       }
     }
   },

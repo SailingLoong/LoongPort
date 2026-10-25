@@ -31,7 +31,7 @@ fn lease(session: &SecretSession, id: &str) -> Result<tokio::sync::OwnedMutexGua
     mutex.try_lock_owned().map_err(|_| Failure::Busy)
 }
 pub(crate) struct Engine<'a, T: Transport> {
-    pub session: &'a SecretSession,
+    pub session: &'a Arc<SecretSession>,
     pub transport: &'a T,
     pub clock: &'a dyn super::clock::Clock,
 }
@@ -44,19 +44,37 @@ impl<T: Transport> Engine<'_, T> {
             .map(|r| r.view(&binding.vault_id, &today(self.clock.now_ms())))
             .collect())
     }
-    async fn request(&self, b: &VaultMetadata, e: Endpoint, a: &Account) -> serde_json::Value {
+    async fn request(
+        &self,
+        b: &VaultMetadata,
+        e: Endpoint,
+        snapshot: &SavedAccount,
+    ) -> serde_json::Value {
         if store::binding(self.session).ok().as_ref() != Some(b) {
             return serde_json::json!({});
         }
+        if snapshot.shared_authorization {
+            return self
+                .transport
+                .shared_request(self.session, snapshot, e, None, None, self.clock)
+                .await
+                .unwrap_or_else(|error| match error {
+                    DispatchFailure::NotDispatched(Failure::NeedsVerification)
+                    | DispatchFailure::OutcomeUnknown(Failure::NeedsVerification) => {
+                        serde_json::json!({"code":401})
+                    }
+                    _ => serde_json::json!({}),
+                });
+        }
         self.transport
-            .request(e, Some(a), None, self.clock.now_ms())
+            .request(e, Some(&snapshot.account), None, self.clock.now_ms())
             .await
             .unwrap_or_else(|error| match error {
                 Failure::NeedsVerification => serde_json::json!({"code":401}),
                 _ => serde_json::json!({}),
             })
     }
-    async fn status(&self, b: &VaultMetadata, a: &Account) -> ClaimState {
+    async fn status(&self, b: &VaultMetadata, a: &SavedAccount) -> ClaimState {
         let request_day = today(self.clock.now_ms());
         let response = self.request(b, Endpoint::Status, a).await;
         if request_day != today(self.clock.now_ms()) {
@@ -65,7 +83,7 @@ impl<T: Transport> Engine<'_, T> {
             checkin::status(&response)
         }
     }
-    async fn credits(&self, b: &VaultMetadata, a: &Account) -> Credits {
+    async fn credits(&self, b: &VaultMetadata, a: &SavedAccount) -> Credits {
         let snapshot_day = today(self.clock.now_ms());
         let summary = self.request(b, Endpoint::Summary, a).await;
         let paid = self.request(b, Endpoint::Paid, a).await;
@@ -117,6 +135,7 @@ impl<T: Transport> Engine<'_, T> {
                 | ClaimState::AlreadyClaimed
                 | ClaimState::Unavailable
                 | ClaimState::NeedsVerification
+                | ClaimState::CheckinRestricted
         ) {
             row.pending = None;
         }
@@ -128,6 +147,10 @@ impl<T: Transport> Engine<'_, T> {
         snapshot: &SavedAccount,
         endpoint: Endpoint,
     ) -> Result<serde_json::Value, Failure> {
+        if snapshot.shared_authorization {
+            self.check_epoch(b, epoch)?;
+            return Ok(self.request(b, endpoint, snapshot).await);
+        }
         let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
         let mut pending = None;
         let mut ready = None;
@@ -296,9 +319,9 @@ impl<T: Transport> Engine<'_, T> {
         {
             return Ok(snapshot.view(&b.vault_id, &operation_day));
         }
-        let status = self.status(&b, &snapshot.account).await;
+        let status = self.status(&b, &snapshot).await;
         let credits = if snapshot.pending.is_some() || status == ClaimState::Available {
-            self.credits(&b, &snapshot.account).await
+            self.credits(&b, &snapshot).await
         } else {
             Credits::default()
         };
@@ -378,8 +401,8 @@ impl<T: Transport> Engine<'_, T> {
             }
             store::save(self.session, &b, rows)?;
         }
-        let after = self.status(&b, &snapshot.account).await;
-        let credits = self.credits(&b, &snapshot.account).await;
+        let after = self.status(&b, &snapshot).await;
+        let credits = self.credits(&b, &snapshot).await;
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
         self.check_epoch(&b, epoch)?;
         let mut rows = store::load(self.session, &b)?;
@@ -412,6 +435,20 @@ impl<T: Transport> Engine<'_, T> {
         day: &str,
     ) -> Result<serde_json::Value, DispatchFailure> {
         use DispatchFailure::NotDispatched;
+        if prepared.shared_authorization {
+            self.check_epoch(b, epoch).map_err(NotDispatched)?;
+            return self
+                .transport
+                .shared_request(
+                    self.session,
+                    prepared,
+                    Endpoint::Claim,
+                    policy,
+                    Some(day),
+                    self.clock,
+                )
+                .await;
+        }
         let waker = std::future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())).await;
         let mut pending = None;
         let mut ready = None;
@@ -449,7 +486,7 @@ impl<T: Transport> Engine<'_, T> {
         }
     }
 }
-fn matched(
+pub(super) fn matched(
     rows: &[SavedAccount],
     b: &VaultMetadata,
     expected: &SavedAccount,
@@ -462,7 +499,10 @@ fn matched(
         })
         .ok_or(Failure::ExpiredAuthorization)
 }
-fn automatic_admission(row: &SavedAccount, policy: Option<(u64, u64)>) -> Result<(), Failure> {
+pub(super) fn automatic_admission(
+    row: &SavedAccount,
+    policy: Option<(u64, u64)>,
+) -> Result<(), Failure> {
     if policy.is_some_and(|(generation, revision)| {
         !row.automatic_enabled()
             || !row.can_set_automatic()

@@ -90,3 +90,6 @@ mod runtime_tests {
         ));
     }
 }
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub(crate) mod refresh_owner_fixture;

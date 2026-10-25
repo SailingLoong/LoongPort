@@ -96,7 +96,10 @@ pub(crate) fn parse_account(token: &Value, profile: &Value) -> Result<Account, F
 pub(crate) fn verification_url(raw: &str, state: &str) -> Result<String, Failure> {
     let url = reqwest::Url::parse(raw).map_err(|_| Failure::UnsupportedContext)?;
     if url.scheme() != "https"
-        || url.host_str() != Some("www.codebuddy.cn")
+        || !matches!(
+            url.host_str(),
+            Some("www.codebuddy.cn" | "copilot.tencent.com")
+        )
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some_and(|p| p != 443)
@@ -221,6 +224,15 @@ pub(crate) async fn begin<T: Transport>(
             .ok_or(Failure::Unconfirmed)?;
         let raw = text(data, &["authUrl", "auth_url", "url"]).ok_or(Failure::Unconfirmed)?;
         let verification_uri = verification_url(raw, state)?;
+        let mut browser =
+            reqwest::Url::parse(&verification_uri).map_err(|_| Failure::UnsupportedContext)?;
+        if browser.host_str() == Some("copilot.tencent.com") {
+            browser
+                .query_pairs_mut()
+                .append_pair("version", "2.0.0")
+                .append_pair("loginSessionId", &uuid::Uuid::new_v4().simple().to_string());
+        }
+        let verification_uri = browser.to_string();
         if session.lifecycle_epoch() != epoch || store::binding(session)? != binding {
             return Err(Failure::ExpiredAuthorization);
         }
@@ -347,7 +359,10 @@ pub(crate) async fn finish<T: Transport>(
             state: AuthorizationState::Waiting,
         });
     }
-    let account = parse_account(&token, &profile)?;
+    let mut account = parse_account(&token, &profile)?;
+    let provisional = SavedAccount::new(account.clone());
+    let grant = super::inference::grant_from_login(session, &provisional, &token, &profile, now)?;
+    zeroize::Zeroize::zeroize(&mut account.token);
     let mut rows = store::load(session, &binding)?;
     let account_id = account.id(&binding.vault_id);
     if let Some(row) = rows
@@ -366,10 +381,19 @@ pub(crate) async fn finish<T: Transport>(
         row.auto_claim_credential = None;
         // Never erase an unresolved claim or its attempted day during reauthorization.
         row.account = account;
-        // This is the legacy check-in grant; never revive a prior inference grant.
-        row.inference = None;
+        row.inference = Some(grant);
+        row.shared_authorization = true;
+        row.inference_consent = Some(false);
+        row.inference_revision = row
+            .inference_revision
+            .checked_add(1)
+            .ok_or(Failure::StorageUnavailable)?;
     } else {
-        rows.push(SavedAccount::new(account));
+        let mut row = SavedAccount::new(account);
+        row.inference = Some(grant);
+        row.shared_authorization = true;
+        row.inference_consent = Some(false);
+        rows.push(row);
     }
     store::save(session, &binding, rows)?;
     pending.remove(id);

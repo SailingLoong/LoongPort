@@ -183,6 +183,17 @@ fn owner_error(_: Failure) -> ProxyError {
     ProxyError::AuthError("minimax_code.authorization_unavailable".into())
 }
 
+fn refresh_error(error: Failure) -> ProxyError {
+    if error == Failure::NetworkUnavailable {
+        // Refresh may already have rotated an upstream credential. Preserve the
+        // original managed-account unknown-outcome policy: no account-health
+        // penalty, no failover/replay, and no misleading downstream HTTP 401.
+        ProxyError::ForwardFailed("minimax_code.refresh_outcome_unknown".into())
+    } else {
+        owner_error(error)
+    }
+}
+
 fn post_dispatch_owner_error(_: Failure) -> ProxyError {
     // The upstream request has already completed its send. An invalidated
     // original owner cannot prove non-acceptance; do not classify this as a
@@ -286,7 +297,7 @@ impl Lease {
         }) {
             self.snapshot = auth::refresh_snapshot(&self.session, auth_transport, &self.snapshot)
                 .await
-                .map_err(owner_error)?;
+                .map_err(refresh_error)?;
             refreshed = true;
         }
         loop {
@@ -307,7 +318,7 @@ impl Lease {
                 self.snapshot =
                     auth::refresh_snapshot(&self.session, auth_transport, &self.snapshot)
                         .await
-                        .map_err(owner_error)?;
+                        .map_err(refresh_error)?;
                 refreshed = true;
                 continue;
             }
