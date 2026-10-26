@@ -1004,8 +1004,13 @@ pub(super) async fn check_library_bundle(
         let Ok(transport) = super::official_http::ReqwestOfficialTransport::new() else {
             return;
         };
+        let Ok(device_mid) = super::device_settings::current(&worker_db, &context) else {
+            return;
+        };
         let client = super::official::OfficialClient::new(
-            transport.with_context(context.data_root(), app_version.as_deref()),
+            transport
+                .with_context(context.data_root(), app_version.as_deref())
+                .with_device_mid(device_mid.as_deref()),
         );
         let check = || {
             lease.check()?;
@@ -1191,10 +1196,13 @@ pub(super) async fn check_saved_connections(
         ))
         .map_err(|_| RuntimeError::TaskFailed)?;
     let native = context.cipher()?;
+    let device_mid =
+        super::device_settings::current(&db, &context).map_err(|_| RuntimeError::TaskFailed)?;
     let client = super::official::OfficialClient::new(
         super::official_http::ReqwestOfficialTransport::new()
             .map_err(|_| RuntimeError::TaskFailed)?
-            .with_context(context.data_root(), version.as_deref()),
+            .with_context(context.data_root(), version.as_deref())
+            .with_device_mid(device_mid.as_deref()),
     );
     let check = || {
         lease

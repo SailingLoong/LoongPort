@@ -7,6 +7,7 @@ pub(crate) fn is_protected_setting(key: &str) -> bool {
             | "global_proxy_url"
             | "claude_desktop_gateway_token"
             | "zcode_claim_v1"
+            | "zcode_device_ids_v1"
             | "client_access_migration_version"
     ) || key
         .strip_prefix("common_config_")
@@ -514,6 +515,7 @@ mod tests {
             "global_proxy_url",
             "claude_desktop_gateway_token",
             "zcode_claim_v1",
+            "zcode_device_ids_v1",
             "common_config_claude",
             "common_config_codex",
             "common_config_gemini",

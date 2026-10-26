@@ -391,10 +391,12 @@ async fn one(
     preview_only: bool,
     automatic: bool,
 ) -> Result<(), &'static str> {
+    let device_mid = super::device_settings::current(&db, &p.ctx)?;
     let client = Client(
         Http::new()
             .map_err(|_| "network")?
-            .with_data_root(p.ctx.data_root()),
+            .with_data_root(p.ctx.data_root())
+            .with_device_mid(device_mid.as_deref()),
     );
     let checked = || check(&db, p, lease, automatic);
     let mut r = previous(db.clone(), p).await?;

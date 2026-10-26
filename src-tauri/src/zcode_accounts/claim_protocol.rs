@@ -162,6 +162,26 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "gui")]
+    fn imported_device_is_shared_by_all_claim_discovery_and_submission_requests() {
+        let id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let http = Http::new().unwrap().with_device_mid(Some(id));
+        for endpoint in [
+            Endpoint::Balance,
+            Endpoint::Preview,
+            Endpoint::Marketing,
+            Endpoint::Config,
+            Endpoint::Claim,
+        ] {
+            let mut input = req();
+            input.endpoint = endpoint;
+            input.plan = Some("synthetic-plan".into());
+            let request = http.build_request(input).unwrap();
+            assert_eq!(request.headers()["x-device-mid"], id);
+            assert!(request.headers()["x-device-mid"].is_sensitive());
+        }
+    }
+    #[test]
+    #[cfg(feature = "gui")]
     fn billing_requests_include_source_context_without_fabricating_a_device() {
         let http = Http::new().unwrap();
         let request = http.build_request(req()).unwrap();
@@ -304,6 +324,10 @@ impl Http {
     }
     pub fn with_data_root(mut self, root: &std::path::Path) -> Self {
         self.context = super::source_context::SourceContext::observe(Some(root));
+        self
+    }
+    pub(super) fn with_device_mid(mut self, imported: Option<&str>) -> Self {
+        self.context = self.context.with_device_mid(imported);
         self
     }
     fn build_request(&self, request: Request) -> Result<reqwest::Request, OfficialError> {

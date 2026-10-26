@@ -215,7 +215,14 @@ fn service(
     let transport = ReqwestOfficialTransport::new()
         .map_err(|_| PublicError::new("zcode.account.official_unavailable", "queryOriginal"))?;
     let transport = match context {
-        Some((context, version)) => transport.with_context(context.data_root(), version),
+        Some((context, version)) => {
+            let device_mid = super::device_settings::current(&db, context).map_err(|_| {
+                PublicError::new("zcode.account.official_unavailable", "queryOriginal")
+            })?;
+            transport
+                .with_context(context.data_root(), version)
+                .with_device_mid(device_mid.as_deref())
+        }
         None => transport,
     };
     let mut service = Service::new(transport, Persistence { db });

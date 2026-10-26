@@ -277,3 +277,36 @@ fn oauth_and_billing_share_real_device_context_only_at_the_zcode_origin() {
     assert!(!external.headers().contains_key("x-device-mid"));
     assert!(!external.headers().contains_key("x-client-timezone"));
 }
+
+#[test]
+fn imported_device_context_is_used_for_oauth_and_balance_without_cross_origin_leaks() {
+    let id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    let transport = ReqwestOfficialTransport::new()
+        .unwrap()
+        .with_device_mid(Some(id));
+    for (url, method) in [
+        (
+            "https://zcode.z.ai/api/v1/oauth/cli/init",
+            OfficialMethod::Post,
+        ),
+        (
+            "https://zcode.z.ai/api/v1/oauth/cli/poll/synthetic",
+            OfficialMethod::Get,
+        ),
+        (
+            "https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=99.1.2",
+            OfficialMethod::Get,
+        ),
+    ] {
+        let outgoing = transport.build_request(request(url, method)).unwrap();
+        assert_eq!(outgoing.headers()["x-device-mid"], id);
+        assert!(outgoing.headers()["x-device-mid"].is_sensitive());
+    }
+    let outgoing = transport
+        .build_request(request(
+            "https://bigmodel.cn/api/biz/customer/getCustomerInfo",
+            OfficialMethod::Get,
+        ))
+        .unwrap();
+    assert!(!outgoing.headers().contains_key("x-device-mid"));
+}

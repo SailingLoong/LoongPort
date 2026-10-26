@@ -24,6 +24,10 @@ impl ReqwestOfficialTransport {
             super::source_context::SourceContext::observe(Some(root)).headers(version);
         self
     }
+    pub(super) fn with_device_mid(mut self, imported: Option<&str>) -> Self {
+        super::source_context::apply_device_mid(&mut self.source_headers, imported);
+        self
+    }
     fn build_request(&self, request: OfficialRequest) -> Result<reqwest::Request, OfficialError> {
         validate_request(&request)?;
         let method = match request.method {

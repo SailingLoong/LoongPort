@@ -17,6 +17,10 @@ fn printable(value: &str) -> Option<String> {
 }
 
 impl SourceContext {
+    pub(super) fn with_device_mid(mut self, selected: Option<&str>) -> Self {
+        self.device_mid = selected.map(String::from);
+        self
+    }
     pub(super) fn observe(root: Option<&Path>) -> Self {
         Self {
             language: sys_locale::get_locale().and_then(|s| printable(&s)),
@@ -59,12 +63,7 @@ impl SourceContext {
         if let Some(version) = self.os_version.as_deref() {
             insert("x-os-version", version);
         }
-        if let Some(mid) = self.device_mid.as_deref() {
-            insert("x-device-mid", mid);
-        }
-        if let Some(mid) = headers.get_mut("x-device-mid") {
-            mid.set_sensitive(true);
-        }
+        apply_device_mid(&mut headers, self.device_mid.as_deref());
         headers
     }
 
@@ -78,6 +77,18 @@ impl SourceContext {
         } else {
             "en-US"
         }
+    }
+}
+
+pub(super) fn apply_device_mid(headers: &mut HeaderMap, value: Option<&str>) {
+    headers.remove("x-device-mid");
+    if let Some(value) = value
+        .and_then(printable)
+        .and_then(|s| HeaderValue::from_str(&s).ok())
+    {
+        let mut value = value;
+        value.set_sensitive(true);
+        headers.insert("x-device-mid", value);
     }
 }
 
@@ -99,7 +110,7 @@ fn timezone_from_path(path: &str) -> Option<String> {
     printable(path.split_once("/zoneinfo/")?.1)
 }
 
-fn existing_device_mid(root: &Path) -> Option<String> {
+pub(super) fn existing_device_mid(root: &Path) -> Option<String> {
     // This is the official existing telemetry identity, shared across saved accounts.
     // Missing or malformed state must never trigger UUID generation or file writes.
     let file = std::fs::File::open(root.join("telemetry-state.json")).ok()?;
@@ -147,6 +158,38 @@ mod tests {
         assert_eq!(a["x-device-mid"], b["x-device-mid"]);
         assert_eq!(a["x-device-mid"], "11111111-2222-4333-8444-555555555555");
         assert!(a["x-device-mid"].is_sensitive());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn device_selection_none_removes_an_existing_native_header() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("telemetry-state.json"),
+            br#"{"deviceMid":"11111111-2222-4333-8444-555555555555"}"#,
+        )
+        .unwrap();
+        assert!(!SourceContext::observe(Some(root.path()))
+            .with_device_mid(None)
+            .headers(None)
+            .contains_key("x-device-mid"));
+    }
+    #[test]
+    fn imported_device_overrides_headers_without_modifying_the_native_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("telemetry-state.json");
+        let bytes = br#"{"deviceMid":"11111111-2222-4333-8444-555555555555"}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let imported = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let context = SourceContext::observe(Some(root.path()));
+        assert_eq!(
+            context.clone().headers(None)["x-device-mid"],
+            "11111111-2222-4333-8444-555555555555"
+        );
+        let headers = context
+            .with_device_mid(Some(imported))
+            .headers(Some("99.1.2"));
+        assert_eq!(headers["x-device-mid"], imported);
+        assert!(headers["x-device-mid"].is_sensitive());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
     #[test]
