@@ -45,6 +45,34 @@ impl SecretSession {
         store: &dyn KeyStore,
         provided_key: Option<zeroize::Zeroizing<Vec<u8>>>,
     ) -> Result<Arc<Self>, AppError> {
+        Self::open_protected_inner(root, device, store, provided_key, true)
+    }
+
+    /// Read-only admission for an existing CLI consumer. This cannot create a
+    /// first choice, repair a pending generation, or persist a replacement key.
+    pub(crate) fn open_existing_protected(
+        root: &Path,
+        device: &Path,
+        store: &dyn KeyStore,
+    ) -> Result<Arc<Self>, AppError> {
+        super::upgrade::checkpoint::ensure_sync_admitted(&crate::live::engine::DeviceStore::at(
+            device,
+        ))?;
+        let session = Self::open_protected_inner(root, device, store, None, false)?;
+        {
+            let context = session.read()?;
+            super::protection::validate_runtime_storage(root, &context)?;
+        }
+        Ok(session)
+    }
+
+    fn open_protected_inner(
+        root: &Path,
+        device: &Path,
+        store: &dyn KeyStore,
+        provided_key: Option<zeroize::Zeroizing<Vec<u8>>>,
+        allow_initial_configuration: bool,
+    ) -> Result<Arc<Self>, AppError> {
         super::files::device_directory_exists(root)?;
         super::files::device_directory_exists(device)?;
         if super::reset::pending(root)?
@@ -56,7 +84,7 @@ impl SecretSession {
         }
         crate::database::storage::preflight_runtime(&root.join(crate::config::DB_FILE_NAME))?;
         let record = super::protection::read(root)?;
-        let local = read_metadata_with_bytes(root)?.map(|(local,_)|local);
+        let local = read_metadata_with_bytes(root)?.map(|(local, _)| local);
         if let Some(local) = &local {
             local
                 .metadata
@@ -86,7 +114,7 @@ impl SecretSession {
             };
             StorageContext::Encrypted(vault)
         } else {
-            if provided_key.is_some() {
+            if !allow_initial_configuration || provided_key.is_some() {
                 return Err(AppError::Config("protection.configuration_required".into()));
             }
             let proof = super::protection::FreshScope::capture(
@@ -114,6 +142,7 @@ impl SecretSession {
         Self::open_inner(root, store, password, true)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn open_existing(
         root: &Path,
         store: &dyn KeyStore,
@@ -334,15 +363,37 @@ pub(crate) fn authenticate_existing(
     }
 }
 
-fn decode_migration_state(vault:&VaultContext,saved:&LocalVault)->Result<MigrationState,AppError>{
-    let state=vault.open(&["local","migration-state"],&saved.migration_state).map_err(super::inventory::secret_error)?;
-    serde_json::from_slice(&state).map_err(|_|AppError::Config("secret.invalid_metadata".into()))
+fn decode_migration_state(
+    vault: &VaultContext,
+    saved: &LocalVault,
+) -> Result<MigrationState, AppError> {
+    let state = vault
+        .open(&["local", "migration-state"], &saved.migration_state)
+        .map_err(super::inventory::secret_error)?;
+    serde_json::from_slice(&state).map_err(|_| AppError::Config("secret.invalid_metadata".into()))
 }
 /// Read-only pending-generation admission through the original local-state codec.
-pub(crate) fn validate_completed_metadata(root:&Path,context:&StorageContext)->Result<(),AppError>{
-    if context.is_plaintext(){if read_metadata_with_bytes(root)?.is_some(){return Err(AppError::Config("protection.identity_mismatch".into()))}return Ok(())}
-    let vault=context.encrypted()?;let saved=read_metadata(root)?;
-    if saved.metadata!=*vault.metadata()||!matches!(decode_migration_state(vault,&saved)?,MigrationState::Complete){return Err(AppError::Config("secret.migration_required".into()))}Ok(())
+pub(crate) fn validate_completed_metadata(
+    root: &Path,
+    context: &StorageContext,
+) -> Result<(), AppError> {
+    if context.is_plaintext() {
+        if read_metadata_with_bytes(root)?.is_some() {
+            return Err(AppError::Config("protection.identity_mismatch".into()));
+        }
+        return Ok(());
+    }
+    let vault = context.encrypted()?;
+    let saved = read_metadata(root)?;
+    if saved.metadata != *vault.metadata()
+        || !matches!(
+            decode_migration_state(vault, &saved)?,
+            MigrationState::Complete
+        )
+    {
+        return Err(AppError::Config("secret.migration_required".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn completed_metadata(
@@ -365,14 +416,29 @@ fn seal_migration_state(vault: &VaultContext, state: &MigrationState) -> Result<
 }
 
 /// Original local-vault parser, optionally retaining exact nonsecret/ciphertext bytes for review CAS.
-pub(crate) fn read_metadata_with_bytes(root: &Path) -> Result<Option<(LocalVault, Vec<u8>)>, AppError> {
-    let path=root.join("vault.json");
-    crate::config_file_io::read_regular_file(&path,64*1024)
-        .map_err(|error| if error.kind()==std::io::ErrorKind::InvalidData {AppError::Config("secret.invalid_metadata".into())}else{AppError::io(&path,error)})?
-        .map(|bytes|serde_json::from_slice::<LocalVault>(&bytes).map(|local|(local,bytes)).map_err(|_|AppError::Config("secret.invalid_metadata".into()))).transpose()
+pub(crate) fn read_metadata_with_bytes(
+    root: &Path,
+) -> Result<Option<(LocalVault, Vec<u8>)>, AppError> {
+    let path = root.join("vault.json");
+    crate::config_file_io::read_regular_file(&path, 64 * 1024)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                AppError::Config("secret.invalid_metadata".into())
+            } else {
+                AppError::io(&path, error)
+            }
+        })?
+        .map(|bytes| {
+            serde_json::from_slice::<LocalVault>(&bytes)
+                .map(|local| (local, bytes))
+                .map_err(|_| AppError::Config("secret.invalid_metadata".into()))
+        })
+        .transpose()
 }
 pub(crate) fn read_metadata(root: &Path) -> Result<LocalVault, AppError> {
-    read_metadata_with_bytes(root)?.map(|(local,_)|local).ok_or_else(||AppError::Config("secret.metadata_missing".into()))
+    read_metadata_with_bytes(root)?
+        .map(|(local, _)| local)
+        .ok_or_else(|| AppError::Config("secret.metadata_missing".into()))
 }
 
 pub(crate) fn ensure_owned_directory(root: &Path, directory: &Path) -> Result<(), AppError> {

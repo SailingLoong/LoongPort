@@ -9,24 +9,22 @@ use crate::error::AppError;
 
 pub(crate) fn prepare_files(session: &SecretSession, legacy_allowed: bool) -> Result<(), AppError> {
     let context = session.read()?;
-    if context.is_plaintext() { return Ok(()); }
+    if context.is_plaintext() {
+        return Ok(());
+    }
     let vault = context.encrypted()?;
     let settings_path = crate::settings::settings_path();
     let settings = match std::fs::read(&settings_path) {
         Ok(bytes) => {
             let decoded = if legacy_allowed {
-                crate::settings::decode_settings_with_vault(&bytes, &vault).map(|_| ())
+                crate::settings::decode_settings_with_vault(&bytes, vault).map(|_| ())
             } else {
-                crate::settings::validate_runtime_settings_with_vault(
-                    &bytes,
-                    &vault,
-                    session.root(),
-                )
+                crate::settings::validate_runtime_settings_with_vault(&bytes, vault, session.root())
             };
             let ciphertext = match decoded {
                 Ok(_) => bytes.clone(),
                 Err(_) if legacy_allowed => {
-                    crate::settings::encrypt_legacy_settings_with_vault(&bytes, &vault)?
+                    crate::settings::encrypt_legacy_settings_with_vault(&bytes, vault)?
                 }
                 Err(error) => return Err(error),
             };
@@ -35,7 +33,7 @@ pub(crate) fn prepare_files(session: &SecretSession, legacy_allowed: bool) -> Re
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(AppError::io(&settings_path, e)),
     };
-    let plans = files::stage_owned_files_with_vault(session.root(), &vault, legacy_allowed)?;
+    let plans = files::stage_owned_files_with_vault(session.root(), vault, legacy_allowed)?;
     for plan in plans {
         let current =
             std::fs::read(&plan.destination).map_err(|e| AppError::io(&plan.destination, e))?;
@@ -68,5 +66,5 @@ pub(crate) fn prepare_files(session: &SecretSession, legacy_allowed: bool) -> Re
             write_durable(&settings_path, &ciphertext)?;
         }
     }
-    crate::database::vault::migrate_backups(session.root(), &vault, legacy_allowed)
+    crate::database::vault::migrate_backups(session.root(), vault, legacy_allowed)
 }

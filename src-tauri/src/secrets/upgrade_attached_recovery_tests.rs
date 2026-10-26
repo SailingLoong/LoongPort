@@ -579,10 +579,13 @@ fn original_attached_journal(
     }
     let checkpoint_path = f.device.root().join(checkpoint::FILE);
     let checkpoint_bytes = std::fs::read(&checkpoint_path).unwrap();
-    let checkpoint_id =
-        checkpoint::verified_database_id(&f.root, &f.device, db.secret_session().read().unwrap().encrypted().unwrap())
-            .unwrap()
-            .expect("original authenticated v24 publication");
+    let checkpoint_id = checkpoint::verified_database_id(
+        &f.root,
+        &f.device,
+        db.secret_session().read().unwrap().encrypted().unwrap(),
+    )
+    .unwrap()
+    .expect("original authenticated v24 publication");
     let parked = checkpoint_path.with_extension("synthetic-parked");
     std::fs::rename(&checkpoint_path, &parked).unwrap();
 
@@ -702,9 +705,13 @@ fn original_attached_journal(
     }
     assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_bytes);
     assert_eq!(
-        checkpoint::verified_database_id(&f.root, &f.device, db.secret_session().read().unwrap().encrypted().unwrap())
-            .unwrap()
-            .as_deref(),
+        checkpoint::verified_database_id(
+            &f.root,
+            &f.device,
+            db.secret_session().read().unwrap().encrypted().unwrap()
+        )
+        .unwrap()
+        .as_deref(),
         Some(checkpoint_id.as_str())
     );
     assert_eq!(result, Err(format!("injected crash at {point}")));

@@ -136,6 +136,7 @@ fn backup_image_verifies_actual_key_and_keeps_relic_failclosed() {
     );
     fixture::assert_unchanged(&relic, &before);
 }
+#[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
         "backup_image_owns_older_same_key_authentication" => {

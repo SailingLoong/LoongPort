@@ -1,8 +1,6 @@
 //! Actual original session and SQLite owners; all paths and keys are synthetic.
 use super::super::{
-    key_store::KeyStoreError,
-    protection::{ProtectionRecord},
-    storage::StorageContext,
+    key_store::KeyStoreError, protection::ProtectionRecord, storage::StorageContext,
     testing::TestHome,
 };
 use super::*;
@@ -45,8 +43,7 @@ fn encrypted(root: &Path, record: bool) -> VaultContext {
     if record {
         write_durable(
             &root.join(super::super::protection::FILE),
-            &serde_json::to_vec(&ProtectionRecord::encrypted(&vault,None).unwrap())
-            .unwrap(),
+            &serde_json::to_vec(&ProtectionRecord::encrypted(&vault, None).unwrap()).unwrap(),
         )
         .unwrap();
     }
@@ -173,7 +170,7 @@ fn original_session_authenticates_versioned_user_text_cache_without_rewriting_an
         VaultContext::create_generation_with_user_text(uuid::Uuid::new_v4().to_string(), 1, text)
             .unwrap();
     write_metadata(&root, &completed_metadata(&vault, true).unwrap()).unwrap();
-    let record = ProtectionRecord::encrypted(&vault,None).unwrap();
+    let record = ProtectionRecord::encrypted(&vault, None).unwrap();
     write_durable(
         &root.join(super::super::protection::FILE),
         &serde_json::to_vec(&record).unwrap(),

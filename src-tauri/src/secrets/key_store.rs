@@ -35,7 +35,12 @@ pub(crate) fn save_verified(
 }
 
 // A single original OS-write protocol; source-specific authentication stays above it.
-fn save_bytes_verified(store: &dyn KeyStore, vault_id: &str, key_id: &str, key: &[u8]) -> Result<(), KeyStoreError> {
+fn save_bytes_verified(
+    store: &dyn KeyStore,
+    vault_id: &str,
+    key_id: &str,
+    key: &[u8],
+) -> Result<(), KeyStoreError> {
     if let Some(existing) = store.load(vault_id, key_id)? {
         if existing.as_slice() != key {
             return Err(KeyStoreError::Verification);

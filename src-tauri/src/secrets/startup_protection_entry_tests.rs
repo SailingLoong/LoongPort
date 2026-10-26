@@ -2,7 +2,7 @@
 use super::*;
 use crate::secrets::{
     key_store::{KeyStore, KeyStoreError},
-    protection::{ProtectionRecord},
+    protection::ProtectionRecord,
     storage::StorageContext,
     testing::TestHome,
     VaultContext,
@@ -52,7 +52,7 @@ fn save_record(root: &Path, record: &ProtectionRecord) {
     .unwrap();
 }
 fn encrypted_record(vault: &VaultContext) -> ProtectionRecord {
-    ProtectionRecord::encrypted(&vault,None).unwrap()
+    ProtectionRecord::encrypted(vault, None).unwrap()
 }
 fn save_vault(root: &Path, vault: &VaultContext) {
     crate::config::ensure_private_directory(root).unwrap();

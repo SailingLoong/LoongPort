@@ -225,7 +225,10 @@ fn source_sql(db: &Database) -> String {
     Database::dump_sql(&db.snapshot_to_memory().unwrap(), &[]).unwrap()
 }
 fn assert_prepared_source(staged: &ValidatedSyncSnapshot, current: &VaultContext) {
-    assert_eq!(&staged.destination, current.metadata());
+    assert_eq!(
+        staged.destination,
+        crate::secrets::storage::StorageIdentity::Encrypted(current.metadata().clone().into())
+    );
     inventory::validate_database(&staged.connection, current).unwrap();
     fixture::assert_values(&staged.connection, &StorageContext::from(current.clone()));
     let encoded: String = staged
@@ -360,6 +363,7 @@ fn sql_source_missing_descriptor_has_no_user_text_fallback() {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
         "sql_source_user_text_authenticates_without_bypassing_installer" => {

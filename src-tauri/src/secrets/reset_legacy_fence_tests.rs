@@ -348,6 +348,7 @@ fn reset_legacy_preview_without_record_stays_read_only() {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
         "reset_preview_protected_scope" => reset_preview_protected_scope(),

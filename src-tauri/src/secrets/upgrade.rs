@@ -278,6 +278,7 @@ impl UpgradeInspection {
     pub(crate) fn has_vault(&self) -> bool {
         matches!(self, Self::Stable(inspected) if inspected.vault.is_some())
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn has_device_files(&self) -> bool {
         matches!(self, Self::Stable(inspected) if !inspected.device_files.is_empty())
     }
@@ -356,15 +357,34 @@ impl UpgradeInspection {
     /// Adopt only the original generation owner's authenticated completion;
     /// every other passive startup input keeps its original preimage.
     pub(crate) fn acknowledge_protection_cleanup(
-        &mut self, root:&Path, completed:&super::protection::generation::CompletedCleanup,
-    )->Result<(),AppError>{
-        let Self::Stable(stable)=self else{return Err(changed())};
-        let before=stable.protection.as_ref().ok_or_else(changed)?;
-        if completed.root()!=root||before.1.as_slice()!=completed.before()||before.0.cleanup.is_none(){return Err(changed())}
-        let after=read_protection(root)?.ok_or_else(changed)?;
-        if after.1.as_slice()!=completed.after()||after.0.cleanup.is_some()||after.0.storage!=before.0.storage||after.0.choice_complete!=before.0.choice_complete{return Err(changed())}
-        let prior=stable.protection.replace(after);
-        if let Err(error)=stable.verify_unchanged(root){stable.protection=prior;return Err(error)}Ok(())
+        &mut self,
+        root: &Path,
+        completed: &super::protection::generation::CompletedCleanup,
+    ) -> Result<(), AppError> {
+        let Self::Stable(stable) = self else {
+            return Err(changed());
+        };
+        let before = stable.protection.as_ref().ok_or_else(changed)?;
+        if completed.root() != root
+            || before.1.as_slice() != completed.before()
+            || before.0.cleanup.is_none()
+        {
+            return Err(changed());
+        }
+        let after = read_protection(root)?.ok_or_else(changed)?;
+        if after.1.as_slice() != completed.after()
+            || after.0.cleanup.is_some()
+            || after.0.storage != before.0.storage
+            || after.0.choice_complete != before.0.choice_complete
+        {
+            return Err(changed());
+        }
+        let prior = stable.protection.replace(after);
+        if let Err(error) = stable.verify_unchanged(root) {
+            stable.protection = prior;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_storage_device_state(

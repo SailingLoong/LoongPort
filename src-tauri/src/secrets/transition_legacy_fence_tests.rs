@@ -141,7 +141,9 @@ fn transition_plaintext_session_protected_scope() {
         SecretSession::from_storage_context(root.clone(), context),
     );
     let record = crate::secrets::protection::ProtectionRecord {
-        commitment: None, cleanup: None, format_version: 1,
+        commitment: None,
+        cleanup: None,
+        format_version: 1,
         choice_complete: true,
         storage: crate::secrets::protection::ProtectionStorage::Plaintext { identity: id },
     };

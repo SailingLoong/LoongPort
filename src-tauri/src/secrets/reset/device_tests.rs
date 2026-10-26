@@ -95,7 +95,9 @@ impl Fixture {
         let guard = crate::live::engine::lock_app("codex");
         let stash = DeviceFile::registered("codex-login-stash.json").unwrap();
         let stash_patch = crate::live::patch::WholeFile::Write(
-            stash.encode(vault.encrypted().unwrap(), br#"{"logins":{}}"#).unwrap(),
+            stash
+                .encode(vault.encrypted().unwrap(), br#"{"logins":{}}"#)
+                .unwrap(),
         );
         let client_patch =
             crate::live::patch::WholeFile::Write(b"synthetic next client login".to_vec());
@@ -127,7 +129,9 @@ impl Fixture {
         let client_stage = pending.files[0].staged.as_ref().unwrap().clone();
         let device_stage = pending.files[1].staged.as_ref().unwrap();
         let stage_bytes = std::fs::read(device_stage).unwrap();
-        assert!(stash.decode(vault.encrypted().unwrap(), &stage_bytes).is_ok());
+        assert!(stash
+            .decode(vault.encrypted().unwrap(), &stage_bytes)
+            .is_ok());
         let mode = self
             .original
             .iter_mut()
@@ -559,7 +563,9 @@ fn oversized_device_manifest_never_publishes_an_unreadable_reset_intent() {
         let file = DeviceFile::registered(name).unwrap();
         crate::config_file_io::write_durable(
             &fixture.device.path_for(&file),
-            &file.encode(vault.encrypted().unwrap(), b"synthetic backup").unwrap(),
+            &file
+                .encode(vault.encrypted().unwrap(), b"synthetic backup")
+                .unwrap(),
         )
         .unwrap();
     }
@@ -677,7 +683,9 @@ fn reset_staging_membership_is_limited_to_registered_adjacent_names() {
     .unwrap();
     let staged = crate::config_file_io::stage_write(
         &fixture.device.path_for(&backup),
-        &backup.encode(vault.encrypted().unwrap(), b"synthetic original").unwrap(),
+        &backup
+            .encode(vault.encrypted().unwrap(), b"synthetic original")
+            .unwrap(),
         Some(0o600),
         true,
     )

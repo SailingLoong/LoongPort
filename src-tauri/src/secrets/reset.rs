@@ -830,6 +830,7 @@ fn finish(
 }
 /// Resuming a reset always requires the new password; a planted reset intent
 /// cannot trigger deletion during automatic startup.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn recover(root: &Path, password: Option<&str>) -> Result<(), AppError> {
     recover_record(root, password, None)
 }
@@ -958,7 +959,13 @@ mod tests {
                 b"retained plain content"
             );
             assert_ne!(
-                db.secrets.read().unwrap().encrypted().unwrap().metadata().vault_id,
+                db.secrets
+                    .read()
+                    .unwrap()
+                    .encrypted()
+                    .unwrap()
+                    .metadata()
+                    .vault_id,
                 self.original_key.metadata().vault_id
             );
         }

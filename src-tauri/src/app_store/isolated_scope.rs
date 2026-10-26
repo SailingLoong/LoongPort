@@ -93,6 +93,7 @@ pub(crate) struct SelectionSnapshot {
     identity_digest: Option<String>,
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn capture_legacy_selection_at(
     store: &Path,
     default_root: &Path,
@@ -122,6 +123,7 @@ pub(crate) fn capture_legacy_selection_at(
     })
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) struct LegacyPendingScope {
     root: PathBuf,
     store: PathBuf,
@@ -132,6 +134,7 @@ pub(crate) struct LegacyPendingScope {
     inspection_id: String,
     _lock: SelectionLock,
 }
+#[cfg(any(test, feature = "test-hooks"))]
 impl LegacyPendingScope {
     pub(crate) fn root(&self) -> &Path {
         &self.root
@@ -216,6 +219,7 @@ pub(crate) enum PublishBoundary {
 
 /// None means no explicit isolated selection. A malformed selector, missing
 /// selected root, identity mismatch, and all read failures are errors, NOT None.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn read_scope_at(store: &Path) -> Result<Option<IsolatedScope>, AppError> {
     let (_, document) = read_document(store)?;
     let Some(value) = document.get(SELECTION_KEY) else {
@@ -229,6 +233,7 @@ pub(crate) fn read_scope_at(store: &Path) -> Result<Option<IsolatedScope>, AppEr
 /// Only creates a fresh private candidate next to the control store, never under
 /// either preserved root. Does NOT open Database, create a vault, or publish.
 /// `inspection` is the original startup snapshot's stable ID, not availability.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn prepare_scope_at(
     store: &Path,
     old: &Path,
@@ -898,10 +903,17 @@ impl PendingScope {
         self,
         proof: crate::secrets::protection::generation::VerifiedGeneration<'_>,
     ) -> PublicationOutcome {
-        self.publish_inner(
-            PublicationAuthority::Conversion(Box::new(proof)),
-            |_| Ok(()),
-        )
+        #[cfg(test)]
+        {
+            self.publish_at_boundary(proof, |_| Ok(()))
+        }
+        #[cfg(not(test))]
+        {
+            self.publish_inner(
+                PublicationAuthority::Conversion(Box::new(proof)),
+                |_| Ok(()),
+            )
+        }
     }
     pub(crate) fn publish_separate(
         self,
@@ -1058,7 +1070,10 @@ fn prepare_candidate_at(
         },
     };
     scope.validate_shape(store)?;
+    #[cfg(unix)]
     let mut builder = fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -1140,11 +1155,52 @@ pub(crate) fn inspect_pending_generation_at(
     Ok(candidate)
 }
 
+// Closed adapter: each public entry requires its own original-owner authority.
+// In particular, explicit separate resumption does not authenticate old secrets
+// or grant permission to convert or clean up the preserved source.
+enum ResumeAuthority<'borrow, 'owner> {
+    Conversion(&'borrow crate::secrets::protection::generation::GenerationResumePermit<'owner>),
+    Separate(
+        &'borrow crate::secrets::protection::generation::SeparateConfigurationResumePermit<'owner>,
+    ),
+}
+impl ResumeAuthority<'_, '_> {
+    fn binding(&self) -> &CandidateBinding {
+        match self {
+            Self::Conversion(permit) => permit.binding(),
+            Self::Separate(permit) => permit.binding(),
+        }
+    }
+    fn verify_selection(&self, expected: &SelectionSnapshot) -> Result<(), AppError> {
+        match self {
+            Self::Conversion(permit) => permit.verify_selection(expected),
+            Self::Separate(permit) => permit.verify_selection(expected),
+        }
+    }
+}
+
+/// Resume only the same explicitly authorized separate candidate. Old-source
+/// authentication/conversion is not implied; publication still needs its own
+/// original-owner VerifiedSeparateConfiguration proof.
+pub(crate) fn resume_separate_configuration_at(
+    expected: &SelectionSnapshot,
+    permit: &crate::secrets::protection::generation::SeparateConfigurationResumePermit<'_>,
+) -> Result<PendingScope, AppError> {
+    resume_candidate_at(expected, ResumeAuthority::Separate(permit))
+}
+
 /// Resume only the same candidate authenticated by the original owner. No new
 /// root or marker, source mutation, cleanup or selector write occurs here.
 pub(crate) fn resume_generation_at(
     expected: &SelectionSnapshot,
     permit: &crate::secrets::protection::generation::GenerationResumePermit<'_>,
+) -> Result<PendingScope, AppError> {
+    resume_candidate_at(expected, ResumeAuthority::Conversion(permit))
+}
+
+fn resume_candidate_at(
+    expected: &SelectionSnapshot,
+    permit: ResumeAuthority<'_, '_>,
 ) -> Result<PendingScope, AppError> {
     permit.verify_selection(expected)?;
     if inspect_pending_generation_at(expected)?.as_ref() != Some(permit.binding()) {
@@ -1298,6 +1354,7 @@ impl GenerationScope {
     pub(crate) fn root_id(&self) -> &str {
         &self.root_id
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -1425,6 +1482,7 @@ impl ScopeCache {
             .map(|_| ())
             .map_err(|e| AppError::Config(e.clone()))
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn initialize_at(&self, store: &Path) -> Result<(), AppError> {
         self.initialize_optional_path(Some(store))
     }

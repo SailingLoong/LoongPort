@@ -33,16 +33,69 @@ pub(crate) struct StartupCoordinator {
     inspection: Mutex<super::upgrade::UpgradeInspection>,
     recovery_token: OnceLock<String>,
     phase: Mutex<Phase>,
-    #[cfg(feature="gui")]
+    #[cfg(feature = "gui")]
     credential_review: Mutex<credential_protection::ReviewSlot>,
-    #[cfg(feature="gui")]
+    #[cfg(feature = "gui")]
     credential_operation: Mutex<()>,
     upgrade_review: Mutex<Option<super::upgrade::AuthenticatedUpgrade>>,
     #[cfg(unix)]
     paperclip_bridge: Mutex<paperclip_ready::ListenerSlot>,
 }
 
+/// Original coordinator's opaque, read-only preservation guard. No old key
+/// authentication is implied; only an explicitly separate empty configuration
+/// may consume this capability while the original runtime is unpublished.
+pub(crate) struct SeparateSourceGuard<'a> {
+    owner: &'a StartupCoordinator,
+    phase: std::sync::MutexGuard<'a, Phase>,
+    inspection: std::sync::MutexGuard<'a, super::upgrade::UpgradeInspection>,
+}
+impl SeparateSourceGuard<'_> {
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.owner.root
+    }
+    pub(crate) fn device_root(&self) -> &std::path::Path {
+        self.inspection.device_root()
+    }
+    pub(crate) fn verify(&self, retired: bool) -> Result<(), crate::error::AppError> {
+        if *self.phase
+            != if retired {
+                Phase::Recovered
+            } else {
+                Phase::Locked
+            }
+            || !self.inspection.has_vault()
+            || self.inspection.is_recovery_required()
+            || self.inspection.is_database_resume_candidate()
+            || self.inspection.future_version().is_some()
+        {
+            return Err(crate::error::AppError::Config(
+                "protection.separate_configuration_unavailable".into(),
+            ));
+        }
+        self.inspection.ensure_runtime_admitted()?;
+        self.inspection.verify_unchanged(&self.owner.root)
+    }
+    pub(crate) fn retire(&mut self) -> Result<(), crate::error::AppError> {
+        self.verify(false)?;
+        *self.phase = Phase::Recovered;
+        Ok(())
+    }
+}
+
 impl StartupCoordinator {
+    pub(crate) fn separate_source(
+        &self,
+    ) -> Result<SeparateSourceGuard<'_>, crate::error::AppError> {
+        let guard = SeparateSourceGuard {
+            owner: self,
+            phase: self.phase.lock()?,
+            inspection: self.inspection.lock()?,
+        };
+        guard.verify(false)?;
+        Ok(guard)
+    }
+
     pub(crate) fn new(root: PathBuf, inspection: super::upgrade::UpgradeInspection) -> Self {
         let recovery_token = OnceLock::new();
         if let super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = &inspection {
@@ -53,9 +106,9 @@ impl StartupCoordinator {
             recovery_token,
             inspection: Mutex::new(inspection),
             phase: Mutex::new(Phase::Locked),
-            #[cfg(feature="gui")]
+            #[cfg(feature = "gui")]
             credential_review: Mutex::new(credential_protection::ReviewSlot::default()),
-            #[cfg(feature="gui")]
+            #[cfg(feature = "gui")]
             credential_operation: Mutex::new(()),
             upgrade_review: Mutex::new(None),
             #[cfg(unix)]
@@ -103,6 +156,7 @@ impl StartupCoordinator {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     fn initialize_with<P>(
         &self,
         password: Option<&str>,
@@ -195,13 +249,20 @@ impl StartupCoordinator {
                         .map_err(super::error::public_code)?;
                 }
                 if super::protection::read(&self.root)
-                    .map_err(super::error::public_code)?.is_some_and(|record|record.cleanup.is_some()) {
-                    let selection=super::protection::generation::capture_current_selection()
+                    .map_err(super::error::public_code)?
+                    .is_some_and(|record| record.cleanup.is_some())
+                {
+                    let selection = super::protection::generation::capture_current_selection()
                         .map_err(super::error::public_code)?;
-                    let completed=super::protection::generation::recover_selected_at(
-                        &self.root,&selection,store,provided_key.clone(),
-                    ).map_err(super::error::public_code)?;
-                    inspection.acknowledge_protection_cleanup(&self.root,&completed)
+                    let completed = super::protection::generation::recover_selected_at(
+                        &self.root,
+                        &selection,
+                        store,
+                        provided_key.clone(),
+                    )
+                    .map_err(super::error::public_code)?;
+                    inspection
+                        .acknowledge_protection_cleanup(&self.root, &completed)
                         .map_err(super::error::public_code)?;
                 }
                 let session = SecretSession::open_protected(
@@ -251,7 +312,15 @@ impl StartupCoordinator {
             .map_err(|_| "secret.startup_unavailable")?
             .ensure_runtime_admitted()
             .map_err(super::error::public_code)?;
-        let session = unlock()?;
+        let session = match unlock() {
+            Ok(session) => session,
+            Err(error) => {
+                if !credential_custody_unavailable(&error) {
+                    *phase = Phase::Failed;
+                }
+                return Err(error);
+            }
+        };
         *phase = Phase::Initializing;
         drop(phase);
         let result = prepare(session);
@@ -1453,13 +1522,8 @@ pub(crate) async fn restore_startup_vault(
     result
 }
 
-fn startup_failure_payload(
-    error: &str,
-    restart_required: bool,
-) -> crate::init_status::InitErrorPayload {
-    // Initialization crosses storage, database and upgrade owners. Only their
-    // explicit custody codes may imply missing credentials; phase is not proof.
-    let credential_unavailable = matches!(
+fn credential_custody_unavailable(error: &str) -> bool {
+    matches!(
         error,
         "secret.locked"
             | "secret.key_missing"
@@ -1467,7 +1531,16 @@ fn startup_failure_payload(
             | "secret.password_setup_required"
             | "secret.password_rejected"
             | "secret.password_unavailable"
-    );
+    )
+}
+
+fn startup_failure_payload(
+    error: &str,
+    restart_required: bool,
+) -> crate::init_status::InitErrorPayload {
+    // Initialization crosses storage, database and upgrade owners. Only their
+    // explicit custody codes may imply missing credentials; phase is not proof.
+    let credential_unavailable = credential_custody_unavailable(error);
     let kind = if credential_unavailable {
         if restart_required {
             "secret_initialization_failed"

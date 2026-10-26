@@ -5,7 +5,10 @@
 use super::{lock_conn, Database};
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
-use crate::secrets::{storage::StorageContext, VaultContext, VaultMetadata};
+use crate::secrets::{
+    storage::{StorageContext, StorageIdentity},
+    VaultContext, VaultMetadata,
+};
 use chrono::{Local, Utc};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
@@ -139,7 +142,9 @@ pub struct BackupEntry {
 /// An authenticated source staged for one destination vault generation.
 pub(crate) struct ValidatedSyncSnapshot {
     connection: Connection,
-    destination: VaultMetadata,
+    destination: StorageIdentity,
+    // Original volatile session lease, not a new persistent generation owner.
+    receiver: Option<(std::sync::Weak<crate::secrets::session::SecretSession>, u64)>,
 }
 
 impl Database {
@@ -251,46 +256,249 @@ impl Database {
         Ok((Self::dump_sql(&snapshot, skip_tables)?, metadata))
     }
 
-    /// Explicit file restore authenticates the source's declared recovery input,
-    /// then keeps this device's generation instead of adopting an older key.
+    /// Compatibility wrapper; the ordinary preparation owner is storage-aware.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn prepare_backup_content(
         &self,
         sql: &str,
         password: Option<&str>,
         current: &VaultContext,
     ) -> Result<ValidatedSyncSnapshot, AppError> {
-        let target = {
-            let conn = self.conn.lock()?;
-            super::vault::check_identity(&conn, current)?;
-            super::vault::preflight_connection(&conn)?;
-            let version = Self::get_user_version(&conn)?;
-            if !matches!(
-                version,
-                super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
-            ) {
-                return Err(AppError::Config(
-                    "sync.database_version_incompatible".into(),
-                ));
-            }
-            version
-        };
+        let current = StorageContext::from(current.clone());
+        self.prepare_backup_content_for_storage(sql, password, &current, &current)
+    }
+
+    fn storage_restore_target(&self, current: &StorageContext) -> Result<i32, AppError> {
+        self.secrets.ensure_available()?;
+        let conn = self.conn.lock()?;
+        super::storage::check_identity(&conn, current)?;
+        super::vault::preflight_structure(&conn)?;
+        let version = Self::get_user_version(&conn)?;
+        if !matches!(
+            version,
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
+        ) || super::loongport_schema::read_stored_version(&conn)?
+            != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        Ok(version)
+    }
+
+    /// Explicit source admission is separate from the unchanged destination mode.
+    /// The caller pins `current` with the original session/sync lifecycle guard.
+    pub(crate) fn prepare_backup_content_for_storage(
+        &self,
+        sql: &str,
+        input: Option<&str>,
+        current: &StorageContext,
+        destination: &StorageContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let epoch = self.secrets.lifecycle_epoch();
+        let target = self.storage_restore_target(current)?;
         let connection = Self::stage_import_sql(sql, true)?;
-        if let Some(metadata) = super::vault::stored_metadata(&connection)? {
-            let password = password
+        super::vault::preflight_structure(&connection)?;
+        let source = if let Some(identity) = super::storage_identity::stored(&connection)? {
+            // A plaintext stamp is an explicit format/consistency identity, not
+            // a guessed interpretation of missing or undecipherable ciphertext.
+            super::storage_identity::check(&connection, &identity)?;
+            Some(StorageContext::Plaintext(identity))
+        } else if let Some(metadata) = super::vault::stored_metadata(&connection)? {
+            let input = input
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AppError::Config("backup.password_required".into()))?;
-            let source = VaultContext::from_recovery_input(metadata, password)
-                .map_err(crate::secrets::inventory::secret_error)?;
-            super::vault::upgrade_staging_for_target(&connection, &source, target)?;
-            crate::secrets::inventory::transform_database(&connection, Some(&source), current)?;
-            super::vault::stamp(&connection, current)?;
+            Some(StorageContext::from(
+                VaultContext::from_recovery_input(metadata, input)
+                    .map_err(crate::secrets::inventory::secret_error)?,
+            ))
         } else {
-            super::vault::upgrade_staging_for_target(&connection, current, target)?;
+            // Only the original explicit legacy import admission can accept an
+            // unmarked source. Modern missing identity remains damaged data.
+            super::vault::preflight_connection(&connection)?;
+            None
+        };
+        let connection =
+            Self::prepare_storage_source_image(connection, source.as_ref(), destination, target)?;
+        self.secrets.ensure_available()?;
+        if self.secrets.lifecycle_epoch() != epoch {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
         Ok(ValidatedSyncSnapshot {
             connection,
-            destination: current.metadata().clone(),
+            destination: destination.identity(),
+            receiver: Some((std::sync::Arc::downgrade(&self.secrets), epoch)),
         })
+    }
+
+    /// Manifest/source authentication remains with the existing crypto owner;
+    /// this path only admits that actual image for the real receiver's schema.
+    pub(crate) fn prepare_sync_snapshot_for_storage(
+        &self,
+        sql: &str,
+        expected: &VaultMetadata,
+        authenticated_source: &VaultContext,
+        current: &StorageContext,
+        destination: &StorageContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let epoch = self.secrets.lifecycle_epoch();
+        let target = self.storage_restore_target(current)?;
+        Self::validate_sync_source(authenticated_source, expected)?;
+        let connection = Self::stage_import_sql(sql, true)?;
+        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        // The original upstream4 receiver accepts only its exact published
+        // schema tuple; remote sync is not an implicit upgrade/downgrade owner.
+        if target == super::UPSTREAM4_SCHEMA_VERSION
+            && (Self::get_user_version(&connection)? != target
+                || super::loongport_schema::read_stored_version(&connection)?
+                    != super::loongport_schema::LOONGPORT_SCHEMA_VERSION)
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        let source = VaultContext::from_key(expected.clone(), authenticated_source.export_key())
+            .map(StorageContext::from)
+            .map_err(crate::secrets::inventory::secret_error)?;
+        let connection =
+            Self::prepare_storage_source_image(connection, Some(&source), destination, target)?;
+        self.secrets.ensure_available()?;
+        if self.secrets.lifecycle_epoch() != epoch {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: destination.identity(),
+            receiver: Some((std::sync::Arc::downgrade(&self.secrets), epoch)),
+        })
+    }
+
+    fn prepare_storage_source_image(
+        mut connection: Connection,
+        source: Option<&StorageContext>,
+        destination: &StorageContext,
+        target: i32,
+    ) -> Result<Connection, AppError> {
+        super::vault::preflight_structure(&connection)?;
+        if Self::get_user_version(&connection)? > target {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        let admitted = source.unwrap_or(destination);
+        if let Some(source) = source {
+            super::storage::check_identity(&connection, source)?;
+        } else {
+            super::vault::preflight_connection(&connection)?;
+        }
+        // Schema migration and credentials use their original owners. All
+        // application-generated writes are confined to the private SQL image.
+        super::storage_generation::with_private_triggers_disabled(&mut connection, |connection| {
+            match admitted {
+                StorageContext::Encrypted(vault) => {
+                    super::vault::upgrade_staging_for_target(connection, vault, target)
+                }
+                StorageContext::Plaintext(identity) => {
+                    super::storage::prepare_plaintext_staging_for_target(
+                        connection, identity, target,
+                    )
+                }
+            }
+        })?;
+        super::storage_generation::prepare_private_image(connection, admitted, destination)
+    }
+
+    fn validate_restore_schema(
+        current: &Connection,
+        incoming: &Connection,
+    ) -> Result<(), AppError> {
+        let version = Self::get_user_version(current)?;
+        if !matches!(
+            version,
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
+        ) || Self::get_user_version(incoming)? != version
+            || super::loongport_schema::read_stored_version(current)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+            || super::loongport_schema::read_stored_version(incoming)?
+                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
+            return Err(AppError::Config(
+                "sync.database_version_incompatible".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The original join owner preserves device-local rows in either mode.
+    pub(crate) fn prepare_sync_join_for_storage(
+        incoming: ValidatedSyncSnapshot,
+        current_conn: &Connection,
+        current: &StorageContext,
+        next: &StorageContext,
+    ) -> Result<Connection, AppError> {
+        if incoming.destination != next.identity() {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        super::storage::check_identity(current_conn, current)?;
+        super::storage::check_identity(&incoming.connection, next)?;
+        Self::validate_restore_schema(current_conn, &incoming.connection)?;
+        let version = Self::get_user_version(current_conn)?;
+        let local = Connection::open_in_memory()?;
+        Self::create_tables_on_conn(&local)?;
+        if version == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
+            Self::apply_upgrade_source_migrations_on_conn(&local)?;
+        } else {
+            Self::apply_schema_migrations_on_conn(&local)?;
+        }
+        super::loongport_schema::apply(&local)?;
+        Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
+        crate::secrets::inventory::transform_storage_database(&local, current, next)?;
+        let mut connection = incoming.connection;
+        super::storage_generation::with_private_triggers_disabled(&mut connection, |connection| {
+            Self::restore_tables(&local, connection, SYNC_PRESERVE_TABLES)?;
+            crate::paperclip::bindings::preserve_local(current_conn, connection)?;
+            crate::database::dao::qoder_campaign_operations::preserve_local(
+                current_conn,
+                connection,
+            )?;
+            Self::preserve_qoder_states_on_restore(current_conn, connection, current, next)?;
+            crate::secrets::inventory::validate_storage_database(connection, next)
+        })?;
+        Ok(connection)
+    }
+
+    /// Same-generation SQL-only restoration delegates the original atomic DB
+    /// replacement. This typed proof never grants a key/mode/skills transition.
+    pub(crate) fn install_backup_content_for_storage(
+        &self,
+        incoming: ValidatedSyncSnapshot,
+    ) -> Result<String, AppError> {
+        let current = self.secrets.read()?;
+        crate::secrets::protection::validate_runtime_storage(self.secrets.root(), &current)?;
+        if incoming.destination != current.identity() {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        super::storage::check_identity(&incoming.connection, &current)?;
+        crate::secrets::inventory::validate_storage_database(&incoming.connection, &current)?;
+        let belongs_to_current_session =
+            incoming.receiver.as_ref().is_some_and(|(receiver, epoch)| {
+                receiver
+                    .upgrade()
+                    .is_some_and(|owner| std::sync::Arc::ptr_eq(&owner, &self.secrets))
+                    && *epoch == self.secrets.lifecycle_epoch()
+            });
+        if !belongs_to_current_session {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        {
+            let conn = self.conn.lock()?;
+            super::storage::check_identity(&conn, &current)?;
+            Self::validate_restore_schema(&conn, &incoming.connection)?;
+        }
+        self.replace_from_staging(incoming.connection, SYNC_PRESERVE_TABLES, &current)
     }
 
     /// Automatic sync may use an authenticated older wrapper for the same key,
@@ -329,7 +537,8 @@ impl Database {
         super::vault::upgrade_staging(&connection, vault)?;
         Ok(ValidatedSyncSnapshot {
             connection,
-            destination: vault.metadata().clone(),
+            destination: StorageIdentity::Encrypted(vault.metadata().clone().into()),
+            receiver: None,
         })
     }
 
@@ -343,58 +552,13 @@ impl Database {
         vault: &VaultContext,
     ) -> Result<ValidatedSyncSnapshot, AppError> {
         let current = self.secrets.read()?;
-        let conn = self.conn.lock()?;
-        super::vault::check_identity(&conn, current.encrypted()?)?;
-        let version = Self::get_user_version(&conn)?;
-        let loongport = super::loongport_schema::read_stored_version(&conn)?;
-        if version <= super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
-            super::vault::preflight_connection(&conn)?;
-            drop(conn);
-            drop(current);
-            Self::validate_sync_source(vault, expected)?;
-            let connection = Self::stage_import_sql(sql, true)?;
-            if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
-                return Err(AppError::Config("sync.source_identity_mismatch".into()));
-            }
-            super::vault::upgrade_staging_for_target(
-                &connection,
-                vault,
-                super::UPSTREAM4_SOURCE_SCHEMA_VERSION,
-            )?;
-            return Ok(ValidatedSyncSnapshot {
-                connection,
-                destination: vault.metadata().clone(),
-            });
-        }
-        if version != super::UPSTREAM4_SCHEMA_VERSION
-            || loongport != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
-        {
-            return Err(AppError::Config("secret.database_version_too_new".into()));
-        }
-        drop(conn);
-        Self::validate_sync_source(vault, expected)?;
-        let connection = Self::stage_import_sql(sql, true)?;
-        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
-            return Err(AppError::Config("sync.source_identity_mismatch".into()));
-        }
-        if Self::get_user_version(&connection)? != version
-            || super::loongport_schema::read_stored_version(&connection)? != loongport
-        {
-            return Err(AppError::Config(
-                "sync.database_version_incompatible".into(),
-            ));
-        }
-        let source = VaultContext::from_key(expected.clone(), vault.export_key())
-            .map_err(crate::secrets::inventory::secret_error)?;
-        crate::secrets::inventory::validate_database(&connection, &source)?;
-        crate::paperclip::bindings::read_rows(&connection)?;
-        crate::database::dao::qoder_campaign_operations::read_rows(&connection)?;
-        crate::secrets::inventory::transform_database(&connection, Some(&source), vault)?;
-        super::vault::stamp(&connection, vault)?;
-        Ok(ValidatedSyncSnapshot {
-            connection,
-            destination: vault.metadata().clone(),
-        })
+        self.prepare_sync_snapshot_for_storage(
+            sql,
+            expected,
+            vault,
+            &current,
+            &StorageContext::from(vault.clone()),
+        )
     }
 
     /// Preserve device-local rows under the incoming key while the transition
@@ -405,51 +569,12 @@ impl Database {
         current: &VaultContext,
         next: &VaultContext,
     ) -> Result<Connection, AppError> {
-        if &incoming.destination != next.metadata() {
-            return Err(AppError::Config("sync.source_identity_mismatch".into()));
-        }
-        super::vault::check_identity(current_conn, current)?;
-        let version = Self::get_user_version(current_conn)?;
-        // Joining vault generations is not a schema upgrade/downgrade owner.
-        // Explicitly staged v4 databases retain their cursor columns in the
-        // private rewrapping copy; ordinary import/startup admission is unchanged.
-        if !matches!(
-            version,
-            super::UPSTREAM4_SOURCE_SCHEMA_VERSION | super::UPSTREAM4_SCHEMA_VERSION
-        ) || Self::get_user_version(&incoming.connection)? != version
-            || super::loongport_schema::read_stored_version(current_conn)?
-                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
-            || super::loongport_schema::read_stored_version(&incoming.connection)?
-                != super::loongport_schema::LOONGPORT_SCHEMA_VERSION
-        {
-            return Err(AppError::Config(
-                "sync.database_version_incompatible".into(),
-            ));
-        }
-        let local = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
-        Self::create_tables_on_conn(&local)?;
-        if version == super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
-            Self::apply_upgrade_source_migrations_on_conn(&local)?;
-        } else {
-            Self::apply_schema_migrations_on_conn(&local)?;
-        }
-        super::loongport_schema::apply(&local)?;
-        Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
-        crate::secrets::inventory::transform_database(&local, Some(current), next)?;
-        Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
-        crate::paperclip::bindings::preserve_local(current_conn, &incoming.connection)?;
-        crate::database::dao::qoder_campaign_operations::preserve_local(
+        Self::prepare_sync_join_for_storage(
+            incoming,
             current_conn,
-            &incoming.connection,
-        )?;
-        Self::preserve_qoder_states_on_restore(
-            current_conn,
-            &incoming.connection,
             &StorageContext::from(current.clone()),
             &StorageContext::from(next.clone()),
-        )?;
-        crate::secrets::inventory::validate_database(&incoming.connection, next)?;
-        Ok(incoming.connection)
+        )
     }
 
     #[cfg(test)]
@@ -458,7 +583,7 @@ impl Database {
         staged: ValidatedSyncSnapshot,
         vault: &VaultContext,
     ) -> Result<String, AppError> {
-        if &staged.destination != vault.metadata() {
+        if staged.destination != StorageIdentity::Encrypted(vault.metadata().clone().into()) {
             return Err(AppError::Config("sync.vault_metadata_conflict".into()));
         }
         self.replace_from_staging(
@@ -670,25 +795,30 @@ impl Database {
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
             super::storage::check_identity(&main_conn, vault)?;
-            if !preserve_tables.is_empty() {
-                let staged_conn = lock_conn!(staged.conn);
-                Self::restore_tables(&main_conn, &staged_conn, preserve_tables)?;
-            }
-            let preserved_bindings = {
-                let staged_conn = lock_conn!(staged.conn);
-                crate::paperclip::bindings::preserve_local(&main_conn, &staged_conn)?;
-                crate::paperclip::bindings::read_rows(&staged_conn)?
-            };
-            let preserved_qoder_operations = {
-                let staged_conn = lock_conn!(staged.conn);
-                crate::database::dao::qoder_campaign_operations::preserve_local(
-                    &main_conn,
-                    &staged_conn,
-                )?;
-                crate::database::dao::qoder_campaign_operations::read_rows(&staged_conn)?
+            let (preserved_bindings, preserved_qoder_operations) = {
+                let mut staged_conn = lock_conn!(staged.conn);
+                super::storage_generation::with_private_triggers_disabled(
+                    &mut staged_conn,
+                    |staged_conn| {
+                        if !preserve_tables.is_empty() {
+                            Self::restore_tables(&main_conn, staged_conn, preserve_tables)?;
+                        }
+                        crate::paperclip::bindings::preserve_local(&main_conn, staged_conn)?;
+                        crate::database::dao::qoder_campaign_operations::preserve_local(
+                            &main_conn,
+                            staged_conn,
+                        )?;
+                        Ok((
+                            crate::paperclip::bindings::read_rows(staged_conn)?,
+                            crate::database::dao::qoder_campaign_operations::read_rows(
+                                staged_conn,
+                            )?,
+                        ))
+                    },
+                )?
             };
             prepare(&staged)?;
-            let temp_conn = lock_conn!(staged.conn);
+            let mut temp_conn = lock_conn!(staged.conn);
             if crate::paperclip::bindings::read_rows(&temp_conn)? != preserved_bindings {
                 return Err(AppError::Config("paperclip.local_bindings_changed".into()));
             }
@@ -697,8 +827,13 @@ impl Database {
             {
                 return Err(AppError::Config("qoder.local_operations_changed".into()));
             }
-            Self::preserve_qoder_states_on_restore(&main_conn, &temp_conn, vault, vault)?;
-            crate::secrets::inventory::validate_storage_database(&temp_conn, vault)?;
+            super::storage_generation::with_private_triggers_disabled(
+                &mut temp_conn,
+                |temp_conn| {
+                    Self::preserve_qoder_states_on_restore(&main_conn, temp_conn, vault, vault)?;
+                    crate::secrets::inventory::validate_storage_database(temp_conn, vault)
+                },
+            )?;
             let backup_path = Self::backup_database_file_from_conn(
                 &backup_file_guard,
                 &main_conn,
@@ -5075,5 +5210,16 @@ impl Database {
     #[doc(hidden)]
     pub fn verify_user_text_portable_case(case: &str) {
         user_text_portable_tests::verify(case);
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_storage_source_tests.rs"]
+mod storage_source_tests;
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_storage_source_case(case: &str) {
+        storage_source_tests::verify(case);
     }
 }

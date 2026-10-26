@@ -104,7 +104,7 @@ impl Owner {
         let rows = store::load(session, &self.binding)?;
         let index = rows
             .iter()
-            .position(|r| r.account.id(&self.binding.store_id()) == self.account_id)
+            .position(|r| r.account.id(self.binding.store_id()) == self.account_id)
             .ok_or(Failure::ExpiredAuthorization)?;
         let row = &rows[index];
         let fingerprint: [u8; 32] = Sha256::digest(row.account.token.as_bytes()).into();
@@ -1537,7 +1537,7 @@ impl FixtureTransport {
         let mut rows = store::load(session, &self.binding)?;
         let row = rows
             .iter_mut()
-            .find(|r| r.account.id(&self.binding.store_id()) == id)
+            .find(|r| r.account.id(self.binding.store_id()) == id)
             .ok_or(Failure::UnsupportedContext)?;
         let grant = row.inference.as_ref().ok_or(Failure::UnsupportedContext)?;
         if !self

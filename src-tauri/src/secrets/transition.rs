@@ -138,7 +138,9 @@ fn db_error(error: rusqlite::Error) -> AppError {
 /// Reuse its strict reader: malformed records must never become "missing".
 pub(crate) fn ensure_legacy_generation_owner(root: &Path) -> Result<(), AppError> {
     if super::protection::read(root)?.is_some() {
-        return Err(AppError::Config("protection.generation_owner_required".into()));
+        return Err(AppError::Config(
+            "protection.generation_owner_required".into(),
+        ));
     }
     Ok(())
 }
@@ -147,7 +149,9 @@ pub(crate) fn ensure_legacy_generation_owner(root: &Path) -> Result<(), AppError
 /// when a legacy destination has not yet acquired a protection record.
 pub(crate) fn ensure_legacy_metadata(metadata: &super::VaultMetadata) -> Result<(), AppError> {
     if metadata.user_text_key.is_some() {
-        return Err(AppError::Config("protection.generation_owner_required".into()));
+        return Err(AppError::Config(
+            "protection.generation_owner_required".into(),
+        ));
     }
     Ok(())
 }
@@ -488,7 +492,7 @@ where
     // ciphertext. Pending app facts stay with their original owners; only a
     // generation-changing install could strand their encrypted staging.
     if upgrade.is_none() {
-        device::ensure_no_pending_mode_operation(roots, &current)?;
+        device::ensure_no_pending_mode_operation(roots, current)?;
     }
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     for name in [INTENT, ".vault-rewrap"] {
@@ -510,7 +514,7 @@ where
     {
         return Err(AppError::Config("upgrade.source_changed".into()));
     }
-    vault::check_identity(&conn, &current)?;
+    vault::check_identity(&conn, current)?;
     let database = if upgrade.is_none()
         && Database::get_user_version(&conn)? == crate::database::UPSTREAM4_SCHEMA_VERSION
         && crate::database::loongport_schema::read_stored_version(&conn)?
@@ -538,7 +542,7 @@ where
     if phase.get("phase").and_then(|v| v.as_str()) != Some("complete") {
         return Err(AppError::Config("secret.migration_required".into()));
     }
-    let next = make_next(&current)?;
+    let next = make_next(current)?;
     ensure_legacy_metadata(next.metadata())?;
     if next.metadata().wrapped_key.is_none()
         && !(automatic_unlock && previous.automatic_unlock && next.metadata() == current.metadata())
@@ -581,9 +585,9 @@ where
         database,
     };
     let capture = (|| {
-        let memory = prepare_database(&conn, &current, &next)?;
+        let memory = prepare_database(&conn, current, &next)?;
         let checkpoint_replacement = if let Some(prepare) = upgrade.as_mut() {
-            let bytes = prepare(&memory, &current)?;
+            let bytes = prepare(&memory, current)?;
             manifest.upgrade = Some(UpgradeBinding {
                 source_database: Database::content_digest(&conn)?,
                 target_database: Database::content_digest(&memory)?,
@@ -641,8 +645,8 @@ where
                     &next,
                 )?;
             }
-            for plan in files::stage_owned_files_with_vault(root, &current, false)? {
-                let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
+            for plan in files::stage_owned_files_with_vault(root, current, false)? {
+                let plaintext = plan.file.decode(current, &plan.ciphertext)?;
                 let bytes = plan.file.encode(&next, &plaintext)?;
                 let recovery = plan.source.starts_with(root.join("backups/vault-recovery"));
                 stage_bytes(
@@ -668,7 +672,7 @@ where
             next.metadata().vault_id.as_str(),
             next.metadata().key_id.as_str(),
         );
-        for plan in files::stage_device_files_with_vault(roots.device, &current)? {
+        for plan in files::stage_device_files_with_vault(roots.device, current)? {
             let source_digest = hash(&plan.ciphertext);
             let replacement = checkpoint_replacement.as_ref().filter(|_| {
                 plan.file.relative_path()
@@ -683,7 +687,7 @@ where
                 plan.file.decode(&next, &plan.ciphertext)?;
                 plan.ciphertext
             } else {
-                let plaintext = plan.file.decode(&current, &plan.ciphertext)?;
+                let plaintext = plan.file.decode(current, &plan.ciphertext)?;
                 plan.file.encode(&next, &plaintext)?
             };
             if roots.device.join(plan.file.relative_path()) != plan.source {
@@ -722,7 +726,7 @@ where
                     )?;
                 } else if regular_file(&path)? {
                     let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
-                    let settings = crate::settings::decode_settings_with_vault(&bytes, &current)?;
+                    let settings = crate::settings::decode_settings_with_vault(&bytes, current)?;
                     let bytes = crate::settings::encode_settings_with_vault(&settings, &next)?;
                     stage_bytes(
                         root,
@@ -1781,8 +1785,13 @@ mod tests {
         set_test_checkpoint_version(&fixture.db.conn.lock().unwrap(), source_version);
         let vault = fixture.db.secrets.read().unwrap().clone();
         let source_digest = Database::content_digest(&fixture.db.conn.lock().unwrap()).unwrap();
-        let id = crate::secrets::upgrade::checkpoint::create(&fixture.root, &device, vault.encrypted().unwrap(), &[])
-            .unwrap();
+        let id = crate::secrets::upgrade::checkpoint::create(
+            &fixture.root,
+            &device,
+            vault.encrypted().unwrap(),
+            &[],
+        )
+        .unwrap();
         let checkpoint_path = device
             .root()
             .join(crate::secrets::upgrade::checkpoint::FILE);
@@ -2100,7 +2109,15 @@ mod tests {
         let fixture = Fixture::new();
         let pending = fixture.root.join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
-        let original = fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = fixture
+            .db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let key = fixture
             .store
             .load(&original.vault_id, &original.key_id)
@@ -2140,7 +2157,17 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata(), &original);
+        assert_eq!(
+            fixture
+                .db
+                .secrets
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata(),
+            &original
+        );
         assert_eq!(
             fixture
                 .store
@@ -2178,7 +2205,15 @@ mod tests {
     #[serial_test::serial]
     fn pending_zcode_transaction_does_not_block_existing_vault_transition_recovery() {
         let fixture = Fixture::new();
-        let original = fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = fixture
+            .db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         fixture.interrupt(Checkpoint::Intent);
         let pending = fixture.root.join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
@@ -2263,7 +2298,10 @@ mod tests {
             )
             .unwrap();
             let next = recovered.read().unwrap();
-            assert_ne!(old.metadata.key_id, next.encrypted().unwrap().metadata().key_id);
+            assert_ne!(
+                old.metadata.key_id,
+                next.encrypted().unwrap().metadata().key_id
+            );
             let connection =
                 Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
             vault::check_identity(&connection, next.encrypted().unwrap()).unwrap();
@@ -2391,7 +2429,13 @@ mod tests {
         .unwrap();
         assert_ne!(
             old.metadata.key_id,
-            recovered.read().unwrap().encrypted().unwrap().metadata().key_id
+            recovered
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .key_id
         );
         assert!(fixture
             .store
@@ -2444,7 +2488,13 @@ mod tests {
         );
         let recovered = SecretSession::open_existing(&fixture.root, &fixture.store, None).unwrap();
         assert_eq!(
-            recovered.read().unwrap().encrypted().unwrap().metadata().key_id,
+            recovered
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .key_id,
             old.metadata.key_id
         );
         assert!(fixture
@@ -2511,11 +2561,21 @@ mod tests {
             Some("kept")
         );
         assert_eq!(
-            fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            fixture
+                .db
+                .secrets
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata(),
             current.encrypted().unwrap().metadata()
         );
         let reopened = SecretSession::open_existing(&fixture.root, &fixture.store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().encrypted().unwrap().metadata(), current.encrypted().unwrap().metadata());
+        assert_eq!(
+            reopened.read().unwrap().encrypted().unwrap().metadata(),
+            current.encrypted().unwrap().metadata()
+        );
         assert!(install_generation(
             &fixture.db,
             &fixture.store,
@@ -2586,14 +2646,26 @@ mod tests {
         .unwrap();
         session.complete_migration().unwrap();
         let old = super::super::VaultContext::from_key(
-            session.read().unwrap().encrypted().unwrap().metadata().clone(),
+            session
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .clone(),
             session.read().unwrap().encrypted().unwrap().export_key(),
         )
         .unwrap();
         rotate(&db, &store, "new generation protection password", false).unwrap();
         let next = session.read().unwrap();
-        assert_eq!(old.metadata().vault_id, next.encrypted().unwrap().metadata().vault_id);
-        assert_ne!(old.metadata().key_id, next.encrypted().unwrap().metadata().key_id);
+        assert_eq!(
+            old.metadata().vault_id,
+            next.encrypted().unwrap().metadata().vault_id
+        );
+        assert_ne!(
+            old.metadata().key_id,
+            next.encrypted().unwrap().metadata().key_id
+        );
         assert_eq!(
             db.conn
                 .lock()
@@ -2614,10 +2686,11 @@ mod tests {
                 .unwrap(),
             "rotation-canary"
         );
-        assert!(
-            super::super::VaultContext::from_key(next.encrypted().unwrap().metadata().clone(), old.export_key())
-                .is_err()
-        );
+        assert!(super::super::VaultContext::from_key(
+            next.encrypted().unwrap().metadata().clone(),
+            old.export_key()
+        )
+        .is_err());
         assert!(CredentialFile::Codex
             .decode(
                 &old,
@@ -2626,12 +2699,19 @@ mod tests {
             .is_err());
         let profile_bytes = std::fs::read(root.join(zcode_profile.relative_path())).unwrap();
         assert_eq!(
-            &*zcode_profile.decode(next.encrypted().unwrap(), &profile_bytes).unwrap(),
+            &*zcode_profile
+                .decode(next.encrypted().unwrap(), &profile_bytes)
+                .unwrap(),
             profile_plaintext
         );
         assert!(zcode_profile.decode(&old, &profile_bytes).is_err());
         assert!(!String::from_utf8_lossy(&profile_bytes).contains("fresh-profile-canary"));
-        let plans = super::super::files::stage_owned_files_with_vault(&root, next.encrypted().unwrap(), false).unwrap();
+        let plans = super::super::files::stage_owned_files_with_vault(
+            &root,
+            next.encrypted().unwrap(),
+            false,
+        )
+        .unwrap();
         assert!(!plans.is_empty());
         for name in [
             crate::settings::settings_path(),
@@ -2659,7 +2739,10 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(store
-            .load(&next.encrypted().unwrap().metadata().vault_id, &next.encrypted().unwrap().metadata().key_id)
+            .load(
+                &next.encrypted().unwrap().metadata().vault_id,
+                &next.encrypted().unwrap().metadata().key_id
+            )
             .unwrap()
             .is_none());
         drop(next);

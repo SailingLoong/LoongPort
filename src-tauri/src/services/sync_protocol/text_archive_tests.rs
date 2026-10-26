@@ -290,7 +290,7 @@ fn local_tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::P
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn protected_active_backup_restore_rejects_before_creating_any_safety_backup() {
+fn protected_active_backup_restore_uses_the_same_generation_database_installer() {
     let home = TestHome::new().unwrap();
     let password = "legacy synthetic backup password";
     let vault = VaultContext::create_with_user_key(Zeroizing::new(vec![33; 32]))
@@ -298,20 +298,55 @@ fn protected_active_backup_restore_rejects_before_creating_any_safety_backup() {
         .with_password(password)
         .unwrap();
     let db = encrypted_database(&home, &vault);
-    db.set_setting("common_config_claude", "backup-untouched-canary")
+    db.set_setting("common_config_claude", "imported-protected-canary")
         .unwrap();
     let exported = home.path().join("synthetic-source.sql");
     db.export_sql(&exported).unwrap();
     let sql = std::fs::read_to_string(&exported).unwrap();
-    let before = local_tree(db.secrets.root());
+    db.set_setting("common_config_claude", "pre-restore-local-canary")
+        .unwrap();
+    let before_metadata = std::fs::read(db.secrets.root().join("vault.json")).unwrap();
+    let before_record =
+        std::fs::read(db.secrets.root().join(crate::secrets::protection::FILE)).unwrap();
+    let before_identity = db.secrets.read().unwrap().identity();
     let _sync = sync_mutex().blocking_lock();
-    assert_code(
-        crate::services::backup_transfer::restore_sql(&db, &sql, Some(password), &NoStore),
-        "protection.generation_owner_required",
+    let backup_id =
+        crate::services::backup_transfer::restore_sql(&db, &sql, Some(password), &NoStore).unwrap();
+    assert!(!backup_id.is_empty());
+    assert_eq!(
+        db.get_setting("common_config_claude").unwrap().as_deref(),
+        Some("imported-protected-canary")
     );
-    assert!(
-        local_tree(db.secrets.root()) == before,
-        "unsupported installer must not leave a new safety backup or change existing evidence"
+    assert_eq!(db.secrets.read().unwrap().identity(), before_identity);
+    assert_eq!(
+        std::fs::read(db.secrets.root().join("vault.json")).unwrap(),
+        before_metadata
+    );
+    assert_eq!(
+        std::fs::read(db.secrets.root().join(crate::secrets::protection::FILE)).unwrap(),
+        before_record
+    );
+    assert!(!db
+        .secrets
+        .root()
+        .join(crate::secrets::transition::INTENT)
+        .exists());
+    let backup = rusqlite::Connection::open_with_flags(
+        db.secrets
+            .root()
+            .join("backups")
+            .join(format!("{backup_id}.db")),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    crate::database::vault::check_identity(&backup, &vault).unwrap();
+    let old = Database::from_connection(
+        backup,
+        SecretSession::from_context(db.secrets.root().to_path_buf(), vault),
+    );
+    assert_eq!(
+        old.get_setting("common_config_claude").unwrap().as_deref(),
+        Some("pre-restore-local-canary")
     );
 }
 
@@ -331,7 +366,7 @@ fn text_generation_backup_restore_is_rejected_before_source_parsing_without_a_re
             None,
             &NoStore,
         ),
-        "protection.generation_owner_required",
+        "protection.record_missing",
     );
     assert_eq!(local_tree(db.secrets.root()), before);
 }
@@ -357,8 +392,8 @@ pub(crate) fn run_case(case: &str) {
         "plaintext_blocked" => {
             plaintext_mode_does_not_become_a_remote_plaintext_snapshot_or_a_fake_vault()
         }
-        "backup_restore_preflight" => {
-            protected_active_backup_restore_rejects_before_creating_any_safety_backup()
+        "backup_restore_same_generation" => {
+            protected_active_backup_restore_uses_the_same_generation_database_installer()
         }
         "backup_text_preflight" => {
             text_generation_backup_restore_is_rejected_before_source_parsing_without_a_record()

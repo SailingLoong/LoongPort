@@ -73,7 +73,9 @@ pub(crate) fn write_record(root: &Path, scope: Scope, current: &VaultContext) {
         }
     };
     let record = ProtectionRecord {
-        commitment: None, cleanup: None, format_version: 1,
+        commitment: None,
+        cleanup: None,
+        format_version: 1,
         choice_complete: true,
         storage,
     };

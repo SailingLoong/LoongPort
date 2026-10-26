@@ -1,9 +1,10 @@
 //! Storage-mode admission around the original SQLite/schema owners.
 //! Durable user choice remains owned solely by SecretSession/protection.json.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) use super::storage_generation::prepare_storage_backup_generation;
 pub(crate) use super::storage_generation::{
-    prepare_storage_backup_generation, prepare_storage_backup_generation_from_image,
-    prepare_storage_generation, verify_storage_backup_generation_image,
-    verify_storage_generation_image,
+    prepare_storage_backup_generation_from_image, prepare_storage_generation,
+    verify_storage_backup_generation_image, verify_storage_generation_image,
 };
 use super::{inspection, storage_identity, vault, Database};
 use crate::{
@@ -177,7 +178,7 @@ pub(crate) fn upgrade_staging(conn: &Connection, context: &StorageContext) -> Re
     }
 }
 
-fn prepare_plaintext_staging_for_target(
+pub(super) fn prepare_plaintext_staging_for_target(
     conn: &Connection,
     identity: &PlaintextIdentity,
     target: i32,
@@ -229,3 +230,116 @@ pub(crate) use super::storage_generation::verify_backup_image_case;
 
 #[cfg(feature = "test-hooks")]
 pub(crate) use super::storage_generation::verify_generation_image_case;
+
+/// Fresh private empty image through the original mode/schema staging owners.
+pub(crate) fn empty_storage_image(context: &StorageContext) -> Result<Connection, AppError> {
+    let image = Connection::open_in_memory()?;
+    match context {
+        StorageContext::Plaintext(identity) => prepare_plaintext_staging(&image, identity)?,
+        StorageContext::Encrypted(vault) => super::vault::upgrade_staging_for_target(
+            &image,
+            vault,
+            super::UPSTREAM4_SOURCE_SCHEMA_VERSION,
+        )?,
+    }
+    check_identity(&image, context)?;
+    Ok(image)
+}
+
+/// Compare a complete empty image without treating the original non-secret
+/// DEFAULT datetime('now') values as a persistent generation identity.
+pub(crate) fn verify_empty_storage_image(
+    image: &Connection,
+    context: &StorageContext,
+) -> Result<(), AppError> {
+    check_identity(image, context)?;
+    inventory::validate_storage_database(image, context)?;
+    let mut private = Connection::open_in_memory()?;
+    vault::copy(image, &mut private)?;
+    let mut canonical = empty_storage_image(context)?;
+    normalize_empty_default_times(&mut private)?;
+    normalize_empty_default_times(&mut canonical)?;
+    if Database::content_digest(&private)? != Database::content_digest(&canonical)? {
+        return Err(AppError::Config("protection.generation_changed".into()));
+    }
+    Ok(())
+}
+
+fn normalize_empty_default_times(image: &mut Connection) -> Result<(), AppError> {
+    let invalid = || AppError::Config("protection.generation_changed".into());
+    let times = {
+        let mut statement = image
+            .prepare("SELECT created_at, updated_at FROM proxy_config")
+            .map_err(|_| invalid())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| invalid())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid())?;
+        rows
+    };
+    for (created, updated) in times {
+        let parsed = chrono::NaiveDateTime::parse_from_str(&created, "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| invalid())?;
+        if created != updated
+            || created.len() != 19
+            || parsed.format("%Y-%m-%d %H:%M:%S").to_string() != created
+            || parsed.and_utc().timestamp_subsec_nanos() != 0
+        {
+            return Err(invalid());
+        }
+    }
+    // Historical v6 seeds this disabled singleton with unix_seconds(); v7
+    // retires runtime verification but intentionally retains its row/schema.
+    // Admit only that exact default shape and a real nonnegative integer clock.
+    let legacy_default = {
+        let mut statement = image
+            .prepare("SELECT singleton, runtime_auto_enabled, updated_at FROM model_verification_settings")
+            .map_err(|_| invalid())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|_| invalid())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid())?;
+        rows
+    };
+    let [(1, 0, updated)] = legacy_default.as_slice() else {
+        return Err(invalid());
+    };
+    if *updated < 0 || chrono::DateTime::<chrono::Utc>::from_timestamp(*updated, 0).is_none() {
+        return Err(invalid());
+    }
+    // Only these declared creation defaults are normalized in private copies.
+    // Original schema, every other column/row and unknown objects stay in the
+    // complete content digest. Trigger suppression cannot affect the caller.
+    super::storage_generation::with_private_triggers_disabled(image, |image| {
+        image.execute(
+            "UPDATE proxy_config SET created_at=?1, updated_at=?1",
+            ["2000-01-01 00:00:00"],
+        )?;
+        image.execute(
+            "UPDATE model_verification_settings SET updated_at=0 WHERE singleton=1",
+            [],
+        )?;
+        Ok(())
+    })
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "storage_empty_image_tests.rs"]
+mod empty_image_tests;
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_empty_storage_image_case(case: &str) {
+        empty_image_tests::verify(case);
+    }
+}

@@ -52,9 +52,7 @@ fn preserved(
     result
 }
 fn code(result: Result<(), AppError>, expected: &str) {
-    let error = result
-        .err()
-        .expect("different generation images compared equal");
+    let error = result.expect_err("different generation images compared equal");
     assert!(
         matches!(error,AppError::Config(ref actual) if actual==expected),
         "unexpected comparison error: {error}"
@@ -240,6 +238,7 @@ fn backup_generation_image_verifier_keeps_primary_exact() {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
         "backup_generation_image_verifier_keeps_primary_exact" => {

@@ -88,7 +88,7 @@ fn encrypted_codec_and_full_metadata_identity_remain_strict() {
     assert!(c.open(&["a", "b"], "plain").is_err());
     assert_eq!(
         c.identity(),
-        StorageIdentity::Encrypted(vault.metadata().clone())
+        StorageIdentity::Encrypted(vault.metadata().clone().into())
     );
     assert_eq!(c.identity().store_id(), vault.metadata().vault_id);
 }

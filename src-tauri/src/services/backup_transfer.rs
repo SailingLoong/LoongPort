@@ -1,44 +1,27 @@
 use crate::{
-    database::Database,
-    error::AppError,
-    secrets::{key_store::KeyStore, session::read_metadata, transition::install_generation},
+    database::Database, error::AppError, secrets::key_store::KeyStore,
     services::skill::skill_state_write_guard,
 };
 
 /// The command owns the common sync mutex across source validation and install.
-/// Manual backups restore content into the current device's key generation.
+/// Explicit local SQL restore retains this device's storage mode and generation.
 pub(crate) fn restore_sql(
     db: &Database,
     sql: &str,
     password: Option<&str>,
-    store: &dyn KeyStore,
+    _store: &dyn KeyStore,
 ) -> Result<String, AppError> {
-    // The legacy installer cannot publish a protection-aware generation. Check
-    // its existing admission before source preparation or a safety-copy write.
-    crate::secrets::transition::ensure_legacy_generation_owner(db.secrets.root())?;
-    let current = db.secrets.read()?.encrypted()?.clone();
-    crate::secrets::transition::ensure_legacy_metadata(current.metadata())?;
-    let incoming = db.prepare_backup_content(sql, password, &current)?;
-    let automatic_unlock = read_metadata(db.secrets.root())?.automatic_unlock;
+    crate::services::sync_protocol::ensure_upgrade_sync_admitted()?;
+    let incoming = {
+        let current = db.secrets.read()?;
+        crate::secrets::protection::validate_runtime_storage(db.secrets.root(), &current)?;
+        db.prepare_backup_content_for_storage(sql, password, &current, &current)?
+    };
+    // The original installer reacquires the session guard and checks the typed
+    // destination before its safety backup and one SQLite replacement. Do not
+    // retain a recursive read guard behind a waiting lifecycle writer.
     let _skills = skill_state_write_guard();
-    // Authentication and schema validation finish before even the safety copy.
-    let safety = db.backup_database_file()?;
-    install_generation(
-        db,
-        store,
-        current,
-        automatic_unlock,
-        |connection, current, next| {
-            Database::prepare_sync_join(incoming, connection, current, next)
-        },
-        None,
-    )?;
-    Ok(safety
-        .and_then(|path| {
-            path.file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_default())
+    db.install_backup_content_for_storage(incoming)
 }
 
 #[cfg(test)]
@@ -363,3 +346,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_transfer/storage_restore_tests.rs"]
+pub(crate) mod storage_restore_tests;

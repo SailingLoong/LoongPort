@@ -81,7 +81,6 @@ mod workbuddy;
 mod zcode_accounts;
 #[cfg(any(feature = "gui", test))]
 mod zcode_config;
-#[cfg(any(feature = "gui", test))]
 mod zcode_file_lock;
 pub use secrets::key_store::{KeyStore, KeyStoreError};
 pub use secrets::session::SecretSession;
@@ -485,18 +484,25 @@ fn small_tray_icon() -> Option<Image<'static>> {
 ///
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
-pub fn run_imagegen_mcp() -> Result<(), String> {
+fn imagegen_mcp_session(
+    store: &dyn secrets::key_store::KeyStore,
+) -> Result<std::sync::Arc<secrets::session::SecretSession>, String> {
     app_store::initialize_active_scope().map_err(secrets::error::public_code)?;
     let root = config::get_app_config_dir();
-    database::vault::preflight(&root.join(config::DB_FILE_NAME)).map_err(|e| e.to_string())?;
-    let session = secrets::session::SecretSession::open_existing(
+    secrets::session::SecretSession::open_existing_protected(
         &root,
-        &secrets::key_store::SystemKeyStore,
-        None,
+        &config::get_device_config_dir(),
+        store,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(secrets::error::public_code)
+}
+pub fn run_imagegen_mcp() -> Result<(), String> {
+    let session = imagegen_mcp_session(&secrets::key_store::SystemKeyStore)?;
     relay::imagegen_mcp::serve(session).map_err(|error| diagnostics::redact_log_text(&error))
 }
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "secrets/imagegen_storage_tests.rs"]
+mod imagegen_storage_tests;
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
 ///
@@ -1608,7 +1614,8 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
                 && payload.url().scheme() != "about"
                 && !startup_page_handled.swap(true, Ordering::Relaxed)
-                && (app_store::initialize_active_scope().is_err() || !crate::settings::get_settings().silent_startup)
+                && (app_store::initialize_active_scope().is_err()
+                    || !crate::settings::get_settings().silent_startup)
             {
                 let _ = webview.window().show();
                 log::info!("主页面加载完成，主窗口已显示");

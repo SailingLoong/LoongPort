@@ -27,7 +27,7 @@ pub(crate) fn build_plaintext_export(session: &SecretSession) -> Result<String, 
     > = std::collections::BTreeMap::new();
     inventory::collect_plaintext_values(
         &conn,
-        &vault,
+        vault,
         |table, column, keys: Vec<String>, plaintext| {
             let columns = inventory::table_identity_columns(table);
             let rows = database.entry(table.to_string()).or_default();
@@ -57,7 +57,7 @@ pub(crate) fn build_plaintext_export(session: &SecretSession) -> Result<String, 
     let mut files = Map::new();
     for file in AUTH_FILES {
         if let Ok(bytes) = std::fs::read(file.path(session)) {
-            if let Ok(plaintext) = file.decode(&vault, &bytes) {
+            if let Ok(plaintext) = file.decode(vault, &bytes) {
                 files.insert(
                     file.filename().to_string(),
                     Value::String(String::from_utf8_lossy(&plaintext).into_owned()),

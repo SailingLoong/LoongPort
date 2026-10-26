@@ -925,8 +925,11 @@ pub(crate) fn archive_and_release(
                     .as_ref()
                     .map(|bytes| match kind {
                         ArchivedKind::Settings => {
-                            crate::settings::export_settings_archive_with_vault(bytes, vault.encrypted()?)
-                                .map(|v| v.to_vec())
+                            crate::settings::export_settings_archive_with_vault(
+                                bytes,
+                                vault.encrypted()?,
+                            )
+                            .map(|v| v.to_vec())
                         }
                         ArchivedKind::Device => DeviceFile::registered(
                             file.path
@@ -956,7 +959,8 @@ pub(crate) fn archive_and_release(
                 .ok_or_else(invalid)?
                 .into(),
             database_digest: crate::secrets::inventory::upgrade_archive_content_digest(
-                &source, vault.encrypted()?,
+                &source,
+                vault.encrypted()?,
             )?,
             source_versions: manifest.source_versions,
             files,

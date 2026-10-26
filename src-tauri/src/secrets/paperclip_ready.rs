@@ -394,11 +394,24 @@ mod wiring_tests {
     #[test]
     fn paperclip_four_ready_paths_use_original_phase_before_shared_launch() {
         let startup = include_str!("startup.rs");
+        // Both original password and user-text key entry points delegate to
+        // the same publication body; neither launches a second bridge.
+        for (begin, end) in [
+            ("fn initialize(", "pub(crate) fn initialize_with_master("),
+            (
+                "pub(crate) fn initialize_with_master(",
+                "fn initialize_and_publish(",
+            ),
+        ] {
+            let entry = section(startup, begin, end);
+            assert_eq!(entry.matches("self.initialize_and_publish(").count(), 1);
+            assert!(!entry.contains("paperclip_after_ready("));
+        }
         for (begin, end, authority) in [
             (
-                "fn initialize(",
-                "fn initialize_with",
-                "self.initialize_with(",
+                "fn initialize_and_publish(",
+                "fn initialize_with<P>(",
+                "self.initialize_with_internal_key(",
             ),
             (
                 "async fn continue_startup_upgrade(",

@@ -189,9 +189,16 @@ pub(super) fn failed_database_publication_keeps_recovery_and_restarts() {
     let original_stage =
         rusqlite::Connection::open_with_flags(&stage, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    database::vault::check_identity(&original_stage, session.read().unwrap().encrypted().unwrap()).unwrap();
-    crate::secrets::inventory::validate_database(&original_stage, session.read().unwrap().encrypted().unwrap())
-        .unwrap();
+    database::vault::check_identity(
+        &original_stage,
+        session.read().unwrap().encrypted().unwrap(),
+    )
+    .unwrap();
+    crate::secrets::inventory::validate_database(
+        &original_stage,
+        session.read().unwrap().encrypted().unwrap(),
+    )
+    .unwrap();
     drop(original_stage);
     let valid_stage = std::fs::read(&stage).unwrap();
     let staged = rusqlite::Connection::open(&stage).unwrap();

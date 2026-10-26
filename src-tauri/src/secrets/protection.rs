@@ -253,31 +253,58 @@ where
     Ok(context)
 }
 
-pub(crate) fn read_with_bytes(root: &Path) -> Result<Option<(ProtectionRecord, Vec<u8>)>, AppError> {
+pub(crate) fn read_with_bytes(
+    root: &Path,
+) -> Result<Option<(ProtectionRecord, Vec<u8>)>, AppError> {
     crate::config_file_io::read_regular_file(&root.join(FILE), MAX_RECORD_BYTES)
-        .map_err(|_|invalid())?.map(|bytes|ProtectionRecord::parse(&bytes).map(|record|(record,bytes))).transpose()
+        .map_err(|_| invalid())?
+        .map(|bytes| ProtectionRecord::parse(&bytes).map(|record| (record, bytes)))
+        .transpose()
 }
 pub(crate) fn read(root: &Path) -> Result<Option<ProtectionRecord>, AppError> {
-    Ok(read_with_bytes(root)?.map(|(record,_)|record))
+    Ok(read_with_bytes(root)?.map(|(record, _)| record))
 }
 
 /// Same-mode choice is not a credential generation. Hold the original session
 /// and DB guards, preserve its identity, and CAS the exact reviewed record.
-pub(crate) fn complete_plaintext_choice(db:&crate::Database, expected:&[u8])->Result<(),AppError> {
-    let session=db.secret_session();
-    let context=session.write()?;
-    if !context.is_plaintext() {return Err(AppError::Config("protection.conversion_required".into()));}
-    let conn=db.conn.lock()?;
-    crate::database::storage::check_identity(&conn,&context)?;
-    let (mut record,bytes)=read_with_bytes(session.root())?.ok_or_else(invalid)?;
-    if bytes!=expected {return Err(AppError::Config("protection.review_changed".into()));}
+pub(crate) fn complete_plaintext_choice(
+    db: &crate::Database,
+    expected: &[u8],
+) -> Result<(), AppError> {
+    let session = db.secret_session();
+    let context = session.write()?;
+    if !context.is_plaintext() {
+        return Err(AppError::Config("protection.conversion_required".into()));
+    }
+    let conn = db.conn.lock()?;
+    crate::database::storage::check_identity(&conn, &context)?;
+    let (mut record, bytes) = read_with_bytes(session.root())?.ok_or_else(invalid)?;
+    if bytes != expected {
+        return Err(AppError::Config("protection.review_changed".into()));
+    }
     record.matches_context(&context)?;
-    if record.choice_complete {return Ok(());}
-    record.choice_complete=true;
-    let target=serde_json::to_vec(&record).map_err(|_|invalid())?;
-    if read_with_bytes(session.root())?.map(|(_,bytes)|bytes).as_deref()!=Some(expected) {return Err(AppError::Config("protection.review_changed".into()));}
-    crate::config_file_io::write_durable(&session.root().join(FILE),&target)?;
-    if read_with_bytes(session.root())?.map(|(_,bytes)|bytes).as_deref()!=Some(target.as_slice()) {return Err(AppError::Config("protection.choice_verification_failed".into()));}
+    if record.choice_complete {
+        return Ok(());
+    }
+    record.choice_complete = true;
+    let target = serde_json::to_vec(&record).map_err(|_| invalid())?;
+    if read_with_bytes(session.root())?
+        .map(|(_, bytes)| bytes)
+        .as_deref()
+        != Some(expected)
+    {
+        return Err(AppError::Config("protection.review_changed".into()));
+    }
+    crate::config_file_io::write_durable(&session.root().join(FILE), &target)?;
+    if read_with_bytes(session.root())?
+        .map(|(_, bytes)| bytes)
+        .as_deref()
+        != Some(target.as_slice())
+    {
+        return Err(AppError::Config(
+            "protection.choice_verification_failed".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -385,7 +412,30 @@ fn empty_except_diagnostics(
 #[path = "protection_tests.rs"]
 mod tests;
 
-#[path="protection/generation_files.rs"]
-pub(crate) mod generation_files;
-#[path="protection/generation.rs"]
+#[path = "protection/generation.rs"]
 pub(crate) mod generation;
+#[path = "protection/generation_files.rs"]
+pub(crate) mod generation_files;
+
+/// One read-only admission for consumers of an already pinned runtime context.
+/// This never loads a key or creates a session, storage record, or database.
+pub(crate) fn validate_runtime_storage(
+    root: &Path,
+    context: &StorageContext,
+) -> Result<(), AppError> {
+    match read(root)? {
+        Some(record) => {
+            record.matches_context(context)?;
+            record.verify_commitment(context)?;
+            if record.cleanup.is_some() {
+                return Err(AppError::Config("protection.cleanup_required".into()));
+            }
+        }
+        None => {
+            if context.is_plaintext() || context.encrypted()?.metadata().user_text_key.is_some() {
+                return Err(AppError::Config("protection.record_missing".into()));
+            }
+        }
+    }
+    super::session::validate_completed_metadata(root, context)
+}

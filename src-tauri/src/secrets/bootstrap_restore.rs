@@ -695,7 +695,13 @@ mod tests {
         let root = fixture.root();
         let store = MemoryKeyStore::default();
         let session = SecretSession::open(&root, &store, None).unwrap();
-        let original = session.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = session
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let connection = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
             session.read().unwrap().encrypted().unwrap(),
@@ -738,7 +744,10 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(session.read().unwrap().encrypted().unwrap().metadata(), &original);
+        assert_eq!(
+            session.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(
             store.load(&original.vault_id, &original.key_id).unwrap(),
             key
@@ -1205,7 +1214,11 @@ mod tests {
                     .unwrap();
             let connection =
                 rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
-            crate::database::vault::check_identity(&connection, session.read().unwrap().encrypted().unwrap()).unwrap();
+            crate::database::vault::check_identity(
+                &connection,
+                session.read().unwrap().encrypted().unwrap(),
+            )
+            .unwrap();
             assert_eq!(
                 std::fs::read(root.join("skills/example/SKILL.md")).unwrap(),
                 b"restored skill"
@@ -1332,15 +1345,21 @@ mod tests {
             prepare_snapshot(snapshot, source(), "remote recovery password", &expected).unwrap();
         let store = MemoryKeyStore::default();
         let session = finalize(&root, prepared, &store, false).unwrap();
-        assert_eq!(session.read().unwrap().encrypted().unwrap().metadata(), &metadata);
+        assert_eq!(
+            session.read().unwrap().encrypted().unwrap().metadata(),
+            &metadata
+        );
         let settings = std::fs::read(crate::settings::settings_path()).unwrap();
         assert!(!String::from_utf8_lossy(&settings).contains("supplied-connection-canary"));
         assert_eq!(
-            crate::settings::decode_settings_with_vault(&settings, session.read().unwrap().encrypted().unwrap())
-                .unwrap()
-                .webdav_sync
-                .unwrap()
-                .password,
+            crate::settings::decode_settings_with_vault(
+                &settings,
+                session.read().unwrap().encrypted().unwrap()
+            )
+            .unwrap()
+            .webdav_sync
+            .unwrap()
+            .password,
             "supplied-connection-canary"
         );
         assert_eq!(

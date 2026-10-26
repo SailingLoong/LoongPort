@@ -31,11 +31,16 @@ pub(crate) struct GenerationFileEvidence {
     role: GenerationFileRole,
     source_root: GenerationSourceRoot,
     relative: PathBuf,
+    #[cfg(any(test, feature = "test-hooks"))]
     source: PathBuf,
+    #[cfg(any(test, feature = "test-hooks"))]
     target: PathBuf,
     source_hash: [u8; 32],
+    #[cfg(any(test, feature = "test-hooks"))]
     target_hash: [u8; 32],
+    #[cfg(any(test, feature = "test-hooks"))]
     source_owner_execute: bool,
+    #[cfg(any(test, feature = "test-hooks"))]
     target_owner_execute: bool,
 }
 impl GenerationFileEvidence {
@@ -48,22 +53,27 @@ impl GenerationFileEvidence {
     pub(crate) fn relative_path(&self) -> &Path {
         &self.relative
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn source_path(&self) -> &Path {
         &self.source
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn target_path(&self) -> &Path {
         &self.target
     }
     pub(crate) fn source_hash(&self) -> &[u8; 32] {
         &self.source_hash
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn target_hash(&self) -> &[u8; 32] {
         &self.target_hash
     }
     /// Captured Neutral behavior only; non-Neutral and non-Unix are always false.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn source_owner_execute(&self) -> bool {
         self.source_owner_execute
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn target_owner_execute(&self) -> bool {
         self.target_owner_execute
     }
@@ -173,16 +183,22 @@ impl PreparedGenerationFiles {
                 );
                 first_sources.insert(file.relative.clone(), file);
             }
+            #[cfg(any(test, feature = "test-hooks"))]
             let encoded = &target_files[&file.relative].bytes;
             evidence.push(GenerationFileEvidence {
                 role: file.codec.role(),
                 source_root: file.root,
                 relative: file.relative.clone(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 source: file.path.clone(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 target: target_root.join(&file.relative),
                 source_hash: Sha256::digest(&*file.bytes).into(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 target_hash: Sha256::digest(&**encoded).into(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 source_owner_execute: file.owner_execute,
+                #[cfg(any(test, feature = "test-hooks"))]
                 target_owner_execute: target_files[&file.relative].owner_execute,
             });
         }
@@ -285,11 +301,16 @@ impl PreparedGenerationFiles {
                 role: file.codec.role(),
                 source_root: file.root,
                 relative: file.relative.clone(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 source: file.path.clone(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 target: target_root.join(&file.relative),
                 source_hash: Sha256::digest(&*file.bytes).into(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 target_hash: Sha256::digest(&*actual.bytes).into(),
+                #[cfg(any(test, feature = "test-hooks"))]
                 source_owner_execute: file.owner_execute,
+                #[cfg(any(test, feature = "test-hooks"))]
                 target_owner_execute: actual.owner_execute,
             });
         }
@@ -497,12 +518,13 @@ fn excluded(
             && (DeviceFile::registered(relative).is_ok()
                 || relative.starts_with(crate::secrets::owned_file::DEVICE_BACKUP_DIR)))
 }
-fn capture(
+/// The original capture's passive data-tree membership, shared with cleanup
+/// postflight. This preserves its exclusions and unclaimed lifecycle-artifact
+/// refusals without decoding any source bytes or adding another walker.
+fn source_membership(
     data: &Path,
     device: &Path,
-    context: &StorageContext,
-    peer: &StorageContext,
-) -> Result<SourceInventory, AppError> {
+) -> Result<(SourceInventory, BTreeSet<PathBuf>), AppError> {
     let data_exists = config_file_io::directory_exists_no_alias(data)?;
     let device_exists = config_file_io::directory_exists_no_alias(device)?;
     let databases = excluded_database_paths(data)?;
@@ -565,12 +587,26 @@ fn capture(
             }
         }
     }
-    let mut image = SourceInventory {
+    let image = SourceInventory {
         files: BTreeMap::new(),
         directories,
         data_exists,
         device_exists,
     };
+    Ok((image, paths))
+}
+
+fn capture(
+    data: &Path,
+    device: &Path,
+    context: &StorageContext,
+    peer: &StorageContext,
+) -> Result<SourceInventory, AppError> {
+    let (mut image, mut paths) = source_membership(data, device)?;
+    let members = credential_membership(data, device, &image, &paths)?;
+    if members.iter().any(|path| is_durable_staging_name(path)) {
+        return Err(invalid("protection.interrupted_credential_write"));
+    }
     for plan in files::stage_owned_files_with_storage(data, context, false)? {
         let bytes = Zeroizing::new(plan.ciphertext);
         if !paths.remove(&plan.source) || bytes != read_file(&plan.source)? {
@@ -611,22 +647,7 @@ fn capture(
                 .as_path(),
         );
     }
-    let mut settings = vec![
-        (GenerationSourceRoot::Data, data, data.join("settings.json")),
-        (
-            GenerationSourceRoot::Data,
-            data,
-            data.join("backups/vault-recovery/settings.json"),
-        ),
-    ];
-    if device != data {
-        settings.push((
-            GenerationSourceRoot::Device,
-            device,
-            device.join("settings.json"),
-        ));
-    }
-    for (root, base, path) in settings {
+    for (root, base, path) in settings_sources(data, device) {
         let parent = path
             .parent()
             .ok_or_else(|| invalid("secret.invalid_storage_path"))?;
@@ -670,6 +691,100 @@ fn capture(
     }
     Ok(image)
 }
+/// One physical settings membership table for capture and source postflight.
+fn settings_sources<'a>(
+    data: &'a Path,
+    device: &'a Path,
+) -> Vec<(GenerationSourceRoot, &'a Path, PathBuf)> {
+    let mut settings = vec![
+        (GenerationSourceRoot::Data, data, data.join("settings.json")),
+        (
+            GenerationSourceRoot::Data,
+            data,
+            data.join("backups/vault-recovery/settings.json"),
+        ),
+    ];
+    if device != data {
+        settings.push((
+            GenerationSourceRoot::Device,
+            device,
+            device.join("settings.json"),
+        ));
+    }
+    settings
+}
+
+fn is_durable_staging_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(config_file_io::staging_target_name)
+        .is_some()
+}
+
+/// Only original registered member locations can claim a durable temporary name.
+fn credential_membership(
+    data: &Path,
+    device: &Path,
+    image: &SourceInventory,
+    paths: &BTreeSet<PathBuf>,
+) -> Result<BTreeSet<PathBuf>, AppError> {
+    let mut members: BTreeSet<PathBuf> = files::owned_file_paths_with_staging(data)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    members.extend(
+        files::device_reset_paths(device)?
+            .into_iter()
+            .map(|(_, path)| path),
+    );
+    for (_, _, settings) in settings_sources(data, device) {
+        let parent = settings
+            .parent()
+            .ok_or_else(|| invalid("secret.invalid_storage_path"))?;
+        if !config_file_io::directory_exists_no_alias(parent)? {
+            continue;
+        }
+        let filename = settings
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid("secret.invalid_storage_path"))?;
+        for entry in std::fs::read_dir(parent).map_err(|error| AppError::io(parent, error))? {
+            let entry = entry.map_err(|error| AppError::io(parent, error))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name != filename && config_file_io::staging_target_name(name) != Some(filename) {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|error| AppError::io(entry.path(), error))?
+                .is_file()
+            {
+                return Err(invalid("secret.invalid_storage_path"));
+            }
+            members.insert(entry.path());
+        }
+    }
+    // With a separate fixed-device root, old device-named data files are not
+    // migrated. But a registered adjacent temporary must not fall through to
+    // the data tree's Neutral codec merely because its final target was excluded.
+    for path in paths
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(image.directories.iter().map(|relative| relative.as_path()))
+    {
+        let relative = path.strip_prefix(data).unwrap_or(path);
+        if relative
+            .to_str()
+            .and_then(config_file_io::staging_target_name)
+            .is_some_and(|target| DeviceFile::registered(target).is_ok())
+        {
+            members.insert(data.join(relative));
+        }
+    }
+    Ok(members)
+}
+
 fn add_source(
     image: &mut SourceInventory,
     root: GenerationSourceRoot,
@@ -794,3 +909,16 @@ fn verify_target_permissions(path: &Path, owner_execute: bool) -> Result<(), App
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "generation_files_tests.rs"]
 pub(crate) mod tests;
+
+/// Passive original-owner membership check; this never reads or deletes payloads.
+pub(crate) fn ensure_no_credential_files(data: &Path, device: &Path) -> Result<(), AppError> {
+    let (image, paths) = source_membership(data, device)?;
+    if !credential_membership(data, device, &image, &paths)?.is_empty() {
+        return Err(invalid("protection.source_credentials_remaining"));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "generation_files_postflight_tests.rs"]
+pub(crate) mod postflight_tests;

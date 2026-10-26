@@ -146,54 +146,115 @@ pub async fn verify_minimax_refresh_owner(case: &str) {
 }
 
 /// Run the same real SQLite owner case without code-generating unrelated unit suites.
+#[cfg(feature = "test-hooks")]
 pub fn verify_credential_storage_case(case: &str) -> Result<(), String> {
     crate::database::verify_storage_case(case);
     Ok(())
 }
 
 /// Same original session owner cases, no real OS store.
-pub fn verify_credential_startup_case(case: &str) { crate::secrets::session::protection_startup_tests::verify(case); }
+#[cfg(feature = "test-hooks")]
+pub fn verify_credential_startup_case(case: &str) {
+    crate::secrets::session::protection_startup_tests::verify(case);
+}
 /// Actual ordinary storage owners. Async groups retain their original runtime.
-pub async fn verify_credential_files_case(case:&str) {
+#[cfg(feature = "test-hooks")]
+pub async fn verify_credential_files_case(case: &str) {
     match case {
-        "owned"=>crate::secrets::owned_file::storage_mode_tests::run(),
-        "files"=>crate::secrets::files::plaintext_runtime_tests::run(),
-        "settings"=>crate::settings::plaintext_storage_tests::run(),
-        "live"=>crate::live::engine::plaintext_tests::run(),
-        "workbuddy"=>crate::workbuddy::verify_plaintext_storage(),
-        "minimax"=>crate::minimax_code::catalog::plaintext_tests::run().await,
-        "trae"=>crate::trae_accounts::store::plaintext_tests::run().await,
-        "zcode_checkpoint"=>crate::zcode_accounts::checkpoint::plaintext_tests::run(),
-        "zcode_key_intent"=>crate::zcode_accounts::key_intent::tests::run_plaintext(),
-        "zcode_operation_log"=>crate::zcode_accounts::operation_log::tests::run_plaintext(),
-        _=>panic!("unknown credential file test case"),
+        "owned" => crate::secrets::owned_file::storage_mode_tests::run(),
+        "files" => crate::secrets::files::plaintext_runtime_tests::run(),
+        "settings" => crate::settings::plaintext_storage_tests::run(),
+        "live" => crate::live::engine::plaintext_tests::run(),
+        "workbuddy" => crate::workbuddy::verify_plaintext_storage(),
+        "minimax" => crate::minimax_code::catalog::plaintext_tests::run().await,
+        "trae" => crate::trae_accounts::store::plaintext_tests::run().await,
+        "zcode_checkpoint" => crate::zcode_accounts::checkpoint::plaintext_tests::run(),
+        "zcode_key_intent" => crate::zcode_accounts::key_intent::tests::run_plaintext(),
+        "zcode_operation_log" => crate::zcode_accounts::operation_log::tests::run_plaintext(),
+        _ => panic!("unknown credential file test case"),
     }
 }
 
+#[cfg(feature = "test-hooks")]
 pub fn verify_credential_transcode_case(case: &str) {
-    if case.starts_with("settings_") { crate::settings::explicit_storage_transcode_tests::run_case(case); }
-    else { crate::secrets::files::explicit_storage_inventory_tests::run_case(case); }
+    if case.starts_with("settings_") {
+        crate::settings::explicit_storage_transcode_tests::run_case(case);
+    } else {
+        crate::secrets::files::explicit_storage_inventory_tests::run_case(case);
+    }
 }
 
-pub fn verify_credential_generation_case(case: &str) { crate::database::verify_storage_generation_case(case); }
+#[cfg(feature = "test-hooks")]
+pub fn verify_credential_generation_case(case: &str) {
+    crate::database::verify_storage_generation_case(case);
+}
 
-pub fn verify_coordinator_protection_entry(case:&str) { crate::secrets::startup::protection_entry_tests::run_case(case); }
+#[cfg(feature = "test-hooks")]
+pub fn verify_coordinator_protection_entry(case: &str) {
+    crate::secrets::startup::protection_entry_tests::run_case(case);
+}
 
-pub fn verify_legacy_generation_fence_case(case:&str){crate::secrets::transition::verify_legacy_generation_fence_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_legacy_generation_fence_case(case: &str) {
+    crate::secrets::transition::verify_legacy_generation_fence_case(case);
+}
 
-pub fn verify_storage_backup_generation_case(case:&str){crate::database::verify_storage_backup_generation_case(case);}
-pub fn verify_generation_files_case(case:&str){crate::secrets::protection::generation_files::tests::run_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_storage_backup_generation_case(case: &str) {
+    crate::database::verify_storage_backup_generation_case(case);
+}
+#[cfg(feature = "test-hooks")]
+pub fn verify_generation_files_case(case: &str) {
+    crate::secrets::protection::generation_files::tests::run_case(case);
+}
 
-pub fn verify_protection_ipc_case(case:&str){crate::secrets::startup::credential_protection::tests::run_case(case);}
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_protection_ipc_case(case: &str) {
+    crate::secrets::startup::credential_protection::tests::run_case(case);
+}
 
-pub fn verify_legacy_reset_fence_case(case:&str) { crate::secrets::reset::verify_legacy_reset_fence_case(case); }
+#[cfg(feature = "test-hooks")]
+pub fn verify_legacy_reset_fence_case(case: &str) {
+    crate::secrets::reset::verify_legacy_reset_fence_case(case);
+}
 
-pub fn verify_native_generation_case(case:&str){crate::secrets::protection::generation::tests::run_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_native_generation_case(case: &str) {
+    crate::secrets::protection::generation::tests::run_case(case);
+}
 
-pub fn verify_text_archive_case(case:&str){crate::services::sync_protocol::text_archive_tests::run_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_text_archive_case(case: &str) {
+    crate::services::sync_protocol::text_archive_tests::run_case(case);
+}
 
-pub fn verify_legacy_reset_cleanup_case(case:&str){crate::secrets::reset::verify_legacy_reset_cleanup_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_legacy_reset_cleanup_case(case: &str) {
+    crate::secrets::reset::verify_legacy_reset_cleanup_case(case);
+}
 
-pub fn verify_backup_image_case(case:&str){crate::database::storage::verify_backup_image_case(case);}
-pub fn verify_generation_image_case(case:&str){crate::database::storage::verify_generation_image_case(case);}
+#[cfg(feature = "test-hooks")]
+pub fn verify_backup_image_case(case: &str) {
+    crate::database::storage::verify_backup_image_case(case);
+}
+#[cfg(feature = "test-hooks")]
+pub fn verify_generation_image_case(case: &str) {
+    crate::database::storage::verify_generation_image_case(case);
+}
 
+#[cfg(feature = "test-hooks")]
+pub fn verify_local_sql_restore_case(case: &str) {
+    crate::services::backup_transfer::storage_restore_tests::run_case(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_imagegen_storage_case(case: &str) {
+    crate::imagegen_storage_tests::run(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_file_postflight_case(case: &str) {
+    crate::secrets::protection::generation_files::postflight_tests::run_case(case);
+}

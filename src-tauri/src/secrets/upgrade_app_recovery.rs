@@ -1,8 +1,8 @@
 //! App-local recovery inside the original authenticated startup owner. A DB
 //! checkpoint is not app completion; these queries never authorize runtime.
-use crate::secrets::storage::StorageContext;
 use super::*;
 use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard;
+use crate::secrets::storage::StorageContext;
 use crate::{
     app_config::AppType,
     mode::{current, operation, state::Mode},
@@ -2057,7 +2057,9 @@ pub(crate) fn ensure_native_app_write_admitted(
         let conn = db.conn.lock()?;
         inspection::verify_connection_primary_identity(&conn, &second.identity)?;
     }
-    if checkpoint::verified_database_id(root, device, vault.encrypted()?)?.as_deref() != Some(id.as_str()) {
+    if checkpoint::verified_database_id(root, device, vault.encrypted()?)?.as_deref()
+        != Some(id.as_str())
+    {
         return Err(source_changed());
     }
     inspection::verify_unchanged(&checkpoint_path, &revision)

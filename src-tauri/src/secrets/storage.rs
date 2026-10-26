@@ -31,7 +31,7 @@ impl PlaintextIdentity {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StorageIdentity {
-    Encrypted(VaultMetadata),
+    Encrypted(Box<VaultMetadata>),
     Plaintext(PlaintextIdentity),
 }
 impl StorageIdentity {
@@ -67,7 +67,7 @@ impl From<VaultContext> for StorageContext {
 impl StorageContext {
     pub(crate) fn identity(&self) -> StorageIdentity {
         match self {
-            Self::Encrypted(v) => StorageIdentity::Encrypted(v.metadata().clone()),
+            Self::Encrypted(v) => StorageIdentity::Encrypted(v.metadata().clone().into()),
             Self::Plaintext(v) => StorageIdentity::Plaintext(v.clone()),
         }
     }

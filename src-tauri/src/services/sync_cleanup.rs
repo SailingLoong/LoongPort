@@ -627,7 +627,9 @@ mod tests {
             .secrets
             .read()
             .unwrap()
-            .encrypted().unwrap().with_password("different cleanup password")
+            .encrypted()
+            .unwrap()
+            .with_password("different cleanup password")
             .unwrap();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(std::str::from_utf8(&remote.snapshot.db_sql).unwrap())

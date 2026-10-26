@@ -56,7 +56,7 @@ pub(crate) struct VaultMetadata {
 
 #[derive(Clone)]
 pub(crate) struct VaultContext {
-    metadata: VaultMetadata,
+    metadata: Box<VaultMetadata>,
     key: Zeroizing<Vec<u8>>,
 }
 
@@ -180,19 +180,23 @@ impl KdfParameters {
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn parse_user_key_hex(encoded: &str) -> Result<Zeroizing<Vec<u8>>, SecretError> {
     if encoded.len() != 64 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(SecretError::InvalidKeyLength);
     }
     let mut key = Zeroizing::new(vec![0; 32]);
-    hex::decode_to_slice(encoded, &mut *key).map_err(|_| SecretError::InvalidKeyLength)?;
+    hex::decode_to_slice(encoded, &mut key).map_err(|_| SecretError::InvalidKeyLength)?;
     Ok(key)
 }
 
 impl VaultContext {
     /// One descriptor-driven user-input authentication boundary. The exact UTF-8
     /// input is never normalized and a failed text source never falls back to a wrapper.
-    pub(crate) fn from_recovery_input(metadata: VaultMetadata, original: &str) -> Result<Self, SecretError> {
+    pub(crate) fn from_recovery_input(
+        metadata: VaultMetadata,
+        original: &str,
+    ) -> Result<Self, SecretError> {
         metadata.validate()?;
         if metadata.user_text_key.is_some() {
             Self::from_user_text(metadata, original)
@@ -238,6 +242,7 @@ impl VaultContext {
         Self::from_key(metadata, key)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn create_generation_with_user_key(
         store_id: String,
         revision: u64,
@@ -246,6 +251,7 @@ impl VaultContext {
         Self::new_with_key(store_id, revision, key)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn create_with_user_key(key: Zeroizing<Vec<u8>>) -> Result<Self, SecretError> {
         if key.len() != 32 {
             return Err(SecretError::InvalidKeyLength);
@@ -253,6 +259,7 @@ impl VaultContext {
         Self::new_with_key(random_id()?, 1, key)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn replace_with_user_key(
         &self,
         key: Zeroizing<Vec<u8>>,
@@ -307,7 +314,10 @@ impl VaultContext {
         };
         metadata.verifier = encrypt(&key, &verifier_aad(&metadata)?, VERIFIER)?;
         metadata.validate()?;
-        Ok(Self { metadata, key })
+        Ok(Self {
+            metadata: Box::new(metadata),
+            key,
+        })
     }
 
     pub(crate) fn metadata(&self) -> &VaultMetadata {
@@ -408,7 +418,10 @@ impl VaultContext {
         if verifier.as_slice() != VERIFIER {
             return Err(SecretError::KeyRejected);
         }
-        Ok(Self { metadata, key })
+        Ok(Self {
+            metadata: Box::new(metadata),
+            key,
+        })
     }
 
     /// The lifecycle owner must migrate protected values before publishing this context.

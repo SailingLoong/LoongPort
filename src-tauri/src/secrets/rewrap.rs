@@ -108,7 +108,7 @@ pub(crate) fn change_password(
     })
     .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
     write_durable(&session.root().join(INTENT), &intent)?;
-    finish(session.root(), &conn, &current, &next, &change, store)?;
+    finish(session.root(), &conn, current, &next, &change, store)?;
     *context = next.into();
     session.set_blocked(false);
     Ok(())
@@ -343,7 +343,14 @@ mod tests {
         let db = fixture(dir.path(), &store);
         let pending = dir.path().join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
-        let original = db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let key = store.load(&original.vault_id, &original.key_id).unwrap();
         let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();
         let database = db
@@ -360,7 +367,10 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(db.secrets.read().unwrap().encrypted().unwrap().metadata(), &original);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(
             store.load(&original.vault_id, &original.key_id).unwrap(),
             key
@@ -385,7 +395,10 @@ mod tests {
         );
         assert!(!dir.path().join(INTENT).exists());
         let reopened = SecretSession::open_existing(dir.path(), &store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().encrypted().unwrap().metadata(), &original);
+        assert_eq!(
+            reopened.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
     }
 
     #[test]
@@ -396,7 +409,14 @@ mod tests {
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = raw_secret(&db);
-        let original = db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         change_password(&db, &store, "example protection password", false).unwrap();
         assert_eq!(raw_secret(&db), before);
         assert!(store
@@ -410,7 +430,16 @@ mod tests {
         let reopened =
             SecretSession::open_existing(dir.path(), &store, Some("example protection password"))
                 .unwrap();
-        assert_eq!(reopened.read().unwrap().encrypted().unwrap().metadata().key_id, original.key_id);
+        assert_eq!(
+            reopened
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .key_id,
+            original.key_id
+        );
         assert_eq!(
             db.get_setting("global_proxy_url").unwrap().as_deref(),
             Some("https://fixture.invalid")
@@ -488,7 +517,9 @@ mod tests {
         change_password(&db, &store, "original protection password", true).unwrap();
         let current = db.secrets.read().unwrap();
         let next = current
-            .encrypted().unwrap().with_password("replacement protection password")
+            .encrypted()
+            .unwrap()
+            .with_password("replacement protection password")
             .unwrap();
         let mut saved = read_metadata(dir.path()).unwrap();
         saved.metadata = next.metadata().clone();
@@ -561,7 +592,14 @@ mod tests {
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = std::fs::read(dir.path().join("vault.json")).unwrap();
-        let original = db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let ciphertext = raw_secret(&db);
         let invalid_home = home.path().join("synthetic-not-a-directory");
         std::fs::write(&invalid_home, b"synthetic").unwrap();
@@ -575,7 +613,10 @@ mod tests {
             std::fs::read(dir.path().join("vault.json")).unwrap(),
             before
         );
-        assert_eq!(db.secrets.read().unwrap().encrypted().unwrap().metadata(), &original);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(raw_secret(&db), ciphertext);
         assert!(!dir.path().join(INTENT).exists());
     }

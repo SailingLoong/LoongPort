@@ -109,6 +109,7 @@ fn authenticated_backup_image(
 
 /// Unpublished backup conversion; the complete-generation owner enumerates the
 /// original backup inventory and publishes only after every image is prepared.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn prepare_storage_backup_generation(
     source: &Connection,
     source_context: &StorageContext,
@@ -122,7 +123,7 @@ pub(crate) fn prepare_storage_backup_generation(
 
 // Connection flags belong only to an unpublished copy and are restored on both
 // success and failure. No caller-owned source connection reaches this helper.
-fn with_private_triggers_disabled<T>(
+pub(super) fn with_private_triggers_disabled<T>(
     image: &mut Connection,
     operation: impl FnOnce(&mut Connection) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
@@ -146,7 +147,7 @@ fn with_private_triggers_disabled<T>(
 // Both primary and backup conversion use exactly this admitted private-image
 // owner: original inventory walker, complete readback, trigger suppression and
 // physical-page cleanup. No export/reset projection or runtime stamping fallback.
-fn prepare_private_image(
+pub(super) fn prepare_private_image(
     mut image: Connection,
     current: &StorageContext,
     next: &StorageContext,
@@ -273,10 +274,8 @@ fn normalize_owned_identities(
     if let Some(identity) = storage_identity::stored(image)? {
         storage_identity::stamp(&canonical, &identity)?;
     }
-    fn objects(
-        conn: &Connection,
-        table: &str,
-    ) -> Result<Vec<(String, String, String, Option<String>)>, AppError> {
+    type SchemaObject = (String, String, String, Option<String>);
+    fn objects(conn: &Connection, table: &str) -> Result<Vec<SchemaObject>, AppError> {
         let mut statement = conn.prepare(
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name=?1 ORDER BY type,name",
         )?;

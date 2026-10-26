@@ -183,6 +183,7 @@ fn committed_cleanup_still_rejects_protected_previous_after_partial_deletion() {
     assert_eq!(support::tree(f.home.path()), before);
 }
 
+#[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
         "committed_cleanup_recovers_after_database_removed_before_sidecars" => {

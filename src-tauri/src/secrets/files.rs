@@ -14,6 +14,7 @@ impl CredentialFile {
         session.root().join(self.filename())
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn encode(
         self,
         vault: &VaultContext,
@@ -389,6 +390,21 @@ pub(crate) fn stage_owned_files_with_vault(
 }
 
 fn owned_file_paths(root: &std::path::Path) -> Result<Vec<(OwnedFile, PathBuf)>, AppError> {
+    owned_paths(root, false)
+}
+
+/// Passive membership, including interrupted files from the original durable writer.
+/// The ordinary codec inventory deliberately does not decode these partial writes.
+pub(super) fn owned_file_paths_with_staging(
+    root: &std::path::Path,
+) -> Result<Vec<(OwnedFile, PathBuf)>, AppError> {
+    owned_paths(root, true)
+}
+
+fn owned_paths(
+    root: &std::path::Path,
+    include_staging: bool,
+) -> Result<Vec<(OwnedFile, PathBuf)>, AppError> {
     let mut paths = Vec::new();
     let directories = std::iter::once("")
         .chain(BACKUP_PATTERNS.iter().map(|entry| entry.0))
@@ -401,13 +417,8 @@ fn owned_file_paths(root: &std::path::Path) -> Result<Vec<(OwnedFile, PathBuf)>,
         .collect::<std::collections::BTreeSet<_>>();
     for directory in directories {
         let path = root.join(&directory);
-        match std::fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(AppError::io(&path, error)),
-            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
-                return Err(AppError::Config("secret.invalid_storage_path".into()))
-            }
-            Ok(_) => {}
+        if !device_directory_exists(&path)? {
+            continue;
         }
         for entry in std::fs::read_dir(&path).map_err(|e| AppError::io(&path, e))? {
             let entry = entry.map_err(|e| AppError::io(&path, e))?;
@@ -415,7 +426,17 @@ fn owned_file_paths(root: &std::path::Path) -> Result<Vec<(OwnedFile, PathBuf)>,
             let identity = relative
                 .strip_prefix("backups/vault-recovery")
                 .unwrap_or(&relative);
-            if let Ok(file) = OwnedFile::registered(identity) {
+            let file = OwnedFile::registered(identity).or_else(|error| {
+                if !include_staging {
+                    return Err(error);
+                }
+                identity
+                    .to_str()
+                    .and_then(crate::config_file_io::staging_target_name)
+                    .ok_or(error)
+                    .and_then(OwnedFile::registered)
+            });
+            if let Ok(file) = file {
                 if !entry
                     .file_type()
                     .map_err(|e| AppError::io(entry.path(), e))?
