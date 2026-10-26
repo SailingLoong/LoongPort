@@ -6238,7 +6238,7 @@ fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
 
 #[test]
 #[serial_test::serial]
-fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live_to_v29() {
+fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live_to_current() {
     fn table_rows(conn: &rusqlite::Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
         let mut statement = conn
             .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
@@ -6399,7 +6399,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     let live = db.conn.lock().unwrap();
     assert_eq!(
         database::loongport_schema::read_stored_version(&live).unwrap(),
-        29
+        database::loongport_schema::LOONGPORT_SCHEMA_VERSION
     );
     assert_eq!(
         crate::database::read_qoder_campaign_operation_rows(&live).unwrap(),

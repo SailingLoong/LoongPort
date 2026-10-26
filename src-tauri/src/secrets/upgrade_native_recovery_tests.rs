@@ -12,7 +12,27 @@ pub(super) fn native_runtime(
     String,
     crate::store::AppState,
 ) {
+    native_runtime_at_version(f, app, 24)
+}
+
+pub(super) fn native_runtime_at_version(
+    f: &Fixture,
+    app: &AppType,
+    expected_version: i32,
+) -> (
+    UpgradeInspection,
+    AuthenticatedUpgrade,
+    String,
+    crate::store::AppState,
+) {
     use crate::live::patch::LivePatch;
+    let source = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+    assert_eq!(
+        crate::database::loongport_schema::read_stored_version(&source).unwrap(),
+        expected_version,
+        "the caller's declared source version must match before checkpoint work"
+    );
+    drop(source);
     publish_resume_fixture(f);
     let db = Database::from_connection(
         rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
@@ -36,9 +56,9 @@ pub(super) fn native_runtime(
             }
             _ => unreachable!(),
         };
-        // This is a retained deployed-v24 fixture, not a current provider write.
-        // Seed only its historical columns using the original credential codec;
-        // the current DAO requires the later credential-revision schema.
+        // Seed the caller's retained historical image using only its original
+        // columns and credential codec. Ordinary legacy DAO writes are supported
+        // separately; fixture setup must not migrate or issue current revisions.
         let context = crate::secrets::storage::StorageContext::Encrypted(f.vault.clone());
         let settings = crate::secrets::inventory::seal_db(
             &context,
@@ -59,7 +79,7 @@ pub(super) fn native_runtime(
         let conn = db.conn.lock().unwrap();
         assert_eq!(
             crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
-            24
+            expected_version
         );
         assert!(!conn
             .prepare("PRAGMA table_xinfo(providers)")
@@ -147,6 +167,12 @@ pub(super) fn native_runtime(
         Database::init_with_secrets(session).unwrap(),
     ))
     .unwrap();
+    assert_eq!(
+        crate::database::loongport_schema::read_stored_version(&state.db.conn.lock().unwrap())
+            .unwrap(),
+        expected_version,
+        "retained runtime publication must not migrate the declared source"
+    );
     (inspected, review, token, state)
 }
 
