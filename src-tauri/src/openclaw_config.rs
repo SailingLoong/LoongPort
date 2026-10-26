@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_state_override_is_used_without_creating_it() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         let state = temp.path().join("missing-state");
         std::env::set_var("OPENCLAW_STATE_DIR", &state);
@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_explicit_file_reads_and_writes_without_relocating_state() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let env = super::path_test_support::Environment::new(temp.path());
         let state = temp.path().join("missing-state");
         let config = temp.path().join("configs/custom.json5");
@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_missing_explicit_file_does_not_use_existing_default() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let env = super::path_test_support::Environment::new(temp.path());
         let default = temp.path().join(".openclaw/openclaw.json");
         fs::create_dir_all(default.parent().unwrap()).unwrap();
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_settings_override_wins_over_both_environment_selectors() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         let selected = temp.path().join("settings-choice");
         let mut settings = crate::settings::get_settings();
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_blank_selectors_keep_default_behavior() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         for value in ["", " \t\n "] {
             std::env::set_var("OPENCLAW_STATE_DIR", value);
@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_relative_selectors_resolve_against_cwd_not_home() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         let cwd = std::env::current_dir().unwrap();
         std::env::set_var("OPENCLAW_STATE_DIR", "  relative/../state  ");
@@ -1237,7 +1237,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_tilde_selectors_use_openclaw_home() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         let effective_home = temp.path().join("effective-home");
         std::env::set_var("OPENCLAW_HOME", &effective_home);
@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_home_override_and_literal_tilde_forms_match_upstream() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = super::path_test_support::Environment::new(temp.path());
         for ignored in ["", "  ", "undefined", " null "] {
             std::env::set_var("OPENCLAW_HOME", ignored);
@@ -1285,14 +1285,14 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_path_fixture_restores_prior_settings_owner_and_environment() {
-        let outer = tempfile::tempdir().unwrap();
+        let outer = crate::secrets::testing::tempdir().unwrap();
         let _outer_env = super::path_test_support::Environment::new(outer.path());
         let choice = outer.path().join("selected");
         let mut settings = crate::settings::get_settings();
         settings.openclaw_config_dir = Some(choice.to_string_lossy().into_owned());
         crate::settings::update_settings(settings).unwrap();
         std::env::set_var("OPENCLAW_STATE_DIR", "outer-state");
-        let inner = tempfile::tempdir().unwrap();
+        let inner = crate::secrets::testing::tempdir().unwrap();
         let inner_settings;
         let inner_bytes;
         {
@@ -1378,7 +1378,7 @@ mod tests {
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {
         let _guard = test_guard();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let openclaw_dir = temp.path().join(".openclaw");
         fs::create_dir_all(&openclaw_dir).unwrap();
         let config_path = openclaw_dir.join("openclaw.json");

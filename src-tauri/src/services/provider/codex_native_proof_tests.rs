@@ -1,6 +1,6 @@
 //! Bound-byte proof exercises the original writer's semantics, without invoking it.
 use super::*;
-use crate::secrets::{testing::TestHome, VaultContext};
+use crate::secrets::{storage::StorageContext, testing::TestHome, VaultContext};
 use serde_json::json;
 
 fn row() -> Provider {
@@ -34,7 +34,7 @@ fn pre(config: &str, auth: Option<&Value>) -> Vec<Option<Vec<u8>>> {
 fn proof(
     row: &Provider,
     settings: &crate::settings::AppSettings,
-    vault: &VaultContext,
+    vault: &StorageContext,
     pre: Vec<Option<Vec<u8>>>,
 ) -> Option<bool> {
     native_completion_match(
@@ -52,7 +52,7 @@ fn proof(
 #[serial_test::serial]
 fn bound_codex_proof_preserves_direct_remote_compaction_preferences() {
     let _home = TestHome::new().unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let settings = crate::settings::AppSettings::default();
     for name in ["OpenAI", "Relay"] {
         for capability in [None, Some("v2"), Some("unsupported")] {
@@ -95,7 +95,7 @@ fn bound_codex_proof_preserves_direct_remote_compaction_preferences() {
 #[cfg_attr(test, serial_test::serial)]
 fn bound_codex_proof_checks_route_auth_and_catalog_without_discovery() {
     let home = TestHome::new().unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let row = row();
     let settings = crate::settings::AppSettings::default();
     let config = config();
@@ -263,7 +263,7 @@ fn bound_codex_proof_checks_route_auth_and_catalog_without_discovery() {
     unknown_stash[4] = Some(
         DeviceFile::registered(STASH_FILENAME)
             .unwrap()
-            .encode(&vault, br#"{"future":true}"#)
+            .encode_storage(&vault, br#"{"future":true}"#)
             .unwrap(),
     );
     assert_eq!(proof(&row, &settings, &vault, unknown_stash), None);
@@ -279,7 +279,7 @@ fn bound_codex_proof_checks_route_auth_and_catalog_without_discovery() {
 #[cfg_attr(test, serial_test::serial)]
 fn bound_codex_proof_uses_original_auth_placement_and_official_login_semantics() {
     let _home = TestHome::new().unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let row = row();
     let settings = crate::settings::AppSettings {
         preserve_codex_official_auth_on_switch: false,
@@ -373,7 +373,7 @@ fn bound_codex_proof_uses_original_auth_placement_and_official_login_semantics()
         input[4] = Some(
             DeviceFile::registered(STASH_FILENAME)
                 .unwrap()
-                .encode(&vault, &serde_json::to_vec(&LoginStash::default()).unwrap())
+                .encode_storage(&vault, &serde_json::to_vec(&LoginStash::default()).unwrap())
                 .unwrap(),
         );
         assert_eq!(proof(&named, &settings, &vault, input), Some(true));
@@ -391,7 +391,7 @@ fn bound_codex_proof_uses_original_auth_placement_and_official_login_semantics()
 #[cfg_attr(test, serial_test::serial)]
 fn bound_codex_proof_defers_unbound_managed_name_path_ownership() {
     let home = TestHome::new().unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let settings = crate::settings::AppSettings::default();
     let mut row = row();
     let name = crate::live::project::codex::CATALOG_FILENAME;

@@ -6,7 +6,7 @@ use super::{
     protocol::{DispatchFailure, Endpoint, Transport},
     store,
 };
-use crate::secrets::{session::SecretSession, VaultMetadata};
+use crate::secrets::{session::SecretSession, storage::StorageIdentity};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -41,12 +41,12 @@ impl<T: Transport> Engine<'_, T> {
         let binding = store::binding(self.session)?;
         Ok(store::load(self.session, &binding)?
             .iter()
-            .map(|r| r.view(&binding.vault_id, &today(self.clock.now_ms())))
+            .map(|r| r.view(binding.store_id(), &today(self.clock.now_ms())))
             .collect())
     }
     async fn request(
         &self,
-        b: &VaultMetadata,
+        b: &StorageIdentity,
         e: Endpoint,
         snapshot: &SavedAccount,
     ) -> serde_json::Value {
@@ -74,7 +74,7 @@ impl<T: Transport> Engine<'_, T> {
                 _ => serde_json::json!({}),
             })
     }
-    async fn status(&self, b: &VaultMetadata, a: &SavedAccount) -> ClaimState {
+    async fn status(&self, b: &StorageIdentity, a: &SavedAccount) -> ClaimState {
         let request_day = today(self.clock.now_ms());
         let response = self.request(b, Endpoint::Status, a).await;
         if request_day != today(self.clock.now_ms()) {
@@ -83,7 +83,7 @@ impl<T: Transport> Engine<'_, T> {
             checkin::status(&response)
         }
     }
-    async fn credits(&self, b: &VaultMetadata, a: &SavedAccount) -> Credits {
+    async fn credits(&self, b: &StorageIdentity, a: &SavedAccount) -> Credits {
         let snapshot_day = today(self.clock.now_ms());
         let summary = self.request(b, Endpoint::Summary, a).await;
         let paid = self.request(b, Endpoint::Paid, a).await;
@@ -95,11 +95,11 @@ impl<T: Transport> Engine<'_, T> {
     }
     fn persist(
         &self,
-        b: &VaultMetadata,
+        b: &StorageIdentity,
         rows: Vec<SavedAccount>,
         index: usize,
     ) -> Result<AccountView, Failure> {
-        let view = rows[index].view(&b.vault_id, &today(self.clock.now_ms()));
+        let view = rows[index].view(b.store_id(), &today(self.clock.now_ms()));
         store::save(self.session, b, rows)?;
         Ok(view)
     }
@@ -142,7 +142,7 @@ impl<T: Transport> Engine<'_, T> {
     }
     async fn refresh_read(
         &self,
-        b: &VaultMetadata,
+        b: &StorageIdentity,
         epoch: u64,
         snapshot: &SavedAccount,
         endpoint: Endpoint,
@@ -199,7 +199,7 @@ impl<T: Transport> Engine<'_, T> {
             let b = store::binding(self.session)?;
             let row = store::load(self.session, &b)?
                 .into_iter()
-                .find(|r| r.account.id(&b.vault_id) == id)
+                .find(|r| r.account.id(b.store_id()) == id)
                 .ok_or(Failure::UnsupportedContext)?;
             (
                 b,
@@ -240,7 +240,7 @@ impl<T: Transport> Engine<'_, T> {
         if read_day != day {
             // The final owner wait can cross midnight after status() returned.
             // Keep the latest row intact instead of relabeling yesterday's read.
-            return Ok(rows[i].view(&b.vault_id, &day));
+            return Ok(rows[i].view(b.store_id(), &day));
         }
         if rows[i].pending.is_some() {
             self.resolve_pending(&mut rows[i], status, &credits);
@@ -303,7 +303,7 @@ impl<T: Transport> Engine<'_, T> {
             let rows = store::load(self.session, &b)?;
             let row = rows
                 .into_iter()
-                .find(|r| r.account.id(&b.vault_id) == id)
+                .find(|r| r.account.id(b.store_id()) == id)
                 .ok_or(Failure::UnsupportedContext)?;
             automatic_admission(&row, policy)?;
             (b, self.session.lifecycle_epoch(), row)
@@ -317,7 +317,7 @@ impl<T: Transport> Engine<'_, T> {
                     .as_deref()
                     .is_some_and(|d| d >= operation_day.as_str()))
         {
-            return Ok(snapshot.view(&b.vault_id, &operation_day));
+            return Ok(snapshot.view(b.store_id(), &operation_day));
         }
         let status = self.status(&b, &snapshot).await;
         let credits = if snapshot.pending.is_some() || status == ClaimState::Available {
@@ -420,7 +420,7 @@ impl<T: Transport> Engine<'_, T> {
         }
         self.persist(&b, rows, i)
     }
-    fn check_epoch(&self, b: &VaultMetadata, epoch: u64) -> Result<(), Failure> {
+    fn check_epoch(&self, b: &StorageIdentity, epoch: u64) -> Result<(), Failure> {
         if store::binding(self.session)? != *b || self.session.lifecycle_epoch() != epoch {
             return Err(Failure::ExpiredAuthorization);
         }
@@ -428,7 +428,7 @@ impl<T: Transport> Engine<'_, T> {
     }
     async fn dispatch_claim(
         &self,
-        b: &VaultMetadata,
+        b: &StorageIdentity,
         epoch: u64,
         prepared: &SavedAccount,
         policy: Option<(u64, u64)>,
@@ -488,12 +488,12 @@ impl<T: Transport> Engine<'_, T> {
 }
 pub(super) fn matched(
     rows: &[SavedAccount],
-    b: &VaultMetadata,
+    b: &StorageIdentity,
     expected: &SavedAccount,
 ) -> Result<usize, Failure> {
     rows.iter()
         .position(|r| {
-            r.account.id(&b.vault_id) == expected.account.id(&b.vault_id)
+            r.account.id(b.store_id()) == expected.account.id(b.store_id())
                 && r.generation == expected.generation
                 && r.account.token == expected.account.token
         })

@@ -1312,7 +1312,7 @@ mod tests {
         crate::Database::create_tables_on_conn(&conn).unwrap();
         crate::Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
         crate::database::loongport_schema::apply(&conn).unwrap();
-        crate::database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+        crate::database::vault::stamp(&conn, session.read().unwrap().encrypted().unwrap()).unwrap();
         session.complete_migration().unwrap();
         crate::settings::unlock_settings_for_test(session.clone()).unwrap();
         let db = std::sync::Arc::new(crate::Database::from_connection(conn, session));

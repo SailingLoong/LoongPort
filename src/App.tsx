@@ -107,6 +107,8 @@ import {
   type SettingsPageHandle,
 } from "@/components/settings/SettingsPage";
 import { UsagePage } from "@/components/usage/UsagePage";
+import { ThemeSettings } from "@/components/settings/ThemeSettings";
+import { CredentialProtectionEntry } from "@/components/relay/CredentialProtectionEntry";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
 import type { ServiceEntryIntent } from "@/components/relay/accounts/serviceEntryIntent";
@@ -189,6 +191,16 @@ const getInitialView = (): View => {
 };
 
 function App() {
+  const runtime = useQuery({
+    queryKey: ["runtimeAvailability"],
+    queryFn: () =>
+      invoke<{ credentialRuntimeAvailable: boolean }>(
+        "get_runtime_availability",
+      ),
+    retry: false,
+  });
+  const credentialRuntimeAvailable =
+    runtime.data?.credentialRuntimeAvailable === true && !runtime.isError;
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -240,13 +252,14 @@ function App() {
     enabled: false,
   });
   const providerWritesBlocked =
-    isProxyAppId(activeApp) &&
-    (!routingAdmission.data ||
-      Boolean(routingAdmission.error) ||
-      isApplicationRoutingWriteBlocked(
-        activeApp,
-        routingAdmission.data.modeState,
-      ));
+    !credentialRuntimeAvailable ||
+    (isProxyAppId(activeApp) &&
+      (!routingAdmission.data ||
+        Boolean(routingAdmission.error) ||
+        isApplicationRoutingWriteBlocked(
+          activeApp,
+          routingAdmission.data.modeState,
+        )));
   const setActiveApp = useCallback(
     (app: AppId) => {
       if (editingSessionApp.current && app !== editingSessionApp.current)
@@ -320,7 +333,9 @@ function App() {
     }
   }, [currentView]);
 
-  const { data: settingsData } = useSettingsQuery();
+  const { data: settingsData } = useSettingsQuery({
+    bootstrap: !credentialRuntimeAvailable,
+  });
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
@@ -385,7 +400,7 @@ function App() {
   const effectiveEditingProvider = useLastValidValue(editingProvider);
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
-  useAccountSessionStartup();
+  useAccountSessionStartup(undefined, credentialRuntimeAvailable);
   useUsageCacheBridge();
   useRelayDirectoryCacheBridge();
   useProviderModelsCacheBridge();
@@ -405,7 +420,7 @@ function App() {
     isRunning: isProxyRunning,
     takeoverStatus,
     status: proxyStatus,
-  } = useProxyStatus();
+  } = useProxyStatus(credentialRuntimeAvailable);
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
   const currentAppUsesProxy =
     proxyAppId !== null || activeApp === "claude-desktop";
@@ -420,11 +435,18 @@ function App() {
     return target?.provider_id;
   }, [proxyStatus?.active_targets, proxyAppId]);
 
-  const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
+  const {
+    data,
+    isLoading,
+    isError: providersReadFailed,
+    refetch,
+  } = useProvidersQuery(activeApp, {
     isProxyRunning: currentAppUsesProxy && isProxyRunning,
-    enabled: usesStore,
+    enabled: usesStore && credentialRuntimeAvailable,
   });
-  const { data: piCurrentState } = usePiCurrentState(activeApp === "pi");
+  const { data: piCurrentState } = usePiCurrentState(
+    credentialRuntimeAvailable && activeApp === "pi",
+  );
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const isOpenClawView =
     activeApp === "openclaw" &&
@@ -434,8 +456,9 @@ function App() {
       currentView === "openclawEnv" ||
       currentView === "openclawTools" ||
       currentView === "openclawAgents");
-  const { data: openclawHealthWarnings = [] } =
-    useOpenClawHealth(isOpenClawView);
+  const { data: openclawHealthWarnings = [] } = useOpenClawHealth(
+    credentialRuntimeAvailable && isOpenClawView,
+  );
 
   const {
     addProvider,
@@ -524,6 +547,7 @@ function App() {
     let unsubscribe: (() => void) | undefined;
     let active = true;
 
+    if (!credentialRuntimeAvailable) return;
     const setupListener = async () => {
       try {
         const off = await providersApi.onSwitched(
@@ -551,9 +575,10 @@ function App() {
       active = false;
       unsubscribe?.();
     };
-  }, [activeApp, queryClient, refetch]);
+  }, [credentialRuntimeAvailable, activeApp, queryClient, refetch]);
 
   useTauriEvent(UNIVERSAL_PROVIDER_SYNCED, async () => {
+    if (!credentialRuntimeAvailable) return;
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
     try {
       await providersApi.updateTrayMenu();
@@ -668,6 +693,7 @@ function App() {
   }, [useAppWindowControls, settingsData]);
 
   useEffect(() => {
+    if (!credentialRuntimeAvailable) return;
     const checkEnvOnStartup = async () => {
       try {
         const allConflicts = await checkAllEnvConflicts();
@@ -689,9 +715,10 @@ function App() {
     };
 
     checkEnvOnStartup();
-  }, []);
+  }, [credentialRuntimeAvailable]);
 
   useEffect(() => {
+    if (!credentialRuntimeAvailable) return;
     const checkMigration = async () => {
       try {
         const migrated = await invoke<boolean>("get_migration_result");
@@ -707,9 +734,10 @@ function App() {
     };
 
     checkMigration();
-  }, [t]);
+  }, [t, credentialRuntimeAvailable]);
 
   useEffect(() => {
+    if (!credentialRuntimeAvailable) return;
     const checkSkillsMigration = async () => {
       try {
         const result = await invoke<{ count: number; error?: string } | null>(
@@ -735,9 +763,10 @@ function App() {
     };
 
     checkSkillsMigration();
-  }, [t, queryClient]);
+  }, [t, queryClient, credentialRuntimeAvailable]);
 
   useEffect(() => {
+    if (!credentialRuntimeAvailable) return;
     const checkEnvOnSwitch = async () => {
       try {
         const conflicts = await checkEnvConflicts(activeApp);
@@ -766,7 +795,7 @@ function App() {
     };
 
     if (usesStore) void checkEnvOnSwitch();
-  }, [activeApp, usesStore]);
+  }, [activeApp, usesStore, credentialRuntimeAvailable]);
 
   const canGoBackRef = useRef(navigation.canGoBack);
   const managementBusy =
@@ -1065,17 +1094,29 @@ function App() {
     [activeApp, setCurrentView],
   );
 
-  const onboarding = useServiceOnboardingStatus();
+  const onboarding = useServiceOnboardingStatus(credentialRuntimeAvailable);
   const onboardingOpened = useRef(false);
   useEffect(() => {
-    if (onboarding.data?.shouldPrompt && !onboardingOpened.current) {
+    if (
+      credentialRuntimeAvailable &&
+      onboarding.isSuccess &&
+      !onboarding.isFetching &&
+      onboarding.data?.shouldPrompt &&
+      !onboardingOpened.current
+    ) {
       onboardingOpened.current = true;
       handleOpenAddHub("directory", { firstVisit: true });
     }
-  }, [onboarding.data?.shouldPrompt, handleOpenAddHub]);
+  }, [
+    credentialRuntimeAvailable,
+    onboarding.isSuccess,
+    onboarding.isFetching,
+    onboarding.data?.shouldPrompt,
+    handleOpenAddHub,
+  ]);
 
   const navigateSection = (view: View) => {
-    if (view === "plaza") {
+    if (credentialRuntimeAvailable && view === "plaza") {
       void settingsApi
         .plazaSetVisible(true)
         .then(() => queryClient.invalidateQueries({ queryKey: ["settings"] }))
@@ -1119,7 +1160,9 @@ function App() {
   const renderContent = () => {
     const providerList = (mutationsDisabled = false) => (
       <ProviderList
-        mutationsDisabled={mutationsDisabled}
+        mutationsDisabled={mutationsDisabled || providersReadFailed}
+        readFailed={providersReadFailed}
+        onRetryRead={() => void refetch()}
         showFailoverControls={false}
         providers={providers}
         appId={activeApp}
@@ -1445,7 +1488,7 @@ function App() {
         }
         footer={
           <>
-            <CcSwitchImportEntry />
+            {credentialRuntimeAvailable && <CcSwitchImportEntry />}
             <UpdateBadge
               onClick={() => {
                 setSettingsDefaultTab("about");
@@ -1458,30 +1501,32 @@ function App() {
           </>
         }
       />
-      {showEnvBanner && envConflicts.length > 0 && (
-        <EnvWarningBanner
-          conflicts={envConflicts}
-          onDismiss={() => {
-            setShowEnvBanner(false);
-            sessionStorage.setItem("env_banner_dismissed", "true");
-          }}
-          onDeleted={async () => {
-            try {
-              const allConflicts = await checkAllEnvConflicts();
-              const flatConflicts = Object.values(allConflicts).flat();
-              setEnvConflicts(flatConflicts);
-              if (flatConflicts.length === 0) {
-                setShowEnvBanner(false);
+      {credentialRuntimeAvailable &&
+        showEnvBanner &&
+        envConflicts.length > 0 && (
+          <EnvWarningBanner
+            conflicts={envConflicts}
+            onDismiss={() => {
+              setShowEnvBanner(false);
+              sessionStorage.setItem("env_banner_dismissed", "true");
+            }}
+            onDeleted={async () => {
+              try {
+                const allConflicts = await checkAllEnvConflicts();
+                const flatConflicts = Object.values(allConflicts).flat();
+                setEnvConflicts(flatConflicts);
+                if (flatConflicts.length === 0) {
+                  setShowEnvBanner(false);
+                }
+              } catch (error) {
+                console.error(
+                  "[App] Failed to re-check conflicts after deletion:",
+                  error,
+                );
               }
-            } catch (error) {
-              console.error(
-                "[App] Failed to re-check conflicts after deletion:",
-                error,
-              );
-            }
-          }}
-        />
-      )}
+            }}
+          />
+        )}
 
       <header
         hidden={currentView === "addHub"}
@@ -1574,203 +1619,205 @@ function App() {
             )}
           </div>
 
-          <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
-            {currentView === "providers" &&
-              (activeApp === "claude-desktop" || proxyAppId) && (
+          {credentialRuntimeAvailable && (
+            <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
+              {currentView === "providers" &&
+                (activeApp === "claude-desktop" || proxyAppId) && (
+                  <div
+                    className="flex shrink-0 items-center gap-1.5"
+                    style={{ WebkitAppRegion: "no-drag" } as any}
+                  >
+                    {activeApp === "claude-desktop" ? (
+                      <ClaudeDesktopRouteToggle />
+                    ) : proxyAppId ? (
+                      <>
+                        {settingsData?.enableLocalProxy && (
+                          <ProxyToggle activeApp={proxyAppId} />
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                )}
+              {currentView === "providers" &&
+                usesStore &&
+                (settingsData?.showProfileSwitcher ?? false) && (
+                  <div
+                    className="flex shrink-0 items-center"
+                    style={{ WebkitAppRegion: "no-drag" } as any}
+                  >
+                    <ProfileSwitcher activeApp={activeApp} />
+                  </div>
+                )}
+              {/* 固定右端：主操作（添加供应商等）shrink-0，任何配置下不被挤出 */}
+              <div className="flex shrink-0 items-center py-4">
                 <div
                   className="flex shrink-0 items-center gap-1.5"
                   style={{ WebkitAppRegion: "no-drag" } as any}
                 >
-                  {activeApp === "claude-desktop" ? (
-                    <ClaudeDesktopRouteToggle />
-                  ) : proxyAppId ? (
-                    <>
-                      {settingsData?.enableLocalProxy && (
-                        <ProxyToggle activeApp={proxyAppId} />
-                      )}
-                    </>
-                  ) : null}
-                </div>
-              )}
-            {currentView === "providers" &&
-              usesStore &&
-              (settingsData?.showProfileSwitcher ?? false) && (
-                <div
-                  className="flex shrink-0 items-center"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
-                >
-                  <ProfileSwitcher activeApp={activeApp} />
-                </div>
-              )}
-            {/* 固定右端：主操作（添加供应商等）shrink-0，任何配置下不被挤出 */}
-            <div className="flex shrink-0 items-center py-4">
-              <div
-                className="flex shrink-0 items-center gap-1.5"
-                style={{ WebkitAppRegion: "no-drag" } as any}
-              >
-                {currentView === "prompts" && promptPrimaryAction && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={promptManagementBusy}
-                    onClick={() => promptPanelRef.current?.openAdd()}
-                    className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    {t(
-                      promptPrimaryAction === "template"
-                        ? "pi.prompts.newTemplate"
-                        : "prompts.add",
-                    )}
-                  </Button>
-                )}
-                {currentView === "mcp" && (
-                  <>
+                  {currentView === "prompts" && promptPrimaryAction && (
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={mcpManagementBusy}
-                      onClick={() => mcpPanelRef.current?.openImport()}
-                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                    >
-                      <Download className="w-4 h-4 mr-2" />
-                      {t("mcp.importExisting")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={mcpManagementBusy}
-                      onClick={() => mcpPanelRef.current?.openAdd()}
+                      disabled={promptManagementBusy}
+                      onClick={() => promptPanelRef.current?.openAdd()}
                       className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <Plus className="w-4 h-4 mr-2" />
-                      {t("mcp.addMcp")}
-                    </Button>
-                  </>
-                )}
-                {currentView === "skills" && (
-                  <>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={
-                        skillsManagementBusy ||
-                        skillsCheckUpdatesState.isChecking ||
-                        !skillsCheckUpdatesState.hasSkills
-                      }
-                      onClick={() =>
-                        unifiedSkillsPanelRef.current?.checkUpdates()
-                      }
-                      className={cn(
-                        "hover:bg-black/5 dark:hover:bg-white/5",
-                        skillsManagementBusy && "disabled:opacity-100",
-                      )}
-                    >
-                      {skillsCheckUpdatesState.isChecking ? (
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4 mr-2" />
-                      )}
-                      {skillsCheckUpdatesState.isChecking
-                        ? t("skills.checkingUpdates")
-                        : t("skills.checkUpdates")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={skillsManagementBusy}
-                      onClick={() =>
-                        unifiedSkillsPanelRef.current?.openRestoreFromBackup()
-                      }
-                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                    >
-                      <History className="w-4 h-4 mr-2" />
-                      {t("skills.restoreFromBackup.button")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={skillsManagementBusy}
-                      onClick={() =>
-                        unifiedSkillsPanelRef.current?.openInstallFromZip()
-                      }
-                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                    >
-                      <FolderArchive className="w-4 h-4 mr-2" />
-                      {t("skills.installFromZip.button")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={skillsManagementBusy}
-                      onClick={() =>
-                        unifiedSkillsPanelRef.current?.openImport()
-                      }
-                      className="relative hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                      title={
-                        hasUnmanagedSkills
-                          ? t("skills.unmanagedAvailable")
-                          : undefined
-                      }
-                    >
-                      <Download className="w-4 h-4 mr-2" />
-                      {t("skills.import")}
-                      {hasUnmanagedSkills && (
-                        <span
-                          className="absolute top-1 right-1 h-2 w-2 rounded-full bg-green-500"
-                          aria-hidden="true"
-                        />
+                      {t(
+                        promptPrimaryAction === "template"
+                          ? "pi.prompts.newTemplate"
+                          : "prompts.add",
                       )}
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={skillsManagementBusy}
-                      onClick={() =>
-                        unifiedSkillsPanelRef.current?.openDiscovery()
-                      }
-                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
-                    >
-                      <Search className="w-4 h-4 mr-2" />
-                      {t("skills.discover")}
-                    </Button>
-                  </>
-                )}
-                {currentView === "skillsDiscovery" && (
-                  <>
-                    {getSkillsPageHeaderActions(skillsDiscoverySource).map(
-                      ({ key, labelKey, Icon, execute }) => (
-                        <Button
-                          key={key}
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => execute(skillsPageRef.current)}
-                          className="hover:bg-black/5 dark:hover:bg-white/5"
-                        >
-                          <Icon className="w-4 h-4 mr-2" />
-                          {t(labelKey)}
-                        </Button>
-                      ),
-                    )}
-                  </>
-                )}
-                {currentView === "providers" && usesStore && (
-                  <>
-                    <Button
-                      onClick={() => handleOpenAddHub()}
-                      size="sm"
-                      className="ml-2 gap-1.5"
-                      aria-label={t("loongport.addEntry.title")}
-                      title={t("loongport.addEntry.title")}
-                    >
-                      <Plus className="w-4 h-4" />
-                      {t("client.addService")}
-                    </Button>
-                  </>
-                )}
+                  )}
+                  {currentView === "mcp" && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={mcpManagementBusy}
+                        onClick={() => mcpPanelRef.current?.openImport()}
+                        className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        {t("mcp.importExisting")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={mcpManagementBusy}
+                        onClick={() => mcpPanelRef.current?.openAdd()}
+                        className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                      >
+                        <Plus className="w-4 h-4 mr-2" />
+                        {t("mcp.addMcp")}
+                      </Button>
+                    </>
+                  )}
+                  {currentView === "skills" && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={
+                          skillsManagementBusy ||
+                          skillsCheckUpdatesState.isChecking ||
+                          !skillsCheckUpdatesState.hasSkills
+                        }
+                        onClick={() =>
+                          unifiedSkillsPanelRef.current?.checkUpdates()
+                        }
+                        className={cn(
+                          "hover:bg-black/5 dark:hover:bg-white/5",
+                          skillsManagementBusy && "disabled:opacity-100",
+                        )}
+                      >
+                        {skillsCheckUpdatesState.isChecking ? (
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-4 h-4 mr-2" />
+                        )}
+                        {skillsCheckUpdatesState.isChecking
+                          ? t("skills.checkingUpdates")
+                          : t("skills.checkUpdates")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={skillsManagementBusy}
+                        onClick={() =>
+                          unifiedSkillsPanelRef.current?.openRestoreFromBackup()
+                        }
+                        className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                      >
+                        <History className="w-4 h-4 mr-2" />
+                        {t("skills.restoreFromBackup.button")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={skillsManagementBusy}
+                        onClick={() =>
+                          unifiedSkillsPanelRef.current?.openInstallFromZip()
+                        }
+                        className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                      >
+                        <FolderArchive className="w-4 h-4 mr-2" />
+                        {t("skills.installFromZip.button")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={skillsManagementBusy}
+                        onClick={() =>
+                          unifiedSkillsPanelRef.current?.openImport()
+                        }
+                        className="relative hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                        title={
+                          hasUnmanagedSkills
+                            ? t("skills.unmanagedAvailable")
+                            : undefined
+                        }
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        {t("skills.import")}
+                        {hasUnmanagedSkills && (
+                          <span
+                            className="absolute top-1 right-1 h-2 w-2 rounded-full bg-green-500"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={skillsManagementBusy}
+                        onClick={() =>
+                          unifiedSkillsPanelRef.current?.openDiscovery()
+                        }
+                        className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
+                      >
+                        <Search className="w-4 h-4 mr-2" />
+                        {t("skills.discover")}
+                      </Button>
+                    </>
+                  )}
+                  {currentView === "skillsDiscovery" && (
+                    <>
+                      {getSkillsPageHeaderActions(skillsDiscoverySource).map(
+                        ({ key, labelKey, Icon, execute }) => (
+                          <Button
+                            key={key}
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => execute(skillsPageRef.current)}
+                            className="hover:bg-black/5 dark:hover:bg-white/5"
+                          >
+                            <Icon className="w-4 h-4 mr-2" />
+                            {t(labelKey)}
+                          </Button>
+                        ),
+                      )}
+                    </>
+                  )}
+                  {currentView === "providers" && usesStore && (
+                    <>
+                      <Button
+                        onClick={() => handleOpenAddHub()}
+                        size="sm"
+                        className="ml-2 gap-1.5"
+                        aria-label={t("loongport.addEntry.title")}
+                        title={t("loongport.addEntry.title")}
+                      >
+                        <Plus className="w-4 h-4" />
+                        {t("client.addService")}
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </header>
 
@@ -1779,162 +1826,189 @@ function App() {
         tabIndex={-1}
         className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in focus:outline-none"
       >
-        {isOpenClawView && openclawHealthWarnings.length > 0 && (
-          <OpenClawHealthBanner warnings={openclawHealthWarnings} />
+        {!credentialRuntimeAvailable ? (
+          <div className="page-content space-y-5">
+            <p role="status" className="rounded-lg border p-4 text-sm">
+              {t(
+                runtime.isPending
+                  ? "common.loading"
+                  : "secrets.runtimeUnavailable",
+              )}
+            </p>
+            {!runtime.isPending && <CredentialProtectionEntry showInline />}
+            {currentView === "settings" && <ThemeSettings />}
+          </div>
+        ) : (
+          <>
+            {isOpenClawView && openclawHealthWarnings.length > 0 && (
+              <OpenClawHealthBanner warnings={openclawHealthWarnings} />
+            )}
+            <PreservedView active={currentView === "services"}>
+              <ServicesPage
+                appId={activeApp}
+                account={navigation.account}
+                platform={navigation.platform}
+                onOpenPlatform={(platform) =>
+                  setCurrentView("services", activeApp, undefined, platform)
+                }
+                onNavigationBlockedChange={setZcodeNavigationBusy}
+                onBack={navigation.back}
+                onSelectAccount={(account, app) =>
+                  setCurrentView("services", app, account)
+                }
+                onOpenAddHub={handleOpenAddHub}
+                onOpenApp={(app) =>
+                  setCurrentView(
+                    app === "codex-image" ? "image" : "providers",
+                    app,
+                  )
+                }
+              />
+            </PreservedView>
+            {PROVIDER_STORE_APP_IDS.map((app) => (
+              <PreservedView
+                key={`add-${app}`}
+                active={currentView === "addHub" && activeApp === app}
+              >
+                <AddHubPage
+                  sourceAppId={app}
+                  entryRequest={addHubEntries[app]}
+                  onOpenPlatform={(platform) =>
+                    setCurrentView("services", app, undefined, platform)
+                  }
+                  firstVisit={addHubEntries[app]?.firstVisit}
+                  onBack={goBack}
+                  onAddProvider={addProvider}
+                />
+              </PreservedView>
+            ))}
+            {PROVIDER_STORE_APP_IDS.map((app) => (
+              <PreservedView
+                key={`plaza-${app}`}
+                active={currentView === "plaza" && activeApp === app}
+              >
+                <RelayDirectoryConnectionPage
+                  sourceAppId={app}
+                  onBack={goBack}
+                />
+              </PreservedView>
+            ))}
+            {!["services", "addHub", "plaza"].includes(currentView) &&
+              renderContent()}
+          </>
         )}
-        <PreservedView active={currentView === "services"}>
-          <ServicesPage
-            appId={activeApp}
-            account={navigation.account}
-            platform={navigation.platform}
-            onOpenPlatform={(platform) =>
-              setCurrentView("services", activeApp, undefined, platform)
-            }
-            onNavigationBlockedChange={setZcodeNavigationBusy}
-            onBack={navigation.back}
-            onSelectAccount={(account, app) =>
-              setCurrentView("services", app, account)
-            }
-            onOpenAddHub={handleOpenAddHub}
-            onOpenApp={(app) =>
-              setCurrentView(app === "codex-image" ? "image" : "providers", app)
-            }
-          />
-        </PreservedView>
-        {PROVIDER_STORE_APP_IDS.map((app) => (
-          <PreservedView
-            key={`add-${app}`}
-            active={currentView === "addHub" && activeApp === app}
-          >
-            <AddHubPage
-              sourceAppId={app}
-              entryRequest={addHubEntries[app]}
-              onOpenPlatform={(platform) =>
-                setCurrentView("services", app, undefined, platform)
-              }
-              firstVisit={addHubEntries[app]?.firstVisit}
-              onBack={goBack}
-              onAddProvider={addProvider}
-            />
-          </PreservedView>
-        ))}
-        {PROVIDER_STORE_APP_IDS.map((app) => (
-          <PreservedView
-            key={`plaza-${app}`}
-            active={currentView === "plaza" && activeApp === app}
-          >
-            <RelayDirectoryConnectionPage sourceAppId={app} onBack={goBack} />
-          </PreservedView>
-        ))}
-        {!["services", "addHub", "plaza"].includes(currentView) &&
-          renderContent()}
       </main>
 
-      <ConfirmDialog
-        isOpen={leaveDraftOpen}
-        title={t("applications.leaveDraftTitle")}
-        message={t("applications.leaveDraftDescription")}
-        cancelText={t("loongport.tier.editConfirmButton")}
-        confirmText={t("applications.discardAndLeave")}
-        onCancel={cancelLeaveDraft}
-        onConfirm={() => {
-          const proceed = pendingNavigation.current;
-          cancelLeaveDraft();
-          if (!proceed) return;
-          if (
-            workspaceRef.current?.submitting ||
-            settingsRef.current?.submitting ||
-            managedAccountRef.current?.submitting
-          ) {
-            toast.info(t("common.saving"));
-            return;
-          }
-          workspaceRef.current?.discard();
-          settingsRef.current?.discard();
-          managedAccountRef.current?.discard();
-          proceed();
-        }}
-      />
-      <PreservedView active={currentView !== "services"}>
-        <EditProviderDialog
-          mutationsDisabled={providerWritesBlocked}
-          open={Boolean(editingProvider)}
-          provider={effectiveEditingProvider}
-          onOpenChange={(open) => {
-            if (!open) {
-              editingSessionApp.current = null;
-              setEditingProvider(null);
+      {credentialRuntimeAvailable && (
+        <>
+          <CredentialProtectionEntry />
+          <ConfirmDialog
+            isOpen={leaveDraftOpen}
+            title={t("applications.leaveDraftTitle")}
+            message={t("applications.leaveDraftDescription")}
+            cancelText={t("loongport.tier.editConfirmButton")}
+            confirmText={t("applications.discardAndLeave")}
+            onCancel={cancelLeaveDraft}
+            onConfirm={() => {
+              const proceed = pendingNavigation.current;
+              cancelLeaveDraft();
+              if (!proceed) return;
+              if (
+                workspaceRef.current?.submitting ||
+                settingsRef.current?.submitting ||
+                managedAccountRef.current?.submitting
+              ) {
+                toast.info(t("common.saving"));
+                return;
+              }
+              workspaceRef.current?.discard();
+              settingsRef.current?.discard();
+              managedAccountRef.current?.discard();
+              proceed();
+            }}
+          />
+          <PreservedView active={currentView !== "services"}>
+            <EditProviderDialog
+              mutationsDisabled={providerWritesBlocked}
+              open={Boolean(editingProvider)}
+              provider={effectiveEditingProvider}
+              onOpenChange={(open) => {
+                if (!open) {
+                  editingSessionApp.current = null;
+                  setEditingProvider(null);
+                }
+              }}
+              onSubmit={handleEditProvider}
+              appId={activeApp}
+              isProxyTakeover={isCurrentAppTakeoverActive}
+            />
+          </PreservedView>
+
+          {effectiveUsageProvider && (
+            <UsageScriptModal
+              mutationsDisabled={providerWritesBlocked}
+              key={effectiveUsageProvider.id}
+              provider={effectiveUsageProvider}
+              appId={activeApp}
+              isOpen={Boolean(usageProvider)}
+              onClose={() => setUsageProvider(null)}
+              onSave={(script) => {
+                if (usageProvider && !providerWritesBlocked) {
+                  void saveUsageScript(usageProvider, script);
+                }
+              }}
+            />
+          )}
+
+          <ConfirmDialog
+            confirmDisabled={providerWritesBlocked}
+            isOpen={Boolean(confirmAction)}
+            title={
+              confirmAction?.action === "remove"
+                ? t("confirm.removeProvider")
+                : t("confirm.deleteProvider")
             }
-          }}
-          onSubmit={handleEditProvider}
-          appId={activeApp}
-          isProxyTakeover={isCurrentAppTakeoverActive}
-        />
-      </PreservedView>
+            message={confirmActionMessage}
+            onConfirm={() => void handleConfirmAction()}
+            onCancel={() => setConfirmAction(null)}
+          />
 
-      {effectiveUsageProvider && (
-        <UsageScriptModal
-          mutationsDisabled={providerWritesBlocked}
-          key={effectiveUsageProvider.id}
-          provider={effectiveUsageProvider}
-          appId={activeApp}
-          isOpen={Boolean(usageProvider)}
-          onClose={() => setUsageProvider(null)}
-          onSave={(script) => {
-            if (usageProvider && !providerWritesBlocked) {
-              void saveUsageScript(usageProvider, script);
-            }
-          }}
-        />
-      )}
+          <ConfirmDialog
+            isOpen={launchDashboardOpen}
+            title={t("hermes.webui.launchConfirmTitle")}
+            message={t("hermes.webui.launchConfirmMessage")}
+            confirmText={t("hermes.webui.launchConfirmAction")}
+            variant="info"
+            onConfirm={() => {
+              setLaunchDashboardOpen(false);
+              void (async () => {
+                try {
+                  await hermesApi.launchDashboard();
+                  toast.success(t("hermes.webui.launching"));
+                } catch (error) {
+                  toast.error(t("hermes.webui.launchFailed"), {
+                    description: extractErrorMessage(error) || undefined,
+                  });
+                }
+              })();
+            }}
+            onCancel={() => setLaunchDashboardOpen(false)}
+          />
 
-      <ConfirmDialog
-        confirmDisabled={providerWritesBlocked}
-        isOpen={Boolean(confirmAction)}
-        title={
-          confirmAction?.action === "remove"
-            ? t("confirm.removeProvider")
-            : t("confirm.deleteProvider")
-        }
-        message={confirmActionMessage}
-        onConfirm={() => void handleConfirmAction()}
-        onCancel={() => setConfirmAction(null)}
-      />
+          <DeepLinkImportDialog />
 
-      <ConfirmDialog
-        isOpen={launchDashboardOpen}
-        title={t("hermes.webui.launchConfirmTitle")}
-        message={t("hermes.webui.launchConfirmMessage")}
-        confirmText={t("hermes.webui.launchConfirmAction")}
-        variant="info"
-        onConfirm={() => {
-          setLaunchDashboardOpen(false);
-          void (async () => {
-            try {
-              await hermesApi.launchDashboard();
-              toast.success(t("hermes.webui.launching"));
-            } catch (error) {
-              toast.error(t("hermes.webui.launchFailed"), {
-                description: extractErrorMessage(error) || undefined,
-              });
-            }
-          })();
-        }}
-        onCancel={() => setLaunchDashboardOpen(false)}
-      />
+          {/* 远端公告：状态机在组件内，这里只挂一行。无公告时零存在感。 */}
+          <AnnouncementDialog />
 
-      <DeepLinkImportDialog />
-
-      {/* 远端公告：状态机在组件内，这里只挂一行。无公告时零存在感。 */}
-      <AnnouncementDialog />
-
-      {/* 模型对齐告警横幅：客户端模型 ≠ 档位已选模型（实际计费模型）时常驻
+          {/* 模型对齐告警横幅：客户端模型 ≠ 档位已选模型（实际计费模型）时常驻
           告知 + 一键出口。状态机在组件内，这里只挂一行；无不符时零存在感。 */}
-      <ModelMismatchBanner />
+          <ModelMismatchBanner />
 
-      {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
+          {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
           持有全部状态（弹不弹、切哪个），这里只挂一行 —— 与上面那个同一个模式。 */}
-      {switchDialog}
+          {switchDialog}
+        </>
+      )}
 
       {/* **这里没有首启欢迎弹窗，是有意的。** 上游那个（`FirstRunNoticeDialog`）讲的是
           CC Switch 怎么在多个供应商之间切换，与 LoongPort 的流程无关；而且它和域名输入

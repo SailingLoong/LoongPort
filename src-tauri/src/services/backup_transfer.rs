@@ -1,43 +1,30 @@
 use crate::{
-    database::Database,
-    error::AppError,
-    secrets::{key_store::KeyStore, session::read_metadata, transition::install_generation},
+    database::Database, error::AppError, secrets::key_store::KeyStore,
     services::skill::skill_state_write_guard,
 };
 
 /// The command owns the common sync mutex across source validation and install.
-/// Manual backups restore content into the current device's key generation.
+/// Explicit local SQL restore retains this device's storage mode and generation.
 pub(crate) fn restore_sql(
     db: &Database,
     sql: &str,
     password: Option<&str>,
-    store: &dyn KeyStore,
+    _store: &dyn KeyStore,
 ) -> Result<String, AppError> {
-    let current = db.secrets.read()?.clone();
-    let incoming = db.prepare_backup_content(sql, password, &current)?;
-    let automatic_unlock = read_metadata(db.secrets.root())?.automatic_unlock;
+    crate::services::sync_protocol::ensure_upgrade_sync_admitted()?;
+    let incoming = {
+        let current = db.secrets.read()?;
+        crate::secrets::protection::validate_runtime_storage(db.secrets.root(), &current)?;
+        db.prepare_backup_content_for_storage(sql, password, &current, &current)?
+    };
+    // The original installer reacquires the session guard and checks the typed
+    // destination before its safety backup and one SQLite replacement. Do not
+    // retain a recursive read guard behind a waiting lifecycle writer.
     let _skills = skill_state_write_guard();
-    // Authentication and schema validation finish before even the safety copy.
-    let safety = db.backup_database_file()?;
-    install_generation(
-        db,
-        store,
-        current,
-        automatic_unlock,
-        |connection, current, next| {
-            Database::prepare_sync_join(incoming, connection, current, next)
-        },
-        None,
-    )?;
-    Ok(safety
-        .and_then(|path| {
-            path.file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_default())
+    db.install_backup_content_for_storage(incoming)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
     use crate::secrets::{
@@ -75,7 +62,7 @@ mod tests {
         let session = SecretSession::open(&home.root(), store, None).unwrap();
         let conn = crate::database::vault::prepare(
             &home.root().join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         session.complete_migration().unwrap();
@@ -124,13 +111,23 @@ mod tests {
         let sql = portable_sql(&home);
         let store = MemoryKeyStore::default();
         let db = local(&home, &store);
-        let before = db.secrets.read().unwrap().metadata().clone();
+        let before = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         CredentialFile::Codex
             .write(&db.secrets, br#"{"token":"local-signin-canary"}"#)
             .unwrap();
         let safety = restore_sql(&db, &sql, Some("backup source password"), &store).unwrap();
         assert!(!safety.is_empty());
-        assert_eq!(db.secrets.read().unwrap().metadata(), &before);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &before
+        );
         let provider = db
             .get_provider_by_id("restored-provider", "claude")
             .unwrap()
@@ -141,25 +138,29 @@ mod tests {
             .unwrap()
             .contains("local-signin-canary"));
         let reopened = SecretSession::open_existing(&home.root(), &store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().metadata(), &before);
+        assert_eq!(
+            reopened.read().unwrap().encrypted().unwrap().metadata(),
+            &before
+        );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials() {
         let home = Home::new();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
         Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
-        crate::database::loongport_schema::apply(&conn).unwrap();
-        let source = Database::from_connection(conn, SecretSession::ephemeral().unwrap());
-        {
-            let conn = source.conn.lock().unwrap();
-            conn.execute_batch("DROP TABLE IF EXISTS loongport_vault;
-                INSERT INTO providers(id,app_type,name,settings_config,meta)
-                VALUES ('legacy-provider','claude','Legacy provider','{\"apiKey\":\"legacy-backup-canary\"}','{}')").unwrap();
-        }
-        let sql = source.export_sql_string().unwrap();
+        // An actual pre-protection source has no modern LoongPort stamp.
+        // Applying today's schema and deleting its identity is damaged storage,
+        // not legacy plaintext admission.
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+            0
+        );
+        conn.execute_batch("INSERT INTO providers(id,app_type,name,settings_config,meta)
+            VALUES ('legacy-provider','claude','Legacy provider','{\"apiKey\":\"legacy-backup-canary\"}','{}')").unwrap();
+        let sql = Database::dump_sql(&conn, &[]).unwrap();
         let store = MemoryKeyStore::default();
         let db = local(&home, &store);
 
@@ -176,6 +177,41 @@ mod tests {
             .contains("legacy-backup-canary"));
     }
 
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn modern_unmarked_plaintext_backup_is_rejected_without_writes() {
+        let home = Home::new();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        assert!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap()
+                >= crate::database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION
+        );
+        conn.execute_batch("DROP TABLE IF EXISTS loongport_vault;
+            INSERT INTO providers(id,app_type,name,settings_config,meta)
+            VALUES ('damaged-provider','claude','Damaged provider','{\"apiKey\":\"damaged-backup-canary\"}','{}')").unwrap();
+        let sql = Database::dump_sql(&conn, &[]).unwrap();
+        let store = MemoryKeyStore::default();
+        let db = local(&home, &store);
+        let before = crate::secrets::transition::fence_test_support::tree(home.temporary.path());
+        let digest = Database::content_digest(&db.conn.lock().unwrap()).unwrap();
+        let error = restore_sql(&db, &sql, None, &store).unwrap_err();
+        assert!(
+            matches!(error, AppError::Config(ref code) if code == "secret.metadata_missing"),
+            "modern missing metadata must not become legacy: {error}"
+        );
+        assert_eq!(
+            crate::secrets::transition::fence_test_support::tree(home.temporary.path()),
+            before
+        );
+        assert_eq!(
+            Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
+            digest
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn portable_backup_remains_restorable_after_its_system_key_is_retired() {
@@ -185,12 +221,26 @@ mod tests {
         crate::secrets::transition::rotate(&db, &store, "first backup password", true).unwrap();
         db.set_setting("common_config_claude", "retired-key-content")
             .unwrap();
-        let previous = db.secrets.read().unwrap().metadata().clone();
+        let previous = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let path = home.temporary.path().join("retained-backup.sql");
         db.export_sql(&path).unwrap();
         let sql = std::fs::read_to_string(path).unwrap();
         crate::secrets::transition::rotate(&db, &store, "current device password", true).unwrap();
-        let current = db.secrets.read().unwrap().metadata().clone();
+        let current = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         assert!(store
             .load(&previous.vault_id, &previous.key_id)
             .unwrap()
@@ -200,7 +250,10 @@ mod tests {
 
         restore_sql(&db, &sql, Some("first backup password"), &store).unwrap();
 
-        assert_eq!(db.secrets.read().unwrap().metadata(), &current);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &current
+        );
         assert_eq!(
             db.get_setting("common_config_claude").unwrap().as_deref(),
             Some("retired-key-content")
@@ -223,7 +276,14 @@ mod tests {
             if receiver_version == 20 {
                 Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
             }
-            let original_metadata = db.secrets.read().unwrap().metadata().clone();
+            let original_metadata = db
+                .secrets
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .clone();
             CredentialFile::Codex
                 .write(&db.secrets, br#"{"token":"retained-local-token"}"#)
                 .unwrap();
@@ -273,7 +333,10 @@ mod tests {
                 Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
                 receiver_version
             );
-            assert_eq!(db.secrets.read().unwrap().metadata(), &original_metadata);
+            assert_eq!(
+                db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+                &original_metadata
+            );
             assert_eq!(
                 &**CredentialFile::Codex.read(&db.secrets).unwrap().unwrap(),
                 br#"{"token":"retained-local-token"}"#
@@ -318,4 +381,18 @@ mod tests {
             Some("local-content-canary")
         );
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_transfer/storage_restore_tests.rs"]
+pub(crate) mod storage_restore_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_explicit_legacy_plaintext_file_restore() {
+    tests::explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials();
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_modern_unmarked_plaintext_backup() {
+    tests::modern_unmarked_plaintext_backup_is_rejected_without_writes();
 }

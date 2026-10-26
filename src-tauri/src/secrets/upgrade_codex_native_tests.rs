@@ -702,7 +702,13 @@ fn codex_outgoing_completion_validates_native_api_key_payload() {
         assert!(checkpoint::verified_database_id(
             &f.root,
             &f.device,
-            &runtime.db.secret_session().read().unwrap()
+            runtime
+                .db
+                .secret_session()
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
         )
         .unwrap()
         .is_some());

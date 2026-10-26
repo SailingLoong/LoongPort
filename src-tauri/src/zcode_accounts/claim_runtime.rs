@@ -170,9 +170,7 @@ struct Prepared {
     ctx: LibraryContext,
     id: String,
     revision: String,
-    vault_id: String,
-    key_id: String,
-    vault_revision: u64,
+    storage: crate::secrets::storage::StorageIdentity,
     jwt: StartJwt,
     version: String,
 }
@@ -210,14 +208,12 @@ async fn prepare(
                 super::native_context::library_app_version(ctx.data_root())
             }
             .ok_or("appVersionUnknown")?;
-            let meta = vault.metadata();
+
             Ok(Prepared {
                 ctx,
                 id,
                 revision: status.revision,
-                vault_id: meta.vault_id.clone(),
-                key_id: meta.key_id.clone(),
-                vault_revision: meta.revision,
+                storage: vault.identity(),
                 jwt,
                 version,
             })
@@ -235,8 +231,8 @@ fn check(db: &Database, p: &Prepared, lease: &Lease, automatic: bool) -> Result<
         .secret_session()
         .read()
         .map_err(|_| OfficialError::Cancelled)?;
-    let meta = vault.metadata();
-    if meta.vault_id != p.vault_id || meta.key_id != p.key_id || meta.revision != p.vault_revision {
+
+    if vault.identity() != p.storage {
         return Err(OfficialError::Cancelled);
     }
     let store = VaultAccountStore::new(db.secret_session().root(), &vault)
@@ -1016,7 +1012,7 @@ mod tests {
         );
         let snapshot = native.inspect(&doc).unwrap();
         let id = snapshot.identity().opaque_id();
-        let (revision, vault_id, key_id, vault_revision) = {
+        let (revision, storage) = {
             let vault = db.secret_session().read().unwrap();
             let store = VaultAccountStore::new(db.secret_session().root(), &vault).unwrap();
             let old = store.catalog_status(&native).unwrap();
@@ -1031,16 +1027,13 @@ mod tests {
                 )
                 .unwrap();
             let revision = store.catalog_status(&native).unwrap().revision;
-            let m = vault.metadata();
-            (revision, m.vault_id.clone(), m.key_id.clone(), m.revision)
+            (revision, vault.identity())
         };
         let p = Prepared {
             ctx,
             id,
             revision,
-            vault_id,
-            key_id,
-            vault_revision,
+            storage,
             jwt: StartJwt::new("synthetic-jwt").unwrap(),
             version: "3.11.2".into(),
         };

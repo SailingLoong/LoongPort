@@ -6,7 +6,10 @@ import { relayApi } from "@/lib/api/relay";
 import { serviceAccountsKey } from "./useServiceAccounts";
 
 /** Mount once in the application shell, independently of pages and queries. */
-export function useAccountSessionStartup(onExpired?: () => void) {
+export function useAccountSessionStartup(
+  onExpired?: () => void,
+  enabled = true,
+) {
   const client = useQueryClient();
   const { t } = useTranslation();
   const latest = useRef({ t, onExpired });
@@ -14,6 +17,7 @@ export function useAccountSessionStartup(onExpired?: () => void) {
   const probe = useRef<Promise<number[]> | null>(null);
 
   useEffect(() => {
+    if (!enabled) return;
     let active = true;
     // Reuse the startup request during StrictMode's effect replay.
     probe.current ??= relayApi.checkSession();
@@ -33,5 +37,5 @@ export function useAccountSessionStartup(onExpired?: () => void) {
     return () => {
       active = false;
     };
-  }, [client]);
+  }, [client, enabled]);
 }

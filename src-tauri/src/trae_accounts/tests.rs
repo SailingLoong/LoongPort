@@ -1,4 +1,5 @@
 use super::store::*;
+use super::test_fixtures::account;
 use crate::secrets::{session::SecretSession, VaultContext};
 use std::sync::Arc;
 struct Fixture {
@@ -29,44 +30,7 @@ impl Fixture {
         id
     }
 }
-fn account(id: &str, realm: Realm) -> Account {
-    Account {
-        id: id.into(),
-        uid: "synthetic-user".into(),
-        realm,
-        generation: 1,
-        version: 1,
-        device: Device {
-            auth_host: realm.auth().into(),
-            native_package: None,
-            uid: "synthetic-user".into(),
-            id: "synthetic-device".into(),
-            machine: "synthetic-machine".into(),
-            client: "ono9krqynydwx5".into(),
-            version: "synthetic-version".into(),
-            version_code: "20260917".into(),
-            os: "linux".into(),
-            os_version: "synthetic-os".into(),
-            source_digest: "a".repeat(64),
-            private_key: String::new(),
-            public_key: String::new(),
-        },
-        grant: Some(Grant {
-            access: "synthetic-access".into(),
-            refresh: "synthetic-refresh".into(),
-            expires: now() + 3600000,
-        }),
-        refresh_pending: false,
-        checkin_day: None,
-        checkin_attempt: None,
-        auto_checkin_enabled: false,
-        auto_checkin_revision: 0,
-        imported_refresh_hash: {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(b"synthetic-refresh"))
-        },
-    }
-}
+
 #[tokio::test]
 async fn encrypted_owner_survives_restart_without_plaintext() {
     let f = Fixture::new().await;
@@ -74,7 +38,7 @@ async fn encrypted_owner_survives_restart_without_plaintext() {
     let raw = std::fs::read(f.root.path().join("trae_accounts.json")).unwrap();
     assert!(!String::from_utf8_lossy(&raw).contains("synthetic-access"));
     let vault = f.session.read().unwrap().clone();
-    let restart = SecretSession::from_context(f.root.path().into(), vault);
+    let restart = SecretSession::from_storage_context(f.root.path().into(), vault);
     assert_eq!(
         snapshot(&restart, &id).await.unwrap().account.uid,
         "synthetic-user"
@@ -571,8 +535,10 @@ async fn cn_checkin_uses_original_device_and_persists_claim_admission() {
         assert_eq!(calls[1].headers["x-device-id"], "synthetic-device");
         assert_eq!(calls[1].body, json!({}));
     }
-    let restart =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let restart = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     wire.responses.lock().unwrap().push_back(checkin_reply(
         json!({"code":0,"enable":true,"checked_in":false}),
     ));
@@ -994,7 +960,7 @@ async fn publication_failure_recovers_without_replay(fault: WriteFault) {
         WRITE_FAULT.lock().unwrap().is_none(),
         "real publication boundary must be reached"
     );
-    let restart = SecretSession::from_context(f.root.path().into(), vault);
+    let restart = SecretSession::from_storage_context(f.root.path().into(), vault);
     if fault == WriteFault::BeforePublication {
         assert!(snapshot(&f.session, &id).await.is_err());
         assert!(snapshot(&restart, &id).await.is_err());
@@ -1139,7 +1105,7 @@ async fn first_activation_unknown_can_be_discovered_without_reimporting_credenti
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].status, AccountStatus::Stored);
     assert_eq!(views[0].id.len(), 64);
-    let restart = SecretSession::from_context(f.root.path().into(), vault);
+    let restart = SecretSession::from_storage_context(f.root.path().into(), vault);
     assert_eq!(
         lookup(&restart, &views[0].id, Realm::Sg).await.unwrap(),
         Some(views[0].clone())
@@ -1208,8 +1174,10 @@ async fn fresh_profile_accepts_opaque_token_then_commits_before_chat() {
     )
     .await
     .unwrap();
-    let restart =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let restart = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     let saved = snapshot(&restart, &id).await.unwrap();
     assert_eq!(
         saved.account.grant.as_ref().unwrap().access,
@@ -1275,8 +1243,10 @@ async fn fresh_profile_uid_realm_and_advertised_host_must_match_original_row() {
         let views = list(&f.session).await.unwrap();
         assert_eq!(views[0].status, AccountStatus::RefreshPending);
         assert!(snapshot(&f.session, &views[0].id).await.is_err());
-        let restart =
-            SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+        let restart = SecretSession::from_storage_context(
+            f.root.path().into(),
+            f.session.read().unwrap().clone(),
+        );
         assert!(Lease::acquire(restart, &views[0].id, "s").await.is_err());
         assert_eq!(wire.calls.lock().unwrap().len(), 2);
         assert!(super::auth::activate_with(
@@ -1712,8 +1682,10 @@ async fn cn_checkin_followup_status_confirms_account_without_a_second_claim() {
             .await
             .is_ok()
     );
-    let restart =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let restart = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     let lease = Lease::acquire(restart, &id, "cn-followup").await.unwrap();
     assert_eq!(
         super::checkin::run_with(lease, Duration::from_secs(2), &wire)
@@ -1945,8 +1917,10 @@ async fn cn_checkin_unknown_does_not_replay_after_cross_day_restart() {
     })
     .await
     .unwrap();
-    let restart =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let restart = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     wire.responses.lock().unwrap().extend([
         checkin_reply(json!({"enable":true,"checked_in":false})),
         checkin_reply(json!({"credits":17.5})),
@@ -2281,8 +2255,10 @@ async fn cn_automatic_cancelled_pending_survives_restart_day_toggle_and_retire()
     super::checkin::set_automatic(&f.session, &id, 1, 2, true)
         .await
         .unwrap();
-    let restart =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let restart = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     wire.responses
         .lock()
         .unwrap()

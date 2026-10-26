@@ -105,8 +105,8 @@ mod protection_tests {
         assert!(stored.starts_with("lpenc1."));
         assert!(!stored.contains(&secret));
         let vault = db.secrets.read().unwrap();
-        let rotated = vault.rotate_key().unwrap();
-        inventory::transform_database(&conn, Some(&vault), &rotated).unwrap();
+        let rotated = vault.encrypted().unwrap().rotate_key().unwrap();
+        inventory::transform_database(&conn, Some(vault.encrypted().unwrap()), &rotated).unwrap();
         let mut exported = None;
         inventory::collect_plaintext_values(&conn, &rotated, |table, _, _, value| {
             if table == "loongport_client_credentials" {

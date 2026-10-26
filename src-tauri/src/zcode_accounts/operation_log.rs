@@ -1,7 +1,7 @@
 //! Authenticated bounded local operation evidence, never an admission capability.
 use crate::secrets::{
     owned_file::{OwnedFile, OPERATION_FILE},
-    VaultContext,
+    storage::StorageContext,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,23 +96,23 @@ impl Log {
         self.records.push(record);
         Ok(())
     }
-    pub fn seal(&self, vault: &VaultContext) -> Result<Vec<u8>, ()> {
+    pub fn seal(&self, vault: &StorageContext) -> Result<Vec<u8>, ()> {
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| ())?);
         if bytes.len() > 64 * 1024 {
             return Err(());
         }
         OwnedFile::registered(OPERATION_FILE)
             .map_err(|_| ())?
-            .encode(vault, &bytes)
+            .encode_storage(vault, &bytes)
             .map_err(|_| ())
     }
-    pub fn open(bytes: &[u8], vault: &VaultContext) -> Result<Self, ()> {
+    pub fn open(bytes: &[u8], vault: &StorageContext) -> Result<Self, ()> {
         if bytes.len() > 128 * 1024 {
             return Err(());
         }
         let plaintext = OwnedFile::registered(OPERATION_FILE)
             .map_err(|_| ())?
-            .decode(vault, bytes)
+            .decode_storage(vault, bytes)
             .map_err(|_| ())?;
         if plaintext.len() > 64 * 1024 {
             return Err(());
@@ -151,9 +151,13 @@ impl Log {
         Ok(checked)
     }
 }
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod tests {
     use super::*;
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run_plaintext() {
+        plaintext_log_retains_committed_phase_and_rejects_rebinding();
+    }
     fn record() -> Record {
         Record {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -167,7 +171,7 @@ mod tests {
     }
     #[test]
     fn authenticated_log_retains_commit_and_rejects_other_vault_and_rebinding() {
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let mut log = Log::default();
         let mut r = record();
         log.put(r.clone()).unwrap();
@@ -177,16 +181,44 @@ mod tests {
         assert!(!String::from_utf8_lossy(&bytes).contains("opaque-target"));
         let mut open = Log::open(&bytes, &vault).unwrap();
         assert_eq!(open.get(&r.request_id).unwrap().phase, Phase::Committed);
-        assert!(Log::open(&bytes, &VaultContext::generate().unwrap()).is_err());
+        assert!(Log::open(
+            &bytes,
+            &StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap())
+        )
+        .is_err());
         r.phase = Phase::Failed;
         assert!(open.put(r.clone()).is_err());
         r.phase = Phase::Committed;
         r.target = "other".into();
         assert!(open.put(r).is_err());
     }
+    #[cfg_attr(test, test)]
+    fn plaintext_log_retains_committed_phase_and_rejects_rebinding() {
+        let storage = StorageContext::Plaintext(crate::secrets::storage::PlaintextIdentity {
+            format_version: 1,
+            store_id: "11111111-1111-4111-8111-111111111111".into(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+        });
+        let mut log = Log::default();
+        let mut item = record();
+        item.phase = Phase::Committed;
+        log.put(item.clone()).unwrap();
+        let bytes = log.seal(&storage).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("opaque-target"));
+        let mut reopened = Log::open(&bytes, &storage).unwrap();
+        assert_eq!(
+            reopened.get(&item.request_id).unwrap().phase,
+            Phase::Committed
+        );
+        item.target = "different-target".into();
+        assert!(reopened.put(item).is_err());
+        assert!(Log::open(b"lpenc:damaged", &storage).is_err());
+    }
+
     #[test]
     fn evicted_request_identity_remains_rejected_after_reopen() {
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let mut log = Log::default();
         let mut first = record();
         first.phase = Phase::Failed;
@@ -221,7 +253,7 @@ mod bound_tests {
     use super::*;
     #[test]
     fn retirement_capacity_fails_closed_without_forgetting_the_first_identity() {
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let mut log = Log::default();
         let first = uuid::Uuid::new_v4().to_string();
         for index in 0..1040 {

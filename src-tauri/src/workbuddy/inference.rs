@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     proxy::{hyper_client::ProxyResponse, ProxyError},
-    secrets::{session::SecretSession, VaultMetadata},
+    secrets::{session::SecretSession, storage::StorageIdentity},
 };
 use bytes::Bytes;
 use futures::StreamExt;
@@ -72,7 +72,7 @@ impl Drop for Authorization {
 
 #[derive(Clone)]
 struct Owner {
-    binding: VaultMetadata,
+    binding: StorageIdentity,
     epoch: u64,
     account_id: String,
     uid: String,
@@ -84,10 +84,10 @@ struct Owner {
     inference_required: bool,
 }
 impl Owner {
-    fn from_row(session: &SecretSession, binding: VaultMetadata, row: &SavedAccount) -> Self {
+    fn from_row(session: &SecretSession, binding: StorageIdentity, row: &SavedAccount) -> Self {
         Self {
             epoch: session.lifecycle_epoch(),
-            account_id: row.account.id(&binding.vault_id),
+            account_id: row.account.id(binding.store_id()),
             uid: row.account.uid.clone(),
             domain: row.account.domain,
             legacy_fingerprint: Sha256::digest(row.account.token.as_bytes()).into(),
@@ -104,7 +104,7 @@ impl Owner {
         let rows = store::load(session, &self.binding)?;
         let index = rows
             .iter()
-            .position(|r| r.account.id(&self.binding.vault_id) == self.account_id)
+            .position(|r| r.account.id(self.binding.store_id()) == self.account_id)
             .ok_or(Failure::ExpiredAuthorization)?;
         let row = &rows[index];
         let fingerprint: [u8; 32] = Sha256::digest(row.account.token.as_bytes()).into();
@@ -369,7 +369,7 @@ pub(crate) async fn set_inference_consent(
     let mut rows = store::load(session, &binding)?;
     let row = rows
         .iter_mut()
-        .find(|r| r.account.id(&binding.vault_id) == account_id)
+        .find(|r| r.account.id(binding.store_id()) == account_id)
         .ok_or(Failure::UnsupportedContext)?;
     if enabled {
         let Some(grant) = row.inference.as_ref() else {
@@ -696,7 +696,7 @@ pub(crate) async fn list_inference_accounts(
                 _ => InferenceState::NeedsAuthorization,
             };
             InferenceAccount {
-                id: row.account.id(&binding.vault_id),
+                id: row.account.id(binding.store_id()),
                 state,
             }
         })
@@ -749,7 +749,7 @@ impl PendingAuthorization {
             let rows = store::load(&session, &b)?;
             let row = rows
                 .iter()
-                .find(|r| r.account.id(&b.vault_id) == account_id)
+                .find(|r| r.account.id(b.store_id()) == account_id)
                 .ok_or(Failure::UnsupportedContext)?;
             let mut owner = Owner::from_row(&session, b, row);
             // A supplemental login may start while inference is off, but cannot
@@ -997,7 +997,7 @@ impl Lease {
         let rows = store::load(&session, &binding)?;
         let row = rows
             .iter()
-            .find(|r| r.account.id(&binding.vault_id) == account_id)
+            .find(|r| r.account.id(binding.store_id()) == account_id)
             .ok_or(Failure::UnsupportedContext)?;
         if (inference && !row.inference_allowed()) || (!inference && !row.shared_authorization) {
             return Err(Failure::NeedsVerification);
@@ -1442,7 +1442,7 @@ type FixtureCapture = Arc<Mutex<Vec<(String, Value)>>>;
 #[derive(Clone)]
 pub(crate) struct FixtureTransport {
     root: std::path::PathBuf,
-    binding: VaultMetadata,
+    binding: StorageIdentity,
     epoch: u64,
     origin: reqwest::Url,
     synthetic_grants: Vec<(String, String)>,
@@ -1488,7 +1488,7 @@ impl FixtureTransport {
             .iter()
             .map(|row| {
                 (
-                    row.account.id(&binding.vault_id),
+                    row.account.id(binding.store_id()),
                     row.inference.as_ref().unwrap().grant_id.clone(),
                 )
             })
@@ -1537,7 +1537,7 @@ impl FixtureTransport {
         let mut rows = store::load(session, &self.binding)?;
         let row = rows
             .iter_mut()
-            .find(|r| r.account.id(&self.binding.vault_id) == id)
+            .find(|r| r.account.id(self.binding.store_id()) == id)
             .ok_or(Failure::UnsupportedContext)?;
         let grant = row.inference.as_ref().ok_or(Failure::UnsupportedContext)?;
         if !self
@@ -1626,7 +1626,7 @@ impl FixtureTransport {
                 expires_ms: i64::MAX,
                 refresh_expires_ms: None,
             });
-            let id = row.account.id(&binding.vault_id);
+            let id = row.account.id(binding.store_id());
             if ids.contains(&id) {
                 return Err(Failure::UnsupportedContext);
             }

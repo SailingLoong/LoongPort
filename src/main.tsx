@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
-import { SecretUnlock } from "./components/SecretUnlock";
 import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
 // 导入国际化配置
@@ -120,26 +119,9 @@ async function bootstrap() {
     const initError = (await invoke(
       "get_init_error",
     )) as ConfigLoadErrorPayload | null;
-    if (
+    const credentialInitUnavailable =
       initError?.kind === "secret_locked" ||
-      initError?.kind === "secret_initialization_failed"
-    ) {
-      ReactDOM.createRoot(document.getElementById("root")!).render(
-        <React.StrictMode>
-          <FrontendErrorBoundary>
-            <ThemeProvider defaultTheme="system" storageKey="loongport-theme">
-              <SecretUnlock
-                initialError={initError.error}
-                requiresRestart={
-                  initError.kind === "secret_initialization_failed"
-                }
-              />
-            </ThemeProvider>
-          </FrontendErrorBoundary>
-        </React.StrictMode>,
-      );
-      return;
-    }
+      initError?.kind === "secret_initialization_failed";
     if (initError && initError.kind === "db_version_too_new") {
       // 数据库版本过新：渲染应用内「升级应用」恢复界面，不进入正常 App
       ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -154,7 +136,11 @@ async function bootstrap() {
       );
       return;
     }
-    if (initError && (initError.path || initError.error)) {
+    if (
+      initError &&
+      !credentialInitUnavailable &&
+      (initError.path || initError.error)
+    ) {
       await handleConfigLoadError(initError);
       // 注意：不会执行到这里，因为 exit(1) 会终止进程
       return;
@@ -167,9 +153,12 @@ async function bootstrap() {
   initializeWindowActivity();
 
   // 首屏语言来自 localStorage 缓存；拿到后端保存的语言后再校正一次。
-  // 与 useSettingsQuery 共用 ["settings"] 缓存，进设置页不会重复拉取。
+  // 启动投影只进独立只读缓存，绝不作为完整可保存的 settings。
   void queryClient
-    .fetchQuery({ queryKey: ["settings"], queryFn: () => settingsApi.get() })
+    .fetchQuery({
+      queryKey: ["bootstrapSettings"],
+      queryFn: () => settingsApi.getBootstrap(),
+    })
     .then((settings) => syncLanguageFromSettings(settings.language))
     .catch((error) => reportFrontendError("startup_language_sync", error));
 

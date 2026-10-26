@@ -5,7 +5,7 @@
 use super::{lock_conn, to_json_string, Database};
 use crate::app_config::MultiAppConfig;
 use crate::error::AppError;
-use crate::secrets::{inventory::seal_db, VaultContext};
+use crate::secrets::{inventory::seal_db, storage::StorageContext, VaultContext};
 use rusqlite::{params, Connection};
 
 impl Database {
@@ -28,7 +28,9 @@ impl Database {
     ///
     /// 用于部署前验证迁移逻辑是否正确。
     pub fn migrate_from_json_dry_run(config: &MultiAppConfig) -> Result<(), AppError> {
-        let vault = VaultContext::generate().map_err(crate::secrets::inventory::secret_error)?;
+        let vault = StorageContext::from(
+            VaultContext::generate().map_err(crate::secrets::inventory::secret_error)?,
+        );
         let mut conn =
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&conn)?;
@@ -49,7 +51,7 @@ impl Database {
     fn migrate_from_json_tx(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<(), AppError> {
         // 1. 迁移 Providers
         Self::migrate_providers(tx, config, vault)?;
@@ -73,7 +75,7 @@ impl Database {
     fn migrate_providers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<(), AppError> {
         for (app_key, manager) in &config.apps {
             let app_type = app_key;
@@ -141,7 +143,7 @@ impl Database {
     fn migrate_mcp_servers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<(), AppError> {
         if let Some(servers) = &config.mcp.servers {
             for (id, server) in servers {
@@ -244,7 +246,7 @@ impl Database {
     fn migrate_common_config(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<(), AppError> {
         if let Some(snippet) = &config.common_config_snippets.claude {
             tx.execute(

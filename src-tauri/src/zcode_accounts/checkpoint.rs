@@ -10,7 +10,7 @@ use super::session_checks::{
     CheckState, EntitlementState, SessionCheckDisplay, SessionCheckReport,
 };
 pub(crate) use crate::secrets::owned_file::{JOURNAL_FILE, PROFILE_FILE};
-use crate::secrets::{owned_file::OwnedFile, VaultContext};
+use crate::secrets::{owned_file::OwnedFile, storage::StorageContext};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
@@ -452,7 +452,7 @@ impl ProfileCatalog {
 
     pub(crate) fn seal(
         &self,
-        vault: &VaultContext,
+        vault: &StorageContext,
         native: &NativeCipher,
     ) -> Result<String, CheckpointError> {
         if self.len() > MAX_PROFILES {
@@ -504,7 +504,7 @@ impl ProfileCatalog {
 
     pub(crate) fn open(
         encoded: &str,
-        vault: &VaultContext,
+        vault: &StorageContext,
         native: &NativeCipher,
     ) -> Result<Self, CheckpointError> {
         let payload: CatalogPayload = open_payload(encoded, PROFILE_FILE, vault)?;
@@ -687,7 +687,7 @@ impl SwitchCheckpoint {
 
     pub(crate) fn seal(
         &self,
-        vault: &VaultContext,
+        vault: &StorageContext,
         native: &NativeCipher,
     ) -> Result<String, CheckpointError> {
         validate_header(1, &self.context, native)?;
@@ -711,7 +711,7 @@ impl SwitchCheckpoint {
     #[cfg(test)]
     pub(crate) fn open(
         encoded: &str,
-        vault: &VaultContext,
+        vault: &StorageContext,
         native: &NativeCipher,
     ) -> Result<Self, CheckpointError> {
         Self::from_payload_bytes(&open_payload_bytes(encoded, JOURNAL_FILE, vault)?, native)
@@ -832,11 +832,11 @@ pub(super) fn encode_payload(
 pub(super) fn seal_payload(
     value: &impl Serialize,
     file: &str,
-    vault: &VaultContext,
+    vault: &StorageContext,
 ) -> Result<String, CheckpointError> {
     let bytes = encode_payload(value)?;
     let encoded = OwnedFile::registered(file)
-        .and_then(|file| file.encode(vault, &bytes))
+        .and_then(|file| file.encode_storage(vault, &bytes))
         .map_err(|_| CheckpointError::Vault)?;
     let encoded = String::from_utf8(encoded).map_err(|_| CheckpointError::Vault)?;
     if encoded.len() > MAX_ENVELOPE_BYTES {
@@ -848,13 +848,13 @@ pub(super) fn seal_payload(
 pub(super) fn open_payload_bytes(
     encoded: &str,
     file: &str,
-    vault: &VaultContext,
+    vault: &StorageContext,
 ) -> Result<Zeroizing<Vec<u8>>, CheckpointError> {
     if encoded.len() > MAX_ENVELOPE_BYTES {
         return Err(CheckpointError::ResourceLimit);
     }
     let bytes = OwnedFile::registered(file)
-        .and_then(|file| file.decode(vault, encoded.as_bytes()))
+        .and_then(|file| file.decode_storage(vault, encoded.as_bytes()))
         .map_err(|_| CheckpointError::Vault)?;
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(CheckpointError::ResourceLimit);
@@ -865,7 +865,7 @@ pub(super) fn open_payload_bytes(
 pub(super) fn open_payload<T: DeserializeOwned>(
     encoded: &str,
     file: &str,
-    vault: &VaultContext,
+    vault: &StorageContext,
 ) -> Result<T, CheckpointError> {
     serde_json::from_slice(&open_payload_bytes(encoded, file, vault)?)
         .map_err(|_| CheckpointError::InvalidPayload)
@@ -903,3 +903,7 @@ fn validate_binding(binding: &TransactionBinding) -> Result<(), CheckpointError>
     }
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "checkpoint_plaintext_tests.rs"]
+pub(crate) mod plaintext_tests;

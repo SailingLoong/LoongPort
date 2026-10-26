@@ -3,6 +3,8 @@ use super::super::core::{CredentialDocument, OAuthFamily};
 use super::super::native::tests::{native_document, replace, TEST_CONTEXT, TEST_SECRET};
 use super::*;
 use crate::config_file_io::write_durable;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 use std::fs;
 
 const ADMITTED: Admission = Admission {
@@ -14,7 +16,7 @@ const ADMITTED: Admission = Admission {
 struct Fixture {
     native_root: tempfile::TempDir,
     vault_root: tempfile::TempDir,
-    vault: VaultContext,
+    vault: StorageContext,
     native: NativeCipher,
     a: AccountIdentity,
     b: AccountIdentity,
@@ -27,7 +29,7 @@ impl Fixture {
         let vault_root = tempfile::tempdir_in(&temp).unwrap();
         crate::config_file_io::ensure_private_directory(native_root.path()).unwrap();
         crate::config_file_io::ensure_private_directory(vault_root.path()).unwrap();
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
         let old = native_document(family, "a", "old");
         let fresh = native_document(family, "a", "fresh");
@@ -525,7 +527,9 @@ fn synthetic_account_crash_child() {
         .read_to_end(&mut bytes)
         .unwrap();
     let input: ChildInput = serde_json::from_slice(&bytes).unwrap();
-    let vault = VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap();
+    let vault = StorageContext::Encrypted(
+        VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap(),
+    );
     let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
     let target = AccountIdentity::new(TEST_CONTEXT, OAuthFamily::Zai, "b").unwrap();
     let store = AccountStore::new(
@@ -555,8 +559,8 @@ fn io_actual_process_crash_at_every_publication_recovers_from_disk() {
         let input = ChildInput {
             native_root: f.native_root.path().into(),
             vault_root: f.vault_root.path().into(),
-            metadata: f.vault.metadata().clone(),
-            key: f.vault.export_key().to_vec(),
+            metadata: f.vault.encrypted().unwrap().metadata().clone(),
+            key: f.vault.encrypted().unwrap().export_key().to_vec(),
             checkpoint: index,
         };
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -583,8 +587,13 @@ fn io_actual_process_crash_at_every_publication_recovers_from_disk() {
         );
         // A newly created cipher and vault context re-open actual child-written
         // bytes. Only synthetic key custody is retained in parent memory.
-        let vault =
-            VaultContext::from_key(f.vault.metadata().clone(), f.vault.export_key()).unwrap();
+        let vault = StorageContext::Encrypted(
+            VaultContext::from_key(
+                f.vault.encrypted().unwrap().metadata().clone(),
+                f.vault.encrypted().unwrap().export_key(),
+            )
+            .unwrap(),
+        );
         let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
         let reopened = AccountStore::new(
             f.native_root.path(),
@@ -1782,7 +1791,9 @@ fn synthetic_archive_crash_child() {
         .read_to_end(&mut bytes)
         .unwrap();
     let input: ChildInput = serde_json::from_slice(&bytes).unwrap();
-    let vault = VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap();
+    let vault = StorageContext::Encrypted(
+        VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap(),
+    );
     let local = VaultAccountStore::new(&input.vault_root, &vault).unwrap();
     local
         .archive_with_hook(&local.status().unwrap().revision, &mut |point| {
@@ -1808,8 +1819,8 @@ fn io_archive_real_process_crashes_preserve_evidence_and_repeat_without_native_r
         let input = ChildInput {
             native_root: f.native_root.path().into(),
             vault_root: f.vault_root.path().into(),
-            metadata: f.vault.metadata().clone(),
-            key: f.vault.export_key().to_vec(),
+            metadata: f.vault.encrypted().unwrap().metadata().clone(),
+            key: f.vault.encrypted().unwrap().export_key().to_vec(),
             checkpoint,
         };
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -1834,8 +1845,13 @@ fn io_archive_real_process_crashes_preserve_evidence_and_repeat_without_native_r
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let vault =
-            VaultContext::from_key(f.vault.metadata().clone(), f.vault.export_key()).unwrap();
+        let vault = StorageContext::Encrypted(
+            VaultContext::from_key(
+                f.vault.encrypted().unwrap().metadata().clone(),
+                f.vault.encrypted().unwrap().export_key(),
+            )
+            .unwrap(),
+        );
         let local = VaultAccountStore::new(f.vault_root.path(), &vault).unwrap();
         assert_eq!(local.status().unwrap().pending, checkpoint == 0);
         assert!(local.status().unwrap().native_unconfirmed);
@@ -2835,7 +2851,7 @@ fn io_key_cleanup_retry_is_noop_when_exact_unsubmitted_request_is_already_absent
     let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
     let root = tempfile::tempdir_in(temp).unwrap();
     crate::config_file_io::ensure_private_directory(root.path()).unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let store = VaultAccountStore::new(root.path(), &vault).unwrap();
     let a = KeyScope::new(OAuthFamily::BigModel, "cache-a", "org", "project-a").unwrap();
     let b = KeyScope::new(OAuthFamily::BigModel, "cache-b", "org", "project-b").unwrap();
@@ -2868,7 +2884,7 @@ fn io_key_cleanup_retry_is_noop_when_exact_copied_request_is_already_absent() {
     let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
     let root = tempfile::tempdir_in(temp).unwrap();
     crate::config_file_io::ensure_private_directory(root.path()).unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let store = VaultAccountStore::new(root.path(), &vault).unwrap();
     let a = KeyScope::new(OAuthFamily::BigModel, "cache-a", "org", "project-a").unwrap();
     let b = KeyScope::new(OAuthFamily::BigModel, "cache-b", "org", "project-b").unwrap();
@@ -3102,9 +3118,7 @@ async fn io_checked_bundle_preserves_whole_session_and_allows_coding_without_bus
             .unwrap();
     let binding = Binding {
         vault_root: f.vault_root.path().into(),
-        vault_id: "synthetic-vault".into(),
-        key_id: "key".into(),
-        vault_revision: 1,
+        storage: super::super::synthetic_storage_identity(1),
         context_revision: "library".into(),
         catalog_revision: status.revision.clone(),
     };
@@ -3405,7 +3419,9 @@ fn synthetic_import_receipt_crash_child() {
         .read_to_end(&mut bytes)
         .unwrap();
     let input: ChildInput = serde_json::from_slice(&bytes).unwrap();
-    let vault = VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap();
+    let vault = StorageContext::Encrypted(
+        VaultContext::from_key(input.metadata, zeroize::Zeroizing::new(input.key)).unwrap(),
+    );
     let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
     let local = VaultAccountStore::new(&input.vault_root, &vault).unwrap();
     let snapshot = native
@@ -3446,8 +3462,8 @@ fn import_receipt_actual_process_exit_before_reply_recovers_saved_and_all_kept_r
         let input = ChildInput {
             native_root: f.native_root.path().into(),
             vault_root: f.vault_root.path().into(),
-            metadata: f.vault.metadata().clone(),
-            key: f.vault.export_key().to_vec(),
+            metadata: f.vault.encrypted().unwrap().metadata().clone(),
+            key: f.vault.encrypted().unwrap().export_key().to_vec(),
             checkpoint,
         };
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -3472,8 +3488,13 @@ fn import_receipt_actual_process_exit_before_reply_recovers_saved_and_all_kept_r
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let vault =
-            VaultContext::from_key(f.vault.metadata().clone(), f.vault.export_key()).unwrap();
+        let vault = StorageContext::Encrypted(
+            VaultContext::from_key(
+                f.vault.encrypted().unwrap().metadata().clone(),
+                f.vault.encrypted().unwrap().export_key(),
+            )
+            .unwrap(),
+        );
         let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
         let reopened = VaultAccountStore::new(f.vault_root.path(), &vault).unwrap();
         let before_query = fs::read(f.vault_root.path().join(PROFILE_FILE)).unwrap();
@@ -3516,9 +3537,7 @@ async fn import_resolution_distinguishes_live_preview_prewrite_failure_and_unkno
     let snapshot = receipt_incoming(&f, "new-resolution", "synthetic", false).snapshot;
     let binding = Binding {
         vault_root: f.vault_root.path().into(),
-        vault_id: f.vault.metadata().vault_id.clone(),
-        key_id: f.vault.metadata().key_id.clone(),
-        vault_revision: f.vault.metadata().revision,
+        storage: f.vault.identity(),
         context_revision: TEST_CONTEXT.into(),
         catalog_revision: revision.clone(),
     };

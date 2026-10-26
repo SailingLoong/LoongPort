@@ -126,7 +126,7 @@ async fn setup() -> (Arc<SecretSession>, String) {
         .unwrap();
     let binding = store::binding(&session).unwrap();
     let rows = store::load(&session, &binding).unwrap();
-    (session, rows[0].account.id(&binding.vault_id))
+    (session, rows[0].account.id(binding.store_id()))
 }
 fn reads(status: bool) -> Vec<(Endpoint, u16, Value)> {
     vec![
@@ -196,7 +196,7 @@ pub(crate) async fn verify(case: &str) {
         let old_ciphertext = {
             let vault = session.read().unwrap();
             owned
-                .encode(&vault, &serde_json::to_vec(&old_document).unwrap())
+                .encode_storage(&vault, &serde_json::to_vec(&old_document).unwrap())
                 .unwrap()
         };
         crate::secrets::session::write_durable(&owned.path(&session), &old_ciphertext).unwrap();

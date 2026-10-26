@@ -155,8 +155,10 @@ describe("ServiceConfiguration", () => {
     const onDone = vi.fn();
     switchTier.mockResolvedValue({ status: "switched", warnings: [] });
     complete.mockResolvedValue({ completed: true });
+    const client = createTestQueryClient();
+    client.setQueryData(["credentialProtection"], { shouldPrompt: false });
     render(
-      <QueryClientProvider client={createTestQueryClient()}>
+      <QueryClientProvider client={client}>
         <ServiceConfiguration
           account={{ kind: "relay", rowId: 7, name: "Example" }}
           sourceAppId="codex"
@@ -176,6 +178,9 @@ describe("ServiceConfiguration", () => {
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(switchTier).toHaveBeenCalledWith("p1", "codex", undefined);
     expect(complete).toHaveBeenCalledWith(false);
+    expect(client.getQueryState(["credentialProtection"])?.isInvalidated).toBe(
+      true,
+    );
   });
 });
 

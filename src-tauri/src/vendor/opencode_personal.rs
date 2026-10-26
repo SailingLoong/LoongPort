@@ -151,7 +151,7 @@ mod tests {
 /// Atomic local persistence. It neither verifies nor spends the credential.
 pub fn save(
     conn: &rusqlite::Connection,
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
     key: &str,
     label: &str,
 ) -> Result<i64, AppError> {

@@ -132,6 +132,30 @@ function duplicateProvider(app: AppId, id: string): boolean {
 }
 
 export const handlers = [
+  http.post(`${TAURI_ENDPOINT}/get_credential_protection_status`, () =>
+    HttpResponse.json({
+      mode: "unconfigured",
+      status: "needs_configuration",
+      shouldPrompt: false,
+      canConfigure: true,
+      canUnlock: false,
+      canSwitchToPlaintext: true,
+      canCreateSeparateConfiguration: false,
+      reviewToken: "synthetic-protection-review",
+      restartRequired: false,
+      errorCode: null,
+    }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/get_bootstrap_settings`, () =>
+    HttpResponse.json({
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      visibleApps: getSettings().visibleApps,
+    }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/get_runtime_availability`, () =>
+    HttpResponse.json({ credentialRuntimeAvailable: true }),
+  ),
   // Workspace reads the independent preference beside the fallback control.
   http.post(`${TAURI_ENDPOINT}/get_auto_mode_status`, () =>
     success({

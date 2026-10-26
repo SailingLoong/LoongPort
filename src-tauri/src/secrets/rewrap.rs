@@ -1,15 +1,16 @@
 //! Password changes preserve the data key. A durable intent repairs the SQLite /
 //! metadata / operating-system-store commit boundary after interruption.
 
+#[cfg(any(test, feature = "test-hooks"))]
+use super::session::write_durable;
 use super::{
     key_store::{save_verified, KeyStore},
-    session::{read_metadata, write_durable, write_metadata, LocalVault},
+    session::{read_metadata, write_metadata, LocalVault},
     VaultContext,
 };
-use crate::{
-    database::{lock_conn, vault, Database},
-    error::AppError,
-};
+#[cfg(any(test, feature = "test-hooks"))]
+use crate::database::{lock_conn, Database};
+use crate::{database::vault, error::AppError};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -39,49 +40,6 @@ struct PasswordChange {
     next: LocalVault,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ProtectionStatus {
-    automatic_unlock: bool,
-    password_configured: bool,
-}
-
-#[cfg(feature = "gui")]
-#[tauri::command]
-pub(crate) fn get_secret_protection(
-    state: tauri::State<'_, crate::store::AppState>,
-) -> Result<ProtectionStatus, String> {
-    let _vault = state.db.secrets.read().map_err(super::error::public_code)?;
-    let saved = read_metadata(state.db.secrets.root()).map_err(super::error::public_code)?;
-    Ok(ProtectionStatus {
-        automatic_unlock: saved.automatic_unlock,
-        password_configured: saved.metadata.wrapped_key.is_some(),
-    })
-}
-
-#[cfg(feature = "gui")]
-#[tauri::command]
-pub(crate) async fn set_secret_password(
-    state: tauri::State<'_, crate::store::AppState>,
-    password: String,
-    automatic_unlock: bool,
-) -> Result<(), String> {
-    let db = state.db.clone();
-    let password = zeroize::Zeroizing::new(password);
-    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
-    tauri::async_runtime::spawn_blocking(move || {
-        change_password(
-            &db,
-            &super::key_store::SystemKeyStore,
-            &password,
-            automatic_unlock,
-        )
-    })
-    .await
-    .map_err(|_| "secret.operation_failed".to_owned())?
-    .map_err(super::error::public_code)
-}
-
 #[cfg(feature = "gui")]
 #[tauri::command]
 pub(crate) async fn rotate_secret_key(
@@ -105,7 +63,9 @@ pub(crate) async fn rotate_secret_key(
     .map_err(super::error::public_code)
 }
 
-/// Caller owns the shared sync operation mutex before entering this method.
+/// Retained solely to construct legacy custody fixtures for compatibility tests.
+/// The retired daily password command cannot call this function in production.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn change_password(
     db: &Database,
     store: &dyn KeyStore,
@@ -113,7 +73,10 @@ pub(crate) fn change_password(
     automatic_unlock: bool,
 ) -> Result<(), AppError> {
     let session = &db.secrets;
-    let mut current = session.write()?;
+    let mut context = session.write()?;
+    super::transition::ensure_legacy_generation_owner(session.root())?;
+    let current = context.encrypted()?;
+    super::transition::ensure_legacy_metadata(current.metadata())?;
     super::owned_file::ensure_no_pending_zcode_transaction(session.root())?;
     if session.root().join(".vault-transition").exists() || session.root().join(INTENT).exists() {
         return Err(AppError::Config("secret.recovery_required".into()));
@@ -145,8 +108,8 @@ pub(crate) fn change_password(
     })
     .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
     write_durable(&session.root().join(INTENT), &intent)?;
-    finish(session.root(), &conn, &current, &next, &change, store)?;
-    *current = next;
+    finish(session.root(), &conn, current, &next, &change, store)?;
+    *context = next.into();
     session.set_blocked(false);
     Ok(())
 }
@@ -159,6 +122,10 @@ fn finish(
     change: &PasswordChange,
     store: &dyn KeyStore,
 ) -> Result<(), AppError> {
+    super::transition::ensure_legacy_generation_owner(root)?;
+    super::transition::ensure_legacy_metadata(current.metadata())?;
+    super::transition::ensure_legacy_metadata(next.metadata())?;
+    super::transition::ensure_legacy_metadata(&change.next.metadata)?;
     let saved = &change.next;
     let metadata = vault::stored_metadata(conn)?
         .ok_or_else(|| AppError::Config("secret.metadata_missing".into()))?;
@@ -210,6 +177,8 @@ fn recover_record(
     store: &dyn KeyStore,
     expected: Option<&[u8]>,
 ) -> Result<(), AppError> {
+    super::transition::ensure_legacy_generation_owner(root)?;
+    super::transition::ensure_legacy_metadata(current.metadata())?;
     let Some(bytes) = pending_record(root)? else {
         return if expected.is_some() {
             Err(AppError::Config("upgrade.source_changed".into()))
@@ -222,6 +191,7 @@ fn recover_record(
     }
     let intent: PasswordIntent = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
+    super::transition::ensure_legacy_metadata(&intent.candidate)?;
     let plaintext = current
         .open(&["local", "password-transition"], &intent.body)
         .map_err(super::inventory::secret_error)?;
@@ -269,6 +239,7 @@ fn recover_password_record(
     password: Option<&str>,
     expected: Option<&[u8]>,
 ) -> Result<(), AppError> {
+    super::transition::ensure_legacy_generation_owner(root)?;
     let Some(password) = password else {
         return Ok(());
     };
@@ -284,9 +255,11 @@ fn recover_password_record(
     }
     let intent: PasswordIntent = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
+    super::transition::ensure_legacy_metadata(&intent.candidate)?;
     let next = VaultContext::from_password(intent.candidate, password)
         .map_err(super::inventory::secret_error)?;
     let committed = read_metadata(root)?;
+    super::transition::ensure_legacy_metadata(&committed.metadata)?;
     // Possession of the candidate key must authenticate the committed vault;
     // an unrelated attacker-created wrapper cannot authorize replacement.
     let mut current = VaultContext::from_key(committed.metadata, next.export_key())
@@ -340,7 +313,7 @@ mod tests {
         let secrets = SecretSession::open(root, store, None).unwrap();
         let conn = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &secrets.read().unwrap(),
+            secrets.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         let db = Database::from_connection(conn, secrets);
@@ -370,7 +343,14 @@ mod tests {
         let db = fixture(dir.path(), &store);
         let pending = dir.path().join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
-        let original = db.secrets.read().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let key = store.load(&original.vault_id, &original.key_id).unwrap();
         let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();
         let database = db
@@ -387,7 +367,10 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(
             store.load(&original.vault_id, &original.key_id).unwrap(),
             key
@@ -412,7 +395,10 @@ mod tests {
         );
         assert!(!dir.path().join(INTENT).exists());
         let reopened = SecretSession::open_existing(dir.path(), &store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().metadata(), &original);
+        assert_eq!(
+            reopened.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
     }
 
     #[test]
@@ -423,7 +409,14 @@ mod tests {
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = raw_secret(&db);
-        let original = db.secrets.read().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         change_password(&db, &store, "example protection password", false).unwrap();
         assert_eq!(raw_secret(&db), before);
         assert!(store
@@ -437,7 +430,16 @@ mod tests {
         let reopened =
             SecretSession::open_existing(dir.path(), &store, Some("example protection password"))
                 .unwrap();
-        assert_eq!(reopened.read().unwrap().metadata().key_id, original.key_id);
+        assert_eq!(
+            reopened
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .key_id,
+            original.key_id
+        );
         assert_eq!(
             db.get_setting("global_proxy_url").unwrap().as_deref(),
             Some("https://fixture.invalid")
@@ -499,7 +501,7 @@ mod tests {
         assert!(!dir.path().join(INTENT).exists());
         vault::check_identity(
             &Connection::open(dir.path().join(crate::config::DB_FILE_NAME)).unwrap(),
-            &resumed.read().unwrap(),
+            resumed.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         assert!(db.secrets.read().is_err());
@@ -515,6 +517,8 @@ mod tests {
         change_password(&db, &store, "original protection password", true).unwrap();
         let current = db.secrets.read().unwrap();
         let next = current
+            .encrypted()
+            .unwrap()
             .with_password("replacement protection password")
             .unwrap();
         let mut saved = read_metadata(dir.path()).unwrap();
@@ -553,7 +557,7 @@ mod tests {
         assert!(!dir.path().join(INTENT).exists());
         vault::check_identity(
             &Connection::open(dir.path().join(crate::config::DB_FILE_NAME)).unwrap(),
-            &resumed.read().unwrap(),
+            resumed.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         assert!(SecretSession::open_existing(
@@ -588,7 +592,14 @@ mod tests {
         let store = MemoryKeyStore::default();
         let db = fixture(dir.path(), &store);
         let before = std::fs::read(dir.path().join("vault.json")).unwrap();
-        let original = db.secrets.read().unwrap().metadata().clone();
+        let original = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let ciphertext = raw_secret(&db);
         let invalid_home = home.path().join("synthetic-not-a-directory");
         std::fs::write(&invalid_home, b"synthetic").unwrap();
@@ -602,8 +613,17 @@ mod tests {
             std::fs::read(dir.path().join("vault.json")).unwrap(),
             before
         );
-        assert_eq!(db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(raw_secret(&db), ciphertext);
         assert!(!dir.path().join(INTENT).exists());
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "rewrap_legacy_fence_tests.rs"]
+mod legacy_fence_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) use legacy_fence_tests::verify as verify_legacy_generation_fence_case;

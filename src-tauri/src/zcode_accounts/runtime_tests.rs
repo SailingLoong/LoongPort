@@ -467,7 +467,7 @@ impl Fixture {
         let session = SecretSession::open(&root, &store, None).unwrap();
         let conn = crate::database::vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         let db = Arc::new(Database::from_connection(conn, session.clone()));
@@ -986,6 +986,8 @@ async fn runtime_pending_transaction_blocks_maintenance_then_archive_preserves_d
         f.db.secret_session()
             .read()
             .unwrap()
+            .encrypted()
+            .unwrap()
             .metadata()
             .key_id
             .clone();
@@ -1063,7 +1065,13 @@ async fn runtime_pending_transaction_blocks_maintenance_then_archive_preserves_d
         assert!(f.current() == f.fresh);
     }
     assert_ne!(
-        f.db.secret_session().read().unwrap().metadata().key_id,
+        f.db.secret_session()
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .key_id,
         original_key
     );
     let status = recovery_status(f.db.clone()).await.unwrap();

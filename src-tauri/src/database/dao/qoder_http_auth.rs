@@ -1,7 +1,7 @@
 //! Private subordinate credential storage; no UI/public Provider DTO access.
 use crate::secrets::{
     inventory::{open_db, seal_db},
-    VaultContext,
+    storage::StorageContext,
 };
 use crate::services::provider::qoder_http_auth::*;
 use crate::{database::Database, error::AppError, provider::Provider};
@@ -90,7 +90,7 @@ pub(crate) fn retire_on(conn: &Connection, app: &str, id: &str) -> Result<(), Ap
 
 fn read_on(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     id: &str,
 ) -> Result<(String, Option<Record>), AppError> {
     let raw: String = conn.query_row(
@@ -103,7 +103,7 @@ fn read_on(
 }
 fn publish_on(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     id: &str,
     previous: &str,
     next: &Record,
@@ -157,7 +157,7 @@ fn snapshot(record: &Record, epoch: u64) -> Result<RequestSnapshot, AppError> {
 /// Keeping this check inside their transaction closes the preflight/dispatch gap.
 pub(crate) fn snapshot_matches_on(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     epoch: u64,
     provider: &Provider,
     snapshot: &RequestSnapshot,
@@ -257,7 +257,7 @@ impl Database {
         provider_id: &str,
         body: impl FnOnce(
             &Transaction<'_>,
-            &VaultContext,
+            &StorageContext,
             u64,
             Provider,
             SourceBinding,

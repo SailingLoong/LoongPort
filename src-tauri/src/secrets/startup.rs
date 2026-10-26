@@ -14,6 +14,10 @@ use tauri::{Emitter, Manager};
 #[path = "paperclip_ready.rs"]
 pub(crate) mod paperclip_ready;
 
+#[cfg(feature = "gui")]
+#[path = "startup/credential_protection.rs"]
+pub(crate) mod credential_protection;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Locked,
@@ -29,12 +33,69 @@ pub(crate) struct StartupCoordinator {
     inspection: Mutex<super::upgrade::UpgradeInspection>,
     recovery_token: OnceLock<String>,
     phase: Mutex<Phase>,
+    #[cfg(feature = "gui")]
+    credential_review: Mutex<credential_protection::ReviewSlot>,
+    #[cfg(feature = "gui")]
+    credential_operation: Mutex<()>,
     upgrade_review: Mutex<Option<super::upgrade::AuthenticatedUpgrade>>,
     #[cfg(unix)]
     paperclip_bridge: Mutex<paperclip_ready::ListenerSlot>,
 }
 
+/// Original coordinator's opaque, read-only preservation guard. No old key
+/// authentication is implied; only an explicitly separate empty configuration
+/// may consume this capability while the original runtime is unpublished.
+pub(crate) struct SeparateSourceGuard<'a> {
+    owner: &'a StartupCoordinator,
+    phase: std::sync::MutexGuard<'a, Phase>,
+    inspection: std::sync::MutexGuard<'a, super::upgrade::UpgradeInspection>,
+}
+impl SeparateSourceGuard<'_> {
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.owner.root
+    }
+    pub(crate) fn device_root(&self) -> &std::path::Path {
+        self.inspection.device_root()
+    }
+    pub(crate) fn verify(&self, retired: bool) -> Result<(), crate::error::AppError> {
+        if *self.phase
+            != if retired {
+                Phase::Recovered
+            } else {
+                Phase::Locked
+            }
+            || !self.inspection.has_vault()
+            || self.inspection.is_recovery_required()
+            || self.inspection.is_database_resume_candidate()
+            || self.inspection.future_version().is_some()
+        {
+            return Err(crate::error::AppError::Config(
+                "protection.separate_configuration_unavailable".into(),
+            ));
+        }
+        self.inspection.ensure_runtime_admitted()?;
+        self.inspection.verify_unchanged(&self.owner.root)
+    }
+    pub(crate) fn retire(&mut self) -> Result<(), crate::error::AppError> {
+        self.verify(false)?;
+        *self.phase = Phase::Recovered;
+        Ok(())
+    }
+}
+
 impl StartupCoordinator {
+    pub(crate) fn separate_source(
+        &self,
+    ) -> Result<SeparateSourceGuard<'_>, crate::error::AppError> {
+        let guard = SeparateSourceGuard {
+            owner: self,
+            phase: self.phase.lock()?,
+            inspection: self.inspection.lock()?,
+        };
+        guard.verify(false)?;
+        Ok(guard)
+    }
+
     pub(crate) fn new(root: PathBuf, inspection: super::upgrade::UpgradeInspection) -> Self {
         let recovery_token = OnceLock::new();
         if let super::upgrade::UpgradeInspection::RecoveryRequired(evidence) = &inspection {
@@ -45,15 +106,46 @@ impl StartupCoordinator {
             recovery_token,
             inspection: Mutex::new(inspection),
             phase: Mutex::new(Phase::Locked),
+            #[cfg(feature = "gui")]
+            credential_review: Mutex::new(credential_protection::ReviewSlot::default()),
+            #[cfg(feature = "gui")]
+            credential_operation: Mutex::new(()),
             upgrade_review: Mutex::new(None),
             #[cfg(unix)]
             paperclip_bridge: Mutex::new(paperclip_ready::ListenerSlot::default()),
         }
     }
 
+    fn runtime_availability(
+        &self,
+        session: Option<&SecretSession>,
+    ) -> super::session::RuntimeAvailability {
+        let ready = self.phase.lock().is_ok_and(|phase| *phase == Phase::Ready);
+        super::session::credential_runtime_availability(if ready { session } else { None })
+    }
+
     #[cfg(feature = "gui")]
     fn initialize(&self, app: &tauri::AppHandle, password: Option<&str>) -> Result<(), String> {
-        self.initialize_with(password, &SystemKeyStore, |session| {
+        self.initialize_and_publish(app, password, None)
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn initialize_with_master(
+        &self,
+        app: &tauri::AppHandle,
+        key: zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), String> {
+        self.initialize_and_publish(app, None, Some(key))
+    }
+
+    #[cfg(feature = "gui")]
+    fn initialize_and_publish(
+        &self,
+        app: &tauri::AppHandle,
+        password: Option<&str>,
+        key: Option<zeroize::Zeroizing<Vec<u8>>>,
+    ) -> Result<(), String> {
+        self.initialize_with_internal_key(password, key, &SystemKeyStore, |session| {
             crate::initialize_runtime(app, session).map_err(|error| error.to_string())
         })?;
         #[cfg(unix)]
@@ -64,9 +156,24 @@ impl StartupCoordinator {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     fn initialize_with<P>(
         &self,
         password: Option<&str>,
+        store: &dyn super::key_store::KeyStore,
+        prepare: P,
+    ) -> Result<(), String>
+    where
+        P: FnOnce(std::sync::Arc<SecretSession>) -> Result<(), String>,
+    {
+        self.initialize_with_internal_key(password, None, store, prepare)
+    }
+
+    /// Receives authenticated internal key bytes, never user text or a legacy password alias.
+    pub(crate) fn initialize_with_internal_key<P>(
+        &self,
+        password: Option<&str>,
+        provided_key: Option<zeroize::Zeroizing<Vec<u8>>>,
         store: &dyn super::key_store::KeyStore,
         prepare: P,
     ) -> Result<(), String>
@@ -79,6 +186,9 @@ impl StartupCoordinator {
             .map_err(|_| "secret.startup_unavailable")?
             .is_database_resume_candidate();
         if resume {
+            if provided_key.is_some() {
+                return Err("upgrade.authentication_required".into());
+            }
             let phase = *self
                 .phase
                 .lock()
@@ -94,36 +204,89 @@ impl StartupCoordinator {
         }
         self.run_attempt(
             || {
-                let inspection = self
+                let mut inspection = self
                     .inspection
                     .lock()
                     .map_err(|_| "secret.startup_unavailable")?;
                 inspection
                     .verify_unchanged(&self.root)
                     .map_err(super::error::public_code)?;
-                if inspection.has_vault() {
-                    let vault = super::session::authenticate_existing(&self.root, store, password)
+                if password.is_some() && provided_key.is_some() {
+                    return Err("protection.unexpected_key".into());
+                }
+                let provided_key = match password {
+                    Some(password) => {
+                        if !inspection.legacy_password_admitted() {
+                            return Err("secret.password_unavailable".into());
+                        }
+                        Some(
+                            super::session::authenticate_existing(
+                                &self.root,
+                                store,
+                                Some(password),
+                            )
+                            .map_err(super::error::public_code)?
+                            .export_key(),
+                        )
+                    }
+                    None => provided_key,
+                };
+                if inspection.needs_initial_protection() && provided_key.is_none() {
+                    // Only the original FreshScope owner may publish onboarding's
+                    // initial explicit plaintext record. Its returned identity is
+                    // the sole authority for acknowledging this inspected output.
+                    let proof = super::protection::FreshScope::capture(
+                        &self.root,
+                        inspection.device_root(),
+                        &crate::panic_hook::diagnostic_entries(),
+                    )
+                    .map_err(super::error::public_code)?;
+                    let published = proof
+                        .publish_initial_plaintext()
                         .map_err(super::error::public_code)?;
                     inspection
-                        .validate_device_state(&vault)
+                        .acknowledge_initial_protection(&self.root, &published)
+                        .map_err(super::error::public_code)?;
+                }
+                if super::protection::read(&self.root)
+                    .map_err(super::error::public_code)?
+                    .is_some_and(|record| record.cleanup.is_some())
+                {
+                    let selection = super::protection::generation::capture_current_selection()
+                        .map_err(super::error::public_code)?;
+                    let completed = super::protection::generation::recover_selected_at(
+                        &self.root,
+                        &selection,
+                        store,
+                        provided_key.clone(),
+                    )
+                    .map_err(super::error::public_code)?;
+                    inspection
+                        .acknowledge_protection_cleanup(&self.root, &completed)
+                        .map_err(super::error::public_code)?;
+                }
+                let session = SecretSession::open_protected(
+                    &self.root,
+                    inspection.device_root(),
+                    store,
+                    provided_key,
+                )
+                .map_err(super::error::public_code)?;
+                {
+                    let context = session.read().map_err(super::error::public_code)?;
+                    inspection
+                        .validate_storage_device_state(&context)
                         .map_err(super::error::public_code)?;
                     inspection
-                        .validate_database(&self.root, &vault)
+                        .validate_storage_database(&self.root, &context)
                         .map_err(super::error::public_code)?;
                     inspection
                         .verify_unchanged(&self.root)
                         .map_err(super::error::public_code)?;
-                } else if inspection.has_device_files() {
-                    return Err("secret.metadata_missing".into());
                 }
-                super::reset::recover(&self.root, password).map_err(super::error::public_code)?;
-                super::bootstrap_restore::recover(&self.root, store, password)
-                    .map_err(super::error::public_code)?;
                 crate::settings::reload_settings().map_err(super::error::public_code)?;
                 crate::settings::bootstrap_settings().map_err(super::error::public_code)?;
-                crate::database::vault::preflight(&self.root.join(crate::config::DB_FILE_NAME))
-                    .map_err(super::error::public_code)?;
-                SecretSession::open(&self.root, store, password).map_err(super::error::public_code)
+                Ok(session)
             },
             prepare,
         )
@@ -149,7 +312,15 @@ impl StartupCoordinator {
             .map_err(|_| "secret.startup_unavailable")?
             .ensure_runtime_admitted()
             .map_err(super::error::public_code)?;
-        let session = unlock()?;
+        let session = match unlock() {
+            Ok(session) => session,
+            Err(error) => {
+                if !credential_custody_unavailable(&error) {
+                    *phase = Phase::Failed;
+                }
+                return Err(error);
+            }
+        };
         *phase = Phase::Initializing;
         drop(phase);
         let result = prepare(session);
@@ -274,7 +445,10 @@ impl StartupCoordinator {
             {
                 state
                     .db
-                    .verify_released_checkpoint_schema(&device, &vault)
+                    .verify_released_checkpoint_schema(
+                        &device,
+                        vault.encrypted().map_err(super::error::public_code)?,
+                    )
                     .map_err(super::error::public_code)?;
                 let mut view = super::upgrade::StartupUpgradeView::blocked("completed");
                 view.checkpoint_id = Some(record.checkpoint_id);
@@ -347,7 +521,10 @@ impl StartupCoordinator {
                 }
                 state
                     .db
-                    .migrate_released_checkpoint_schema(&device, &vault)
+                    .migrate_released_checkpoint_schema(
+                        &device,
+                        vault.encrypted().map_err(super::error::public_code)?,
+                    )
                     .map_err(super::error::public_code)?;
             }
         } else {
@@ -360,7 +537,10 @@ impl StartupCoordinator {
             }
             state
                 .db
-                .migrate_released_checkpoint_schema(&device, &vault)
+                .migrate_released_checkpoint_schema(
+                    &device,
+                    vault.encrypted().map_err(super::error::public_code)?,
+                )
                 .map_err(super::error::public_code)?;
         }
         *inspection =
@@ -986,9 +1166,12 @@ pub(crate) async fn get_upgrade_sync_resume_review(
         };
         state
             .db
-            .verify_released_checkpoint_schema(&device, &vault)
+            .verify_released_checkpoint_schema(
+                &device,
+                vault.encrypted().map_err(super::error::public_code)?,
+            )
             .map_err(super::error::public_code)?;
-        let review = crate::settings::review_upgrade_sync_with_vault(&state.db.secrets, &vault)
+        let review = crate::settings::review_upgrade_sync_with_storage(&state.db.secrets, &vault)
             .map_err(super::error::public_code)?;
         if review
             .as_ref()
@@ -1024,19 +1207,22 @@ pub(crate) async fn confirm_upgrade_sync_resume(
         }
         state
             .db
-            .verify_released_checkpoint_schema(&device, &vault)
+            .verify_released_checkpoint_schema(
+                &device,
+                vault.encrypted().map_err(super::error::public_code)?,
+            )
             .map_err(super::error::public_code)?;
         match choice {
             UpgradeSyncChoice::IndependentConfig | UpgradeSyncChoice::CompatibleDevices => {}
         }
-        crate::settings::confirm_upgrade_sync_with_vault(
+        crate::settings::confirm_upgrade_sync_with_storage(
             &expected_checkpoint_id,
             &expected_revision,
             &state.db.secrets,
             &vault,
         )
         .map_err(super::error::public_code)?;
-        crate::settings::review_upgrade_sync_with_vault(&state.db.secrets, &vault)
+        crate::settings::review_upgrade_sync_with_storage(&state.db.secrets, &vault)
             .map_err(super::error::public_code)?
             .ok_or_else(|| "upgrade.source_changed".into())
     })
@@ -1174,8 +1360,8 @@ pub(crate) async fn recover_startup_upgrade_app(
 
 #[cfg(feature = "gui")]
 #[tauri::command]
-pub(crate) async fn get_startup_recovery(
-    app: tauri::AppHandle,
+pub(crate) async fn get_startup_recovery<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
 ) -> Result<StartupRecoveryView, String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<StartupCoordinator>().recovery_view())
         .await
@@ -1184,8 +1370,8 @@ pub(crate) async fn get_startup_recovery(
 
 #[cfg(feature = "gui")]
 #[tauri::command]
-pub(crate) async fn recover_startup_operation(
-    app: tauri::AppHandle,
+pub(crate) async fn recover_startup_operation<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     token: String,
     password: String,
 ) -> Result<StartupRecoveryView, StartupError> {
@@ -1193,8 +1379,9 @@ pub(crate) async fn recover_startup_operation(
     let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         let coordinator = app.state::<StartupCoordinator>();
+        let dependencies = app.state::<credential_protection::CommandDependencies<R>>();
         coordinator
-            .recover_operation(&token, &password, &SystemKeyStore)
+            .recover_operation(&token, &password, dependencies.key_store())
             .map_err(|code| StartupError {
                 code,
                 restart_required: coordinator.restart_required(),
@@ -1336,26 +1523,69 @@ pub(crate) async fn restore_startup_vault(
     result
 }
 
-#[cfg(feature = "gui")]
-fn present_error(app: &tauri::AppHandle, error: &str) {
-    log::error!("启动解锁失败（secret startup failed）: {error}");
-    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+fn credential_custody_unavailable(error: &str) -> bool {
+    matches!(
+        error,
+        "secret.locked"
+            | "secret.key_missing"
+            | "secret.store_unavailable"
+            | "secret.password_setup_required"
+            | "secret.password_rejected"
+            | "secret.password_unavailable"
+    )
+}
+
+fn startup_failure_payload(
+    error: &str,
+    restart_required: bool,
+) -> crate::init_status::InitErrorPayload {
+    // Initialization crosses storage, database and upgrade owners. Only their
+    // explicit custody codes may imply missing credentials; phase is not proof.
+    let credential_unavailable = credential_custody_unavailable(error);
+    let kind = if credential_unavailable {
+        if restart_required {
+            "secret_initialization_failed"
+        } else {
+            "secret_locked"
+        }
+    } else {
+        "startup_initialization_failed"
+    };
+    crate::init_status::InitErrorPayload {
         path: String::new(),
-        error: error.to_owned(),
-        kind: Some(
-            if app.state::<StartupCoordinator>().restart_required() {
-                "secret_initialization_failed"
-            } else {
-                "secret_locked"
-            }
-            .into(),
-        ),
+        error: crate::diagnostics::redact_log_text(error),
+        kind: Some(kind.into()),
         db_version: None,
         supported_version: None,
-    });
+    }
+}
+
+#[cfg(feature = "gui")]
+fn present_error(app: &tauri::AppHandle, error: &str) {
+    log::error!("启动初始化失败（startup initialization failed）: {error}");
+    crate::init_status::set_init_error(startup_failure_payload(
+        error,
+        app.state::<StartupCoordinator>().restart_required(),
+    ));
     if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+/// Observe only an actually published runtime. This command never opens a key,
+/// initializes a database, retries startup, or changes the credential lifecycle.
+#[cfg(feature = "gui")]
+#[tauri::command]
+pub(crate) fn get_runtime_availability(
+    app: tauri::AppHandle,
+) -> super::session::RuntimeAvailability {
+    let state = app.try_state::<crate::store::AppState>();
+    match app.try_state::<StartupCoordinator>() {
+        Some(coordinator) => {
+            coordinator.runtime_availability(state.as_ref().map(|state| state.db.secrets.as_ref()))
+        }
+        None => super::session::credential_runtime_availability(None),
     }
 }
 
@@ -1365,32 +1595,6 @@ pub(crate) fn try_automatic_unlock(app: &tauri::AppHandle) {
     if let Err(error) = coordinator.initialize(app, None) {
         present_error(app, &error);
     }
-}
-
-#[cfg(feature = "gui")]
-#[tauri::command]
-pub(crate) async fn unlock_secret_vault(
-    app: tauri::AppHandle,
-    password: Option<String>,
-) -> Result<(), StartupError> {
-    let password = password.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        let coordinator = app.state::<StartupCoordinator>();
-        coordinator
-            .initialize(&app, password.as_ref().map(|p| p.as_str()))
-            .map_err(|code| {
-                present_error(&app, &code);
-                StartupError {
-                    code,
-                    restart_required: coordinator.restart_required(),
-                }
-            })
-    })
-    .await
-    .map_err(|_| StartupError {
-        code: "secret.operation_failed".into(),
-        restart_required: true,
-    })?
 }
 
 #[cfg(feature = "gui")]
@@ -1509,6 +1713,206 @@ mod tests {
                 std::fs::read(root.join(crate::config::DB_FILE_NAME)).unwrap(),
                 b"runtime-owned-source"
             );
+        }
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn runtime_availability_requires_completed_original_publication() {
+        let directory = super::super::testing::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let device = crate::live::engine::DeviceStore::at(directory.path().join("device"));
+        let inspection = super::super::upgrade::inspect(&root, &device).unwrap();
+        let coordinator = StartupCoordinator::new(root.clone(), inspection);
+        let session = SecretSession::ephemeral().unwrap();
+        assert!(coordinator
+            .run_attempt(
+                || Ok(session.clone()),
+                |published_session| {
+                    assert!(
+                        !coordinator
+                            .runtime_availability(Some(&published_session))
+                            .credential_runtime_available,
+                        "an AppState published inside initialization is not yet a ready runtime"
+                    );
+                    Err("synthetic failure after state publication".into())
+                },
+            )
+            .is_err());
+        assert!(
+            !coordinator
+                .runtime_availability(Some(&session))
+                .credential_runtime_available
+        );
+        for phase in [
+            Phase::Locked,
+            Phase::UpgradeReview,
+            Phase::Initializing,
+            Phase::Failed,
+            Phase::Recovered,
+        ] {
+            *coordinator.phase.lock().unwrap() = phase;
+            assert!(
+                !coordinator
+                    .runtime_availability(Some(&session))
+                    .credential_runtime_available
+            );
+        }
+        *coordinator.phase.lock().unwrap() = Phase::Ready;
+        assert!(
+            coordinator
+                .runtime_availability(Some(&session))
+                .credential_runtime_available
+        );
+        assert!(
+            !coordinator
+                .runtime_availability(None)
+                .credential_runtime_available
+        );
+        session.set_blocked(true);
+        assert!(
+            !coordinator
+                .runtime_availability(Some(&session))
+                .credential_runtime_available
+        );
+        assert!(!root.exists());
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn startup_failure_classification_does_not_invent_a_key_failure() {
+        for restart in [false, true] {
+            for code in [
+                "settings.invalid_json",
+                "settings.read_failed",
+                "secret.storage_unavailable",
+                "secret.invalid_metadata",
+                "secret.identity_mismatch",
+                "secret.key_rejected",
+                "upgrade.sync_paused",
+                "upgrade.source_changed",
+                "upgrade.future_version",
+                "upgrade.invalid_mode_state",
+                "database checkpoint failed",
+                "unknown future error",
+            ] {
+                let payload = startup_failure_payload(code, restart);
+                assert_eq!(
+                    payload.kind.as_deref(),
+                    Some("startup_initialization_failed"),
+                    "{code}"
+                );
+                assert_eq!(payload.error, code);
+            }
+            for code in [
+                "secret.locked",
+                "secret.key_missing",
+                "secret.store_unavailable",
+                "secret.password_setup_required",
+                "secret.password_rejected",
+                "secret.password_unavailable",
+            ] {
+                assert_eq!(
+                    startup_failure_payload(code, restart).kind.as_deref(),
+                    Some(if restart {
+                        "secret_initialization_failed"
+                    } else {
+                        "secret_locked"
+                    })
+                );
+            }
+        }
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn startup_diagnostics_reuse_redaction_without_mutating_recovery_evidence() {
+        let raw = "settings.read_failed password=synthetic-secret-canary https://test.invalid/?token=synthetic-query-canary";
+        let payload = startup_failure_payload(raw, false);
+        assert!(!payload.error.contains("synthetic-secret-canary"));
+        assert!(!payload.error.contains("synthetic-query-canary"));
+        let line = crate::diagnostics::format_log_line(
+            "synthetic-time",
+            log::Level::Error,
+            "startup",
+            raw,
+        );
+        assert!(!line.contains("synthetic-secret-canary"));
+        assert!(!line.contains("synthetic-query-canary"));
+        let directory = super::super::testing::tempdir().unwrap();
+        let root = directory.path().join("old-data");
+        crate::config_file_io::ensure_private_directory(&root).unwrap();
+        let marker = directory.path().join(".old-data-vault-reset");
+        std::fs::write(&marker, b"synthetic pending evidence").unwrap();
+        let target = crate::panic_hook::diagnostic_root_for(&root).unwrap();
+        assert_ne!(target, root);
+        assert!(!target.starts_with(&root));
+        assert_eq!(
+            std::fs::read(marker).unwrap(),
+            b"synthetic pending evidence"
+        );
+        assert!(!target.exists());
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn diagnostic_preflight_preserves_invalid_paths_and_pending_evidence() {
+        let directory = super::super::testing::tempdir().unwrap();
+        let file_root = directory.path().join("not-a-directory");
+        std::fs::write(&file_root, b"untouched file root").unwrap();
+        assert!(crate::prepare_startup_diagnostic_root(&file_root).is_err());
+        assert_eq!(std::fs::read(&file_root).unwrap(), b"untouched file root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let root = directory.path().join("original");
+            std::fs::create_dir(&root).unwrap();
+            let evidence = directory.path().join("external-evidence");
+            std::fs::write(&evidence, b"untouched pending bytes").unwrap();
+            let marker = directory.path().join(".original-vault-reset");
+            symlink(&evidence, &marker).unwrap();
+            assert!(crate::prepare_startup_diagnostic_root(&root).is_err());
+            assert_eq!(
+                std::fs::read(&evidence).unwrap(),
+                b"untouched pending bytes"
+            );
+            assert!(std::fs::symlink_metadata(&marker)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!root.join("logs").exists());
+            let real_parent = directory.path().join("real-parent");
+            let real_root = real_parent.join("data");
+            std::fs::create_dir_all(&real_root).unwrap();
+            std::fs::set_permissions(&real_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let sentinel = real_root.join("sentinel");
+            std::fs::write(&sentinel, b"unchanged original bytes").unwrap();
+            let logging_root = directory.path().join("logging-root");
+            std::fs::create_dir(&logging_root).unwrap();
+            std::fs::set_permissions(&logging_root, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            symlink(&real_root, logging_root.join("logs")).unwrap();
+            assert!(crate::prepare_startup_diagnostic_root(&logging_root).is_err());
+            assert_eq!(
+                std::fs::metadata(&logging_root)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert_eq!(std::fs::read_dir(&real_root).unwrap().count(), 1);
+            let alias = directory.path().join("ancestor-alias");
+            symlink(&real_parent, &alias).unwrap();
+            assert!(
+                crate::prepare_startup_diagnostic_root(&alias.join("data")).is_err(),
+                "a rejected ancestor alias must fail before diagnostic chmod/write"
+            );
+            assert_eq!(
+                std::fs::metadata(&real_root).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert_eq!(
+                std::fs::read(&sentinel).unwrap(),
+                b"unchanged original bytes"
+            );
+            assert_eq!(std::fs::read_dir(&real_root).unwrap().count(), 1);
         }
     }
 
@@ -1702,7 +2106,7 @@ mod upgrade_handoff_tests {
                 database::loongport_schema::read_stored_version(&conn).unwrap(),
                 version
             );
-            database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+            database::vault::stamp(&conn, session.read().unwrap().encrypted().unwrap()).unwrap();
             session.complete_migration().unwrap();
             let db = Database::from_connection(conn, session.clone());
             let config = serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-credential","ANTHROPIC_BASE_URL":"https://synthetic.example.invalid/v1","ANTHROPIC_MODEL":"synthetic-model"}});
@@ -1722,9 +2126,11 @@ mod upgrade_handoff_tests {
                 current_provider_claude: Some("a".into()),
                 ..Default::default()
             };
-            let bytes =
-                crate::settings::encode_settings_with_vault(&settings, &session.read().unwrap())
-                    .unwrap();
+            let bytes = crate::settings::encode_settings_with_vault(
+                &settings,
+                session.read().unwrap().encrypted().unwrap(),
+            )
+            .unwrap();
             crate::config_file_io::write_durable(&crate::settings::settings_path(), &bytes)
                 .unwrap();
             let native = crate::config::get_claude_settings_path();
@@ -2229,7 +2635,7 @@ mod upgrade_handoff_tests {
                 assert!(checkpoint::verified_database_id(
                     &root,
                     &f.device,
-                    &session.read().unwrap()
+                    session.read().unwrap().encrypted().unwrap()
                 )
                 .unwrap()
                 .is_some());
@@ -2358,20 +2764,31 @@ mod upgrade_handoff_tests {
                 ordinary_prepare_calls.set(ordinary_prepare_calls.get() + 1);
                 let vault = session.read().unwrap();
                 assert_eq!(
-                    vault.metadata().vault_id,
-                    original_session.read().unwrap().metadata().vault_id
+                    vault.encrypted().unwrap().metadata().vault_id,
+                    original_session
+                        .read()
+                        .unwrap()
+                        .encrypted()
+                        .unwrap()
+                        .metadata()
+                        .vault_id
                 );
-                assert!(checkpoint::verified_database_id(&root, &f.device, &vault)
-                    .unwrap()
-                    .is_none());
+                assert!(checkpoint::verified_database_id(
+                    &root,
+                    &f.device,
+                    vault.encrypted().unwrap()
+                )
+                .unwrap()
+                .is_none());
                 let conn =
                     rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
                 assert_eq!(
                     Database::get_user_version(&conn).unwrap(),
                     database::SCHEMA_VERSION
                 );
-                database::vault::check_identity(&conn, &vault).unwrap();
-                crate::secrets::inventory::validate_database(&conn, &vault).unwrap();
+                database::vault::check_identity(&conn, vault.encrypted().unwrap()).unwrap();
+                crate::secrets::inventory::validate_database(&conn, vault.encrypted().unwrap())
+                    .unwrap();
                 Ok(())
             })
             .unwrap();
@@ -2481,7 +2898,7 @@ mod upgrade_handoff_tests {
         assert!(crate::settings::update_settings(dto).is_err());
         {
             let vault = session.read().unwrap();
-            assert!(crate::settings::set_current_provider_with_vault(
+            assert!(crate::settings::set_current_provider_with_storage(
                 &AppType::Codex,
                 Some("synthetic-new-selection"),
                 &session,
@@ -2493,7 +2910,7 @@ mod upgrade_handoff_tests {
         crate::settings::update_settings(crate::settings::get_settings()).unwrap();
         {
             let vault = session.read().unwrap();
-            crate::settings::set_current_provider_with_vault(
+            crate::settings::set_current_provider_with_storage(
                 &AppType::Claude,
                 Some("a"),
                 &session,
@@ -2614,8 +3031,11 @@ mod upgrade_handoff_tests {
             std::fs::write(&path, &bytes).unwrap();
             let before = snapshot(f.home.path());
             assert!(
-                crate::settings::decode_settings_with_vault(&bytes, &session.read().unwrap())
-                    .is_err(),
+                crate::settings::decode_settings_with_vault(
+                    &bytes,
+                    session.read().unwrap().encrypted().unwrap()
+                )
+                .is_err(),
                 "{case}"
             );
             assert!(
@@ -2680,19 +3100,22 @@ mod upgrade_handoff_tests {
         let path = crate::settings::settings_path();
         let plaintext = serde_json::to_vec(&settings).unwrap();
         std::fs::write(&path, &plaintext).unwrap();
-        assert!(
-            crate::settings::decode_settings_with_vault(&plaintext, &session.read().unwrap())
-                .is_err()
-        );
+        assert!(crate::settings::decode_settings_with_vault(
+            &plaintext,
+            session.read().unwrap().encrypted().unwrap()
+        )
+        .is_err());
         assert!(crate::secrets::migration::prepare_files(&session, false).is_err());
         assert!(std::fs::read(&path).unwrap() == plaintext);
         assert!(session.migration_pending().unwrap());
         crate::secrets::migration::prepare_files(&session, true).unwrap();
         let encrypted = std::fs::read(&path).unwrap();
         assert!(!String::from_utf8_lossy(&encrypted).contains("synthetic-legacy-credential"));
-        let restored =
-            crate::settings::decode_settings_with_vault(&encrypted, &session.read().unwrap())
-                .unwrap();
+        let restored = crate::settings::decode_settings_with_vault(
+            &encrypted,
+            session.read().unwrap().encrypted().unwrap(),
+        )
+        .unwrap();
         assert!(restored.webdav_sync.unwrap().password == "synthetic-legacy-credential");
         crate::secrets::migration::prepare_files(&session, true).unwrap();
         assert!(std::fs::read(&path).unwrap() == encrypted);
@@ -2739,7 +3162,7 @@ mod upgrade_handoff_tests {
         let checkpoint_id = checkpoint::verified_database_id(
             &f.coordinator.root,
             &f.device,
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap()
         .unwrap();
@@ -2959,9 +3382,25 @@ pub(crate) fn verify_normal_upgrade_startup(case: &str) {
             normal_upgrade_tests::failed_database_publication_keeps_recovery_and_restarts()
         }
         "guards" => verify_original_startup_admission(),
+        "diagnostics-preflight" => {
+            tests::diagnostic_preflight_preserves_invalid_paths_and_pending_evidence()
+        }
+        "error-classification" => {
+            tests::startup_failure_classification_does_not_invent_a_key_failure()
+        }
+        "error-redaction" => {
+            tests::startup_diagnostics_reuse_redaction_without_mutating_recovery_evidence()
+        }
+        "shell-availability" => {
+            tests::runtime_availability_requires_completed_original_publication()
+        }
         "password-modern" => {
             normal_upgrade_tests::password_and_existing_modern_database_keep_original_owners()
         }
         _ => panic!("unknown startup fixture"),
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "startup_protection_entry_tests.rs"]
+pub(crate) mod protection_entry_tests;

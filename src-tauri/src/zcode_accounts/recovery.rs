@@ -6,7 +6,7 @@ use super::checkpoint::{
 };
 use super::core::{AccountSnapshot, CredentialDocument, TransactionPhase};
 use super::native::NativeCipher;
-use crate::secrets::{owned_file::RECOVERY_FILE, VaultContext};
+use crate::secrets::{owned_file::RECOVERY_FILE, storage::StorageContext};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -119,7 +119,10 @@ pub(crate) struct JournalEvidence {
     context: String,
 }
 impl JournalEvidence {
-    pub(crate) fn open_journal(encoded: &str, vault: &VaultContext) -> Result<Self, RecoveryError> {
+    pub(crate) fn open_journal(
+        encoded: &str,
+        vault: &StorageContext,
+    ) -> Result<Self, RecoveryError> {
         Self::from_authenticated_payload(&open_payload_bytes(encoded, JOURNAL_FILE, vault)?)
     }
     fn from_authenticated_payload(raw: &[u8]) -> Result<Self, RecoveryError> {
@@ -219,7 +222,7 @@ impl RecoveryLedger {
     pub(crate) fn ensure_switch_capacity(
         &self,
         candidate: &JournalEvidence,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<(), RecoveryError> {
         if self.needs_confirmation() {
             return Err(RecoveryError::Unconfirmed);
@@ -374,10 +377,10 @@ impl RecoveryLedger {
         self.records()
             .any(|r| matches!(r.disposition, Disposition::NativeUnconfirmed {}))
     }
-    pub(crate) fn seal(&self, vault: &VaultContext) -> Result<String, RecoveryError> {
+    pub(crate) fn seal(&self, vault: &StorageContext) -> Result<String, RecoveryError> {
         seal_payload(&self.payload(), RECOVERY_FILE, vault).map_err(Into::into)
     }
-    pub(crate) fn open(encoded: &str, vault: &VaultContext) -> Result<Self, RecoveryError> {
+    pub(crate) fn open(encoded: &str, vault: &StorageContext) -> Result<Self, RecoveryError> {
         let payload: LedgerPayload = open_payload(encoded, RECOVERY_FILE, vault)?;
         if payload.version != 1 {
             return Err(CheckpointError::InvalidPayload.into());

@@ -90,7 +90,7 @@ pub(crate) fn load_current_tier(
 ) -> Result<Tier, String> {
     let vault = session.read().map_err(|e| e.to_string())?;
     let conn = open_readonly(&session.root().join(crate::config::DB_FILE_NAME))?;
-    crate::database::vault::check_identity(&conn, &vault).map_err(|e| e.to_string())?;
+    crate::database::storage::check_identity(&conn, &vault).map_err(|e| e.to_string())?;
     let provider_id = current_image_tier_id(&conn)?;
     load_tier(&conn, &vault, &provider_id)
 }
@@ -205,7 +205,7 @@ fn open_readonly(db_path: &std::path::Path) -> Result<rusqlite::Connection, Stri
 /// [`super::provider_config::extract_api_key`]，没有另写一份解析）。
 fn load_tier(
     conn: &rusqlite::Connection,
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
     provider_id: &str,
 ) -> Result<Tier, String> {
     // ⚠️ **`app_type` 必须参与查询** —— `providers` 的主键是
@@ -884,14 +884,16 @@ base_url = "https://api.example/v1""#}),
         }
         let conn = open_readonly(&path).unwrap();
         let vault = db.secrets.read().unwrap();
-        crate::database::vault::check_identity(&conn, &vault).unwrap();
+        crate::database::storage::check_identity(&conn, &vault).unwrap();
         assert_eq!(
             load_tier(&conn, &vault, &provider.id).unwrap().api_key,
             "image-canary"
         );
         assert!(load_tier(
             &conn,
-            &crate::secrets::VaultContext::generate().unwrap(),
+            &crate::secrets::storage::StorageContext::Encrypted(
+                crate::secrets::VaultContext::generate().unwrap()
+            ),
             &provider.id
         )
         .is_err());

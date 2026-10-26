@@ -22,7 +22,7 @@ impl Admission<'_> {
         &self,
         _session: &SecretSession,
         rows: &[SavedAccount],
-        binding: &VaultMetadata,
+        binding: &StorageIdentity,
     ) -> Result<(), Failure> {
         let i = engine::matched(rows, binding, self.snapshot)?;
         if self.day.is_some() {
@@ -66,7 +66,7 @@ pub(super) async fn request_with<T: Transport>(
     }
     let now = clock.now_ms();
     let binding = store::binding(session).map_err(NotDispatched)?;
-    let account_id = snapshot.account.id(&binding.vault_id);
+    let account_id = snapshot.account.id(binding.store_id());
     let mut lease = Lease::acquire_for_purpose(session.clone(), &account_id, false)
         .await
         .map_err(NotDispatched)?;

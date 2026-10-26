@@ -409,7 +409,23 @@ impl HttpFixture {
         });
         let private_wrapper = directory.path().join("worker.mjs");
         // Every path/origin is a trusted test constant, not HTTP input or product config.
-        std::fs::write(&private_wrapper,format!("import {{pathToFileURL}} from 'node:url';\nconst {{runFixture}}=await import(pathToFileURL({}).href);\nawait runFixture({});\n",serde_json::to_string(&wrapper).unwrap(),json!({"origin":origin,"tracePath":directory.path().join("trace.jsonl"),"workerPath":worker,"terminalFault":terminal_fault}))).unwrap();
+        let diagnostic_path = directory.path().join("diagnostic.jsonl");
+        std::fs::write(&private_wrapper, format!(r#"import {{pathToFileURL}} from 'node:url';
+import {{appendFileSync}} from 'node:fs';
+const diagnosticPath={};
+const diagnostic=value=>appendFileSync(diagnosticPath,JSON.stringify(value)+'\n');
+diagnostic({{stage:'bootstrap'}});
+try {{
+  const {{runFixture}}=await import(pathToFileURL({}).href);
+  await runFixture({});
+}} catch (error) {{
+  const allowed=['ERR_MODULE_NOT_FOUND','ERR_UNSUPPORTED_ESM_URL_SCHEME','EACCES','ENOENT','EPIPE'];
+  const errorClass=allowed.includes(error?.code)?error.code:'other';
+  diagnostic({{stage:'bootstrapFailed',errorClass}});
+  throw error;
+}}
+"#, serde_json::to_string(&diagnostic_path).unwrap(), serde_json::to_string(&wrapper).unwrap(),
+            json!({"origin":origin,"tracePath":directory.path().join("trace.jsonl"),"workerPath":worker,"terminalFault":terminal_fault,"diagnosticPath":diagnostic_path}))).unwrap();
         let runtime = crate::proxy::qoder_host::HostConfig {
             node: std::env::var_os("QODER_HOST_NODE")
                 .unwrap_or_else(|| "node".into())
@@ -448,6 +464,67 @@ impl HttpFixture {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+    /// Safe failure summary only. Raw trace bodies and arbitrary worker stderr
+    /// deliberately remain private; assertions expose fixed stages/counts only.
+    fn diagnostic(&self) -> String {
+        let trace = self.trace();
+        let mut stages = std::collections::BTreeMap::<&str, usize>::new();
+        let mut errors = std::collections::BTreeMap::<&str, usize>::new();
+        let allowed_stages = [
+            "bootstrap",
+            "entered",
+            "guardReady",
+            "protocolLoaded",
+            "workerLoaded",
+            "stdinAttached",
+            "inputRejected",
+            "networkDenied",
+            "workerReturned",
+            "bootstrapFailed",
+        ];
+        let allowed_errors = [
+            "ERR_MODULE_NOT_FOUND",
+            "ERR_UNSUPPORTED_ESM_URL_SCHEME",
+            "EACCES",
+            "ENOENT",
+            "EPIPE",
+            "other",
+        ];
+        for line in std::fs::read_to_string(self.directory.path().join("diagnostic.jsonl"))
+            .unwrap_or_default()
+            .lines()
+        {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(stage) = allowed_stages
+                .iter()
+                .find(|stage| value["stage"].as_str() == Some(**stage))
+            {
+                *stages.entry(stage).or_default() += 1;
+            }
+            if let Some(error) = allowed_errors
+                .iter()
+                .find(|error| value["errorClass"].as_str() == Some(**error))
+            {
+                *errors.entry(error).or_default() += 1;
+            }
+        }
+        json!({"start":trace.iter().filter(|v|v["kind"]=="start").count(),
+            "GET":trace.iter().filter(|v|v["kind"]=="network" && v["method"]=="GET").count(),
+            "POST":trace.iter().filter(|v|v["kind"]=="network" && v["method"]=="POST").count(),
+            "exit":trace.iter().filter(|v|v["kind"]=="exit").count(),
+            "stages":stages,"errorClasses":errors})
+        .to_string()
+    }
+    fn assert_status(&self, response: &axum::response::Response, expected: StatusCode) {
+        assert_eq!(
+            response.status(),
+            expected,
+            "safe worker stages: {}",
+            self.diagnostic()
+        );
     }
     fn sent(&self) -> Vec<Value> {
         self.trace()
@@ -713,7 +790,7 @@ async fn http_client_body_drop_closes_upstream_without_account_replay() {
                 json!({"model":MODEL,"stream":true,"input":"hello"}),
             )
             .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        f.assert_status(&response, StatusCode::OK);
         f.upstream.wait_posts(1).await;
         assert_eq!(f.proxy.state.status.read().await.active_connections, 1);
         if read_prefix {
@@ -732,7 +809,12 @@ async fn http_client_body_drop_closes_upstream_without_account_replay() {
         }
         f.upstream.wait_closed(1).await;
         f.idle().await;
-        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+        assert_eq!(
+            *f.upstream.posts.lock().await,
+            vec!["qoder-a"],
+            "safe worker stages: {}",
+            f.diagnostic()
+        );
     }
 }
 
@@ -771,7 +853,7 @@ async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
             json!({"model":MODEL,"stream":true,"input":"hello"}),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
+    f.assert_status(&response, StatusCode::OK);
     let mut stream = response.into_body().into_data_stream();
     let mut visible = Vec::new();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -802,7 +884,12 @@ async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
     assert!(!String::from_utf8_lossy(&visible).contains("response.completed"));
     drop(stream);
     f.idle().await;
-    assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+    assert_eq!(
+        *f.upstream.posts.lock().await,
+        vec!["qoder-a"],
+        "safe worker stages: {}",
+        f.diagnostic()
+    );
 }
 
 #[tokio::test]
@@ -816,7 +903,7 @@ async fn http_original_override_exclusion_keeps_compatible_account() {
     let response = f
         .request("/v1/responses", json!({"model":MODEL,"input":"hello"}))
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
+    f.assert_status(&response, StatusCode::OK);
     let _ = text(response).await;
     assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-b"]);
     assert_eq!(f.proxy.state.status.read().await.failed_requests, 0);
@@ -1329,7 +1416,12 @@ async fn http_cn_device_unknown_post_and_partial_output_never_replay_or_complete
             }
         }
         assert!(!String::from_utf8_lossy(&bytes).contains("response.completed"));
-        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+        assert_eq!(
+            *f.upstream.posts.lock().await,
+            vec!["qoder-a"],
+            "safe worker stages: {}",
+            f.diagnostic()
+        );
         f.idle().await;
     }
 }

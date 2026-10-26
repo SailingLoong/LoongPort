@@ -1,4 +1,5 @@
 use super::*;
+use crate::secrets::VaultContext;
 use serde_json::json;
 use std::sync::RwLock;
 
@@ -7,7 +8,7 @@ fn preview_apply_conflict_and_disconnect_preserve_user_edits() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = dir.path().join("models.json");
     let store = DeviceStore::at(dir.path().join("device"));
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     std::fs::write(
         &path,
@@ -79,7 +80,7 @@ fn final_conflict_check_preserves_external_bytes_and_clears_intent() {
     let path = dir.path().join("models.json");
     std::fs::write(&path, b"[]").unwrap();
     let owner = Configuration::new(DeviceStore::at(dir.path().join("device")));
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     let plan = engine::plan(
         &LiveFile::private(&path),
@@ -106,7 +107,7 @@ fn explicit_recovery_recognizes_before_and_after_without_replaying() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = dir.path().join("models.json");
     let owner = Configuration::new(DeviceStore::at(dir.path().join("device")));
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     for bytes in [b"[]".as_slice(), b"[1]", b"[2]"] {
         std::fs::write(&path, bytes).unwrap();
@@ -141,7 +142,7 @@ fn changed_owned_entry_is_not_removed_or_silently_adopted() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let path = dir.path().join("models.json");
     let owner = Configuration::new(DeviceStore::at(dir.path().join("device")));
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     let request = Connection {
         client_id: "workbuddy".into(),

@@ -185,8 +185,10 @@ async fn adapter_fixture_cross_root_epoch_and_missing_transport_send_zero_http()
     let f = Owner::new().await;
     let fixture = FixtureTransport::loopback(&f.seal, "http://127.0.0.1:9").unwrap();
     let other_root = tempfile::tempdir().unwrap();
-    let other =
-        SecretSession::from_context(other_root.path().into(), f.session.read().unwrap().clone());
+    let other = SecretSession::from_storage_context(
+        other_root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     FixtureTransport::seed_accounts(&other, &[("synthetic-sg", Realm::Sg)])
         .await
         .unwrap();

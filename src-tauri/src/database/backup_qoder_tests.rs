@@ -1,3 +1,4 @@
+use crate::secrets::storage::StorageContext;
 // Included only inside backup.rs::tests. These tests call the original import,
 // backup/restore and encrypted sync-join owners, not the preservation helpers.
 use crate::database::dao::qoder_campaign_operations as qoder_receipts;
@@ -275,7 +276,11 @@ fn qoder_sync_join_rewraps_provider_but_keeps_only_current_operation_owner() -> 
     let joined = Database::prepare_sync_join(staged, &*local.conn.lock()?, &current, &next)?;
     assert_eq!(Database::content_digest(&*local.conn.lock()?)?, before);
     assert_eq!(qoder_receipts::read_rows(&joined)?, expected_rows);
-    let providers = Database::get_all_providers_on_connection(&joined, &next, "codex")?;
+    let providers = Database::get_all_providers_on_connection(
+        &joined,
+        &StorageContext::from(next.clone()),
+        "codex",
+    )?;
     let provider = &providers["qoder-restore-fixture"];
     let restored = provider
         .meta
@@ -291,6 +296,11 @@ fn qoder_sync_join_rewraps_provider_but_keeps_only_current_operation_owner() -> 
         provider.settings_config["env"]["OPENAI_API_KEY"],
         "synthetic-changed"
     );
-    assert!(Database::get_all_providers_on_connection(&joined, &current, "codex").is_err());
+    assert!(Database::get_all_providers_on_connection(
+        &joined,
+        &StorageContext::from(current.clone()),
+        "codex"
+    )
+    .is_err());
     Ok(())
 }

@@ -28,12 +28,10 @@ struct Persistence {
 fn binding(db: &Database) -> Result<VaultBinding, RuntimeError> {
     let session = db.secret_session();
     let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
-    let meta = vault.metadata();
+
     Ok(VaultBinding {
         root: session.root().into(),
-        vault_id: meta.vault_id.clone(),
-        key_id: meta.key_id.clone(),
-        revision: meta.revision,
+        storage: vault.identity(),
     })
 }
 fn check_binding(db: &Database, expected: &VaultBinding) -> Result<(), RuntimeError> {

@@ -7,7 +7,7 @@ use crate::{
     relay::provider_config,
     secrets::{
         inventory::{open_db, seal_db},
-        VaultContext,
+        storage::StorageContext,
     },
     vendor::{self, Vendor},
 };
@@ -110,7 +110,7 @@ pub(crate) fn is_reference(provider: &Provider) -> bool {
 /// Returned credentials are transient; inventory writes strip them again.
 pub(crate) fn resolve_on(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     app: &AppType,
     provider: &mut Provider,
 ) -> Result<(), AppError> {

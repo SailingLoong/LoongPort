@@ -2,13 +2,15 @@ use super::super::core::OAuthFamily;
 use super::super::native::tests::replace;
 use super::super::native::tests::{native_document, TEST_CONTEXT, TEST_SECRET};
 use super::*;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 
 fn native() -> NativeCipher {
     NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap()
 }
 
 fn fixture(
-    vault: &VaultContext,
+    vault: &StorageContext,
     name: &str,
     phase: TransactionPhase,
 ) -> (JournalEvidence, CredentialDocument, CredentialDocument) {
@@ -36,13 +38,13 @@ fn fixture(
     )
 }
 
-fn evidence(vault: &VaultContext, name: &str, phase: TransactionPhase) -> JournalEvidence {
+fn evidence(vault: &StorageContext, name: &str, phase: TransactionPhase) -> JournalEvidence {
     fixture(vault, name, phase).0
 }
 
 #[test]
 fn recovery_archives_exact_authenticated_bytes_without_native_key() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let original = evidence(&vault, "target", TransactionPhase::Prepared);
     let raw = original.raw_payload().to_vec();
     let id = original.id().to_owned();
@@ -69,7 +71,7 @@ fn recovery_archives_exact_authenticated_bytes_without_native_key() {
 
 #[test]
 fn recovery_keeps_latest_and_two_archives_without_replacing_different_evidence() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let completed = evidence(&vault, "completed", TransactionPhase::Committed);
     let completed_id = completed.id().to_owned();
     let mut ledger = RecoveryLedger::default();
@@ -108,13 +110,17 @@ fn recovery_keeps_latest_and_two_archives_without_replacing_different_evidence()
 
 #[test]
 fn recovery_rejects_wrong_aad_key_schema_phase_and_duplicate_entries() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let item = evidence(&vault, "target", TransactionPhase::Committed);
     let journal = vault
         .seal(&["file", JOURNAL_FILE, "content"], item.raw_payload())
         .unwrap();
     assert!(RecoveryLedger::open(&journal, &vault).is_err());
-    assert!(JournalEvidence::open_journal(&journal, &VaultContext::generate().unwrap()).is_err());
+    assert!(JournalEvidence::open_journal(
+        &journal,
+        &StorageContext::Encrypted(VaultContext::generate().unwrap())
+    )
+    .is_err());
     let old_layout = vault
         .seal(&["file", RECOVERY_FILE, "content"], item.raw_payload())
         .unwrap();
@@ -138,7 +144,11 @@ fn recovery_rejects_wrong_aad_key_schema_phase_and_duplicate_entries() {
     ledger.archive(item).unwrap();
     let encoded = ledger.seal(&vault).unwrap();
     assert!(JournalEvidence::open_journal(&encoded, &vault).is_err());
-    assert!(RecoveryLedger::open(&encoded, &VaultContext::generate().unwrap()).is_err());
+    assert!(RecoveryLedger::open(
+        &encoded,
+        &StorageContext::Encrypted(VaultContext::generate().unwrap())
+    )
+    .is_err());
     let raw = vault
         .open(&["file", RECOVERY_FILE, "content"], &encoded)
         .unwrap();
@@ -159,7 +169,7 @@ fn recovery_rejects_wrong_aad_key_schema_phase_and_duplicate_entries() {
 
 #[test]
 fn recovery_confirmation_requires_an_entire_image_and_preserves_original_evidence() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let (item, before, after) = fixture(&vault, "target", TransactionPhase::Captured);
     let raw = item.raw_payload().to_vec();
@@ -197,7 +207,7 @@ fn recovery_confirmation_requires_an_entire_image_and_preserves_original_evidenc
 
 #[test]
 fn recovery_confirmation_is_bound_to_selected_evidence_and_fresh_persisted_capture() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let (item, before, _) = fixture(&vault, "target", TransactionPhase::Prepared);
     let (other, _, _) = fixture(&vault, "other", TransactionPhase::Prepared);
@@ -262,7 +272,7 @@ fn recovery_confirmation_is_bound_to_selected_evidence_and_fresh_persisted_captu
 
 #[test]
 fn recovery_reappearing_journal_revokes_old_confirmation_without_duplicating_payload() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     for latest in [false, true] {
         let (item, before, _) = fixture(&vault, "target", TransactionPhase::Committed);
         let raw = item.raw_payload().to_vec();
@@ -299,7 +309,7 @@ fn recovery_reappearing_journal_revokes_old_confirmation_without_duplicating_pay
 
 #[test]
 fn recovery_deletes_only_selected_confirmed_record_and_completion_preserves_archives() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let (item, before, _) = fixture(&vault, "archive", TransactionPhase::Prepared);
     let id = item.id().to_owned();
     let raw = item.raw_payload().to_vec();
@@ -348,7 +358,7 @@ fn recovery_deletes_only_selected_confirmed_record_and_completion_preserves_arch
     assert!(!ledger.needs_confirmation());
 }
 
-fn reauthenticate(vault: &VaultContext, raw: &[u8]) -> JournalEvidence {
+fn reauthenticate(vault: &StorageContext, raw: &[u8]) -> JournalEvidence {
     let encoded = vault.seal(&["file", JOURNAL_FILE, "content"], raw).unwrap();
     JournalEvidence::open_journal(&encoded, vault).unwrap()
 }
@@ -356,7 +366,7 @@ fn reauthenticate(vault: &VaultContext, raw: &[u8]) -> JournalEvidence {
 #[test]
 fn recovery_capacity_reserves_real_later_phases_and_confirmation_metadata_without_mutation() {
     use super::super::checkpoint::MAX_PAYLOAD_BYTES;
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let completed = evidence(&vault, "previous", TransactionPhase::Committed);
     let candidate = evidence(&vault, "candidate", TransactionPhase::Prepared);
     let mut ledger = RecoveryLedger::default();
@@ -401,7 +411,7 @@ fn recovery_capacity_reserves_real_later_phases_and_confirmation_metadata_withou
 
 #[test]
 fn recovery_capacity_refuses_full_slots_unconfirmed_state_and_unbound_candidate() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let candidate = evidence(&vault, "candidate", TransactionPhase::Prepared);
     let mut ledger = RecoveryLedger::default();
     for name in ["first", "second"] {
@@ -432,7 +442,7 @@ fn recovery_capacity_refuses_full_slots_unconfirmed_state_and_unbound_candidate(
 #[test]
 fn recovery_total_plaintext_limit_is_atomic_and_distinct_from_each_journal_limit() {
     use super::super::checkpoint::{MAX_ENVELOPE_BYTES, MAX_PAYLOAD_BYTES};
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let mut ledger = RecoveryLedger::default();
     let mut original = Vec::new();
     for name in ["first", "second", "third"] {
@@ -482,7 +492,7 @@ fn recovery_total_plaintext_limit_is_atomic_and_distinct_from_each_journal_limit
 
 #[test]
 fn recovery_strict_parsing_rejects_duplicate_fields_unknown_dispositions_and_invalid_proofs() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let item = evidence(&vault, "target", TransactionPhase::Prepared);
     let raw = std::str::from_utf8(item.raw_payload()).unwrap();
     for changed in [
@@ -543,7 +553,7 @@ fn recovery_strict_parsing_rejects_duplicate_fields_unknown_dispositions_and_inv
 
 #[test]
 fn recovery_preserves_supported_native_invalid_evidence_and_does_not_dedup_by_operation_uuid() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let first = evidence(&vault, "target", TransactionPhase::Captured);
     let mut payload: serde_json::Value = serde_json::from_slice(first.raw_payload()).unwrap();
     payload["target"]["oauth:zai:access_token"] = "unreadable-native-value".into();
@@ -563,7 +573,7 @@ fn recovery_preserves_supported_native_invalid_evidence_and_does_not_dedup_by_op
 #[test]
 fn recovery_phase_growth_reservation_is_required_even_when_prepared_and_confirmation_fit() {
     use super::super::checkpoint::MAX_PAYLOAD_BYTES;
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let completed = evidence(&vault, "previous", TransactionPhase::Committed);
     let candidate = evidence(&vault, "candidate", TransactionPhase::Prepared);
     let mut ledger = RecoveryLedger::default();
@@ -595,7 +605,7 @@ fn recovery_phase_growth_reservation_is_required_even_when_prepared_and_confirma
 
 #[test]
 fn recovery_dedup_requires_exact_bytes_even_if_an_evidence_digest_collides() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let original = evidence(&vault, "original", TransactionPhase::Committed);
     let raw = original.raw_payload().to_vec();
     let id = original.id().to_owned();
@@ -621,7 +631,7 @@ fn recovery_dedup_requires_exact_bytes_even_if_an_evidence_digest_collides() {
 
 #[test]
 fn recovery_requires_all_layout_fields_and_rejects_duplicate_records_across_slots() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let completed = evidence(&vault, "completed", TransactionPhase::Committed);
     let mut ledger = RecoveryLedger::default();
     ledger.record_completion(completed).unwrap();

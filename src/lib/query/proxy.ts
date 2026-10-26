@@ -20,9 +20,10 @@ export const proxyKeys = {
 /**
  * 获取代理服务器状态
  */
-export function useProxyStatusQuery() {
+export function useProxyStatusQuery(enabled = true) {
   return useQuery({
     queryKey: proxyKeys.status,
+    enabled,
     queryFn: () => proxyApi.getProxyStatus(),
     // 仅在服务运行时轮询
     refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
@@ -34,9 +35,10 @@ export function useProxyStatusQuery() {
 /**
  * 获取各应用接管状态
  */
-export function useProxyTakeoverStatus(poll = true) {
+export function useProxyTakeoverStatus(poll = true, enabled = true) {
   return useQuery({
     queryKey: proxyKeys.takeoverStatus,
+    enabled,
     queryFn: () => proxyApi.getProxyTakeoverStatus(),
     refetchInterval: poll ? 2000 : false,
     ...(poll

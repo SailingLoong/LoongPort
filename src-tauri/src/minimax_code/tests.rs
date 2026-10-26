@@ -1,3 +1,4 @@
+use super::test_fixtures::account;
 use super::{catalog::*, checkin::Engine, http::*};
 use crate::secrets::{owned_file::OwnedFile, session::SecretSession, VaultContext};
 use serde_json::{json, Value};
@@ -35,7 +36,7 @@ impl Fixture {
         let vault = self.session.read().unwrap();
         let file = OwnedFile::registered(FILE).unwrap();
         let bytes = file
-            .encode(&vault, &serde_json::to_vec(&doc).unwrap())
+            .encode_storage(&vault, &serde_json::to_vec(&doc).unwrap())
             .unwrap();
         crate::config_file_io::write_durable(&self.root.path().join(FILE), &bytes).unwrap();
     }
@@ -43,31 +44,7 @@ impl Fixture {
         std::fs::read(self.root.path().join(FILE)).unwrap()
     }
 }
-fn account() -> Account {
-    Account {
-        auto_claim_enabled: false,
-        auto_claim_revision: 0,
-        auto_claim_failure: None,
-        id: "synthetic-account".into(),
-        label: "Synthetic".into(),
-        region: Region::Cn,
-        build_env: "prod".into(),
-        real_user_id: "synthetic-user".into(),
-        auth_generation: 1,
-        credential_version: 1,
-        credentials: Some(Credentials {
-            access_token: "synthetic-access".into(),
-            refresh_token: Some("synthetic-refresh".into()),
-            kind: CredentialKind::DeviceOAuth,
-            native_source: None,
-            expires_at: i64::MAX,
-        }),
-        status: Status::Claimable,
-        operation: None,
-        last_checked_at: None,
-        last_observed_status: Some(Status::Claimable),
-    }
-}
+
 fn panel(status: u64) -> Value {
     json!({"scene":2,"days":(1..=7).map(|n|json!({"day_no":n,"points":10,"status":if n==1{status}else{1},"is_today":n==1})).collect::<Vec<_>>()})
 }
@@ -376,8 +353,10 @@ async fn aborted_claim_keeps_marker_and_new_session_never_replays() {
     gate.entered.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    let new_session =
-        SecretSession::from_context(f.root.path().into(), f.session.read().unwrap().clone());
+    let new_session = SecretSession::from_storage_context(
+        f.root.path().into(),
+        f.session.read().unwrap().clone(),
+    );
     let t = Fake::default();
     let engine = Engine {
         session: &new_session,
@@ -1145,7 +1124,7 @@ async fn pending_operation_records_its_auth_generation_and_verified_receipt() {
     let vault = f.session.read().unwrap();
     let decoded = OwnedFile::registered(FILE)
         .unwrap()
-        .decode(&vault, &f.raw())
+        .decode_storage(&vault, &f.raw())
         .unwrap();
     let saved: Value = serde_json::from_slice(&decoded).unwrap();
     assert_eq!(saved["accounts"][0]["operation"]["boundAuthGeneration"], 1);
@@ -1366,7 +1345,7 @@ async fn lifecycle_commit_fence_cancel_cannot_return_before_publication() {
     let vault = f.session.read().unwrap();
     let plaintext = OwnedFile::registered(FILE)
         .unwrap()
-        .decode(&vault, &f.raw())
+        .decode_storage(&vault, &f.raw())
         .unwrap();
     let saved: Document = serde_json::from_slice(&plaintext).unwrap();
     assert_eq!(saved.accounts[0].real_user_id, "synthetic-user");
@@ -1810,7 +1789,7 @@ async fn lifecycle_partial_authorization_publication_remains_uncertain_without_r
         let vault = f.session.read().unwrap();
         let plain = OwnedFile::registered(FILE)
             .unwrap()
-            .decode(&vault, &published)
+            .decode_storage(&vault, &published)
             .unwrap();
         let document: Document = serde_json::from_slice(&plain).unwrap();
         assert_eq!(document.accounts[0].auth_generation, 2);
@@ -2400,7 +2379,11 @@ async fn disabling_automatic_before_dispatch_prevents_claim_and_stale_enable() {
     // Reopen the durable catalog with a fresh session and the synthetic Vault key.
     let restored_vault = {
         let vault = f.session.read().unwrap();
-        VaultContext::from_key(vault.metadata().clone(), vault.export_key()).unwrap()
+        VaultContext::from_key(
+            vault.encrypted().unwrap().metadata().clone(),
+            vault.encrypted().unwrap().export_key(),
+        )
+        .unwrap()
     };
     let reopened = SecretSession::from_context(f.root.path().into(), restored_vault);
     let resumed = Engine {
@@ -2562,7 +2545,11 @@ async fn dispatched_unknown_survives_policy_toggle_and_owner_recreation_without_
         .unwrap();
     let restored_vault = {
         let vault = f.session.read().unwrap();
-        VaultContext::from_key(vault.metadata().clone(), vault.export_key()).unwrap()
+        VaultContext::from_key(
+            vault.encrypted().unwrap().metadata().clone(),
+            vault.encrypted().unwrap().export_key(),
+        )
+        .unwrap()
     };
     let reopened = SecretSession::from_context(f.root.path().into(), restored_vault);
     let resumed = Engine {

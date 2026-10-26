@@ -7,7 +7,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::secrets::{
     inventory::{open_db, seal_db},
-    VaultContext,
+    storage::StorageContext,
 };
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Row};
@@ -15,7 +15,10 @@ use rusqlite::{params, OptionalExtension, Row};
 const MCP_SERVER_SELECT: &str =
     "SELECT id, name, server_config, description, homepage, docs, tags, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes FROM mcp_servers";
 
-fn row_to_mcp_server(row: &Row<'_>, vault: &VaultContext) -> Result<(String, McpServer), AppError> {
+fn row_to_mcp_server(
+    row: &Row<'_>,
+    vault: &StorageContext,
+) -> Result<(String, McpServer), AppError> {
     let id: String = row.get(0)?;
     let name: String = row.get(1)?;
     let server_config_str: String = row.get(2)?;

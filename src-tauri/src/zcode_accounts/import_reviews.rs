@@ -355,9 +355,7 @@ mod tests {
     fn binding(revision: u64) -> Binding {
         Binding {
             vault_root: "/synthetic/vault".into(),
-            vault_id: "v".into(),
-            key_id: "k".into(),
-            vault_revision: revision,
+            storage: super::super::synthetic_storage_identity(revision),
             context_revision: "c".into(),
             catalog_revision: "p".into(),
         }
@@ -400,9 +398,7 @@ mod owned_check_tests {
     fn binding() -> Binding {
         Binding {
             vault_root: "/synthetic/vault".into(),
-            vault_id: "v".into(),
-            key_id: "k".into(),
-            vault_revision: 1,
+            storage: super::super::synthetic_storage_identity(1),
             context_revision: "c".into(),
             catalog_revision: "p".into(),
         }
@@ -475,9 +471,7 @@ mod dropped_check_tests {
             .unwrap();
         let binding = Binding {
             vault_root: "/synthetic/vault".into(),
-            vault_id: "v".into(),
-            key_id: "k".into(),
-            vault_revision: 1,
+            storage: super::super::synthetic_storage_identity(1),
             context_revision: "c".into(),
             catalog_revision: "r".into(),
         };

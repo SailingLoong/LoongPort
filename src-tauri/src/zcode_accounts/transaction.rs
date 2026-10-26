@@ -16,7 +16,7 @@ use super::recovery::{
 use crate::config_file_io::write_durable;
 use crate::secrets::{
     owned_file::{JOURNAL_FILE, PROFILE_FILE, RECOVERY_FILE},
-    VaultContext,
+    storage::StorageContext,
 };
 use crate::zcode_file_lock::FileLock;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -305,7 +305,7 @@ struct CaptureCandidate {
 pub(crate) struct VaultAccountStore<'a> {
     root: &'a Path,
     root_id: [u64; 2],
-    vault: &'a VaultContext,
+    vault: &'a StorageContext,
 }
 impl<'a> VaultAccountStore<'a> {
     pub(crate) fn reserve_key_intent(
@@ -479,7 +479,7 @@ impl<'a> VaultAccountStore<'a> {
         }
         Ok(Some(record))
     }
-    pub(crate) fn new(root: &'a Path, vault: &'a VaultContext) -> Result<Self, TransactionError> {
+    pub(crate) fn new(root: &'a Path, vault: &'a StorageContext) -> Result<Self, TransactionError> {
         Ok(Self {
             root,
             root_id: root_identity(root)?,
@@ -807,15 +807,25 @@ impl<'a> VaultAccountStore<'a> {
         native: &NativeCipher,
     ) -> Result<String, TransactionError> {
         self.validate_root()?;
-        let meta = self.vault.metadata();
-        let identity = serde_json::to_vec(&(
-            self.root,
-            self.root_id,
-            &meta.vault_id,
-            &meta.key_id,
-            meta.revision,
-            native.context(),
-        ))
+        let identity = match self.vault.identity() {
+            crate::secrets::storage::StorageIdentity::Encrypted(meta) => serde_json::to_vec(&(
+                self.root,
+                self.root_id,
+                &meta.vault_id,
+                &meta.key_id,
+                meta.revision,
+                native.context(),
+            )),
+            crate::secrets::storage::StorageIdentity::Plaintext(meta) => serde_json::to_vec(&(
+                "plaintext",
+                self.root,
+                self.root_id,
+                &meta.store_id,
+                &meta.generation_id,
+                meta.revision,
+                native.context(),
+            )),
+        }
         .map_err(|_| TransactionError::Storage)?;
         Ok(format!(
             "sha256:{}",
@@ -1166,7 +1176,7 @@ pub(crate) struct AccountStore<'a> {
     vault_root: &'a Path,
     native_id: [u64; 2],
     vault_id: [u64; 2],
-    vault: &'a VaultContext,
+    vault: &'a StorageContext,
     native: &'a NativeCipher,
     gate: &'a dyn Fn() -> Result<(), BlockedReason>,
     connection_kind: Option<(super::checkpoint::ConnectionKind, String)>,
@@ -1176,7 +1186,7 @@ impl<'a> AccountStore<'a> {
     pub(crate) fn new(
         native_root: &'a Path,
         vault_root: &'a Path,
-        vault: &'a VaultContext,
+        vault: &'a StorageContext,
         native: &'a NativeCipher,
         admission: Admission,
     ) -> Result<Self, TransactionError> {
@@ -1194,7 +1204,7 @@ impl<'a> AccountStore<'a> {
     pub(super) fn new_guarded(
         native_root: &'a Path,
         vault_root: &'a Path,
-        vault: &'a VaultContext,
+        vault: &'a StorageContext,
         native: &'a NativeCipher,
         admission: Admission,
         gate: &'a dyn Fn() -> Result<(), BlockedReason>,
@@ -2147,7 +2157,7 @@ mod unsupported_platform_tests {
     use super::*;
     #[test]
     fn native_writes_remain_disabled_without_a_platform_adapter() {
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let native = NativeCipher::new("synthetic-context", "synthetic-secret").unwrap();
         let admission = Admission {
             contract_verified: true,

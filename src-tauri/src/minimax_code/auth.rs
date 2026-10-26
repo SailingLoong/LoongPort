@@ -457,7 +457,7 @@ pub(crate) async fn poll<T: Transport>(
                 return Err(Failure::StaleIdentity);
             }
             let mut map = flows().lock().map_err(|_| Failure::Busy)?;
-            let account_id = catalog::account_id(&b.vault.vault_id, flow.region, &uid);
+            let account_id = catalog::account_id(b.vault.store_id(), flow.region, &uid);
             let i = if let Some(i) = d.accounts.iter().position(|a| {
                 a.region == flow.region && a.build_env == "prod" && a.real_user_id == uid
             }) {

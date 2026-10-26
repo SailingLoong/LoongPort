@@ -81,7 +81,6 @@ mod workbuddy;
 mod zcode_accounts;
 #[cfg(any(feature = "gui", test))]
 mod zcode_config;
-#[cfg(any(feature = "gui", test))]
 mod zcode_file_lock;
 pub use secrets::key_store::{KeyStore, KeyStoreError};
 pub use secrets::session::SecretSession;
@@ -129,6 +128,7 @@ pub use mcp::{
 };
 pub use prompt::Prompt;
 pub use provider::{Provider, ProviderMeta};
+pub use secrets::session::{credential_runtime_availability, RuntimeAvailability};
 pub use services::{
     profile::{ProfilePayload, ProfileScope, ProfileService},
     provider::reapply_current_codex_official_live,
@@ -136,7 +136,10 @@ pub use services::{
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{reload_settings, unlock_settings, update_settings, AppSettings};
+pub use settings::{
+    get_bootstrap_settings_for_frontend, get_settings_for_frontend, reload_settings,
+    unlock_settings, update_settings, AppSettings,
+};
 pub use store::AppState;
 
 #[cfg(feature = "gui")]
@@ -481,17 +484,25 @@ fn small_tray_icon() -> Option<Image<'static>> {
 ///
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
-pub fn run_imagegen_mcp() -> Result<(), String> {
+fn imagegen_mcp_session(
+    store: &dyn secrets::key_store::KeyStore,
+) -> Result<std::sync::Arc<secrets::session::SecretSession>, String> {
+    app_store::initialize_active_scope().map_err(secrets::error::public_code)?;
     let root = config::get_app_config_dir();
-    database::vault::preflight(&root.join(config::DB_FILE_NAME)).map_err(|e| e.to_string())?;
-    let session = secrets::session::SecretSession::open_existing(
+    secrets::session::SecretSession::open_existing_protected(
         &root,
-        &secrets::key_store::SystemKeyStore,
-        None,
+        &config::get_device_config_dir(),
+        store,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(secrets::error::public_code)
+}
+pub fn run_imagegen_mcp() -> Result<(), String> {
+    let session = imagegen_mcp_session(&secrets::key_store::SystemKeyStore)?;
     relay::imagegen_mcp::serve(session).map_err(|error| diagnostics::redact_log_text(&error))
 }
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "secrets/imagegen_storage_tests.rs"]
+mod imagegen_storage_tests;
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
 ///
@@ -1531,9 +1542,21 @@ fn raise_open_file_limit() {
     }
 }
 
+#[cfg(any(feature = "gui", test, feature = "test-hooks"))]
+fn prepare_startup_diagnostic_root(root: &std::path::Path) -> Result<(), AppError> {
+    // Preserve passive startup admission before diagnostics can chmod or write.
+    secrets::files::device_directory_exists(root)?;
+    let diagnostics = panic_hook::diagnostic_root_for(root)?;
+    secrets::files::device_directory_exists(&diagnostics)?;
+    secrets::files::device_directory_exists(&diagnostics.join(panic_hook::LOG_DIRECTORY))?;
+    panic_hook::init_app_config_dir(root.to_path_buf())
+}
+
 #[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Freeze strict selection before any diagnostic/settings/device path is resolved.
+    let _ = app_store::initialize_active_scope();
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.loongport/crash.log）
     panic_hook::setup_panic_hook();
 
@@ -1591,7 +1614,8 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
                 && payload.url().scheme() != "about"
                 && !startup_page_handled.swap(true, Ordering::Relaxed)
-                && !crate::settings::get_settings().silent_startup
+                && (app_store::initialize_active_scope().is_err()
+                    || !crate::settings::get_settings().silent_startup)
             {
                 let _ = webview.window().show();
                 log::info!("主页面加载完成，主窗口已显示");
@@ -1624,7 +1648,7 @@ pub fn run() {
                 let in_db_recovery = crate::init_status::get_init_error()
                     .map(|p| p.kind.as_deref() == Some("db_version_too_new"))
                     .unwrap_or(false);
-                if in_db_recovery {
+                if in_db_recovery || app_store::initialize_active_scope().is_err() {
                     api.prevent_close();
                     window.app_handle().exit(0);
                     return;
@@ -1706,39 +1730,36 @@ pub fn run() {
         })
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
+            app.manage(secrets::startup::credential_protection::CommandDependencies::production());
 
+            if let Err(error)=app_store::initialize_active_scope() {
+                crate::init_status::set_init_error(crate::init_status::InitErrorPayload {path:String::new(),error:secrets::error::public_code(error),kind:Some("storage_inspection_failed".into()),db_version:None,supported_version:None});
+                if let Some(window)=app.get_webview_window(MAIN_WINDOW_LABEL) {let _=window.show();let _=window.set_focus();}
+                return Ok(());
+            }
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join(crate::config::DB_FILE_NAME);
-            let inspection = match secrets::upgrade::inspect(&app_config_dir, &live::engine::DeviceStore::for_device()) {
-                Ok(inspection) => inspection,
-                Err(error) => {
-                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
-                        path: db_path.display().to_string(),
-                        error: secrets::error::public_code(error),
-                        kind: Some("storage_inspection_failed".into()),
-                        db_version: None,
-                        supported_version: None,
-                    });
-                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    return Ok(());
+            // Keep the existing redacted/versioned diagnostics available for
+            // passive-inspection failures and upgrade/recovery early returns.
+            if let Err(error) = prepare_startup_diagnostic_root(&app_config_dir) {
+                let code = secrets::error::public_code(error);
+                // The original file logger cannot safely be opened here.
+                eprintln!("Startup diagnostics unavailable: {}", diagnostics::redact_log_text(&code));
+                crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                    path: db_path.display().to_string(),
+                    error: code,
+                    kind: Some("storage_inspection_failed".into()),
+                    db_version: None,
+                    supported_version: None,
+                });
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
-            };
-            if let Some((version, supported)) = inspection.future_version().filter(|_| !inspection.is_database_resume_candidate()) {
-                enter_db_version_too_new_recovery(app.handle(), &db_path,
-                    format!("数据库版本过新（{version}），当前应用仅支持 {supported}，请升级应用后再尝试。"), version, supported);
                 return Ok(());
             }
-            if inspection.is_recovery_required() || inspection.is_database_resume_candidate() {
-                app.manage(secrets::startup::StartupCoordinator::new(app_config_dir, inspection));
-                secrets::startup::try_automatic_unlock(app.handle());
-                return Ok(());
-            }
-            panic_hook::init_app_config_dir(app_config_dir.clone())?;
 
             // 初始化日志（输出到 <app_config_dir>/logs/loongport.log）
             {
@@ -1751,7 +1772,7 @@ pub fn run() {
                     eprintln!("创建日志目录失败: {e}");
                 }
 
-                app.handle().plugin(
+                let logger = app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         // 底层保留 Trace 能力，便于加载用户配置后动态调高级别。
                         // 插件注册后会立即把全局级别收紧到 Info，避免启动阶段全量 Trace。
@@ -1789,13 +1810,57 @@ pub fn run() {
                             out.finish(format_args!("{line}"));
                         })
                         .build(),
-                )?;
+                );
+                if let Err(error) = logger {
+                    eprintln!("Startup logger unavailable: {}", diagnostics::redact_log_text(&error.to_string()));
+                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                        path: String::new(),
+                        error: "startup.diagnostics_unavailable".into(),
+                        kind: Some("startup_initialization_failed".into()),
+                        db_version: None,
+                        supported_version: None,
+                    });
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    return Ok(());
+                }
 
                 // 用户配置存在数据库中，数据库尚未打开时使用保守的 Info 级别。
                 log::set_max_level(log::LevelFilter::Info);
                 log::info!("=== LoongPort v{} started ===", env!("CARGO_PKG_VERSION"));
             }
 
+            let inspection = match secrets::upgrade::inspect(&app_config_dir, &live::engine::DeviceStore::for_device()) {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    let code = secrets::error::public_code(error);
+                    log::error!("Startup storage inspection failed: {code}");
+                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                        path: db_path.display().to_string(),
+                        error: code,
+                        kind: Some("storage_inspection_failed".into()),
+                        db_version: None,
+                        supported_version: None,
+                    });
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    return Ok(());
+                }
+            };
+            if let Some((version, supported)) = inspection.future_version().filter(|_| !inspection.is_database_resume_candidate()) {
+                enter_db_version_too_new_recovery(app.handle(), &db_path,
+                    format!("数据库版本过新（{version}），当前应用仅支持 {supported}，请升级应用后再尝试。"), version, supported);
+                return Ok(());
+            }
+            if inspection.is_recovery_required() || inspection.is_database_resume_candidate() {
+                app.manage(secrets::startup::StartupCoordinator::new(app_config_dir, inspection));
+                secrets::startup::try_automatic_unlock(app.handle());
+                return Ok(());
+            }
             // 首次读取覆盖路径时 logger 尚未可用；此处重放一次，
             // 让 Store 损坏或路径无效等启动警告能够真正落盘。
             let _ = app_store::refresh_app_config_dir_override(app.handle());
@@ -1836,7 +1901,10 @@ pub fn run() {
             commands::recover_client_connection,
             commands::list_agents_tasks,
             commands::cancel_agents_task,
-            secrets::startup::unlock_secret_vault,
+            secrets::startup::get_runtime_availability,
+            secrets::startup::credential_protection::get_credential_protection_status,
+            secrets::startup::credential_protection::configure_credential_protection,
+            secrets::startup::credential_protection::unlock_credential_runtime,
             secrets::startup::get_startup_recovery,
             secrets::startup::get_startup_upgrade_review,
             secrets::startup::authenticate_startup_upgrade,
@@ -1857,8 +1925,6 @@ pub fn run() {
             secrets::startup::reset_secret_vault,
             secrets::startup::preview_startup_restore,
             secrets::startup::restore_startup_vault,
-            secrets::rewrap::get_secret_protection,
-            secrets::rewrap::set_secret_password,
             secrets::rewrap::rotate_secret_key,
             secrets::export::export_plaintext_secrets,
             commands::get_providers,
@@ -2011,6 +2077,7 @@ pub fn run() {
             commands::preview_codex_catalog_restore,
             commands::confirm_codex_catalog_restore,
             commands::query_codex_catalog_restore,
+            commands::get_bootstrap_settings,
             commands::get_settings,
             commands::set_app_visibility,
             commands::save_settings,

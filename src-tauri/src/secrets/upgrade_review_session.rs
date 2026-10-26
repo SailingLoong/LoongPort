@@ -161,7 +161,7 @@ impl AuthenticatedUpgrade {
         }
         if resumed {
             let vault = session.read()?;
-            let id = checkpoint::verified_database_id(root, device, &vault)?
+            let id = checkpoint::verified_database_id(root, device, vault.encrypted()?)?
                 .ok_or_else(source_changed)?;
             stable.verify_resume_checkpoint(root)?;
             drop(vault);
@@ -180,15 +180,15 @@ impl AuthenticatedUpgrade {
         let settings = settings.ok_or_else(source_changed)?;
         {
             let vault = session.read()?;
-            inspected.validate_device_state(&vault)?;
-            inspected.validate_database(root, &vault)?;
+            inspected.validate_device_state(vault.encrypted()?)?;
+            inspected.validate_database(root, vault.encrypted()?)?;
             if let Some(bytes) =
                 crate::config_file_io::read_regular_file(&settings.path, checkpoint::MAX_BYTES)
                     .map_err(|e| AppError::io(&settings.path, e))?
             {
                 // Validate protected settings and pointer input without publishing
                 // an unlocked SettingsStore or retaining unrelated sync credentials.
-                crate::settings::decode_settings_with_vault(&bytes, &vault)?;
+                crate::settings::decode_settings_with_vault(&bytes, vault.encrypted()?)?;
             }
         }
         settings.verify()?;
@@ -229,7 +229,8 @@ impl AuthenticatedUpgrade {
             };
             stable.verify_resume_checkpoint(&self.root)?;
             let vault = self.session.read()?;
-            if checkpoint::verified_database_id(&self.root, &self.device, &vault)?.as_ref()
+            if checkpoint::verified_database_id(&self.root, &self.device, vault.encrypted()?)?
+                .as_ref()
                 != Some(expected)
             {
                 return Err(source_changed());
@@ -326,7 +327,8 @@ impl AuthenticatedUpgrade {
         }
         if fresh.is_database_resume_candidate() {
             let vault = self.session.read()?;
-            if checkpoint::verified_database_id(&self.root, &self.device, &vault)?.as_deref()
+            if checkpoint::verified_database_id(&self.root, &self.device, vault.encrypted()?)?
+                .as_deref()
                 != Some(id)
             {
                 return Err(source_changed());
@@ -368,8 +370,12 @@ impl AuthenticatedUpgrade {
         let paths = self.paths();
         let session = self.session.clone();
         let vault = session.read()?;
-        let creation =
-            checkpoint::create_with_hook(&root, &device, &vault, &paths, &mut |boundary| {
+        let creation = checkpoint::create_with_hook(
+            &root,
+            &device,
+            vault.encrypted()?,
+            &paths,
+            &mut |boundary| {
                 hook(boundary)?;
                 if boundary == checkpoint::Boundary::CaptureReady && directory_missing {
                     for input in &mut self.inputs {
@@ -384,14 +390,19 @@ impl AuthenticatedUpgrade {
                     self.verify(inspected)?;
                 }
                 Ok(())
-            });
+            },
+        );
         // A lost response may leave a complete artifact. Authenticate that exact
         // output and inventory before acknowledging only its addition to startup.
-        let (id, output) =
-            match checkpoint::verified_checkpoint_for_clients(&root, &device, &vault, &paths) {
-                Ok(output) => output,
-                Err(error) => return Err(creation.err().unwrap_or(error)),
-            };
+        let (id, output) = match checkpoint::verified_checkpoint_for_clients(
+            &root,
+            &device,
+            vault.encrypted()?,
+            &paths,
+        ) {
+            Ok(output) => output,
+            Err(error) => return Err(creation.err().unwrap_or(error)),
+        };
         if creation.as_ref().is_ok_and(|created| created != &id) {
             return Err(source_changed());
         }
@@ -438,7 +449,7 @@ impl AuthenticatedUpgrade {
             let (actual, bytes) = checkpoint::verified_checkpoint_for_clients(
                 &self.root,
                 &self.device,
-                &vault,
+                vault.encrypted()?,
                 &self.paths(),
             )?;
             if actual != id {
@@ -456,7 +467,7 @@ impl AuthenticatedUpgrade {
         checkpoint::cancel_with_hook(
             &self.root,
             &self.device,
-            &vault,
+            vault.encrypted()?,
             &self.paths(),
             (id, &cancellation.bytes),
             hook,
@@ -515,7 +526,9 @@ impl AuthenticatedUpgrade {
             match crate::config_file_io::read_regular_file(&settings_path, checkpoint::MAX_BYTES)
                 .map_err(|error| AppError::io(&settings_path, error))?
             {
-                Some(bytes) => crate::settings::decode_settings_with_vault(&bytes, &vault)?,
+                Some(bytes) => {
+                    crate::settings::decode_settings_with_vault(&bytes, vault.encrypted()?)?
+                }
                 None => crate::settings::AppSettings::default(),
             };
         let live = crate::mode::state::read_review_snapshot(&self.device, &vault)?;
@@ -550,12 +563,12 @@ impl AuthenticatedUpgrade {
         let (staged, apps) = checkpoint::stage_with_source_review(
             &self.root,
             &self.device,
-            &vault,
+            vault.encrypted()?,
             &id,
             |source| {
                 staged_review::source_facts(
                     source,
-                    &vault,
+                    vault.encrypted()?,
                     &mut settings,
                     &live,
                     &files,
@@ -632,7 +645,7 @@ impl AuthenticatedUpgrade {
             view.checkpoint_id = Some(checkpoint::existing_id_for_clients(
                 &self.root,
                 &self.device,
-                &vault,
+                vault.encrypted()?,
                 &self.paths(),
             )?);
         }

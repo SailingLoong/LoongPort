@@ -123,6 +123,7 @@
     "windowClose": "关闭窗口"
   },
   "provider": {
+    "readFailed": "配置列表读取失败，已有数据未被清空；如有显示，为上次成功读取的结果。",
     "connectivityCheck": "检测连通",
     "tabProvider": "供应商",
     "tabUniversal": "统一供应商",
@@ -234,7 +235,7 @@
       "invalidFormat": "配置格式不正确，请返回编辑。",
       "readOnly": "相关文件只读，当前不能保存。",
       "sourceChanged": "配置或文件已变化，请重新生成预览。",
-      "vaultLocked": "凭据存储已锁定，请先解锁。",
+      "vaultLocked": "已保存的凭据数据当前无法读取；现有数据保留，此操作暂不可用。",
       "pendingOperation": "存在待核对的原操作，请先重新检查原操作。",
       "ownerUnavailable": "现有配置或认证所有者无法证明本次写入，请返回检查。",
       "credentialConflict": "删除与替换密钥不能同时执行，请先清空密钥输入。",
@@ -4300,7 +4301,7 @@
       "invalidFormat": "设置格式或所选思考方式不被端点支持。",
       "readOnly": "此配置当前不可编辑。",
       "sourceChanged": "配置已发生变化，请重新打开后核对。",
-      "vaultLocked": "凭据库已锁定，请先解锁。",
+      "vaultLocked": "已保存的凭据数据当前无法读取；现有数据保留，此操作暂不可用。",
       "pendingOperation": "还有未完成的配置操作。",
       "ownerUnavailable": "配置管理器暂不可用。",
       "credentialConflict": "现有凭据有冲突，请到高级配置核对。",
@@ -4335,6 +4336,7 @@
     }
   },
   "secrets": {
+    "runtimeUnavailable": "已保存的凭据数据当前无法读取。现有数据保留，依赖这些数据的操作暂不可用。",
     "recoveryTitle": "继续恢复",
     "recoveryDescription": "数据保护操作尚未完成。请输入恢复密码以继续。",
     "resumeRecovery": "继续恢复",
@@ -4394,7 +4396,7 @@
     "title": "恢复云端配置",
     "description": "用云端快照替换此设备的配置和技能。本机登录账号和同步连接凭据会保留。",
     "source": "快照来自 {{deviceName}}",
-    "protection": "恢复后，此设备将使用云端快照的保护口令。",
+    "protection": "输入用于验证云端快照来源；已选择的本机保护方式会保留。尚未选择保护方式的旧版配置仍按原恢复规则处理，成功恢复时会采用来源保护信息。",
     "password": "云端保护口令",
     "confirm": "恢复配置",
     "restoring": "正在恢复…",
@@ -4404,7 +4406,7 @@
   },
   "portableBackup": {
     "password": "备份保护口令",
-    "importNotice": "导入会替换配置，保留本机登录和同步凭据。本机保护口令保持不变。旧版未加密备份无需口令。",
+    "importNotice": "导入会替换配置，保留本机登录和同步凭据。当前保护方式和已有密钥保持不变。旧版未加密备份无需口令。",
     "passwordRequired": "请输入此备份的保护口令。",
     "passwordRejected": "备份保护口令不正确。",
     "exportPasswordRequired": "请先在「凭据保护」中设置保护口令，再导出备份。"
@@ -4775,7 +4777,7 @@
         "writer_state_unknown": "无法验证 ZCode 进程状态。请确认 ZCode 和其他写入进程已停止。",
         "context_changed": "所选来源已变化。请重新检查并查看最新账号状态。",
         "target_scope_mismatch": "请选择与已检查来源属于同一账号体系的个人账号。",
-        "vault_unavailable": "请解锁 LoongPort 本地保险库，然后刷新账号状态。",
+        "vault_unavailable": "已保存的凭据数据当前无法读取；现有数据保留，此操作暂不可用。",
         "operation_failed": "无法验证账号操作。请重新检查所选来源并刷新状态。",
         "committed_recovery_required": "账号切换已经提交，但恢复仍需处理。继续前请检查本地恢复。",
         "pending_or_locked": "请正常退出 ZCode，然后检查并保留待处理的本地恢复。",
@@ -5055,7 +5057,7 @@
       "invalidFormat": "TOML 格式无效，请修改后重新预览。",
       "sourceChanged": "源文件已变化，请重新读取或重新预览。",
       "ownerUnavailable": "当前配置不可用，暂时无法保存共享设置。",
-      "vaultLocked": "凭据库已锁定，请解锁后重新读取。",
+      "vaultLocked": "已保存的凭据数据当前无法读取；现有数据保留，此操作暂不可用。",
       "pendingOperation": "已有操作待确认，请先查询原保存结果。",
       "legacyDisabled": "旧公共片段已禁用，不能导入。"
     },
@@ -5291,5 +5293,75 @@
     "inferenceUnverified": "真实推理消费尚未验收。领取成功、授权就绪或模型发现均不等于已完成实际推理消费。",
     "authorizationSaved": "账号授权已保存；不代表推理消费已验收",
     "reauthorize": "需要重新授权"
+  },
+  "storageProtection": {
+    "title": "存储保护方式",
+    "manage": "管理存储保护",
+    "description": "自行选择使用您提供的密钥加密，或将 LoongPort 数据保存在明文文件中。应用不会自动生成密钥。",
+    "mode": {
+      "unconfigured": "尚未选择存储保护方式",
+      "encrypted": "当前方式：用户密钥加密",
+      "plaintext": "当前方式：明文存储"
+    },
+    "status": {
+      "needs_configuration": "请选择一种存储方式。",
+      "available": "当前配置可用。",
+      "key_required": "暂时无法从系统密钥存储取得原密钥，原有加密文件保持不变。",
+      "blocked": "目前无法确认配置可安全使用。原文件保持不变，请先检查配置问题。"
+    },
+    "chooseEncrypted": "使用我自己的密钥",
+    "choosePlaintext": "使用明文存储",
+    "skipPlaintext": "跳过密钥，使用明文",
+    "applyEncrypted": "保存并启用密钥保护",
+    "applyPlaintext": "确认使用明文存储",
+    "unlock": "使用原密钥解锁",
+    "keyLabel": "设置密钥",
+    "confirmKeyLabel": "再次输入密钥",
+    "keyFormat": "按原文使用您输入的内容，不限制字符种类或数量。空格、大小写和字符原样保留，再次输入须完全一致。",
+    "keepKeyCopy": "请在安全位置另行保管您输入的密钥原文。系统密钥存储中保留同一份原文；系统存储丢失后仍需输入相同内容。",
+    "localOnlyNotice": "密钥仅保存在本机，不会由 LoongPort 自动同步到其他设备。没有同一把密钥的其他设备无法解密这些加密数据；这不代表本机所有程序都无法读取数据。",
+    "sameKeyRequired": "请输入最初用于加密这些数据的同一把密钥。新密钥不能解锁旧文件；成功解锁后才可更改保护方式。",
+    "plaintextRisk": "明文不加密：能够读取本机 LoongPort 数据文件的人或程序可直接取得其中的 API 密钥、令牌等凭据。",
+    "plaintextConversion": "这会将当前可解密的数据转换为明文。只有原数据可完整解密并通过验证后才会执行。",
+    "acknowledgePlaintext": "我了解本机文件会直接暴露凭据，并选择使用明文。",
+    "createSeparate": "保留原文件，创建独立新配置",
+    "originalsPreserved": "将在另一位置创建新配置，保留原有文件。新配置不会解锁或恢复原加密数据，切换配置需要重启。",
+    "cancelSeparate": "返回原配置",
+    "actionFailed": "操作未完成。原密钥可能不匹配，或配置暂不可用。请检查后重试；不会自动改成明文。",
+    "statusFailed": "无法读取存储保护状态，暂不允许修改。",
+    "saved": "存储保护操作已完成。",
+    "restartRequired": "选择已保存，请重启 LoongPort 后使用新配置。当前会话的可用状态未因此改变。",
+    "keyCacheUnavailable": "本次会话已可用，但同一把密钥未能保存或验证到系统密钥存储中。请保留密钥，下次启动可能需要重新输入。",
+    "backupIndependent": "备份文件的加密密码与此密钥独立，原有备份密码设置不会更改。",
+    "promptTitle": "设置您的存储密钥",
+    "promptDescription": "您可以自行提供密钥并重复输入确认，也可以明确跳过并使用明文。关闭此窗口不会更改当前保护方式；之后可在设置中选择。",
+    "forgotKey": "忘记密钥？查看本机找回方法",
+    "recovery": {
+      "mac": "打开“钥匙串访问”，选择“登录”钥匙串，搜索 LoongPort credential vault，并核对与当前配置对应的条目。打开条目，勾选“显示密码”，按系统提示验证身份。不要修改或删除条目。",
+      "windows": "打开“凭据管理器 → Windows 凭据 → 普通凭据”，查找包含 LoongPort credential vault 的条目并核对当前配置。这里可以确认条目是否仍在，但不能将它当作本应用密钥原文的“显示密码”入口。不要修改或删除条目。",
+      "linux": "密钥位于当前登录会话的 Secret Service。若您使用 GNOME Keyring 且已安装“密码和密钥”（Passwords and Keys），打开它并解锁对应密钥环，搜索 LoongPort credential vault，在条目属性中查看。其他桌面没有统一的查看界面。不要修改或删除条目。",
+      "unknown": "无法确认当前操作系统。请查找您自行保管的原密钥，或在当前系统的密钥存储工具中核对 LoongPort credential vault 条目。不要修改或删除条目。",
+      "binaryNotice": "系统工具能否显示密钥原文取决于当前平台与条目格式；旧版二进制条目或带版本标记的存储记录不一定可直接作为密钥重新输入。此帮助不会读取、显示或导出系统密钥。请保留您原先输入的内容；无法取得原密钥时保留原文件，新密钥不能替代原密钥解密。"
+    },
+    "keyPlaceholder": "输入您的密钥原文",
+    "confirmKeyPlaceholder": "再次输入完全相同的内容"
+  },
+  "startupRecovery": {
+    "title": "恢复未完成的本地操作",
+    "checkTitle": "检查本地恢复状态",
+    "description": "检测到一项未完成的原操作。这里只继续该操作，不重新发起导入、同步或模型请求。",
+    "sourceKey": "本次操作使用的密钥或恢复口令",
+    "sourceHelp": "请输入原操作的来源密钥或恢复口令，保持原文。这不一定是当前存储保护密钥；目标使用明文也不代表来源归档无需密钥。 系统库帮助仅适用于对应的本机条目，无法保证找回其他设备的密钥或旧备份口令。",
+    "resume": "继续恢复原操作",
+    "recheck": "重新检查原操作",
+    "statusFailed": "暂时无法读取权威恢复状态。不会据此启动恢复或更改存储保护方式。",
+    "keyRejected": "密钥或恢复口令未获接受。请核对原操作使用的输入，再重新检查。",
+    "sourceChanged": "原操作已发生变化。已丢弃旧输入，请检查最新状态后再决定。",
+    "unknownResult": "无法确认原操作的结果。请重新检查状态；不会自动重复提交。",
+    "notCompleted": "原操作尚未确认完成，请依据最新状态处理。",
+    "verificationRequired": "当前结果需要进一步核验，不能继续原操作。请保留原文件并重新检查。",
+    "completed": "原操作已恢复，需要重启后重新检查并打开数据。",
+    "restartDescription": "本次恢复不会直接启用当前进程的凭据功能。请重启 LoongPort。",
+    "restartFailed": "重启未能完成，请手动关闭并重新打开 LoongPort。"
   }
 }

@@ -537,7 +537,7 @@ fn reviewed_late_drift(point: &'static str, effect: &'static str) {
                 .unwrap(),
             "pointer" => {
                 let vault = db.secret_session().read().unwrap();
-                crate::settings::set_current_provider_with_vault(
+                crate::settings::set_current_provider_with_storage(
                     &AppType::Claude,
                     Some("a"),
                     db.secret_session(),

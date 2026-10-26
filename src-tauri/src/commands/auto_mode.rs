@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     fn test_home() -> tempfile::TempDir {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
         crate::settings::reload_settings().unwrap();

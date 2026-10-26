@@ -114,9 +114,7 @@ pub(crate) fn identity_source_name(source: super::checkpoint::IdentitySource) ->
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VaultBinding {
     pub root: std::path::PathBuf,
-    pub vault_id: String,
-    pub key_id: String,
-    pub revision: u64,
+    pub storage: crate::secrets::storage::StorageIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]

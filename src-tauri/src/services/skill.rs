@@ -4515,7 +4515,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn skill_storage_validation_skips_mcode() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         SkillService::validate_skill_storage_destination(&temp.path().join("new-skill-store"))
             .expect("adding Mcode must not block skill storage migration");
@@ -5300,7 +5300,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pi_skill_state_follows_native_directory_presence() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
@@ -5326,7 +5326,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pi_skill_toggle_preserves_a_same_name_external_directory() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
@@ -5359,7 +5359,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pi_install_conflict_is_rejected_before_persisting() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
@@ -5449,7 +5449,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn importing_a_native_pi_skill_returns_its_derived_active_state() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
         let db = std::sync::Arc::new(Database::memory().expect("memory db"));
@@ -5475,7 +5475,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_preserves_an_external_pi_skill_and_removes_the_managed_record() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
@@ -5509,7 +5509,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_does_not_remove_a_preserved_pi_skill_through_another_app() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir =
             crate::pi_config::test_support::TestAgentDir::at(&temp.path().join(".claude"));
@@ -5553,7 +5553,7 @@ mod tests {
     fn uninstall_preserves_a_dangling_pi_link_through_an_aliased_app_root() {
         use std::os::unix::fs::symlink;
 
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let shared_agent = temp.path().join("shared-agent");
         fs::create_dir_all(shared_agent.join("skills")).expect("create shared skills root");
@@ -5605,7 +5605,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_keeps_ssot_when_it_contains_a_preserved_pi_skill() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
 
         let db = std::sync::Arc::new(Database::memory().expect("memory db"));
@@ -5638,7 +5638,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_with_a_missing_source_does_not_backup_or_delete_the_pi_directory() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
 
@@ -5668,7 +5668,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_treats_an_aliased_pi_root_as_the_ssot() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
@@ -5694,7 +5694,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_warns_when_the_pi_root_cannot_be_resolved() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
@@ -5916,7 +5916,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn restore_from_backup_rejects_traversal_directory_in_metadata() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // 手工放置一个备份：meta.json 里的 directory 指向 SSOT 之外。
@@ -5953,7 +5953,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn remove_from_app_rejects_traversal_directory() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // 受害目录与 app skills 目录都先建好，保证未修复时代码真的能删到它：
@@ -5971,7 +5971,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn aliased_skill_roots_reject_sync_and_remove_without_deleting_the_source() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
@@ -6000,7 +6000,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_rejects_an_aliased_destination_before_moving_skills() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
@@ -6033,7 +6033,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_safely_leaves_an_existing_pi_ssot_alias() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
         let _pi_dir =
@@ -6070,7 +6070,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_rejects_traversal_directory_from_db_row() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // 模拟同步导入灌进来的脏数据：directory 含路径穿越（save_skill 不校验，
@@ -6106,7 +6106,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_a_managed_pi_symlink() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
@@ -6144,7 +6144,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_an_equivalent_relative_pi_symlink() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let _pi_dir =
@@ -6184,7 +6184,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_skips_bad_rows_without_moving_foreign_dirs() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
         let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
 
@@ -6215,7 +6215,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_backup_source_rejects_traversal_directory() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // 备份源会被整目录复制进 skill-backups 并在界面列出 → 任意文件外泄面。
@@ -6235,7 +6235,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn sync_to_app_skips_bad_rows_instead_of_aborting_the_whole_app() {
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         let ssot_dir = SkillService::get_ssot_dir().expect("ssot dir");
@@ -6272,7 +6272,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn sync_to_app_leaves_openclaw_skills_dir_alone() {
-        let home = tempdir().expect("home");
+        let home = crate::secrets::testing::tempdir().expect("home");
         let _home = TestHomeGuard::set(home.path());
         let ssot_dir = SkillService::get_ssot_dir().expect("ssot dir");
         write_skill(&ssot_dir.join("shared-name"), "managed copy");
@@ -6315,7 +6315,7 @@ mod tests {
                 }
             }
         }
-        let temp = tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = EnvGuard(std::env::var_os("CC_SWITCH_TEST_HOME"));
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 
@@ -6484,7 +6484,7 @@ mod tests {
                 ("ordinary-skill", "old/ordinary-skill", "new/ordinary-skill"),
                 ("weread-skills", "skills", "."),
             ] {
-                let home = tempdir().expect("home");
+                let home = crate::secrets::testing::tempdir().expect("home");
                 let config_dir = home.path().join(".loongport");
                 fs::create_dir_all(&config_dir).expect("isolated config directory");
                 // Keep Windows' legacy-HOME fallback out of this destructive test.

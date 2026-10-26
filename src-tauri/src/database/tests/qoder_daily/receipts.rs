@@ -558,7 +558,7 @@ fn real_credential_reset_walker_clears_provider_values_but_keeps_latest_receipt(
             )
             .unwrap();
         assert_eq!(
-            secrets::inventory::open_db(
+            secrets::inventory::open_encrypted_db(
                 &target,
                 "providers",
                 column,
@@ -587,7 +587,7 @@ fn restore_wrong_current_or_target_vault_cannot_mutate_live_or_target() {
     assert!(Database::preserve_qoder_states_on_restore(
         &db.conn.lock().unwrap(),
         &target.conn.lock().unwrap(),
-        &wrong,
+        &secrets::storage::StorageContext::from(wrong.clone()),
         &target_vault
     )
     .is_err());
@@ -595,7 +595,7 @@ fn restore_wrong_current_or_target_vault_cannot_mutate_live_or_target() {
         &db.conn.lock().unwrap(),
         &target.conn.lock().unwrap(),
         &current_vault,
-        &wrong
+        &secrets::storage::StorageContext::from(wrong.clone())
     )
     .is_err());
     assert_eq!(state(&incoming, &target), before);

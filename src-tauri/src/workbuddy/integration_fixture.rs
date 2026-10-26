@@ -68,7 +68,7 @@ pub(crate) async fn verify(case: &str) {
     );
     assert!(!rows[0].automatic_enabled());
     assert!(
-        Lease::acquire(session.clone(), &rows[0].account.id(&binding.vault_id))
+        Lease::acquire(session.clone(), &rows[0].account.id(binding.store_id()))
             .await
             .is_err(),
         "login alone must not opt into inference"

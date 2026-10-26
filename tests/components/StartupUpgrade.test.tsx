@@ -327,55 +327,22 @@ describe("StartupUpgrade", () => {
     ).toHaveLength(1);
   });
 
-  it("uses the original recovery form after publication leaves a generation intent", async () => {
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "get_startup_upgrade_review")
-        return review({ status: "recovery_required" });
-      if (command === "get_startup_recovery")
-        return {
-          token: "synthetic-original-recovery",
-          status: "pending",
-          canRecover: true,
-          restartRequired: false,
-        };
-      if (command === "recover_startup_operation")
-        return {
-          token: "synthetic-original-recovery",
-          status: "completed",
-          canRecover: false,
-          restartRequired: true,
-        };
-      throw new Error("synthetic unexpected command");
-    });
+  it("preserves a generation intent without reintroducing a recovery password form", async () => {
+    serve(review({ status: "recovery_required" }));
     render(<StartupUpgrade />);
-    await screen.findByRole("heading", { name: "secrets.recoveryTitle" });
-    await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("get_startup_recovery"),
-    );
-    expect(invoke).not.toHaveBeenCalledWith(
+    await screen.findByText("secrets.runtimeUnavailable");
+    expect(screen.queryByLabelText("secrets.password")).not.toBeInTheDocument();
+    for (const command of [
+      "get_startup_recovery",
       "recover_startup_operation",
-      expect.anything(),
-    );
-    fireEvent.change(screen.getByLabelText("secrets.password"), {
-      target: { value: "synthetic-recovery-password" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "secrets.resumeRecovery" }),
-    );
-    await screen.findByRole("button", { name: "secrets.restart" });
-    expect(invoke).toHaveBeenCalledWith("recover_startup_operation", {
-      token: "synthetic-original-recovery",
-      password: "synthetic-recovery-password",
-    });
-    expect(invoke).not.toHaveBeenCalledWith("restart_app");
-    expect(invoke).not.toHaveBeenCalledWith(
       "publish_startup_upgrade_checkpoint",
-      expect.anything(),
-    );
-    expect(invoke).not.toHaveBeenCalledWith(
       "cancel_startup_upgrade_checkpoint",
-      expect.anything(),
-    );
+      "restart_app",
+    ]) {
+      expect(
+        vi.mocked(invoke).mock.calls.some(([name]) => name === command),
+      ).toBe(false);
+    }
   });
 
   it("publishes only on an explicit checkpoint-bound click and coalesces duplicates", async () => {
@@ -472,7 +439,7 @@ describe("StartupUpgrade", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("authenticates only after explicit input and clears the submitted password", async () => {
+  it("does not offer manual password authentication for a retained old checkpoint", async () => {
     serve(
       review({
         status: "authentication_required",
@@ -482,26 +449,14 @@ describe("StartupUpgrade", () => {
       }),
     );
     render(<StartupUpgrade />);
-    const password = await screen.findByLabelText("secrets.password");
-    expect(invoke).toHaveBeenCalledTimes(1);
-    fireEvent.change(password, {
-      target: { value: "synthetic protection password" },
-    });
-    vi.mocked(invoke).mockResolvedValueOnce(
-      review({ status: "ready_to_check", canCheckAndBackup: true }),
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "startupUpgrade.authenticate" }),
-    );
-    await screen.findByRole("button", { name: "startupUpgrade.checkBackup" });
-    expect(invoke).toHaveBeenLastCalledWith("authenticate_startup_upgrade", {
-      password: "synthetic protection password",
-    });
+    await screen.findByText("secrets.runtimeUnavailable");
     expect(screen.queryByLabelText("secrets.password")).not.toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith(
-      "unlock_secret_vault",
-      expect.anything(),
-    );
+    expect(
+      screen.queryByRole("button", { name: "startupUpgrade.authenticate" }),
+    ).not.toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.map(([name]) => name)).toEqual([
+      "get_startup_upgrade_review",
+    ]);
   });
 
   it("queries a lost backup response and retains the checkpoint without repeating creation", async () => {
@@ -854,21 +809,16 @@ describe("explicit runtime handoff", () => {
   });
 });
 
-it("uses the original explicit restart form after failed runtime preparation", async () => {
+it("does not route runtime preparation failure into the retired unlock form", async () => {
   serve(review({ status: "restart_required", reviewToken: null }));
   render(<StartupUpgrade />);
-  const button = await screen.findByRole("button", { name: "secrets.restart" });
+  await screen.findByText("secrets.runtimeUnavailable");
   expect(
-    vi.mocked(invoke).mock.calls.some(([command]) => command === "restart_app"),
-  ).toBe(false);
-  vi.mocked(invoke).mockResolvedValueOnce(null);
-  fireEvent.click(button);
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("restart_app"));
-  expect(
-    vi
-      .mocked(invoke)
-      .mock.calls.some(([command]) => command === "continue_startup_upgrade"),
-  ).toBe(false);
+    screen.queryByRole("button", { name: "secrets.restart" }),
+  ).not.toBeInTheDocument();
+  expect(vi.mocked(invoke).mock.calls.map(([name]) => name)).toEqual([
+    "get_startup_upgrade_review",
+  ]);
 });
 
 describe("retained checkpoint sync explanation", () => {

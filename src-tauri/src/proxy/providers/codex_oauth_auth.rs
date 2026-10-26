@@ -317,10 +317,10 @@ impl CodexLiveAuthGuard<'_> {
     /// a failed save. This read neither reloads nor repairs either owner.
     pub(crate) fn native_store_matches(
         &self,
-        vault: &crate::secrets::VaultContext,
+        vault: &crate::secrets::storage::StorageContext,
         bytes: Option<&[u8]>,
     ) -> Option<bool> {
-        let plaintext = CredentialFile::Codex.decode(vault, bytes?).ok()?;
+        let plaintext = CredentialFile::Codex.decode_storage(vault, bytes?).ok()?;
         let value: serde_json::Value = serde_json::from_slice(&plaintext).ok()?;
         let store: CodexOAuthStore = serde_json::from_value(value.clone()).ok()?;
         if store.version != 1

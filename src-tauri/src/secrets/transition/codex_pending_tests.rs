@@ -20,7 +20,10 @@ fn pending_encrypted_stash_blocks_new_generation_before_mutation() {
         let vault = db.secret_session().read().unwrap();
         let guard = lock_app("codex");
         let ciphertext = stash
-            .encode(&vault, br#"{"logins":{"synthetic":"credential"}}"#)
+            .encode(
+                vault.encrypted().unwrap(),
+                br#"{"logins":{"synthetic":"credential"}}"#,
+            )
             .unwrap();
         let config_patch = WholeFile::Write(b"model = \"synthetic\"\n".to_vec());
         let stash_patch = WholeFile::Write(ciphertext);
@@ -49,10 +52,17 @@ fn pending_encrypted_stash_blocks_new_generation_before_mutation() {
         assert!(pending.published);
         staged = pending.files[1].staged.clone().unwrap();
         assert!(stash
-            .decode(&vault, &std::fs::read(&staged).unwrap())
+            .decode(vault.encrypted().unwrap(), &std::fs::read(&staged).unwrap())
             .is_ok());
     }
-    let before = db.secret_session().read().unwrap().metadata().clone();
+    let before = db
+        .secret_session()
+        .read()
+        .unwrap()
+        .encrypted()
+        .unwrap()
+        .metadata()
+        .clone();
     let stage_bytes = std::fs::read(&staged).unwrap();
     let state_bytes = std::fs::read(store.state_path()).unwrap();
     let result = rotate(
@@ -65,7 +75,15 @@ fn pending_encrypted_stash_blocks_new_generation_before_mutation() {
         matches!(result, Err(AppError::Config(ref code)) if code == "mode.verification_required"),
         "pending encrypted staging must block a new key generation: {result:?}"
     );
-    assert_eq!(db.secret_session().read().unwrap().metadata(), &before);
+    assert_eq!(
+        db.secret_session()
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata(),
+        &before
+    );
     assert_eq!(std::fs::read(&staged).unwrap(), stage_bytes);
     assert_eq!(std::fs::read(store.state_path()).unwrap(), state_bytes);
     assert!(!db.secret_session().root().join(INTENT).exists());
@@ -128,6 +146,8 @@ fn authenticated_started_vault_transition_with_mode_pending_still_recovers() {
         .secret_session()
         .read()
         .unwrap()
+        .encrypted()
+        .unwrap()
         .metadata()
         .key_id
         .clone();
@@ -189,7 +209,7 @@ fn authenticated_started_vault_transition_with_mode_pending_still_recovers() {
     .unwrap();
     crate::settings::unlock_settings_for_test(reopened.clone()).unwrap();
     let vault = reopened.read().unwrap();
-    assert_ne!(vault.metadata().key_id, old_key);
+    assert_ne!(vault.encrypted().unwrap().metadata().key_id, old_key);
     assert!(state::pending(&store, &vault, "codex").unwrap().is_some());
     assert!(!root.join(INTENT).exists());
 }
@@ -252,8 +272,8 @@ fn malformed_or_unknown_mode_blocks_new_generation_before_mutation() {
         let store = DeviceStore::for_device();
         let file = DeviceFile::registered(crate::secrets::owned_file::DEVICE_STATE_FILE).unwrap();
         let vault = db.secret_session().read().unwrap();
-        let before = vault.metadata().clone();
-        let ciphertext = file.encode(&vault, plaintext).unwrap();
+        let before = vault.encrypted().unwrap().metadata().clone();
+        let ciphertext = file.encode(vault.encrypted().unwrap(), plaintext).unwrap();
         write_durable(&store.state_path(), &ciphertext).unwrap();
         drop(vault);
         let result = rotate(
@@ -265,7 +285,15 @@ fn malformed_or_unknown_mode_blocks_new_generation_before_mutation() {
         assert!(
             matches!(result, Err(AppError::Config(ref code)) if code == "mode.verification_required")
         );
-        assert_eq!(db.secret_session().read().unwrap().metadata(), &before);
+        assert_eq!(
+            db.secret_session()
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata(),
+            &before
+        );
         assert_eq!(std::fs::read(store.state_path()).unwrap(), ciphertext);
         assert!(!db.secret_session().root().join(INTENT).exists());
     }

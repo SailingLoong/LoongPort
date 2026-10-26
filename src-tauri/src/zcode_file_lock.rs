@@ -212,6 +212,25 @@ fn reclaim_dead_owner(directory: &Path) -> bool {
     .unwrap_or(false)
 }
 
+#[cfg(any(windows, test))]
+fn windows_pid_exited_with(pid: u32, probe: impl FnOnce() -> Result<u32, u32>) -> bool {
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    // The same Win32 values let non-Windows tests exercise the conservative
+    // decision boundary without pretending to execute Windows process APIs.
+    #[cfg(all(test, not(windows)))]
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    #[cfg(all(test, not(windows)))]
+    const WAIT_OBJECT_0: u32 = 0;
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // Err is ONLY OpenProcess's error. With fixed valid access rights and a
+    // bounded nonzero PID, INVALID_PARAMETER identifies an absent PID. All
+    // denied/unknown errors and nonsignaled/failed waits preserve the lock.
+    matches!(probe(), Err(ERROR_INVALID_PARAMETER) | Ok(WAIT_OBJECT_0))
+}
+
 fn pid_definitely_exited(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -223,7 +242,28 @@ fn pid_definitely_exited(pid: u32) -> bool {
         (unsafe { libc::kill(pid as libc::pid_t, 0) == -1 })
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::GetLastError,
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        };
+        windows_pid_exited_with(pid, || {
+            // Least privilege, no inheritance and no debug privilege changes.
+            // SAFETY: scalar inputs only; a non-null returned handle is owned.
+            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if raw.is_null() {
+                return Err(unsafe { GetLastError() });
+            }
+            // SAFETY: OpenProcess returned a fresh owned process handle. RAII
+            // closes it after the nonblocking wait, including all error paths.
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            // Signaled process object proves exit without exit-code ambiguity.
+            Ok(unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) })
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
@@ -607,7 +647,7 @@ mod tests {
         std::process::exit(0);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn recoverable_acquire_reclaims_a_real_exited_subprocess_lock() {
         let root = tempfile::tempdir().unwrap();
@@ -639,7 +679,7 @@ mod tests {
         assert!(!lock_dir(&path).exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn exited_pid() -> u32 {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "no_matching_test"])
@@ -652,7 +692,7 @@ mod tests {
         pid
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn recoverable_acquire_preserves_malformed_or_unbounded_dead_owner_metadata() {
         let pid = exited_pid();
@@ -683,7 +723,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn recoverable_acquire_preserves_unknown_children_and_multiple_owners() {
         let pid = exited_pid();
@@ -767,7 +807,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn recoverable_acquire_does_not_reclaim_after_deadline() {
         let root = tempfile::tempdir().unwrap();
@@ -845,5 +885,58 @@ mod tests {
             }
             Err(error) => panic!("unexpected raw-path creation error: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod windows_liveness_contract_tests {
+    use super::*;
+    #[test]
+    fn windows_probe_accepts_only_absent_or_signaled_processes() {
+        // OpenProcess error codes vs zero-time WaitForSingleObject results.
+        // These are synthetic observations, never probes of unrelated processes.
+        let cases = [
+            (Err(87), true), // ERROR_INVALID_PARAMETER, for a bounded nonzero PID.
+            (Ok(0), true),   // WAIT_OBJECT_0: the opened process is signaled.
+            (Err(5), false), // ERROR_ACCESS_DENIED is not absence.
+            (Err(6), false), // ERROR_INVALID_HANDLE / unknown failure.
+            (Err(0), false),
+            (Ok(258), false),      // WAIT_TIMEOUT: still running (also PID reuse).
+            (Ok(128), false),      // WAIT_ABANDONED is not a process-exit proof.
+            (Ok(u32::MAX), false), // WAIT_FAILED.
+            (Ok(259), false),      // No exit-code inference (STILL_ACTIVE ambiguity).
+        ];
+        for (observed, expected) in cases {
+            assert_eq!(
+                windows_pid_exited_with(124, || observed),
+                expected,
+                "{observed:?}"
+            );
+        }
+    }
+    #[test]
+    fn windows_probe_never_queries_idle_or_unbounded_owner_pids() {
+        for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
+            assert!(!windows_pid_exited_with(pid, || panic!(
+                "invalid owner PID must not reach Windows"
+            )));
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_live_and_exited_child_are_distinguished() {
+        assert!(!pid_definitely_exited(std::process::id()));
+        assert!(!pid_definitely_exited(0));
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "no_matching_test"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        // While the child HANDLE is retained, then after its last handle closes.
+        assert!(pid_definitely_exited(pid));
+        drop(child);
+        assert!(pid_definitely_exited(pid));
     }
 }
