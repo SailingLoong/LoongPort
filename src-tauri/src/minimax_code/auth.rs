@@ -484,6 +484,7 @@ pub(crate) async fn poll<T: Transport>(
                 i
             } else {
                 d.accounts.push(Account {
+                    quota_observation: None,
                     auto_claim_enabled: false,
                     auto_claim_revision: 0,
                     auto_claim_failure: None,

@@ -752,6 +752,7 @@ impl FixtureTransport {
                     return Err(Failure::UnsupportedContext);
                 }
                 document.accounts.push(catalog::Account {
+                    quota_observation: None,
                     auto_claim_enabled: false,
                     auto_claim_revision: 0,
                     auto_claim_failure: None,

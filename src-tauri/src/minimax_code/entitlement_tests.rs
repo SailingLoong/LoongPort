@@ -1,6 +1,53 @@
 use super::*;
 use serde_json::json;
 #[test]
+fn quota_observation_preserves_all_rows_and_unrounded_independent_windows() {
+    let body = json!({"model_remains":[
+        {"model_name":"shared-plan","current_interval_remaining_percent":0.4,
+         "current_interval_usage_count":1,"current_interval_total_count":250,
+         "current_weekly_usage_count":0,"current_weekly_total_count":1000,
+         "end_time":1790000000000_i64,"weekly_end_time":1790600000000_i64,
+         "access_token":"must-not-survive","op_group_id":"must-not-survive"},
+        {"model_name":"video","current_weekly_status":3}
+    ],"access_token":"must-not-survive"});
+    let rows = observation_rows(&body).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].model_name.as_deref(), Some("shared-plan"));
+    assert_eq!(
+        rows[0].fields["current_interval_remaining_percent"].as_f64(),
+        Some(0.4)
+    );
+    assert_eq!(
+        rows[0].fields["current_interval_usage_count"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(
+        rows[0].fields["current_weekly_usage_count"].as_f64(),
+        Some(0.0)
+    );
+    assert_eq!(rows[1].fields["current_weekly_status"].as_f64(), Some(3.0));
+    assert!(!serde_json::to_string(&rows)
+        .unwrap()
+        .contains("must-not-survive"));
+    // Existing presentation remains rounded. A displayed zero is not exact quota.
+    assert_eq!(
+        project_quota(&body).unwrap().five_hour.remaining_percent,
+        Some(0.0)
+    );
+}
+
+#[test]
+fn quota_observation_rejects_partial_or_oversized_rows_instead_of_claiming_completeness() {
+    assert!(observation_rows(&json!({})).is_none());
+    assert!(observation_rows(&json!({"model_remains":[]})).is_none());
+    assert!(observation_rows(&json!({"model_remains":[{},null]})).is_none());
+    assert!(observation_rows(&json!({"model_remains":vec![json!({});129]})).is_none());
+    assert!(observation_rows(&json!({"model_remains":[{"model_name":"x".repeat(257)}]})).is_none());
+    assert!(observation_rows(&json!({"model_remains":[{}]})).is_none());
+    assert!(observation_rows(&json!({"model_remains":[{"current_interval_usage_count":"secret","end_time":1790000000000_i64}]})).is_none());
+}
+
+#[test]
 fn absent_entitlement_is_unknown_not_zero() {
     let e = project(&json!({}));
     assert_eq!(e.remaining_credits, None);
