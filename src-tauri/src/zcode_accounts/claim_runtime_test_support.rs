@@ -189,6 +189,11 @@ fn fixture(case: &'static str) -> (Arc<Script>, Vec<String>) {
             Endpoint::Preview,
             Ok(serde_json::json!({"code":0,"data":{"plans":[]}})),
         ));
+        steps.push_back((
+            "b",
+            Endpoint::Marketing,
+            Ok(serde_json::json!({"code":0,"data":{"deliveries":[]}})),
+        ));
     }
     (
         Arc::new(Script {
@@ -461,6 +466,11 @@ async fn benign_after_fault(app: &tauri::AppHandle, source: &Script, id: &str, c
                 "b",
                 Endpoint::Preview,
                 Ok(serde_json::json!({"code":0,"data":{"plans":[]}})),
+            ),
+            (
+                "b",
+                Endpoint::Marketing,
+                Ok(serde_json::json!({"code":0,"data":{"deliveries":[]}})),
             ),
         ]),
     );

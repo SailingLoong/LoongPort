@@ -4907,6 +4907,22 @@
         "openOfficialClient": "打开官方 ZCode 后重新查询",
         "notDue": "套餐仍有效，请到期后重新查询"
       }
+    },
+    "devices": {
+      "title": "设备 ID",
+      "description": "为当前 ZCode 环境导入设备 ID，所有账号使用同一选择。",
+      "input": "待导入的设备 ID",
+      "placeholder": "每行一个 UUID，也可粘贴 JSON",
+      "file": "设备 ID 文件",
+      "chooseFile": "选择文件",
+      "import": "导入设备 ID",
+      "selected": "下次启动使用的设备 ID",
+      "native": "使用本机 ZCode",
+      "restart": "重启 LoongPort 后，所选设备 ID 生效。",
+      "error": "设备 ID 更新失败，请检查 UUID 格式后重试。",
+      "retry": "重试",
+      "saved": "已保存 {{count}} 个设备 ID",
+      "current": "本次运行：{{device}}"
     }
   },
   "workbuddy": {

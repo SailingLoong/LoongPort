@@ -346,6 +346,43 @@ fn active_plan<'a>(balance: &'a serde_json::Value, id: &str) -> Option<&'a serde
                 .is_none_or(|(end, now)| end > now)
     })
 }
+fn discovery_must_stop(error: &OfficialError) -> bool {
+    matches!(
+        error,
+        OfficialError::Unauthorized | OfficialError::Cancelled | OfficialError::Http(429)
+    )
+}
+fn merge_plan_sources(
+    preview: Result<Vec<super::claim::Plan>, OfficialError>,
+    marketing: Result<Vec<super::claim::Plan>, OfficialError>,
+) -> Result<(Vec<super::claim::Plan>, bool), OfficialError> {
+    for error in [preview.as_ref().err(), marketing.as_ref().err()]
+        .into_iter()
+        .flatten()
+    {
+        if discovery_must_stop(error) {
+            return Err(*error);
+        }
+    }
+    let complete = preview.is_ok() && marketing.is_ok();
+    let mut plans = match (preview, marketing) {
+        (Ok(mut plans), Ok(delivered)) => {
+            for plan in delivered {
+                if !plans.iter().any(|existing| existing.id == plan.id) {
+                    plans.push(plan);
+                }
+            }
+            plans
+        }
+        (Ok(plans), Err(error)) | (Err(error), Ok(plans)) => {
+            log::warn!("ZCode plan discovery incomplete: {error}");
+            plans
+        }
+        (Err(error), Err(_)) => return Err(error),
+    };
+    plans.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
+    Ok((plans, complete))
+}
 async fn one(
     app: &tauri::AppHandle,
     db: Arc<Database>,
@@ -354,7 +391,13 @@ async fn one(
     preview_only: bool,
     automatic: bool,
 ) -> Result<(), &'static str> {
-    let client = Client(Http::new().map_err(|_| "network")?);
+    let device_mid = super::device_settings::current(&db, &p.ctx)?;
+    let client = Client(
+        Http::new()
+            .map_err(|_| "network")?
+            .with_data_root(p.ctx.data_root())
+            .with_device_mid(device_mid.as_deref()),
+    );
     let checked = || check(&db, p, lease, automatic);
     let mut r = previous(db.clone(), p).await?;
     r.checked_at = Some(chrono::Utc::now().timestamp().max(0) as u64);
@@ -388,26 +431,35 @@ async fn one(
             return Ok(());
         }
     };
-    let raw = match client
+    let preview = client
         .request(request(p, Endpoint::Preview), &checked)
         .await
-    {
-        Ok(value) => value,
+        .and_then(|value| {
+            if matches!(super::claim::response_code(&value), Some(401 | 403)) {
+                Err(OfficialError::Unauthorized)
+            } else {
+                super::claim::preview(&value).map_err(|_| OfficialError::InvalidResponse)
+            }
+        });
+    if preview.as_ref().err().is_some_and(discovery_must_stop) {
+        failure(&mut r, preview.err().unwrap());
+        record(db, p, &r).await?;
+        return Ok(());
+    }
+    let marketing = client
+        .request(request(p, Endpoint::Marketing), &checked)
+        .await
+        .and_then(|value| {
+            if matches!(super::claim::response_code(&value), Some(401 | 403)) {
+                Err(OfficialError::Unauthorized)
+            } else {
+                super::claim::marketing_plans(&value).map_err(|_| OfficialError::InvalidResponse)
+            }
+        });
+    let (plans, complete) = match merge_plan_sources(preview, marketing) {
+        Ok(discovery) => discovery,
         Err(error) => {
             failure(&mut r, error);
-            record(db, p, &r).await?;
-            return Ok(());
-        }
-    };
-    let plans = match super::claim::preview(&raw) {
-        Ok(plans) => plans,
-        Err(_) => {
-            if matches!(super::claim::response_code(&raw), Some(401 | 403)) {
-                r.status = Status::LoginExpired;
-            } else {
-                r.status = Status::Unknown;
-                r.reason = Some("previewUnavailable".into());
-            }
             record(db, p, &r).await?;
             return Ok(());
         }
@@ -420,6 +472,12 @@ async fn one(
     r.prior_plan_ids = prior_plan_ids;
     r.reason = None;
     let Some(plan) = plan else {
+        if !complete {
+            r.status = Status::Unknown;
+            r.reason = Some("previewUnavailable".into());
+            record(db, p, &r).await?;
+            return Ok(());
+        }
         r.status = Status::NoClaim;
         if let Some(plan) = r.plans.first().and_then(|p| active_plan(&balance, &p.id)) {
             r.plan_id = plan
@@ -547,6 +605,7 @@ where
 }
 
 fn failure(r: &mut Record, error: OfficialError) {
+    log::warn!("ZCode claim check failed: {error}");
     r.status = if error == OfficialError::Unauthorized {
         Status::LoginExpired
     } else if error == OfficialError::Cancelled {
@@ -810,6 +869,43 @@ mod tests {
     #[cfg(unix)]
     use super::super::{core::OAuthFamily, native::tests::native_document_with_context};
     use super::*;
+    #[test]
+    fn plan_discovery_preserves_independent_results_and_unknown_completeness() {
+        let plan = super::super::claim::Plan {
+            id: "synthetic-plan".into(),
+            name: None,
+            description: None,
+            priority: 1,
+            units: None,
+            grants: vec![],
+        };
+        let (plans, complete) =
+            merge_plan_sources(Ok(vec![plan.clone()]), Err(OfficialError::Timeout)).unwrap();
+        assert_eq!(plans, vec![plan.clone()]);
+        assert!(!complete);
+        let (plans, complete) =
+            merge_plan_sources(Err(OfficialError::Http(500)), Ok(vec![plan.clone()])).unwrap();
+        assert_eq!(plans, vec![plan.clone()]);
+        assert!(!complete);
+        let (plans, complete) =
+            merge_plan_sources(Ok(vec![]), Err(OfficialError::Transport)).unwrap();
+        assert!(plans.is_empty() && !complete);
+        let (plans, complete) =
+            merge_plan_sources(Ok(vec![plan.clone()]), Ok(vec![plan.clone()])).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(complete);
+        for error in [
+            OfficialError::Unauthorized,
+            OfficialError::Cancelled,
+            OfficialError::Http(429),
+        ] {
+            assert_eq!(
+                merge_plan_sources(Ok(vec![plan.clone()]), Err(error)),
+                Err(error)
+            );
+        }
+    }
+
     #[test]
     fn invalid_balance_failure_is_persisted_without_erasing_the_prior_snapshot() {
         let db = Database::memory().unwrap();

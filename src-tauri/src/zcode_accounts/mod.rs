@@ -18,6 +18,8 @@ pub(crate) mod checkpoint;
 pub(crate) mod connection_check;
 pub mod core;
 pub(crate) mod desktop_text;
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod device_settings;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 pub(crate) mod discovery_paths;
 pub(crate) mod import_receipts;
@@ -53,6 +55,8 @@ pub(crate) mod recovery;
 pub(crate) mod runtime;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod session_checks;
+#[cfg(any(feature = "gui", test))]
+mod source_context;
 pub(crate) mod transaction;
 
 #[cfg(test)]

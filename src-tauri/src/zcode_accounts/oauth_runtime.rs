@@ -208,12 +208,35 @@ fn flows() -> &'static LoginFlowStore {
     static FLOWS: OnceLock<LoginFlowStore> = OnceLock::new();
     FLOWS.get_or_init(LoginFlowStore::default)
 }
-fn service(db: Arc<Database>) -> Result<Arc<Service>, PublicError> {
+fn service(
+    db: Arc<Database>,
+    context: Option<(&super::library_context::LibraryContext, Option<&str>)>,
+) -> Result<Arc<Service>, PublicError> {
     let transport = ReqwestOfficialTransport::new()
         .map_err(|_| PublicError::new("zcode.account.official_unavailable", "queryOriginal"))?;
+    let transport = match context {
+        Some((context, version)) => {
+            let device_mid = super::device_settings::current(&db, context).map_err(|_| {
+                PublicError::new("zcode.account.official_unavailable", "queryOriginal")
+            })?;
+            transport
+                .with_context(context.data_root(), version)
+                .with_device_mid(device_mid.as_deref())
+        }
+        None => transport,
+    };
     let mut service = Service::new(transport, Persistence { db });
     service.flows = flows().clone();
     Ok(Arc::new(service))
+}
+fn service_for_flow(db: Arc<Database>, id: &str) -> Result<Arc<Service>, PublicError> {
+    let context = flows().request_context(id).map_err(flow_error)?;
+    service(
+        db,
+        context
+            .as_ref()
+            .map(|(context, version)| (context, version.as_deref())),
+    )
 }
 fn flow_error(_: FlowError) -> PublicError {
     PublicError::new("zcode.account.login_changed", "queryOriginal")
@@ -323,7 +346,7 @@ pub(crate) async fn begin(
     })
     .await
     .map_err(PublicError::from)?;
-    let service = service(db)?;
+    let service = service(db, Some((&context, app_version.as_deref())))?;
     let token = PollToken::generate().map_err(|_| flow_error(FlowError::Capacity))?;
     let id = service
         .flows
@@ -368,7 +391,7 @@ pub(crate) async fn begin(
 }
 pub(crate) async fn query(db: Arc<Database>, id: String) -> Result<LoginProgress, PublicError> {
     if let Some(kind) = flows().recovery_kind(&id).map_err(flow_error)? {
-        let service = service(db)?;
+        let service = service_for_flow(db, &id)?;
         if let Ok(lease) = service.flows.acquire(&id, kind, Instant::now()) {
             tokio::spawn(async move {
                 let ticket = lease.ticket();
@@ -465,7 +488,7 @@ pub(crate) async fn begin_saved(
         Selection::Existing(id) => return query(db, id).await,
         Selection::Selected(bound, input) => (bound, *input),
     };
-    let service = service(db)?;
+    let service = service(db, Some((&input.context, input.app_version.as_deref())))?;
     let begin = service
         .flows
         .begin_saved(bound, input, Instant::now())
@@ -505,7 +528,7 @@ pub(crate) async fn confirm(
     organization: String,
     project: String,
 ) -> Result<LoginProgress, PublicError> {
-    let service = service(db)?;
+    let service = service_for_flow(db, &id)?;
     let lease = service
         .flows
         .acquire(&id, WorkKind::CreateKey, Instant::now())
@@ -529,7 +552,7 @@ pub(crate) async fn decline(db: Arc<Database>, id: String) -> Result<LoginProgre
     if status.stage != FlowStage::KeyRequired || status.key_may_exist {
         return progress(&id);
     }
-    let service = service(db)?;
+    let service = service_for_flow(db, &id)?;
     let lease = service
         .flows
         .acquire(&id, WorkKind::Prepare, Instant::now())
@@ -549,7 +572,7 @@ pub(crate) async fn save(
     id: String,
     update_duplicate: bool,
 ) -> Result<LoginProgress, PublicError> {
-    let service = service(db)?;
+    let service = service_for_flow(db, &id)?;
     let lease = service
         .flows
         .acquire(&id, WorkKind::Save, Instant::now())

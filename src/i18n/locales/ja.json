@@ -4907,6 +4907,22 @@
         "openOfficialClient": "公式 ZCode を開いてから再確認してください",
         "notDue": "プランはまだ有効です。有効期限後に再確認してください"
       }
+    },
+    "devices": {
+      "title": "デバイス ID",
+      "description": "この ZCode 環境のデバイス ID をインポートします。すべてのアカウントで同じ選択を使用します。",
+      "input": "インポートするデバイス ID",
+      "placeholder": "1 行に 1 つの UUID、または JSON を貼り付け",
+      "file": "デバイス ID ファイル",
+      "chooseFile": "ファイルを選択",
+      "import": "デバイス ID をインポート",
+      "selected": "次回起動時のデバイス ID",
+      "native": "ローカルの ZCode を使用",
+      "restart": "選択したデバイス ID は LoongPort の再起動後に適用されます。",
+      "error": "デバイス ID を更新できません。UUID の形式を確認して再試行してください。",
+      "retry": "再試行",
+      "saved": "{{count}} 個のデバイス ID を保存済み",
+      "current": "現在のセッション：{{device}}"
     }
   },
   "workbuddy": {
