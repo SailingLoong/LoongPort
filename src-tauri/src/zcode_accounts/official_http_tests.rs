@@ -237,3 +237,43 @@ async fn invalid_origin_is_rejected_before_transport_and_post_is_never_retried()
         std::io::ErrorKind::WouldBlock
     );
 }
+
+#[test]
+fn oauth_and_billing_share_real_device_context_only_at_the_zcode_origin() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("telemetry-state.json"),
+        br#"{"deviceMid":"11111111-2222-4333-8444-555555555555"}"#,
+    )
+    .unwrap();
+    let transport = ReqwestOfficialTransport::new()
+        .unwrap()
+        .with_context(root.path(), Some("99.1.2"));
+    for (url, method) in [
+        (
+            "https://zcode.z.ai/api/v1/oauth/cli/init",
+            OfficialMethod::Post,
+        ),
+        (
+            "https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=99.1.2",
+            OfficialMethod::Get,
+        ),
+    ] {
+        let outgoing = transport.build_request(request(url, method)).unwrap();
+        assert_eq!(
+            outgoing.headers()["x-device-mid"],
+            "11111111-2222-4333-8444-555555555555"
+        );
+        assert!(outgoing.headers()["x-device-mid"].is_sensitive());
+        assert_eq!(outgoing.headers()["x-zcode-app-version"], "99.1.2");
+        assert!(outgoing.headers()["authorization"].is_sensitive());
+    }
+    let external = transport
+        .build_request(request(
+            "https://bigmodel.cn/api/biz/customer/getCustomerInfo",
+            OfficialMethod::Get,
+        ))
+        .unwrap();
+    assert!(!external.headers().contains_key("x-device-mid"));
+    assert!(!external.headers().contains_key("x-client-timezone"));
+}

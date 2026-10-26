@@ -429,3 +429,19 @@ fn reopened_login_finds_only_latest_same_vault_and_library_after_cancel() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn request_context_is_owned_by_the_selected_flow_and_cleared_on_cancellation() {
+    let store = LoginFlowStore::default();
+    let mut input = saved_input();
+    input.app_version = Some("99.1.2".into());
+    let root = input.context.data_root().to_path_buf();
+    let now = Instant::now();
+    let flow = store.begin_saved(binding(), input, now).unwrap();
+    let (context, version) = store.request_context(&flow.flow_id).unwrap().unwrap();
+    assert_eq!(context.data_root(), root);
+    assert_eq!(version.as_deref(), Some("99.1.2"));
+    assert!(store.request_context("unrelated-flow").is_err());
+    store.cancel(&flow.flow_id, now).unwrap();
+    assert!(store.request_context(&flow.flow_id).unwrap().is_none());
+}

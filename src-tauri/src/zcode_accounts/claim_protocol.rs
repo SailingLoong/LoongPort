@@ -12,6 +12,7 @@ pub(crate) enum Endpoint {
     Balance,
     Config,
     Claim,
+    Marketing,
 }
 #[derive(Clone)]
 pub(crate) struct Request {
@@ -33,6 +34,28 @@ pub(crate) trait Transport: Send + Sync {
     fn send(&self, request: Request) -> TransportFuture<'_>;
 }
 pub(crate) struct Client<T>(pub T);
+// Fixed field names only: never log response text, credential values or headers.
+fn rejection_fields(body: &[u8]) -> Vec<&'static str> {
+    [
+        "x-device-mid",
+        "device_mid",
+        "x-zcode-app-version",
+        "app_version",
+        "x-platform",
+        "x-title",
+        "http-referer",
+        "x-client-language",
+        "x-client-timezone",
+        "x-release-channel",
+        "authorization",
+    ]
+    .into_iter()
+    .filter(|name| {
+        body.windows(name.len())
+            .any(|w| w.eq_ignore_ascii_case(name.as_bytes()))
+    })
+    .collect()
+}
 impl<T: Transport> Client<T> {
     pub async fn request(
         &self,
@@ -40,6 +63,7 @@ impl<T: Transport> Client<T> {
         check: &RequestCheck<'_>,
     ) -> Result<Value, OfficialError> {
         check()?;
+        let endpoint = request.endpoint;
         let jwt = request.jwt.clone();
         let captcha = request.captcha.clone();
         let response = self.0.send(request).await?;
@@ -48,6 +72,12 @@ impl<T: Transport> Client<T> {
             return Err(OfficialError::Unauthorized);
         }
         if !(200..300).contains(&response.status) {
+            let code = serde_json::from_slice::<Value>(&response.body)
+                .ok()
+                .as_ref()
+                .and_then(super::claim::response_code);
+            log::warn!("ZCode request rejected: endpoint={endpoint:?}, status={}, service_code={code:?}, mentioned_fields={:?}",
+                response.status, rejection_fields(&response.body));
             return Err(OfficialError::Http(response.status));
         }
         if response.body.len() > MAX_RESPONSE_BYTES {
@@ -115,12 +145,34 @@ mod tests {
         }
     }
     #[test]
+    fn rejection_diagnostics_emit_only_known_field_names() {
+        assert_eq!(
+            rejection_fields(br#"{"msg":"Missing X-Device-Mid","token":"secret-canary"}"#),
+            vec!["x-device-mid"]
+        );
+        assert!(rejection_fields(br#"{"msg":"secret-canary"}"#).is_empty());
+    }
+    #[test]
     fn disabled_captcha_config_needs_no_sdk_fields() {
         let config = captcha_config(&serde_json::json!({
             "code": 0, "data": {"configs": {"captcha": {"enabled": false}}}
         }))
         .unwrap();
         assert!(!config.enabled);
+    }
+    #[test]
+    #[cfg(feature = "gui")]
+    fn billing_requests_include_source_context_without_fabricating_a_device() {
+        let http = Http::new().unwrap();
+        let request = http.build_request(req()).unwrap();
+        assert_eq!(
+            request.headers().get("HTTP-Referer").unwrap(),
+            "https://zcode.z.ai"
+        );
+        assert!(request.headers().contains_key("X-Client-Language"));
+        assert!(request.headers().contains_key("X-Client-Timezone"));
+        assert!(!request.headers().contains_key("X-Device-Mid"));
+        assert_eq!(request.headers()["X-Title"], "LoongPort");
     }
     #[test]
     #[cfg(feature = "gui")]
@@ -229,6 +281,7 @@ mod tests {
 
 #[cfg(feature = "gui")]
 pub(crate) struct Http {
+    context: super::source_context::SourceContext,
     #[cfg(feature = "test-hooks")]
     script: Option<std::sync::Arc<super::claim_runtime::test_support::Script>>,
     client: reqwest::Client,
@@ -237,6 +290,7 @@ pub(crate) struct Http {
 impl Http {
     pub fn new() -> Result<Self, OfficialError> {
         Ok(Self {
+            context: super::source_context::SourceContext::observe(None),
             #[cfg(feature = "test-hooks")]
             script: super::claim_runtime::test_support::current(),
             client: reqwest::Client::builder()
@@ -248,12 +302,17 @@ impl Http {
                 .map_err(|_| OfficialError::Transport)?,
         })
     }
+    pub fn with_data_root(mut self, root: &std::path::Path) -> Self {
+        self.context = super::source_context::SourceContext::observe(Some(root));
+        self
+    }
     fn build_request(&self, request: Request) -> Result<reqwest::Request, OfficialError> {
         let path = match request.endpoint {
             Endpoint::Preview => "zcode-plan/billing/preview",
             Endpoint::Balance => "zcode-plan/billing/balance",
             Endpoint::Config => "client/configs",
             Endpoint::Claim => "zcode-plan/billing/claim",
+            Endpoint::Marketing => "marketing/touch",
         };
         if request.version.is_empty()
             || request.version.len() > 64
@@ -266,22 +325,19 @@ impl Http {
         }
         let mut url = url::Url::parse(&format!("https://zcode.z.ai/api/v1/{path}"))
             .map_err(|_| OfficialError::InvalidInput)?;
-        let os = match std::env::consts::OS {
-            "macos" => "darwin",
-            other => other,
-        };
-        let arch = match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            "x86_64" => "x64",
-            other => other,
-        };
-        let platform = format!("{os}-{arch}");
+        let platform = super::source_context::platform();
         if matches!(request.endpoint, Endpoint::Preview | Endpoint::Balance) {
             url.query_pairs_mut()
                 .append_pair("app_version", &request.version);
         }
         if request.endpoint == Endpoint::Preview {
             url.query_pairs_mut().append_pair("platform", &platform);
+        }
+        if request.endpoint == Endpoint::Marketing {
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            url.query_pairs_mut()
+                .append_pair("seq", &sequence.to_string());
         }
         let mut auth =
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", request.jwt.expose()))
@@ -294,13 +350,10 @@ impl Http {
         };
         builder = builder
             .header(reqwest::header::AUTHORIZATION, auth)
-            .header("X-ZCode-App-Version", &request.version)
-            .header("X-Platform", platform)
-            .header("X-Title", "LoongPort")
-            .header(
-                "User-Agent",
-                concat!("LoongPort/", env!("CARGO_PKG_VERSION")),
-            );
+            .headers(self.context.headers(Some(&request.version)));
+        if request.endpoint == Endpoint::Marketing {
+            builder = builder.header("X-Client-Language", self.context.marketing_language());
+        }
         if request.endpoint == Endpoint::Claim {
             if let Some(captcha) = request.captcha.as_ref() {
                 let mut header = reqwest::header::HeaderValue::from_str(captcha.expose())

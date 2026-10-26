@@ -231,3 +231,29 @@ fn rebuilt_prior_snapshot_prevents_old_plan_from_confirming_new_claim() {
     assert_eq!(record.status, Status::Claimed);
     assert!(!record.may_submit());
 }
+
+#[test]
+fn marketing_claims_use_action_plan_ids_not_campaign_ids_or_unrelated_buttons() {
+    let body = serde_json::json!({"code":0,"data":{"deliveries":[
+        {"campaign_id":"synthetic-campaign","resource_position":"popup","priority":70,"popup":{"buttons":[
+            {"action":{"type":"claim_zcode_plan","args":{"plan_id":"synthetic-plan"}}},
+            {"action":{"type":"open_url","args":{"url":"https://example.invalid/"}}}
+        ]}},
+        {"campaign_id":"another-campaign","resource_position":"banner","banner":{"buttons":[
+            {"action":{"type":"claim_zcode_plan","args":{"plan_id":"synthetic-plan"}}}
+        ]}}
+    ]}});
+    let plans = super::marketing_plans(&body).unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].id, "synthetic-plan");
+    assert_eq!(plans[0].priority, 70);
+    assert!(
+        super::marketing_plans(&serde_json::json!({"code":0,"data":{"deliveries":[]}}))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(super::marketing_plans(&serde_json::json!({"code":0,"data":{}})).is_err());
+    assert!(
+        super::marketing_plans(&serde_json::json!({"code":401,"data":{"deliveries":[]}})).is_err()
+    );
+}

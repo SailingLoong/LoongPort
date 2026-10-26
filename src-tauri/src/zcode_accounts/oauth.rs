@@ -595,6 +595,20 @@ impl LoginFlowStore {
         }
         Ok(describe(id, flow))
     }
+    /// Source metadata stays bound to the flow's selected library context.
+    pub(crate) fn request_context(
+        &self,
+        id: &str,
+    ) -> Result<Option<(LibraryContext, Option<String>)>, FlowError> {
+        let flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        let flow = flows.get(id).ok_or(FlowError::Missing)?;
+        Ok(flow.draft.as_ref().and_then(|draft| {
+            draft
+                .context
+                .clone()
+                .map(|context| (context, draft.app_version.clone()))
+        }))
+    }
     pub(crate) fn progress(&self, id: &str, now: Instant) -> Result<LoginProgress, FlowError> {
         let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
         expire_due(&mut flows, now);

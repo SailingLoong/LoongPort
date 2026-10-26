@@ -1017,7 +1017,9 @@ pub(super) async fn check_library_bundle(
         let Ok(transport) = super::official_http::ReqwestOfficialTransport::new() else {
             return;
         };
-        let client = super::official::OfficialClient::new(transport);
+        let client = super::official::OfficialClient::new(
+            transport.with_context(context.data_root(), app_version.as_deref()),
+        );
         let check = || {
             lease.check()?;
             require_library_binding(&worker_db, &context, &lease.binding)
@@ -1204,7 +1206,8 @@ pub(super) async fn check_saved_connections(
     let native = context.cipher()?;
     let client = super::official::OfficialClient::new(
         super::official_http::ReqwestOfficialTransport::new()
-            .map_err(|_| RuntimeError::TaskFailed)?,
+            .map_err(|_| RuntimeError::TaskFailed)?
+            .with_context(context.data_root(), version.as_deref()),
     );
     let check = || {
         lease
