@@ -51,6 +51,11 @@ export const PLAZA_VISIBLE_DEFAULT = false;
 export const settingsApi = {
   setAppVisibility: (app: AppId, visible: boolean) =>
     invoke<VisibleApps>("set_app_visibility", { app, visible }),
+  /** Non-secret startup projection only. Never use this result as a save draft. */
+  async getBootstrap(): Promise<FrontendSettings> {
+    return await invoke("get_bootstrap_settings");
+  },
+
   async get(): Promise<FrontendSettings> {
     return await invoke("get_settings");
   },

@@ -10,7 +10,7 @@ use super::patch::{LivePatch, LiveWriteError};
 use crate::config_file_io::{self, StagedWrite};
 use crate::error::AppError;
 use crate::secrets::owned_file::{DeviceFile, DEVICE_BACKUP_DIR, DEVICE_STATE_FILE};
-use crate::secrets::VaultContext;
+use crate::secrets::storage::StorageContext;
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -36,7 +36,7 @@ pub(crate) struct DeviceStore {
 
 impl DeviceStore {
     pub(crate) fn for_device() -> Self {
-        Self::at(crate::config::get_home_dir().join(crate::config::APP_DIR_NAME))
+        Self::at(crate::config::get_device_config_dir())
     }
 
     pub(crate) fn at(root: impl Into<PathBuf>) -> Self {
@@ -426,7 +426,7 @@ impl DeviceStore {
     /// Reads do not create a directory, initialize a vault, or repair bad state.
     pub(crate) fn read_device(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         file: &DeviceFile,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
         validate_path(&self.root, true)?;
@@ -434,7 +434,7 @@ impl DeviceStore {
         validate_file_path(&path)?;
         config_file_io::read_regular_file(&path, MAX_DEVICE_BYTES)
             .map_err(|e| AppError::io(&path, e))?
-            .map(|bytes| file.decode(vault, &bytes))
+            .map(|bytes| file.decode_storage(vault, &bytes))
             .transpose()
     }
 
@@ -454,25 +454,26 @@ impl DeviceStore {
 
     pub(crate) fn write_device(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         file: &DeviceFile,
         plaintext: &[u8],
     ) -> Result<(), AppError> {
         self.prepare_device_parent(file)?;
-        let bytes = file.encode(vault, plaintext)?;
+        let bytes = file.encode_storage(vault, plaintext)?;
         let path = self.path_for(file);
+        crate::secrets::files::ensure_plaintext_destination(vault, &path)?;
         config_file_io::stage_write(&path, &bytes, Some(0o600), true)?.commit()?;
         sync_parent(&path)
     }
 
     fn create_device(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         file: &DeviceFile,
         plaintext: &[u8],
     ) -> Result<(), AppError> {
         self.prepare_device_parent(file)?;
-        let bytes = file.encode(vault, plaintext)?;
+        let bytes = file.encode_storage(vault, plaintext)?;
         config_file_io::write_durable_new(&self.path_for(file), &bytes)
     }
 }
@@ -490,7 +491,7 @@ struct BackupSource {
 /// An orphaned backup is verified and reused, never replaced with later content.
 pub(crate) fn ensure_first_write_backup(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     path: &Path,
     current: Option<&[u8]>,
 ) -> Result<(), AppError> {
@@ -546,3 +547,7 @@ pub(crate) fn sync_parent(path: &Path) -> Result<(), AppError> {
     let _ = path;
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "engine_plaintext_tests.rs"]
+pub(crate) mod plaintext_tests;

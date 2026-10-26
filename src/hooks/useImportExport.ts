@@ -60,6 +60,32 @@ export function useImportExport(
     }
   }, [t]);
 
+  const importFailureMessage = useCallback(
+    (error: unknown) => {
+      const code =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "";
+      if (
+        code === "backup.password_required" ||
+        code === "配置错误: backup.password_required"
+      )
+        return t("portableBackup.passwordRequired");
+      if (
+        code === "secret.password_rejected" ||
+        code === "配置错误: secret.password_rejected"
+      )
+        return t("portableBackup.passwordRejected");
+      // Import failures can contain source input. Never log/cache/display raw details.
+      return t("settings.importFailed", {
+        defaultValue: "导入配置失败",
+      });
+    },
+    [t],
+  );
+
   const importConfig = useCallback(
     async (password?: string) => {
       if (!selectedFile) {
@@ -83,11 +109,7 @@ export function useImportExport(
           : await settingsApi.importConfigFromFile(selectedFile);
         if (!result.success) {
           setStatus("error");
-          const message =
-            result.message ||
-            t("settings.configCorrupted", {
-              defaultValue: "SQL 文件已损坏或格式不正确",
-            });
+          const message = importFailureMessage(result.message);
           setErrorMessage(message);
           toast.error(message);
           return;
@@ -117,15 +139,8 @@ export function useImportExport(
           );
         }
       } catch (error) {
-        console.error("[useImportExport] Failed to import config", error);
         setStatus("error");
-        const rawMessage =
-          error instanceof Error ? error.message : String(error ?? "");
-        const message = rawMessage.includes("backup.password_required")
-          ? t("portableBackup.passwordRequired")
-          : rawMessage.includes("secret.password_rejected")
-            ? t("portableBackup.passwordRejected")
-            : rawMessage;
+        const message = importFailureMessage(error);
         setErrorMessage(message);
         toast.error(
           t("settings.importFailedError", {
@@ -137,7 +152,7 @@ export function useImportExport(
         setIsImporting(false);
       }
     },
-    [isImporting, onImportSuccess, selectedFile, t],
+    [isImporting, onImportSuccess, selectedFile, importFailureMessage, t],
   );
 
   const exportConfig = useCallback(async () => {

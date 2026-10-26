@@ -49,10 +49,10 @@ impl Fixture {
 fn write_current_with_guard(
     store: &SettingsStore,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     id: Option<&str>,
 ) -> Result<(), AppError> {
-    store.set_current_provider_with_vault(&AppType::Codex, id, session, vault)
+    store.set_current_provider_with_storage(&AppType::Codex, id, session, vault)
 }
 
 #[cfg_attr(test, test)]
@@ -79,7 +79,7 @@ fn held_vault_current_write_finishes_before_waiting_writer() {
         write_current_with_guard(&fixture.store, &fixture.session, &vault, Some("after")).unwrap();
         let bytes = fs::read(&fixture.store.path).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains(CANARY));
-        let decoded = decode_settings_with_vault(&bytes, &vault).unwrap();
+        let decoded = decode_settings_with_storage(&bytes, &vault).unwrap();
         assert_eq!(decoded.current_provider_codex.as_deref(), Some("after"));
         assert_eq!(decoded.webdav_sync.unwrap().password, CANARY);
         assert_eq!(
@@ -102,7 +102,7 @@ fn another_session_with_the_same_key_and_root_cannot_change_settings() {
     let fixture = Fixture::new();
     let before_disk = fixture.bytes();
     let before_state = fixture.state();
-    let foreign = SecretSession::from_context(
+    let foreign = SecretSession::from_storage_context(
         fixture.session.root().to_path_buf(),
         fixture.session.read().unwrap().clone(),
     );
@@ -113,6 +113,27 @@ fn another_session_with_the_same_key_and_root_cannot_change_settings() {
     assert!(matches!(result, Err(AppError::Config(code)) if code == "settings.session_mismatch"));
     assert_eq!(fixture.bytes(), before_disk);
     assert_eq!(fixture.state(), before_state);
+}
+
+#[cfg_attr(test, test)]
+fn retired_session_cannot_publish_a_full_settings_snapshot() {
+    let fixture = Fixture::new();
+    let before_disk = fixture.bytes();
+    assert!(
+        crate::secrets::session::credential_runtime_availability(Some(&fixture.session))
+            .credential_runtime_available
+    );
+    assert!(fixture.store.ready_snapshot().is_ok());
+    fixture.session.set_blocked(true);
+    assert!(
+        !crate::secrets::session::credential_runtime_availability(Some(&fixture.session))
+            .credential_runtime_available
+    );
+    assert!(
+        fixture.store.ready_snapshot().is_err(),
+        "a retired runtime cannot publish cached full settings as an available owner"
+    );
+    assert_eq!(fixture.bytes(), before_disk);
 }
 
 #[cfg_attr(test, test)]
@@ -160,7 +181,7 @@ fn failed_publication_preserves_prior_state_and_destination_contents() {
     fs::remove_dir(&fixture.store.path).unwrap();
     fs::rename(retained, &fixture.store.path).unwrap();
     write_current_with_guard(&fixture.store, &fixture.session, &vault, Some("retry")).unwrap();
-    let decoded = decode_settings_with_vault(&fixture.bytes(), &vault).unwrap();
+    let decoded = decode_settings_with_storage(&fixture.bytes(), &vault).unwrap();
     assert_eq!(decoded.current_provider_codex.as_deref(), Some("retry"));
     assert_eq!(decoded.webdav_sync.unwrap().password, CANARY);
 }
@@ -187,7 +208,7 @@ fn failed_readback_keeps_last_verified_memory_and_reports_published_disk_state()
         let fixture = Fixture::new();
         let before_state = fixture.state();
         let vault = fixture.session.read().unwrap();
-        let result = fixture.store.mutate_with_vault(
+        let result = fixture.store.mutate_with_storage(
             &fixture.session,
             &vault,
             |settings| {
@@ -198,14 +219,14 @@ fn failed_readback_keeps_last_verified_memory_and_reports_published_disk_state()
                 // Model an external change after publication, using actual disk
                 // contents and the same verifier as the guarded pointer seam.
                 let published = fs::read(path).unwrap();
-                let mut decoded = decode_settings_with_vault(&published, vault).unwrap();
+                let mut decoded = decode_settings_with_storage(&published, vault).unwrap();
                 assert_eq!(decoded.current_provider_codex.as_deref(), Some("target"));
                 match fault {
                     "missing" => fs::remove_file(path).unwrap(),
                     "invalid" => fs::write(path, b"{broken").unwrap(),
                     "different-pointer" => {
                         decoded.current_provider_codex = Some("external".into());
-                        fs::write(path, encode_settings_with_vault(&decoded, vault).unwrap())
+                        fs::write(path, encode_settings_with_storage(&decoded, vault).unwrap())
                             .unwrap();
                     }
                     "invalid-secret" => {
@@ -225,7 +246,7 @@ fn failed_readback_keeps_last_verified_memory_and_reports_published_disk_state()
             assert!(
                 matches!(result, Err(AppError::Config(code)) if code == "settings.current_provider_readback_mismatch")
             );
-            let actual = decode_settings_with_vault(&fixture.bytes(), &vault).unwrap();
+            let actual = decode_settings_with_storage(&fixture.bytes(), &vault).unwrap();
             assert_eq!(actual.current_provider_codex.as_deref(), Some("external"));
         } else if fault == "missing" {
             assert!(!fixture.store.path.exists());
@@ -267,9 +288,9 @@ fn guarded_pointer_mapping_preserves_unrelated_fields_and_pi_has_no_pointer() {
             }
             fixture
                 .store
-                .set_current_provider_with_vault(&app, id, &fixture.session, &vault)
+                .set_current_provider_with_storage(&app, id, &fixture.session, &vault)
                 .unwrap();
-            let persisted = decode_settings_with_vault(&fixture.bytes(), &vault).unwrap();
+            let persisted = decode_settings_with_storage(&fixture.bytes(), &vault).unwrap();
             assert_eq!(serde_json::to_value(persisted).unwrap(), expected);
             assert_eq!(fixture.state(), expected);
         }
@@ -291,7 +312,7 @@ fn ordinary_mutation_still_returns_its_result_and_persists_encrypted_settings() 
     let bytes = fixture.bytes();
     assert!(!String::from_utf8_lossy(&bytes).contains(CANARY));
     let vault = fixture.session.read().unwrap();
-    let decoded = decode_settings_with_vault(&bytes, &vault).unwrap();
+    let decoded = decode_settings_with_storage(&bytes, &vault).unwrap();
     assert_eq!(decoded.current_provider_codex, None);
     assert_eq!(decoded.language.as_deref(), Some("en"));
     assert_eq!(decoded.webdav_sync.unwrap().password, CANARY);
@@ -331,7 +352,7 @@ fn codex_app_projection_retains_auth_preservation_policy_without_writes() {
             }
             let before = fs::read(settings_path()).unwrap();
             let vault = session.read().unwrap();
-            let selected = read_app_settings_with_vault(
+            let selected = read_app_settings_with_storage(
                 &AppType::Codex,
                 &session,
                 &vault,
@@ -375,11 +396,11 @@ fn codex_app_projection_rejects_malformed_policy_without_blocking_peers() {
         let before = fs::read(settings_path()).unwrap();
         let vault = session.read().unwrap();
         assert!(
-            read_upgrade_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024)
+            read_upgrade_settings_with_storage(&AppType::Codex, &session, &vault, 1024 * 1024)
                 .is_err()
         );
         let selected =
-            read_upgrade_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+            read_upgrade_settings_with_storage(&AppType::Claude, &session, &vault, 1024 * 1024)
                 .unwrap();
         assert_eq!(
             selected.current_provider_claude.as_deref(),
@@ -413,11 +434,11 @@ fn native_codex_projection_rejects_auth_policy_drift_from_ready_owner() {
     let before = fs::read(settings_path()).unwrap();
     let vault = session.read().unwrap();
     assert!(
-        matches!(read_native_app_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024),
+        matches!(read_native_app_settings_with_storage(&AppType::Codex, &session, &vault, 1024 * 1024),
         Err(AppError::Config(code)) if code == "upgrade.source_changed")
     );
     assert!(
-        read_native_app_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+        read_native_app_settings_with_storage(&AppType::Claude, &session, &vault, 1024 * 1024)
             .is_ok()
     );
     assert!(get_settings().preserve_codex_official_auth_on_switch);
@@ -445,7 +466,7 @@ fn codex_app_projection_retains_session_history_policy_without_writes() {
             }
             let before = fs::read(settings_path()).unwrap();
             let vault = session.read().unwrap();
-            let selected = read_app_settings_with_vault(
+            let selected = read_app_settings_with_storage(
                 &AppType::Codex,
                 &session,
                 &vault,
@@ -486,11 +507,11 @@ fn codex_app_projection_rejects_malformed_history_policy_without_blocking_peers(
         let before = fs::read(settings_path()).unwrap();
         let vault = session.read().unwrap();
         assert!(
-            read_upgrade_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024)
+            read_upgrade_settings_with_storage(&AppType::Codex, &session, &vault, 1024 * 1024)
                 .is_err()
         );
         let selected =
-            read_upgrade_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+            read_upgrade_settings_with_storage(&AppType::Claude, &session, &vault, 1024 * 1024)
                 .unwrap();
         assert_eq!(
             selected.current_provider_claude.as_deref(),
@@ -516,11 +537,11 @@ fn native_codex_projection_rejects_session_history_policy_drift_from_ready_owner
     let before = fs::read(settings_path()).unwrap();
     let vault = session.read().unwrap();
     assert!(
-        matches!(read_native_app_settings_with_vault(&AppType::Codex, &session, &vault, 1024 * 1024),
+        matches!(read_native_app_settings_with_storage(&AppType::Codex, &session, &vault, 1024 * 1024),
         Err(AppError::Config(code)) if code == "upgrade.source_changed")
     );
     assert!(
-        read_native_app_settings_with_vault(&AppType::Claude, &session, &vault, 1024 * 1024)
+        read_native_app_settings_with_storage(&AppType::Claude, &session, &vault, 1024 * 1024)
             .is_ok()
     );
     assert!(get_settings().unify_codex_session_history);
@@ -530,7 +551,7 @@ fn native_codex_projection_rejects_session_history_policy_drift_from_ready_owner
 /// The external headless runner invokes actual production persistence code.
 #[cfg(feature = "test-hooks")]
 pub(crate) fn run() {
-    let cases: [(&str, fn()); 14] = [
+    let cases: [(&str, fn()); 15] = [
         (
             "Codex session history projection",
             codex_app_projection_retains_session_history_policy_without_writes,
@@ -562,6 +583,10 @@ pub(crate) fn run() {
         (
             "foreign session with identical key and root",
             another_session_with_the_same_key_and_root_cannot_change_settings,
+        ),
+        (
+            "retired session full settings read",
+            retired_session_cannot_publish_a_full_settings_snapshot,
         ),
         (
             "blocked session",

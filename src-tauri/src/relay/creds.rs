@@ -71,7 +71,7 @@ use std::time::Duration;
 use crate::error::AppError;
 use crate::secrets::{
     inventory::{open_db, seal_db},
-    VaultContext,
+    storage::StorageContext,
 };
 
 /// LoongPort 支持的 relay 协议；由 discovery 定义，持久层直接复用同一个类型。
@@ -281,7 +281,7 @@ const SELECT_COLS: &str =
      auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent, \
      cf_clearance, pricing_synced_at";
 
-fn row_to_relay(row: &rusqlite::Row<'_>, vault: &VaultContext) -> Result<RelayAccount, AppError> {
+fn row_to_relay(row: &rusqlite::Row<'_>, vault: &StorageContext) -> Result<RelayAccount, AppError> {
     let mut account = RelayAccount {
         id: row.get(0)?,
         site_origin: row.get(1)?,
@@ -319,7 +319,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>, vault: &VaultContext) -> Result<RelayAc
 }
 
 /// 列出全部站点，当前选中的排在最前。
-pub fn list(conn: &Connection, vault: &VaultContext) -> Result<Vec<RelayAccount>, AppError> {
+pub fn list(conn: &Connection, vault: &StorageContext) -> Result<Vec<RelayAccount>, AppError> {
     let mut stmt = conn
         .prepare(&format!(
             // ⚠️ 排序键必须是**用户拖出来的那个**，不能是任何会被别的操作改动的状态：
@@ -364,7 +364,7 @@ pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<(), AppError> {
 /// 按 id 读一行。
 pub fn get(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     id: i64,
 ) -> Result<Option<RelayAccount>, AppError> {
     conn.query_row(
@@ -526,7 +526,7 @@ pub struct AuthenticatedRelay<'a> {
 /// and account identification have all completed successfully.
 pub fn save_authenticated_relay(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     relay: AuthenticatedRelay<'_>,
 ) -> Result<i64, AppError> {
     let AuthenticatedRelay {
@@ -607,7 +607,7 @@ pub fn save_authenticated_relay(
 #[allow(clippy::too_many_arguments)]
 pub fn save_credentials(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     id: i64,
     account: AccountIdentity<'_>,
     auth_token: &str,
@@ -734,7 +734,7 @@ pub fn save_credentials(
 /// ⇒ 没有重复可言。走那条会白查一次重复，还得传一遍已知的 account_id。
 pub fn update_tokens(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     id: i64,
     auth_token: &str,
     refresh_token: Option<&str>,
@@ -788,7 +788,7 @@ pub fn update_tokens(
 /// credential 值不进日志、不进错误文案。
 pub fn update_refresh_credential(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     relay_id: i64,
     refresh_credential: &str,
 ) -> Result<(), AppError> {
@@ -990,7 +990,7 @@ mod tests {
     #[test]
     fn encrypted_relay_insert_rolls_back_allocated_identity_if_update_fails() {
         let conn = mem();
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         conn.execute_batch("CREATE TRIGGER reject_credential BEFORE UPDATE OF auth_token ON loongport_relay BEGIN SELECT RAISE(ABORT, 'reject update'); END;").unwrap();
         assert!(save_authenticated_relay(
             &conn,
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn secret_relay_storage_roundtrips_without_plaintext() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let mut account = authenticated("https://relay.example", 7, "relay-auth-canary");
         account.refresh_token = Some("relay-refresh-canary");
         account.session.cf_clearance = Some("relay-cookie-canary");
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn encrypted_relay_credentials_reject_row_transplant_and_foreign_key() {
         let conn = mem();
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = save_authenticated_relay(
             &conn,
             &vault,
@@ -1058,12 +1058,17 @@ mod tests {
         .unwrap();
         assert!(get(&conn, &vault, second).is_err());
         assert!(list(&conn, &vault).is_err());
-        assert!(get(&conn, &VaultContext::generate().unwrap(), first).is_err());
+        assert!(get(
+            &conn,
+            &StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap()),
+            first
+        )
+        .is_err());
     }
 
     fn seed_authenticated_relay(
         conn: &Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         site_origin: &str,
         account_id: i64,
     ) -> i64 {
@@ -1078,7 +1083,7 @@ mod tests {
     #[test]
     fn marking_one_relay_pricing_fresh_does_not_touch_another() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = seed_authenticated_relay(&conn, &_vault, "https://a.example", 1);
         let second = seed_authenticated_relay(&conn, &_vault, "https://b.example", 2);
         mark_pricing_synced(&conn, first, 123).unwrap();
@@ -1101,7 +1106,7 @@ mod tests {
     #[test]
     fn pricing_is_fresh_only_within_the_interval() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let relay_id = seed_authenticated_relay(&conn, &_vault, "https://relay.example", 1);
         let unsynced = get(&conn, &_vault, relay_id).unwrap().unwrap();
         let interval = std::time::Duration::from_secs(60);
@@ -1116,7 +1121,7 @@ mod tests {
     #[test]
     fn pricing_is_fresh_tolerates_the_clock_moving_backwards() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let relay_id = seed_authenticated_relay(&conn, &_vault, "https://relay.example", 1);
         mark_pricing_synced(&conn, relay_id, 100).unwrap();
         let relay = get(&conn, &_vault, relay_id).unwrap().unwrap();
@@ -1127,7 +1132,7 @@ mod tests {
     #[test]
     fn save_authenticated_relay_inserts_only_a_complete_logged_in_row() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
 
         let id = save_authenticated_relay(
             &conn,
@@ -1148,7 +1153,7 @@ mod tests {
     #[test]
     fn save_authenticated_relay_updates_the_existing_account_without_staging_a_row() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = save_authenticated_relay(
             &conn,
             &_vault,
@@ -1185,7 +1190,7 @@ mod tests {
     #[test]
     fn select_cols_match_the_row_reader() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1244,7 +1249,7 @@ mod tests {
         );
 
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let newapi_id = save_site_with_backend(
             &conn,
             "https://newapi.example",
@@ -1281,7 +1286,7 @@ mod tests {
     #[test]
     fn saving_a_detected_backend_updates_an_existing_unlogged_site() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id = save_site(
             &conn,
             "https://site.example",
@@ -1307,15 +1312,18 @@ mod tests {
 
     #[test]
     fn list_is_empty_before_any_site_saved() {
-        assert!(list(&mem(), &VaultContext::generate().unwrap())
-            .unwrap()
-            .is_empty());
+        assert!(list(
+            &mem(),
+            &StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap())
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
     fn create_table_removes_legacy_unauthenticated_placeholders() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         conn.execute(
             "INSERT INTO loongport_relay
                 (site_origin, site_name, api_base_url, account_id, auth_token)
@@ -1333,7 +1341,7 @@ mod tests {
     fn adding_the_same_site_twice_before_login_reuses_one_row() {
         // 用户连点两次「添加」不该得到两行。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://a.dev", "A 改名了", "https://a.dev/v1").unwrap();
         assert_eq!(a, b, "未登录的同站行应被复用");
@@ -1348,7 +1356,7 @@ mod tests {
     #[test]
     fn same_site_different_accounts_coexist() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1385,7 +1393,7 @@ mod tests {
     fn re_adding_a_site_with_the_same_account_merges_instead_of_duplicating() {
         // 这条是用户明确要的去重：同「域名 + 账号」只留一份。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1424,7 +1432,7 @@ mod tests {
     #[test]
     fn duplicate_account_merge_keeps_existing_identity_and_copies_fresh_site_metadata() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let existing = save_site_with_backend(
             &conn,
             "https://a.dev",
@@ -1486,7 +1494,7 @@ mod tests {
     #[test]
     fn duplicate_account_merge_rolls_back_when_source_delete_fails() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let existing = save_site_with_backend(
             &conn,
             "https://a.dev",
@@ -1548,7 +1556,7 @@ mod tests {
         // account_id 在新后端毫无意义，必须一起清。
         // ⚠️ 「登录态失效」走的**不是**这个函数，走 `clear_session`（见下一条）。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1577,7 +1585,7 @@ mod tests {
     #[test]
     fn clear_session_keeps_the_account_identity() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1622,7 +1630,7 @@ mod tests {
     #[test]
     fn clear_session_makes_the_row_report_session_expired() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1653,7 +1661,7 @@ mod tests {
     #[test]
     fn relogin_on_an_expired_row_can_switch_to_a_different_account() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1693,7 +1701,7 @@ mod tests {
         // 断言的是「删掉当前站要把剩下最早那条提为当前」。`is_current` 整个概念
         // 已删 ⇒ 现在要钉的是更简单的事实：删一行只影响那一行。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
 
@@ -1708,7 +1716,7 @@ mod tests {
     #[test]
     fn removing_the_last_site_leaves_nothing() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         remove(&conn, a).unwrap();
         assert!(list(&conn, &_vault).unwrap().is_empty());
@@ -1719,7 +1727,7 @@ mod tests {
         // 静默成功会让「登录成功但什么都没存下」变成查不出来的问题。
         let err = save_credentials(
             &mem(),
-            &VaultContext::generate().unwrap(),
+            &StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap()),
             999,
             ident(1, "x@x.com", "x@x.com"),
             "tok",
@@ -1734,7 +1742,7 @@ mod tests {
     #[test]
     fn token_validity_leaves_a_margin_and_tolerates_missing_expiry() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1772,7 +1780,7 @@ mod tests {
     #[test]
     fn session_expired_separates_never_logged_in_from_credentials_gone_stale() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
 
         // 从没登录：token 无效但也**不是过期** —— 前端该摆「登录」而不是「登录已过期」。
@@ -1814,7 +1822,7 @@ mod tests {
     #[test]
     fn refresh_token_keeps_a_row_refreshable_until_reauthentication_is_required() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1846,7 +1854,7 @@ mod tests {
         // **除了 `reorder`，没有任何操作能改变行序** —— 这里拿「登录」当代表，
         // 它是当初真的会让行跳位的那个操作（`save_credentials` 曾在末尾 `set_current`）。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
         let c = save_site(&conn, "https://c.dev", "C", "https://c.dev/v1").unwrap();
@@ -1904,7 +1912,7 @@ mod tests {
     #[test]
     fn reorder_persists_user_order() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
         let c = save_site(&conn, "https://c.dev", "C", "https://c.dev/v1").unwrap();
@@ -1943,7 +1951,7 @@ mod tests {
         // 这条是这个字段存在的理由：设了昵称的用户，`account_label` 是昵称而不是邮箱
         // —— 拿它去预填登录框就填错了（sub2api 那个框要邮箱格式）。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1966,7 +1974,7 @@ mod tests {
     fn clearing_credentials_keeps_the_login_identifier() {
         // clear_credentials 正是「重登前的那一步」，把预填值一起清掉等于让用户重新输邮箱。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -1996,7 +2004,7 @@ mod tests {
         // 用户在中转站那边改了昵称与邮箱：服务端主键不变 ⇒ 仍是同一个账号，
         // 只有展示与预填要跟上。续期路径靠这个函数刷，否则站点选择器一直挂旧标签。
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
@@ -2037,7 +2045,7 @@ mod tests {
     #[test]
     fn refreshing_identity_backfills_a_missing_account_id() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         // 造出那种半成品行：有 token、没账号身份（`save_site` 不写 account_id，
         // 再单独塞一把 token 进去 —— 与实测到的脏数据同形）。
@@ -2078,7 +2086,7 @@ mod tests {
     #[test]
     fn update_refresh_credential_rotates_only_the_refresh_column() {
         let conn = mem();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let mut relay = authenticated("https://newapi.example", 7, "access-token");
         relay.site.backend_kind = BackendKind::NewApi;
         relay.session = SessionEnvironment {
@@ -2146,7 +2154,7 @@ mod tests {
     fn update_refresh_credential_on_a_missing_row_is_a_visible_error() {
         let err = update_refresh_credential(
             &mem(),
-            &VaultContext::generate().unwrap(),
+            &StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap()),
             999,
             "rotated-refresh",
         )

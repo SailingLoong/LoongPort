@@ -472,7 +472,6 @@ pub fn write_grok_live_settings(settings: &Value) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use tempfile::TempDir;
 
     fn valid_config() -> &'static str {
         r#"[models]
@@ -716,7 +715,7 @@ context_window = 500000
     #[test]
     #[serial]
     fn official_provider_roundtrips_without_custom_model_tables() {
-        let temp = TempDir::new().expect("temp dir");
+        let temp = crate::secrets::testing::tempdir().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 
@@ -762,7 +761,7 @@ context_window = 500000
     #[test]
     #[serial]
     fn writes_and_reads_live_config() {
-        let temp = TempDir::new().expect("temp dir");
+        let temp = crate::secrets::testing::tempdir().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 

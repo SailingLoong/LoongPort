@@ -5,7 +5,7 @@ use super::{
     protocol::{Endpoint, Transport},
     store,
 };
-use crate::secrets::{session::SecretSession, VaultMetadata};
+use crate::secrets::{session::SecretSession, storage::StorageIdentity};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -33,7 +33,7 @@ pub(crate) struct AuthorizationResult {
 struct Flow {
     state: zeroize::Zeroizing<String>,
     root: PathBuf,
-    binding: VaultMetadata,
+    binding: StorageIdentity,
     expires: i64,
     epoch: u64,
     deadline: std::time::Instant,
@@ -364,10 +364,10 @@ pub(crate) async fn finish<T: Transport>(
     let grant = super::inference::grant_from_login(session, &provisional, &token, &profile, now)?;
     zeroize::Zeroize::zeroize(&mut account.token);
     let mut rows = store::load(session, &binding)?;
-    let account_id = account.id(&binding.vault_id);
+    let account_id = account.id(binding.store_id());
     if let Some(row) = rows
         .iter_mut()
-        .find(|r| r.account.id(&binding.vault_id) == account_id)
+        .find(|r| r.account.id(binding.store_id()) == account_id)
     {
         row.generation = row
             .generation

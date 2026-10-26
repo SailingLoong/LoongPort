@@ -52,7 +52,7 @@ fn refresh_lock(
     let key = format!(
         "{}:{}:{}:{}",
         session.root().display(),
-        s.binding.vault.vault_id,
+        s.binding.vault.store_id(),
         s.account.id,
         s.account.generation
     );
@@ -404,7 +404,7 @@ async fn activate_inner(
             control.check()?;
         }
         row.id = hex::encode(Sha256::digest(
-            serde_json::to_vec(&(&b.vault.vault_id, row.realm, &row.uid))
+            serde_json::to_vec(&(b.vault.store_id(), row.realm, &row.uid))
                 .map_err(|_| Failure::Invalid)?,
         ));
         row.refresh_pending = true;

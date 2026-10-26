@@ -667,7 +667,7 @@ mod tests {
     use serial_test::serial;
 
     fn with_test_home(test: impl FnOnce(&Database, &PathBuf)) {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 

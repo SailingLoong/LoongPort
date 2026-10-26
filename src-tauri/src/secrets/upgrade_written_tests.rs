@@ -217,7 +217,9 @@ fn operation_written_targets_are_bound_to_the_app_before_staging_or_recovery() {
             target.written = written
                 .as_ref()
                 .map(|w| serde_json::from_value(w.clone()).unwrap());
-            let key = std::sync::RwLock::new(f.vault.clone());
+            let key = std::sync::RwLock::new(crate::secrets::storage::StorageContext::Encrypted(
+                f.vault.clone(),
+            ));
             let vault = key.read().unwrap();
             let guard = lock_app(app.as_str());
             let patch = JsonPatch {

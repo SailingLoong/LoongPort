@@ -2,7 +2,7 @@
 use super::{valid_request_id, ExportFailure};
 use crate::secrets::{
     owned_file::{OwnedFile, BUNDLE_EXPORT_FILE},
-    VaultContext,
+    storage::StorageContext,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -126,7 +126,7 @@ impl ReceiptLedger {
         Ok(())
     }
     #[cfg(unix)]
-    pub(crate) fn seal(&self, vault: &VaultContext) -> Result<Vec<u8>, ExportFailure> {
+    pub(crate) fn seal(&self, vault: &StorageContext) -> Result<Vec<u8>, ExportFailure> {
         let bytes =
             Zeroizing::new(serde_json::to_vec(self).map_err(|_| ExportFailure::SavedDataInvalid)?);
         if bytes.len() > MAX_PLAINTEXT {
@@ -134,16 +134,16 @@ impl ReceiptLedger {
         }
         OwnedFile::registered(BUNDLE_EXPORT_FILE)
             .map_err(|_| ExportFailure::Storage)?
-            .encode(vault, &bytes)
+            .encode_storage(vault, &bytes)
             .map_err(|_| ExportFailure::Storage)
     }
-    pub(crate) fn open(bytes: &[u8], vault: &VaultContext) -> Result<Self, ExportFailure> {
+    pub(crate) fn open(bytes: &[u8], vault: &StorageContext) -> Result<Self, ExportFailure> {
         if bytes.len() > 16 * 1024 * 1024 {
             return Err(ExportFailure::ResourceLimit);
         }
         let plaintext = OwnedFile::registered(BUNDLE_EXPORT_FILE)
             .map_err(|_| ExportFailure::Storage)?
-            .decode(vault, bytes)
+            .decode_storage(vault, bytes)
             .map_err(|_| ExportFailure::SavedDataInvalid)?;
         if plaintext.len() > MAX_PLAINTEXT {
             return Err(ExportFailure::ResourceLimit);

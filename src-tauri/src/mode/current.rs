@@ -7,7 +7,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::live::engine::DeviceStore;
 use crate::provider::Provider;
-use crate::secrets::VaultContext;
+use crate::secrets::storage::StorageContext;
 use std::sync::RwLockReadGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub(crate) enum Purpose {
 
 pub(crate) fn mode_state(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
 ) -> Result<ModeState, AppError> {
     state::mode_state(store, vault, app.as_str())
@@ -26,7 +26,7 @@ pub(crate) fn mode_state(
 
 pub(crate) fn validate_known_mode(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
 ) -> Result<ModeState, AppError> {
     let live = state::load_app(store, vault, app.as_str())?;
@@ -52,7 +52,7 @@ pub(crate) fn known_mode_from_state(
 
 pub(crate) fn validate_direct_mode(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
 ) -> Result<(), AppError> {
     let mut entry = state::load_app(store, vault, app.as_str())?

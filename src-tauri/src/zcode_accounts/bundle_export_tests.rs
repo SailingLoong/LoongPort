@@ -1,6 +1,8 @@
 use super::*;
 use crate::config_file_io::{ensure_private_directory, write_durable};
-use crate::secrets::{owned_file::PROFILE_FILE, VaultContext};
+use crate::secrets::owned_file::PROFILE_FILE;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 use crate::zcode_accounts::{
     bundle::open_bundle,
     checkpoint::ProfileCatalog,
@@ -19,7 +21,7 @@ struct Fixture {
     vault_root: PathBuf,
     native_root: PathBuf,
     output: PathBuf,
-    vault: VaultContext,
+    vault: StorageContext,
     native: NativeCipher,
     profiles: Vec<String>,
     revision: String,
@@ -34,7 +36,7 @@ impl Fixture {
         for path in [&vault_root, &native_root, &output] {
             ensure_private_directory(path).unwrap();
         }
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
         let mut catalog = ProfileCatalog::default();
         let mut profiles = Vec::new();
@@ -490,10 +492,14 @@ fn receipt_authentication_bounds_identity_and_capacity_never_silently_retire_req
     let sealed = ledger.seal(&f.vault).unwrap();
     let reopened = ReceiptLedger::open(&sealed, &f.vault).unwrap();
     assert!(reopened.get(&first).is_some());
-    assert!(ReceiptLedger::open(&sealed, &VaultContext::generate().unwrap()).is_err());
+    assert!(ReceiptLedger::open(
+        &sealed,
+        &StorageContext::Encrypted(VaultContext::generate().unwrap())
+    )
+    .is_err());
     assert!(OwnedFile::registered(OPERATION_FILE)
         .unwrap()
-        .decode(&f.vault, &sealed)
+        .decode_storage(&f.vault, &sealed)
         .is_err());
     assert!(!OwnedFile::registered(BUNDLE_EXPORT_FILE)
         .unwrap()
@@ -501,7 +507,7 @@ fn receipt_authentication_bounds_identity_and_capacity_never_silently_retire_req
     let unknown_field = r#"{"version":1,"records":[],"password":"synthetic-never-accepted"}"#;
     let invalid = OwnedFile::registered(BUNDLE_EXPORT_FILE)
         .unwrap()
-        .encode(&f.vault, unknown_field.as_bytes())
+        .encode_storage(&f.vault, unknown_field.as_bytes())
         .unwrap();
     assert!(ReceiptLedger::open(&invalid, &f.vault).is_err());
     write_durable(&f.vault_root.join(RECEIPTS), b"plaintext is never upgraded").unwrap();

@@ -1,6 +1,6 @@
 //! Single registry and authenticated codec for application-owned credential files.
 use crate::error::AppError;
-use crate::secrets::VaultContext;
+use crate::secrets::{storage::StorageContext, VaultContext};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
@@ -107,6 +107,29 @@ impl OwnedFile {
     pub(crate) fn relative_path(&self) -> &std::path::Path {
         &self.relative
     }
+    /// Runtime persistence is selected only by the original session owner.
+    pub(crate) fn encode_storage(
+        &self,
+        storage: &StorageContext,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        let identity = self.relative.to_string_lossy().replace('\\', "/");
+        storage
+            .encode_bytes(&["file", &identity, "content"], plaintext)
+            .map_err(crate::secrets::error::secret_error)
+    }
+
+    pub(crate) fn decode_storage(
+        &self,
+        storage: &StorageContext,
+        bytes: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let identity = self.relative.to_string_lossy().replace('\\', "/");
+        storage
+            .decode_bytes(&["file", &identity, "content"], bytes)
+            .map_err(crate::secrets::error::secret_error)
+    }
+
     pub(crate) fn encode(
         &self,
         vault: &VaultContext,
@@ -178,6 +201,29 @@ impl DeviceFile {
 
     pub(crate) fn relative_path(&self) -> &std::path::Path {
         &self.relative
+    }
+
+    /// Runtime persistence is selected only by the original session owner.
+    pub(crate) fn encode_storage(
+        &self,
+        storage: &StorageContext,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        let identity = self.relative.to_string_lossy().replace('\\', "/");
+        storage
+            .encode_bytes(&["device-file", &identity, "content"], plaintext)
+            .map_err(crate::secrets::error::secret_error)
+    }
+
+    pub(crate) fn decode_storage(
+        &self,
+        storage: &StorageContext,
+        bytes: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let identity = self.relative.to_string_lossy().replace('\\', "/");
+        storage
+            .decode_bytes(&["device-file", &identity, "content"], bytes)
+            .map_err(crate::secrets::error::secret_error)
     }
 
     pub(crate) fn encode(
@@ -628,5 +674,98 @@ mod mcode_backup_tests {
         assert!(
             matches!(file.decode(&vault, tampered.as_bytes()), Err(AppError::Config(code)) if code == "secret.authentication_failed")
         );
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod storage_mode_tests {
+    use super::*;
+    use crate::secrets::storage::{PlaintextIdentity, StorageContext};
+
+    fn plaintext() -> StorageContext {
+        StorageContext::Plaintext(PlaintextIdentity {
+            format_version: 1,
+            store_id: "11111111-1111-4111-8111-111111111111".into(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+        })
+    }
+
+    #[cfg_attr(test, test)]
+    fn explicit_plaintext_uses_the_original_registered_file_bytes() {
+        let storage = plaintext();
+        for name in [
+            PROFILE_FILE,
+            JOURNAL_FILE,
+            RECOVERY_FILE,
+            OPERATION_FILE,
+            KEY_INTENT_FILE,
+            BUNDLE_EXPORT_FILE,
+            WORKBUDDY_FILE,
+            MINIMAX_CODE_FILE,
+            TRAE_FILE,
+            "config.json",
+            "copilot_auth.json",
+            "codex_oauth_auth.json",
+            "xai_oauth_auth.json",
+        ] {
+            let file = OwnedFile::registered(name).unwrap();
+            let original = br#"{"token":"synthetic-plaintext-canary"}"#;
+            let encoded = file.encode_storage(&storage, original).unwrap();
+            assert_eq!(encoded, original);
+            assert_eq!(
+                file.decode_storage(&storage, &encoded).unwrap().as_slice(),
+                original
+            );
+        }
+    }
+
+    #[cfg_attr(test, test)]
+    fn explicit_plaintext_refuses_encrypted_file_bytes_in_both_directions() {
+        let storage = plaintext();
+        let encrypted = VaultContext::generate().unwrap();
+        let file = OwnedFile::registered(WORKBUDDY_FILE).unwrap();
+        let envelope = file.encode(&encrypted, b"synthetic-sensitive").unwrap();
+        assert!(file.decode_storage(&storage, &envelope).is_err());
+        assert!(file.encode_storage(&storage, &envelope).is_err());
+        assert!(file.decode_storage(&storage, b"lpenc:damaged").is_err());
+    }
+
+    #[cfg_attr(test, test)]
+    fn encrypted_storage_stays_strict_and_bound_to_registered_identity() {
+        let storage = StorageContext::Encrypted(VaultContext::generate().unwrap());
+        let file = OwnedFile::registered(WORKBUDDY_FILE).unwrap();
+        let other = OwnedFile::registered(TRAE_FILE).unwrap();
+        let original = br#"{"token":"synthetic-encrypted-canary"}"#;
+        let encoded = file.encode_storage(&storage, original).unwrap();
+        assert_ne!(encoded, original);
+        assert!(file.decode_storage(&storage, original).is_err());
+        assert!(other.decode_storage(&storage, &encoded).is_err());
+        assert_eq!(
+            file.decode_storage(&storage, &encoded).unwrap().as_slice(),
+            original
+        );
+    }
+
+    #[cfg_attr(test, test)]
+    fn plaintext_device_backup_preserves_binary_bytes_and_rejects_ciphertext() {
+        let storage = plaintext();
+        let file = DeviceFile::registered(format!("{DEVICE_BACKUP_DIR}/{}.backup", "a".repeat(64)))
+            .unwrap();
+        let binary = [0xff, 0, 0xfe, b'\n'];
+        assert_eq!(file.encode_storage(&storage, &binary).unwrap(), binary);
+        assert_eq!(
+            file.decode_storage(&storage, &binary).unwrap().as_slice(),
+            binary
+        );
+        assert!(file.decode_storage(&storage, b"lpenc:damaged").is_err());
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run() {
+        explicit_plaintext_uses_the_original_registered_file_bytes();
+        explicit_plaintext_refuses_encrypted_file_bytes_in_both_directions();
+        encrypted_storage_stays_strict_and_bound_to_registered_identity();
+        plaintext_device_backup_preserves_binary_bytes_and_rejects_ciphertext();
     }
 }

@@ -649,22 +649,27 @@ pub(crate) mod tests {
     /// 用 `CC_SWITCH_TEST_HOME` 把它指到临时目录，跑完还原。
     /// `pub(crate)`：guard 必须在调用方作用域里活到断言结束（提前 Drop
     /// 会把 home 还原，后续读取就打到真实用户目录）。
-    pub(crate) struct TestHomeGuard(Option<std::ffi::OsString>);
+    pub(crate) struct TestHomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _directory: tempfile::TempDir,
+    }
 
     impl TestHomeGuard {
-        fn set(tag: &str) -> Self {
+        fn set(_tag: &str) -> Self {
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
-            let dir = std::env::temp_dir().join(format!("lp-transit-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("mkdir");
-            std::env::set_var("CC_SWITCH_TEST_HOME", &dir);
-            Self(previous)
+            let directory = crate::secrets::testing::tempdir().expect("physical test home");
+            let dir = directory.path();
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir);
+            Self {
+                previous,
+                _directory: directory,
+            }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.previous.take() {
                 Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }

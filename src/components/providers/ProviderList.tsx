@@ -54,6 +54,8 @@ interface ProviderListProps {
   onOpenTerminal?: (provider: Provider) => void;
   onCreate?: () => void;
   isLoading?: boolean;
+  readFailed?: boolean;
+  onRetryRead?: () => void;
   /** LoongPort uses the application priority table instead of the upstream queue editor. */
   showFailoverControls?: boolean;
   isProxyRunning?: boolean; // 代理服务运行状态
@@ -78,6 +80,8 @@ export function ProviderList({
   onOpenTerminal,
   onCreate,
   isLoading = false,
+  readFailed = false,
+  onRetryRead,
   isProxyRunning = false,
   showFailoverControls = true,
   isProxyTakeover = false,
@@ -355,6 +359,20 @@ export function ProviderList({
       </div>
     ) : null;
 
+  const readErrorNotice = readFailed ? (
+    <div
+      role="alert"
+      className="rounded-lg border border-destructive/30 p-4 text-sm"
+    >
+      <p>{t("provider.readFailed")}</p>
+      {onRetryRead && (
+        <Button variant="outline" className="mt-2" onClick={onRetryRead}>
+          {t("common.retry")}
+        </Button>
+      )}
+    </div>
+  ) : null;
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -367,6 +385,8 @@ export function ProviderList({
       </div>
     );
   }
+
+  if (readFailed && sortedProviders.length === 0) return readErrorNotice;
 
   if (sortedProviders.length === 0) {
     return (
@@ -500,6 +520,7 @@ export function ProviderList({
 
   return (
     <div className="mt-4 space-y-4">
+      {readErrorNotice}
       {piStateErrorNotice}
       {appId === "mcode" && (
         <Button

@@ -461,7 +461,7 @@ export const accountErrorText = {
   target_scope_mismatch:
     "Choose a saved personal account in the inspected source's account family.",
   vault_unavailable:
-    "Unlock the local LoongPort vault, then refresh account status.",
+    "Saved credential data is currently unavailable. Existing data is preserved; this operation cannot continue.",
   oauth_init_unavailable:
     "The official authorization page could not be prepared. Check the original login status before starting another sign-in.",
   oauth_poll_unavailable:

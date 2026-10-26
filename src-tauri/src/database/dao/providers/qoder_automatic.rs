@@ -102,7 +102,7 @@ impl Database {
 
     pub(crate) fn revoke_qoder_automatic_on(
         conn: &rusqlite::Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         provider: &Provider,
     ) -> Result<(), AppError> {
         let Some(mut meta) = provider.meta.clone() else {

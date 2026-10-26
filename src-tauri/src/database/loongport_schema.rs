@@ -2309,6 +2309,7 @@ mod tests {
             ("database/mod.rs", include_str!("mod.rs")),
             ("database/backup.rs", include_str!("backup.rs")),
             ("database/vault.rs", include_str!("vault.rs")),
+            ("database/storage.rs", include_str!("storage.rs")),
             ("database/migration.rs", include_str!("migration.rs")),
         ];
 

@@ -3,7 +3,7 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::secrets::{
     inventory::{open_db, seal_db},
-    VaultContext,
+    storage::StorageContext,
 };
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -27,7 +27,7 @@ pub(crate) fn delete_provider_row_on(
 
 pub(crate) fn insert_endpoint_on_tx(
     tx: &Transaction<'_>,
-    vault: &VaultContext,
+    vault: &StorageContext,
     provider: &str,
     app: &str,
     url: &str,
@@ -168,7 +168,7 @@ impl Database {
     }
 
     fn decode_provider_json<T: serde::de::DeserializeOwned + Default>(
-        vault: &VaultContext,
+        vault: &StorageContext,
         column: &str,
         id: &str,
         app_type: &str,
@@ -184,7 +184,7 @@ impl Database {
 
     pub(crate) fn get_provider_meta_on_connection(
         conn: &rusqlite::Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         id: &str,
         app_type: &str,
     ) -> Result<Option<ProviderMeta>, AppError> {
@@ -214,7 +214,7 @@ impl Database {
     /// calling this helper so the decision is based on one database snapshot.
     pub(crate) fn get_provider_snapshot_in_transaction(
         transaction: &Transaction<'_>,
-        vault: &VaultContext,
+        vault: &StorageContext,
         app_type: &str,
     ) -> Result<(Option<String>, IndexMap<String, Provider>), AppError> {
         Ok((
@@ -225,7 +225,7 @@ impl Database {
 
     pub(crate) fn get_all_providers_on_connection(
         conn: &rusqlite::Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let mut stmt = conn.prepare(
@@ -297,7 +297,7 @@ impl Database {
 
     fn get_endpoints_on_connection(
         conn: &rusqlite::Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         id: &str,
         app_type: &str,
     ) -> Result<HashMap<String, crate::settings::CustomEndpoint>, AppError> {
@@ -374,7 +374,7 @@ impl Database {
         id: &str,
         app_type: &str,
         session: &crate::secrets::session::SecretSession,
-        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+        vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
     ) -> Result<Option<Provider>, AppError> {
         if !std::ptr::eq(session, self.secrets.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
@@ -387,7 +387,7 @@ impl Database {
     /// Reuse the original row decoder inside a caller-owned read transaction.
     pub(crate) fn get_provider_by_id_on_connection(
         conn: &rusqlite::Connection,
-        vault: &VaultContext,
+        vault: &StorageContext,
         id: &str,
         app_type: &str,
     ) -> Result<Option<Provider>, AppError> {
@@ -467,7 +467,7 @@ impl Database {
         expected: Option<&str>,
         mark_user_edited: bool,
         session: &crate::secrets::session::SecretSession,
-        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+        vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
     ) -> Result<(), AppError> {
         self.save_provider_with_vault_owned(
             app_type,
@@ -486,7 +486,7 @@ impl Database {
         provider: &Provider,
         comparison: (Option<&str>, bool),
         session: &crate::secrets::session::SecretSession,
-        vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+        vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
         qoder_operation: Option<&crate::services::provider::qoder_daily::Operation>,
     ) -> Result<crate::services::provider::qoder_daily::PersistOutcome, AppError> {
         let (expected, mark_user_edited) = comparison;
@@ -784,7 +784,7 @@ impl Database {
 
     fn clear_qoder_pending_on(
         tx: &Transaction<'_>,
-        vault: &VaultContext,
+        vault: &StorageContext,
         operation: &crate::services::provider::qoder_daily::Operation,
     ) -> Result<(), AppError> {
         for (id, provider) in Self::get_all_providers_on_connection(tx, vault, "codex")? {
@@ -861,8 +861,8 @@ impl Database {
     pub(crate) fn preserve_qoder_states_on_restore(
         live: &rusqlite::Connection,
         target: &rusqlite::Connection,
-        current_vault: &VaultContext,
-        target_vault: &VaultContext,
+        current_vault: &StorageContext,
+        target_vault: &StorageContext,
     ) -> Result<(), AppError> {
         let current = Self::get_all_providers_on_connection(live, current_vault, "codex")?;
         let incoming = Self::get_all_providers_on_connection(target, target_vault, "codex")?;

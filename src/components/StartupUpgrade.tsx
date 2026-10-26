@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { exit } from "@tauri-apps/plugin-process";
-import { SecretUnlockForm } from "@/components/SecretUnlock";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   startupUpgradeApi,
   type StartupUpgradeReview,
@@ -328,7 +325,6 @@ export function StartupUpgrade({
 }) {
   const { t } = useTranslation();
   const [view, setView] = useState<StartupUpgradeReview | null>(null);
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const busyRef = useRef(false);
@@ -402,7 +398,6 @@ export function StartupUpgrade({
   async function act(
     action:
       | "query"
-      | "authenticate"
       | "prepare"
       | "publish"
       | "cancel"
@@ -447,8 +442,6 @@ export function StartupUpgrade({
         if (next?.status !== "completed") {
           throw new Error("upgrade.completion_verification_required");
         }
-      } else if (action === "authenticate" && view?.canAuthenticate === true) {
-        next = await startupUpgradeApi.authenticate(password || null);
       } else if (
         action === "prepare" &&
         view?.canCheckAndBackup === true &&
@@ -483,7 +476,6 @@ export function StartupUpgrade({
       setError(true);
       if (action !== "exit") await query();
     } finally {
-      setPassword("");
       busyRef.current = false;
       setBusy(false);
     }
@@ -516,16 +508,16 @@ export function StartupUpgrade({
       : published
         ? "startupUpgrade.databaseOnly"
         : "startupUpgrade.verificationRequired";
-  if (view?.status === "restart_required") {
+  if (
+    view?.status === "restart_required" ||
+    view?.status === "recovery_required" ||
+    view?.canAuthenticate === true
+  ) {
     return (
-      <SecretUnlockForm
-        requiresRestart
-        initialError="secret.restart_required"
-      />
+      <p role="status" className="rounded-lg border p-4 text-sm">
+        {t("secrets.runtimeUnavailable")}
+      </p>
     );
-  }
-  if (view?.status === "recovery_required") {
-    return <SecretUnlockForm initialError="secret.recovery_required" />;
   }
   return (
     <main
@@ -566,28 +558,6 @@ export function StartupUpgrade({
           <p role="alert" className="text-sm text-destructive">
             {t("startupUpgrade.queryFailed")}
           </p>
-        )}
-        {view?.canAuthenticate === true && (
-          <form
-            className="space-y-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void act("authenticate");
-            }}
-          >
-            <Label htmlFor="upgrade-password">{t("secrets.password")}</Label>
-            <Input
-              id="upgrade-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              disabled={busy}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-            <Button type="submit" disabled={busy}>
-              {t("startupUpgrade.authenticate")}
-            </Button>
-          </form>
         )}
         <div className="flex flex-wrap gap-2">
           <Button

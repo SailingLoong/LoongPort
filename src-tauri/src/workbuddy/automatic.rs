@@ -15,7 +15,7 @@ impl<T: Transport> Engine<'_, T> {
         let mut rows = store::load(self.session, &b)?;
         let i = rows
             .iter()
-            .position(|r| r.account.id(&b.vault_id) == id)
+            .position(|r| r.account.id(b.store_id()) == id)
             .ok_or(Failure::UnsupportedContext)?;
         let row = &mut rows[i];
         if row.generation != generation

@@ -6,7 +6,9 @@ fn first_write_backup_keeps_encrypted_original_once_with_full_identity() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(dir.path().join("device"));
     let path = dir.path().join("client.json");
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(
+        crate::secrets::VaultContext::generate().unwrap(),
+    ));
     let vault = key.read().unwrap();
     ensure_first_write_backup(&store, &vault, &path, Some(b"original-secret")).unwrap();
     ensure_first_write_backup(&store, &vault, &path, Some(b"later-secret")).unwrap();
@@ -41,7 +43,9 @@ fn absent_first_write_is_a_durable_encrypted_tombstone() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(dir.path().join("device"));
     let path = dir.path().join("new.json");
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(
+        crate::secrets::VaultContext::generate().unwrap(),
+    ));
     let vault = key.read().unwrap();
     ensure_first_write_backup(&store, &vault, &path, None).unwrap();
     ensure_first_write_backup(&store, &vault, &path, Some(b"later")).unwrap();
@@ -58,7 +62,9 @@ fn incomplete_backup_never_overwrites_original() {
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(dir.path().join("device"));
     let path = dir.path().join("client.json");
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(
+        crate::secrets::VaultContext::generate().unwrap(),
+    ));
     let vault = key.read().unwrap();
     let identity = sha256_hex(path.to_str().unwrap().as_bytes());
     let backup = DeviceFile::registered(format!("{DEVICE_BACKUP_DIR}/{identity}.backup")).unwrap();
@@ -84,7 +90,9 @@ fn linked_device_root_is_rejected_without_touching_destination() {
     let linked = dir.path().join("device");
     std::os::unix::fs::symlink(&other, &linked).unwrap();
     let store = DeviceStore::at(&linked);
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(
+        crate::secrets::VaultContext::generate().unwrap(),
+    ));
     let file = DeviceFile::registered(DEVICE_STATE_FILE).unwrap();
     assert!(store
         .write_device(&key.read().unwrap(), &file, b"secret")

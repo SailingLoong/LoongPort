@@ -337,7 +337,7 @@ fn read_backup(state: &AppState, id: &str) -> Result<ConfigBackup, AppError> {
         .map_err(|error| AppError::io(&path, error))?
         .ok_or_else(|| AppError::InvalidInput("MCode backup not found".into()))?;
     let vault = state.db.secrets.read()?;
-    let bytes = file.decode(&vault, &encrypted)?;
+    let bytes = file.decode_storage(&vault, &encrypted)?;
     serde_json::from_slice(&bytes).map_err(|_| AppError::Config("Invalid MCode backup".into()))
 }
 pub(crate) fn latest_backup(state: &AppState) -> Result<Option<BackupDescriptor>, AppError> {

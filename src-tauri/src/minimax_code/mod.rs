@@ -46,7 +46,7 @@ pub(crate) fn shutdown() {
 }
 /// The one process-wide MiniMax test lock. Hold until all fixture IO/body work
 /// finishes. Only this cfg(test) entry can combine serialization with reset.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) async fn isolated_fixture_guard() -> tokio::sync::OwnedMutexGuard<()> {
     static SERIAL: OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     let serial = SERIAL
@@ -58,7 +58,7 @@ pub(crate) async fn isolated_fixture_guard() -> tokio::sync::OwnedMutexGuard<()>
     serial
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn reset_for_isolated_fixture() {
     let mut guard = runtime().lock().unwrap();
     guard.epoch += 1;
@@ -93,3 +93,6 @@ mod runtime_tests {
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub(crate) mod refresh_owner_fixture;
+
+#[cfg(any(test, feature = "test-hooks"))]
+mod test_fixtures;

@@ -668,7 +668,7 @@ export function ManagedAccountProviderSection({
                     : error === "catalog"
                       ? copy(
                           "catalogError",
-                          "部分账号库不可用；仅显示本次成功读取的账号。请确认原账号库已解锁。",
+                          "部分账号库当前无法读取；仅显示本次成功读取的账号，原有数据仍保留。",
                         )
                       : copy(
                           "saveError",

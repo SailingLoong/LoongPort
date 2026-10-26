@@ -147,7 +147,8 @@ async fn models_cn_missing_crossroot_and_changed_realm_send_zero_http() {
     let wire = Wire::default();
     assert!(begin(f.session.clone(), "missing").await.is_err());
     let root = tempfile::tempdir().unwrap();
-    let other = SecretSession::from_context(root.path().into(), f.session.read().unwrap().clone());
+    let other =
+        SecretSession::from_storage_context(root.path().into(), f.session.read().unwrap().clone());
     assert_eq!(
         list_with(other, &id, &wire).await.unwrap_err(),
         Error::Cancelled

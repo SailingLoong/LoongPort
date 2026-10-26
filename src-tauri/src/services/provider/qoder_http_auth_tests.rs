@@ -386,23 +386,25 @@ fn inventory_rewrap_reset_export_and_wrong_row_authentication_cover_private_colu
     )
     .is_err());
     let mut columns = Vec::new();
-    inventory::collect_plaintext_values(&conn, &current, |table, column, _, _| {
-        columns.push((table.to_owned(), column.to_owned()))
-    })
+    inventory::collect_plaintext_values(
+        &conn,
+        current.encrypted().unwrap(),
+        |table, column, _, _| columns.push((table.to_owned(), column.to_owned())),
+    )
     .unwrap();
     assert!(!columns
         .iter()
         .any(|(t, c)| t == "providers" && c == QODER_HTTP_AUTH_COLUMN));
     let target = crate::secrets::VaultContext::generate().unwrap();
-    inventory::transform_database(&conn, Some(&current), &target).unwrap();
+    inventory::transform_database(&conn, Some(current.encrypted().unwrap()), &target).unwrap();
     inventory::validate_database(&conn, &target).unwrap();
-    assert!(inventory::validate_database(&conn, &current).is_err());
+    assert!(inventory::validate_database(&conn, current.encrypted().unwrap()).is_err());
     inventory::reset_database(&conn, &target).unwrap();
     let raw: String = conn
         .query_row("SELECT qoder_http_secret FROM providers", [], |r| r.get(0))
         .unwrap();
     let reset = inventory::open_db(
-        &target,
+        &crate::secrets::storage::StorageContext::Encrypted(target),
         "providers",
         QODER_HTTP_AUTH_COLUMN,
         &[ID, "codex"],
@@ -418,16 +420,16 @@ fn legacy_inventory_keeps_archive_digest_and_v27_missing_column_is_rejected() {
     let conn = db.conn.lock().unwrap();
     conn.execute_batch("ALTER TABLE providers DROP COLUMN qoder_http_secret; UPDATE loongport_schema_version SET version=26;").unwrap();
     let before = Database::content_digest(&conn).unwrap();
-    inventory::validate_database(&conn, &vault).unwrap();
+    inventory::validate_database(&conn, vault.encrypted().unwrap()).unwrap();
     assert_eq!(before, Database::content_digest(&conn).unwrap());
     conn.execute_batch("UPDATE loongport_schema_version SET version=27;")
         .unwrap();
-    assert!(inventory::validate_database(&conn, &vault).is_err());
+    assert!(inventory::validate_database(&conn, vault.encrypted().unwrap()).is_err());
     conn.execute_batch("UPDATE loongport_schema_version SET version=26;")
         .unwrap();
     crate::database::loongport_schema::apply(&conn).unwrap();
     validate_qoder_http_auth_column(&conn).unwrap();
-    inventory::validate_database(&conn, &vault).unwrap();
+    inventory::validate_database(&conn, vault.encrypted().unwrap()).unwrap();
 }
 #[test]
 fn migration_retires_even_experimental_ready_and_keeps_pat() {
@@ -747,7 +749,9 @@ fn selected_owner_fence_does_not_decrypt_an_unrelated_corrupt_provider() {
         Acquisition::Ready(_)
     ));
     let vault = db.secrets.read().unwrap();
-    assert!(inventory::validate_database(&db.conn.lock().unwrap(), &vault).is_err());
+    assert!(
+        inventory::validate_database(&db.conn.lock().unwrap(), vault.encrypted().unwrap()).is_err()
+    );
 }
 #[test]
 fn recovery_receipt_cannot_be_consumed_twice() {

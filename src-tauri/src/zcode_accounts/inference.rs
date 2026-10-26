@@ -64,9 +64,7 @@ impl ResponseFence {
 
 #[derive(Clone)]
 struct Binding {
-    vault_id: String,
-    key_id: String,
-    vault_revision: u64,
+    storage: crate::secrets::storage::StorageIdentity,
     epoch: u64,
     catalog_revision: String,
     account_id: String,
@@ -242,11 +240,9 @@ impl Lease {
                 .map_err(|_| Failure::StorageUnavailable)?;
             return Err(Failure::NeedsLogin);
         }
-        let meta = vault.metadata();
+
         let binding = Binding {
-            vault_id: meta.vault_id.clone(),
-            key_id: meta.key_id.clone(),
-            vault_revision: meta.revision,
+            storage: vault.identity(),
             epoch: session.lifecycle_epoch(),
             catalog_revision: status.revision,
             account_id: account_id.into(),
@@ -273,10 +269,8 @@ impl Lease {
     ) -> Result<R, Failure> {
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
         let vault = self.session.read().map_err(|_| Failure::StaleIdentity)?;
-        let meta = vault.metadata();
-        if meta.vault_id != self.binding.vault_id
-            || meta.key_id != self.binding.key_id
-            || meta.revision != self.binding.vault_revision
+
+        if vault.identity() != self.binding.storage
             || self.session.lifecycle_epoch() != self.binding.epoch
         {
             return Err(Failure::StaleIdentity);

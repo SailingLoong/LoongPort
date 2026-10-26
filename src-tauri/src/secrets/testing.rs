@@ -77,7 +77,7 @@ pub(crate) fn initialize_source17_database() -> Result<Database, AppError> {
     crate::database::loongport_schema::apply(&conn)?;
     {
         let vault = session.read()?;
-        crate::database::vault::stamp(&conn, &vault)?;
+        crate::database::vault::stamp(&conn, vault.encrypted()?)?;
     }
     session.complete_migration()?;
     crate::settings::unlock_settings_for_test(session.clone())?;

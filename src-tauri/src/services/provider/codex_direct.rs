@@ -972,7 +972,7 @@ fn read_inputs(write: &AppWrite<'_>, official_logins: &[Value]) -> Result<Inputs
 fn parse_inputs(
     files: Vec<LiveFile>,
     pre: Vec<Option<Vec<u8>>>,
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
     official_logins: &[Value],
 ) -> Result<Inputs, AppError> {
     if pre.len() != files.len() {
@@ -1014,7 +1014,7 @@ fn parse_inputs(
     let stash_file = DeviceFile::registered(STASH_FILENAME)?;
     let stash = match &pre[4] {
         Some(bytes) => {
-            let mut stash: LoginStash = parse_json(&stash_file.decode(vault, bytes)?)?;
+            let mut stash: LoginStash = parse_json(&stash_file.decode_storage(vault, bytes)?)?;
             stash.initialized = true;
             stash
         }
@@ -1407,7 +1407,7 @@ pub(crate) fn native_completion_match(
     provider: &Provider,
     rows: &indexmap::IndexMap<String, Provider>,
     settings: &crate::settings::AppSettings,
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
     pre: Vec<Option<Vec<u8>>>,
     written: Option<&state::Written>,
     endpoint: Option<&(String, u16)>,
@@ -1422,7 +1422,7 @@ pub(crate) fn native_completion_match_with_generation(
     provider: &Provider,
     rows: &indexmap::IndexMap<String, Provider>,
     settings: &crate::settings::AppSettings,
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
     pre: Vec<Option<Vec<u8>>>,
     written: Option<&state::Written>,
     endpoint: Option<&(String, u16)>,
@@ -1582,7 +1582,7 @@ type GuardedFiles = Vec<(LiveFile, Guarded)>;
 /// shape; fresh ciphertext never serves as a semantic mismatch or a match.
 pub(crate) fn planned_files_match(
     planned: &[(LiveFile, Guarded)],
-    vault: &crate::secrets::VaultContext,
+    vault: &crate::secrets::storage::StorageContext,
 ) -> Result<bool, AppError> {
     let expected = files();
     if planned.len() != expected.len()
@@ -1614,8 +1614,8 @@ pub(crate) fn planned_files_match(
                     before == after
                 }
                 4 => {
-                    parse_json::<LoginStash>(&stash_file.decode(vault, before)?)?
-                        == parse_json::<LoginStash>(&stash_file.decode(vault, after)?)?
+                    parse_json::<LoginStash>(&stash_file.decode_storage(vault, before)?)?
+                        == parse_json::<LoginStash>(&stash_file.decode_storage(vault, after)?)?
                 }
                 _ => parse_json::<Value>(before)? == parse_json::<Value>(after)?,
             },
@@ -1631,7 +1631,7 @@ pub(crate) fn planned_files_match(
 #[allow(clippy::too_many_arguments)]
 fn assemble_pinned(
     store: &DeviceStore,
-    vault: &std::sync::RwLockReadGuard<'_, crate::secrets::VaultContext>,
+    vault: &std::sync::RwLockReadGuard<'_, crate::secrets::storage::StorageContext>,
     inputs: Inputs,
     mut planned: Planned,
     prepared: &Prepared,
@@ -1748,7 +1748,9 @@ fn assemble_pinned(
         .map(|bytes| digest(Some(&bytes)));
     let stash_after = auth_plan
         .stash
-        .map(|stash| sorted_json_bytes(&stash).and_then(|bytes| stash_file.encode(vault, &bytes)))
+        .map(|stash| {
+            sorted_json_bytes(&stash).and_then(|bytes| stash_file.encode_storage(vault, &bytes))
+        })
         .transpose()?
         .or_else(|| pre[4].clone());
     let after = [

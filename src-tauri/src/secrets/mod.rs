@@ -8,11 +8,12 @@ pub(crate) mod inventory;
 pub(crate) mod key_store;
 pub(crate) mod migration;
 pub(crate) mod owned_file;
+pub(crate) mod protection;
 pub(crate) mod reset;
 pub(crate) mod rewrap;
 pub(crate) mod session;
-#[cfg(any(test, feature = "gui", feature = "test-hooks"))]
 pub(crate) mod startup;
+pub(crate) mod storage;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod stream_guard;
 #[cfg(any(test, feature = "test-hooks"))]

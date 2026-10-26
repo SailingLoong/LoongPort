@@ -7,7 +7,7 @@ use crate::{
         engine::{self, DeviceStore, LiveFile},
         patch::WholeFile,
     },
-    secrets::{owned_file::DeviceFile, VaultContext},
+    secrets::{owned_file::DeviceFile, storage::StorageContext},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,7 +67,7 @@ impl Configuration {
     pub fn new(store: DeviceStore) -> Self {
         Self { store }
     }
-    fn load(&self, vault: &RwLockReadGuard<'_, VaultContext>) -> Result<State, AppError> {
+    fn load(&self, vault: &RwLockReadGuard<'_, StorageContext>) -> Result<State, AppError> {
         self.store
             .read_device(vault, &file()?)?
             .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| error("clients.invalid_state")))
@@ -76,7 +76,7 @@ impl Configuration {
     }
     fn save(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         state: &State,
     ) -> Result<(), AppError> {
         self.store.write_device(
@@ -87,7 +87,7 @@ impl Configuration {
     }
     pub fn connection(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         id: &str,
         path: &Path,
     ) -> Result<(Option<Connection>, bool, &'static str), AppError> {
@@ -160,7 +160,7 @@ impl Configuration {
     }
     pub fn preview(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         path: &Path,
         request: &Connection,
         desired: &Value,
@@ -176,7 +176,7 @@ impl Configuration {
     }
     pub fn apply(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         path: &Path,
         request: &Connection,
         desired: &Value,
@@ -192,7 +192,7 @@ impl Configuration {
     }
     fn commit(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         state: &mut State,
         id: &str,
         plan: engine::Planned,
@@ -230,7 +230,7 @@ impl Configuration {
     }
     pub fn recover(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         path: &Path,
         id: &str,
     ) -> Result<(), AppError> {
@@ -257,7 +257,7 @@ impl Configuration {
     }
     pub fn disconnect(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         path: &Path,
         id: &str,
     ) -> Result<(), AppError> {

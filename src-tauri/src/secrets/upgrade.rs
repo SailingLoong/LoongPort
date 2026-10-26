@@ -1,6 +1,11 @@
 //! Startup owns passive inspection before any recovery or runtime publication.
 
-use super::{session, VaultContext, VaultMetadata};
+use super::{
+    protection::{ProtectionRecord, ProtectionStorage},
+    session,
+    storage::StorageContext,
+    VaultContext, VaultMetadata,
+};
 use crate::{
     database::{self, inspection, Database},
     error::AppError,
@@ -75,6 +80,15 @@ impl RecoveryEvidence {
         password: &str,
     ) -> Result<UpgradeInspection, AppError> {
         self.verify_unchanged(root, token)?;
+        let content = self.records[2]
+            .as_deref()
+            .map(super::transition::is_content_record)
+            .transpose()?
+            .unwrap_or(false);
+        if content && [0, 1, 3].into_iter().any(|i| self.records[i].is_some()) {
+            return Err(AppError::Config("secret.conflicting_transition".into()));
+        }
+        let mut recovered_storage = None;
         if let Some(record) = &self.records[0] {
             super::reset::recover_inspected(root, Some(password), record)?;
         }
@@ -84,7 +98,7 @@ impl RecoveryEvidence {
         // Bootstrap recovery may have settled its child transition itself.
         if let Some(record) = &self.records[2] {
             if self.records[1].is_none() || super::transition::pending_record(root)?.is_some() {
-                super::transition::recover_inspected(
+                recovered_storage = super::transition::recover_inspected_storage(
                     root,
                     self.device.root(),
                     store,
@@ -101,6 +115,12 @@ impl RecoveryEvidence {
         let resumed_database = inspected.is_database_resume_candidate();
         if inspected.future_version().is_some() && !resumed_database {
             return Err(AppError::Config("upgrade.future_version".into()));
+        }
+        if let Some(context) = recovered_storage {
+            inspected.validate_storage_device_state(&context)?;
+            inspected.validate_storage_database(root, &context)?;
+            inspected.verify_unchanged(root)?;
+            return Ok(inspected);
         }
         let vault = session::authenticate_existing(root, store, Some(password))?;
         if resumed_database {
@@ -121,6 +141,7 @@ pub(crate) struct StableInspection {
     pub source_versions: Option<SchemaVersions>,
     revision: Option<inspection::SourceRevision>,
     vault: Option<(VaultMetadata, bool, String)>,
+    protection: Option<(ProtectionRecord, Vec<u8>)>,
     device: DeviceStore,
     device_files: Vec<(super::owned_file::DeviceFile, std::path::PathBuf, Vec<u8>)>,
 }
@@ -197,7 +218,7 @@ impl UpgradeInspection {
         if stable.future_version().is_some() && !stable.is_database_resume_candidate() {
             // Preserve existing newer-binary precedence: do not parse a vault
             // format the current binary cannot understand.
-            if pending_generation(root)? {
+            if pending_generation(root)? || read_protection(root)? != stable.protection {
                 return Err(changed());
             }
             if let Some(revision) = &stable.revision {
@@ -272,6 +293,7 @@ impl UpgradeInspection {
     pub(crate) fn has_vault(&self) -> bool {
         matches!(self, Self::Stable(inspected) if inspected.vault.is_some())
     }
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn has_device_files(&self) -> bool {
         matches!(self, Self::Stable(inspected) if !inspected.device_files.is_empty())
     }
@@ -299,9 +321,138 @@ impl UpgradeInspection {
         }
         self.verify_unchanged(root)
     }
+
+    pub(crate) fn device_root(&self) -> &Path {
+        match self {
+            Self::Stable(stable) => stable.device.root(),
+            Self::RecoveryRequired(evidence) => evidence.device.root(),
+        }
+    }
+
+    pub(crate) fn needs_initial_protection(&self) -> bool {
+        matches!(self, Self::Stable(stable) if stable.protection.is_none() && stable.vault.is_none())
+    }
+
+    pub(crate) fn legacy_password_admitted(&self) -> bool {
+        matches!(self, Self::Stable(stable) if stable.vault.as_ref().is_some_and(|(metadata, _, _)| metadata.user_text_key.is_none()))
+    }
+
+    pub(crate) fn acknowledge_initial_protection(
+        &mut self,
+        root: &Path,
+        published: &ProtectionRecord,
+    ) -> Result<(), AppError> {
+        let Self::Stable(stable) = self else {
+            return Err(changed());
+        };
+        if stable.protection.is_some()
+            || stable.vault.is_some()
+            || stable.revision.is_some()
+            || !stable.device_files.is_empty()
+            || published.choice_complete
+            || !matches!(published.storage, ProtectionStorage::Plaintext { .. })
+        {
+            return Err(changed());
+        }
+        published.validate()?;
+        let expected = serde_json::to_vec(published)
+            .map_err(|_| AppError::Config("protection.invalid_record".into()))?;
+        let actual = read_protection(root)?.ok_or_else(changed)?;
+        if actual.0 != *published || actual.1 != expected {
+            return Err(changed());
+        }
+        stable.protection = Some(actual);
+        if let Err(error) = stable.verify_unchanged(root) {
+            stable.protection = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Adopt only the original generation owner's authenticated completion;
+    /// every other passive startup input keeps its original preimage.
+    pub(crate) fn acknowledge_protection_cleanup(
+        &mut self,
+        root: &Path,
+        completed: &super::protection::generation::CompletedCleanup,
+    ) -> Result<(), AppError> {
+        let Self::Stable(stable) = self else {
+            return Err(changed());
+        };
+        let before = stable.protection.as_ref().ok_or_else(changed)?;
+        if completed.root() != root
+            || before.1.as_slice() != completed.before()
+            || before.0.cleanup.is_none()
+        {
+            return Err(changed());
+        }
+        let after = read_protection(root)?.ok_or_else(changed)?;
+        if after.1.as_slice() != completed.after()
+            || after.0.cleanup.is_some()
+            || after.0.storage != before.0.storage
+            || after.0.choice_complete != before.0.choice_complete
+        {
+            return Err(changed());
+        }
+        let prior = stable.protection.replace(after);
+        if let Err(error) = stable.verify_unchanged(root) {
+            stable.protection = prior;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_storage_device_state(
+        &self,
+        context: &StorageContext,
+    ) -> Result<(), AppError> {
+        let Self::Stable(stable) = self else {
+            return Err(AppError::Config("secret.recovery_required".into()));
+        };
+        stable.validate_storage_context(context)?;
+        for (file, path, bytes) in &stable.device_files {
+            let plaintext = file.decode_storage(context, bytes)?;
+            if path == &stable.device.state_path() {
+                crate::mode::state::validate_envelope(&plaintext)
+                    .map_err(|_| AppError::Config("upgrade.invalid_mode_state".into()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_storage_database(
+        &self,
+        root: &Path,
+        context: &StorageContext,
+    ) -> Result<(), AppError> {
+        self.verify_unchanged(root)?;
+        let Self::Stable(stable) = self else {
+            return Err(AppError::Config("secret.recovery_required".into()));
+        };
+        stable.validate_storage_context(context)?;
+        if let Some(db) = inspection::capture(&root.join(crate::config::DB_FILE_NAME))? {
+            database::storage::check_identity(&db.image, context)?;
+            super::inventory::validate_storage_database(&db.image, context)?;
+        }
+        self.verify_unchanged(root)
+    }
 }
 
 impl StableInspection {
+    fn validate_storage_context(&self, context: &StorageContext) -> Result<(), AppError> {
+        if let Some((record, _)) = &self.protection {
+            return record.matches_context(context);
+        }
+        match (&self.vault, context) {
+            (Some((metadata, _, _)), StorageContext::Encrypted(vault))
+                if metadata == vault.metadata() && metadata.user_text_key.is_none() =>
+            {
+                Ok(())
+            }
+            _ => Err(AppError::Config("protection.identity_mismatch".into())),
+        }
+    }
+
     fn is_database_resume_candidate(&self) -> bool {
         self.source_versions.is_some_and(|source| {
             source.upstream == database::UPSTREAM4_SCHEMA_VERSION
@@ -315,7 +466,10 @@ impl StableInspection {
     /// Keep the original checkpoint binding while letting each app own its
     /// post-DB facts. Peer client/device changes are not DB completion authority.
     fn verify_resume_checkpoint(&self, root: &Path) -> Result<(), AppError> {
-        if pending_generation(root)? || read_vault(root)? != self.vault {
+        if pending_generation(root)?
+            || read_vault(root)? != self.vault
+            || read_protection(root)? != self.protection
+        {
             return Err(changed());
         }
         let expected = self
@@ -355,7 +509,7 @@ impl StableInspection {
             None if inspection::capture(&path)?.is_some() => return Err(changed()),
             None => {}
         }
-        if read_vault(root)? != self.vault {
+        if read_vault(root)? != self.vault || read_protection(root)? != self.protection {
             return Err(changed());
         }
         Ok(())
@@ -468,6 +622,10 @@ fn pending_generation(root: &Path) -> Result<bool, AppError> {
         || super::rewrap::pending(root)?)
 }
 
+fn read_protection(root: &Path) -> Result<Option<(ProtectionRecord, Vec<u8>)>, AppError> {
+    super::protection::read_with_bytes(root)
+}
+
 fn read_vault(root: &Path) -> Result<Option<(VaultMetadata, bool, String)>, AppError> {
     super::files::device_directory_exists(root)?;
     match std::fs::symlink_metadata(root.join("vault.json")) {
@@ -509,6 +667,7 @@ pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspec
             RecoveryEvidence::capture(root, device)?,
         ));
     }
+    let protection = read_protection(root)?;
     let captured = inspection::capture(&root.join(crate::config::DB_FILE_NAME))?;
     let source_versions = captured
         .as_ref()
@@ -523,6 +682,7 @@ pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspec
         source_versions,
         revision: captured.as_ref().map(|db| db.revision.clone()),
         vault: None,
+        protection,
         device: device.clone(),
         device_files: Vec::new(),
     };
@@ -546,7 +706,32 @@ pub(crate) fn inspect(root: &Path, device: &DeviceStore) -> Result<UpgradeInspec
         result.device_files = read_device(device)?;
     }
     result.vault = read_vault(root)?;
+    if let Some((record, _)) = &result.protection {
+        record.validate_vault(result.vault.as_ref().map(|(metadata, _, _)| metadata))?;
+    } else if result
+        .vault
+        .as_ref()
+        .is_some_and(|(metadata, _, _)| metadata.user_text_key.is_some())
+    {
+        return Err(AppError::Config("protection.record_missing".into()));
+    }
     if let Some(db) = captured.as_ref() {
+        if let Some((
+            ProtectionRecord {
+                storage: ProtectionStorage::Plaintext { identity },
+                ..
+            },
+            _,
+        )) = &result.protection
+        {
+            database::storage::preflight_runtime(&root.join(crate::config::DB_FILE_NAME))?;
+            database::storage::check_identity(
+                &db.image,
+                &StorageContext::Plaintext(identity.clone()),
+            )?;
+            result.verify_unchanged(root)?;
+            return Ok(UpgradeInspection::Stable(Box::new(result)));
+        }
         // The original preflight admits only the running source schema. A
         // target checkpoint candidate is authenticated by its existing owner;
         // it must not be rejected here before that proof can be checked.

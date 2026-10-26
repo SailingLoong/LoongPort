@@ -13,7 +13,7 @@ pub(crate) fn is_protected_setting(key: &str) -> bool {
         .is_some_and(|app| crate::app_config::AppType::all().any(|kind| kind.as_str() == app))
 }
 
-use super::VaultContext;
+use super::{storage::StorageContext, VaultContext};
 use crate::error::AppError;
 use rusqlite::{params_from_iter, types::Value, Connection};
 
@@ -84,7 +84,52 @@ pub(crate) const TABLES: &[ProtectedTable] = &[
 
 pub(crate) use super::error::secret_error;
 
+/// Ordinary database codec; the session pins the explicit storage mode.
 pub(crate) fn seal_db(
+    context: &StorageContext,
+    table: &str,
+    column: &str,
+    keys: &[&str],
+    value: &str,
+) -> Result<String, AppError> {
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let mut identity = vec!["db", table, column];
+    identity.extend_from_slice(keys);
+    context
+        .seal(&identity, value.as_bytes())
+        .map_err(secret_error)
+}
+
+pub(crate) fn open_db(
+    context: &StorageContext,
+    table: &str,
+    column: &str,
+    keys: &[&str],
+    value: &str,
+) -> Result<String, AppError> {
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let mut identity = vec!["db", table, column];
+    identity.extend_from_slice(keys);
+    let bytes = context.open(&identity, value).map_err(secret_error)?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| AppError::Config("secret.invalid_text".into()))
+}
+
+/// Validate ordinary database contents through the same explicit codec.
+pub(crate) fn validate_storage_database(
+    conn: &Connection,
+    context: &StorageContext,
+) -> Result<(), AppError> {
+    process_values(conn, |table, column, keys, value| {
+        open_db(context, table, column, keys, value)?;
+        Ok(None)
+    })
+}
+
+pub(crate) fn seal_encrypted_db(
     vault: &VaultContext,
     table: &str,
     column: &str,
@@ -102,7 +147,7 @@ pub(crate) fn seal_db(
         .map_err(secret_error)
 }
 
-pub(crate) fn open_db(
+pub(crate) fn open_encrypted_db(
     vault: &VaultContext,
     table: &str,
     column: &str,
@@ -155,16 +200,26 @@ pub(crate) fn table_identity_columns(table: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-/// 明文导出投影（只读）：按 `TABLES` 唯源遍历，把每个受保护值解密成明文交给
-/// 调用方收集；不写库、不改密文。与迁移/轮换走同一个 walker，覆盖面不分叉。
+/// Legacy encrypted test callers use the same storage-aware export walker.
+#[cfg(test)]
 pub(crate) fn collect_plaintext_values(
     conn: &Connection,
     vault: &VaultContext,
+    collect: impl FnMut(&str, &str, Vec<String>, String),
+) -> Result<(), AppError> {
+    collect_plaintext_values_with_storage(conn, &StorageContext::from(vault.clone()), collect)
+}
+
+/// 明文导出投影（只读）：按 `TABLES` 唯源遍历，用当前存储 codec 解读每个受保护值。
+/// 不写库、不改源值；与迁移/轮换走同一个 walker，覆盖面不分叉。
+pub(crate) fn collect_plaintext_values_with_storage(
+    conn: &Connection,
+    context: &StorageContext,
     mut collect: impl FnMut(&str, &str, Vec<String>, String),
 ) -> Result<(), AppError> {
     process_values(conn, |table, column, keys: &[&str], value| {
         let owned: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
-        let plaintext = open_db(vault, table, column, keys, value)?;
+        let plaintext = open_db(context, table, column, keys, value)?;
         // Derived credentials are deliberately excluded from plaintext export.
         // Still authenticate them above; encrypted complete-image archives retain
         // the column and all restore owners retire it before publication.
@@ -182,7 +237,7 @@ pub(crate) fn collect_plaintext_values(
 /// Authenticate every protected value without changing SQLite state or ciphertext.
 pub(crate) fn validate_database(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
     process_values(conn, |table, column, keys, value| {
-        open_db(vault, table, column, keys, value)?;
+        open_encrypted_db(vault, table, column, keys, value)?;
         Ok(None)
     })
 }
@@ -197,7 +252,7 @@ pub(crate) fn upgrade_archive_content_digest(
     let mut image = Connection::open_in_memory().map_err(database_error)?;
     crate::database::vault::copy(source, &mut image)?;
     process_values(&image, |table, column, keys, value| {
-        open_db(vault, table, column, keys, value).map(Some)
+        open_encrypted_db(vault, table, column, keys, value).map(Some)
     })?;
     // Key wrappers change on password updates and rotation; retain the schema
     // and every other table/column in the original complete-image digest.
@@ -220,7 +275,9 @@ pub(crate) fn reset_database(conn: &Connection, target: &VaultContext) -> Result
             .ok_or_else(|| AppError::Config("secret.invalid_identity".into()))?
             .reset;
         match policy {
-            ResetPolicy::EmptyObject => Ok(Some(seal_db(target, table, column, keys, "{}")?)),
+            ResetPolicy::EmptyObject => {
+                Ok(Some(seal_encrypted_db(target, table, column, keys, "{}")?))
+            }
             ResetPolicy::EmptyStrings => Ok(Some(String::new())),
             ResetPolicy::RemoveRows | ResetPolicy::RemoveProtectedSettings => Ok(None),
         }
@@ -269,13 +326,15 @@ fn transform_values(
 ) -> Result<(), AppError> {
     process_values(conn, |table, column, keys, value| {
         let plaintext = match source {
-            Some(source) => open_db(source, table, column, keys, value)?,
+            Some(source) => open_encrypted_db(source, table, column, keys, value)?,
             None if value.starts_with("lpenc") => {
                 return Err(AppError::Config("secret.source_key_required".into()))
             }
             None => value.to_owned(),
         };
-        Ok(Some(seal_db(target, table, column, keys, &plaintext)?))
+        Ok(Some(seal_encrypted_db(
+            target, table, column, keys, &plaintext,
+        )?))
     })
 }
 
@@ -472,4 +531,96 @@ mod tests {
             assert!(!is_protected_setting(key), "control flag selected: {key}");
         }
     }
+}
+
+#[cfg(test)]
+#[path = "inventory_storage_tests.rs"]
+mod storage_tests;
+
+/// A complete protected-value snapshot, including derived credentials. This is
+/// deliberately neither serializable nor debuggable and is not an export API.
+pub(crate) struct StorageValueSnapshot {
+    values: Vec<(Vec<String>, zeroize::Zeroizing<String>)>,
+}
+pub(crate) fn capture_storage_values(
+    conn: &Connection,
+    context: &StorageContext,
+) -> Result<StorageValueSnapshot, AppError> {
+    let mut values = Vec::new();
+    process_values(conn, |table, column, keys, value| {
+        let mut identity = vec![table.to_owned(), column.to_owned()];
+        identity.extend(keys.iter().map(|key| (*key).to_owned()));
+        values.push((
+            identity,
+            zeroize::Zeroizing::new(open_db(context, table, column, keys, value)?),
+        ));
+        Ok(None)
+    })?;
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+    if values.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(AppError::Config("secret.invalid_identity".into()));
+    }
+    Ok(StorageValueSnapshot { values })
+}
+impl StorageValueSnapshot {
+    pub(crate) fn verify(
+        &self,
+        conn: &Connection,
+        context: &StorageContext,
+    ) -> Result<(), AppError> {
+        let actual = capture_storage_values(conn, context)?;
+        if self.values.len() != actual.values.len()
+            || self
+                .values
+                .iter()
+                .zip(&actual.values)
+                .any(|(expected, actual)| {
+                    expected.0 != actual.0 || expected.1.as_str() != actual.1.as_str()
+                })
+        {
+            return Err(AppError::Config(
+                "protection.transformation_mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Explicit lifecycle-owned private images only. Every protected field uses the
+/// original inventory walker; unlike export projection, no derived field is omitted.
+pub(crate) fn transform_storage_database(
+    conn: &Connection,
+    source: &StorageContext,
+    target: &StorageContext,
+) -> Result<(), AppError> {
+    conn.execute_batch("SAVEPOINT loongport_storage_transform")
+        .map_err(database_error)?;
+    let result = process_values(conn, |table, column, keys, value| {
+        let plaintext = zeroize::Zeroizing::new(open_db(source, table, column, keys, value)?);
+        Ok(Some(seal_db(target, table, column, keys, &plaintext)?))
+    });
+    match result {
+        Ok(()) => conn
+            .execute_batch("RELEASE loongport_storage_transform")
+            .map_err(database_error),
+        Err(error) => {
+            conn.execute_batch(
+                "ROLLBACK TO loongport_storage_transform; RELEASE loongport_storage_transform",
+            )
+            .map_err(database_error)?;
+            Err(error)
+        }
+    }
+}
+
+/// Digest-only normalization on the caller's authenticated, unpublished copy.
+/// The DB owner suppresses/restores private triggers and handles mode identity;
+/// this remains the original complete inventory walker, including derived values.
+pub(crate) fn normalize_storage_values_for_digest(
+    image: &Connection,
+    context: &StorageContext,
+) -> Result<(), AppError> {
+    process_values(image, |table, column, keys, value| {
+        open_db(context, table, column, keys, value).map(Some)
+    })
 }

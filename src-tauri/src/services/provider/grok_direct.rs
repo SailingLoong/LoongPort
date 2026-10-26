@@ -10,7 +10,7 @@
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::grok_config::get_grok_config_path;
-use crate::secrets::VaultContext;
+use crate::secrets::storage::StorageContext;
 use crate::store::AppState;
 use std::sync::RwLockReadGuard;
 
@@ -49,7 +49,7 @@ pub(crate) fn projection(provider: &Provider) -> Result<GrokProjection, AppError
 /// CC Switch 的表。用户的其他表旧版也会原样写回，但证明不了是 CC Switch 的，不删。
 pub(crate) fn retired_tables(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     live_owner: Option<&Provider>,
 ) -> Result<Vec<String>, AppError> {
     let written = state::written(store, vault, app())?;

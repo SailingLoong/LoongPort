@@ -324,6 +324,12 @@ pub fn get_app_config_dir() -> PathBuf {
         return custom;
     }
 
+    get_default_app_config_dir()
+}
+
+/// Legacy default/fallback resolution without consulting the mutable override
+/// cache. The selector snapshot uses this same owner to detect stale roots.
+pub(crate) fn get_default_app_config_dir() -> PathBuf {
     let default_dir = get_home_dir().join(APP_DIR_NAME);
 
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
@@ -355,6 +361,12 @@ pub fn get_app_config_dir() -> PathBuf {
     }
 
     default_dir
+}
+
+/// Isolated selection deliberately includes settings and device state; the
+/// legacy override still leaves these at the original device-local home root.
+pub(crate) fn get_device_config_dir() -> PathBuf {
+    crate::app_store::device_config_root(get_home_dir().join(APP_DIR_NAME))
 }
 
 /// 获取应用配置文件路径

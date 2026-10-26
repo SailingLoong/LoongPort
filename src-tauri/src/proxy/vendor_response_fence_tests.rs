@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn with_owner_conn<T>(
     f: &Fixture,
-    action: impl FnOnce(&rusqlite::Connection, &crate::secrets::VaultContext, i64) -> T,
+    action: impl FnOnce(&rusqlite::Connection, &crate::secrets::storage::StorageContext, i64) -> T,
 ) -> T {
     let db = &f.owner.state().db;
     let row = db

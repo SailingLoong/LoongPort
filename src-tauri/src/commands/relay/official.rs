@@ -195,7 +195,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn backup_copies_auth_json_before_it_gets_deleted() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
+        let temp = crate::secrets::testing::tempdir().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn missing_auth_json_is_not_an_error() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
+        let temp = crate::secrets::testing::tempdir().expect("temp dir");
         let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
 

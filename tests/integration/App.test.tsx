@@ -329,7 +329,9 @@ const renderApp = (client = new QueryClient()) => {
 async function selectApplication(name: string) {
   const user = userEvent.setup();
   if (!screen.queryByRole("button", { name })) {
-    await user.click(screen.getByRole("button", { name: "appSwitcher.add" }));
+    await user.click(
+      await screen.findByRole("button", { name: "appSwitcher.add" }),
+    );
   }
   await user.click(await screen.findByRole("button", { name }));
 }
@@ -1051,9 +1053,9 @@ describe("App integration with MSW", () => {
     expect(
       await screen.findAllByRole("button", { name: "client.image" }),
     ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Claude Code" })).toHaveLength(
-      1,
-    );
+    expect(
+      await screen.findAllByRole("button", { name: "Claude Code" }),
+    ).toHaveLength(1);
   });
 
   it("switches primary pages through the sidebar without Back or Escape history", async () => {

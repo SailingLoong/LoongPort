@@ -73,12 +73,10 @@ pub(super) async fn preview_bundle(
                 _ => RuntimeError::BundleInvalid,
             })?;
         context.recheck(probe.observe()?, &contracts)?;
-        let metadata = vault.metadata();
+
         let binding = Binding {
             vault_root: session.root().to_owned(),
-            vault_id: metadata.vault_id.clone(),
-            key_id: metadata.key_id.clone(),
-            vault_revision: metadata.revision,
+            storage: vault.identity(),
             context_revision: context.context_revision(),
             catalog_revision: input.revision,
         };
@@ -120,12 +118,10 @@ pub(super) async fn commit_bundle(
         let context = VerifiedContext::assess(probe.observe()?, &contracts)?;
         let session = db.secret_session();
         let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
-        let metadata = vault.metadata();
+
         let binding = Binding {
             vault_root: session.root().to_owned(),
-            vault_id: metadata.vault_id.clone(),
-            key_id: metadata.key_id.clone(),
-            vault_revision: metadata.revision,
+            storage: vault.identity(),
             context_revision: context.context_revision(),
             catalog_revision: input.revision.clone(),
         };
@@ -711,12 +707,10 @@ async fn run(
                 .map_err(Into::into),
             Operation::PreviewCapture { revision } => {
                 let preview = store.preview_capture(context.family(), &revision)?;
-                let metadata = vault.metadata();
+
                 let binding = Binding {
                     vault_root: session.root().to_owned(),
-                    vault_id: metadata.vault_id.clone(),
-                    key_id: metadata.key_id.clone(),
-                    vault_revision: metadata.revision,
+                    storage: vault.identity(),
                     context_revision: context.context_revision(),
                     catalog_revision: revision,
                 };
@@ -742,12 +736,9 @@ async fn run(
                 preview_id: _,
                 update_duplicate,
             } => {
-                let metadata = vault.metadata();
                 let binding = Binding {
                     vault_root: session.root().to_owned(),
-                    vault_id: metadata.vault_id.clone(),
-                    key_id: metadata.key_id.clone(),
-                    vault_revision: metadata.revision,
+                    storage: vault.identity(),
                     context_revision: context.context_revision(),
                     catalog_revision: revision.clone(),
                 };
@@ -883,12 +874,10 @@ fn library_binding(
 ) -> Result<Binding, RuntimeError> {
     let session = db.secret_session();
     let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
-    let meta = vault.metadata();
+
     Ok(Binding {
         vault_root: session.root().to_owned(),
-        vault_id: meta.vault_id.clone(),
-        key_id: meta.key_id.clone(),
-        vault_revision: meta.revision,
+        storage: vault.identity(),
         context_revision: context.context_id().into(),
         catalog_revision: revision,
     })
@@ -923,12 +912,10 @@ pub(super) async fn preview_library_bundle(
                     }
                     _ => RuntimeError::BundleInvalid,
                 })?;
-        let meta = vault.metadata();
+
         let binding = Binding {
             vault_root: session.root().into(),
-            vault_id: meta.vault_id.clone(),
-            key_id: meta.key_id.clone(),
-            vault_revision: meta.revision,
+            storage: vault.identity(),
             context_revision: context.context_id().into(),
             catalog_revision: input.revision,
         };
@@ -1195,8 +1182,8 @@ pub(super) async fn check_saved_connections(
     lease
         .bind(format!(
             "{}:{}:{}:{}",
-            bound.vault_id,
-            bound.key_id,
+            bound.storage.store_id(),
+            bound.storage.generation_id(),
             context.context_id(),
             snapshot.identity().opaque_id()
         ))

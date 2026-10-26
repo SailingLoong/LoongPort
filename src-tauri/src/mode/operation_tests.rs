@@ -2,6 +2,7 @@ use super::*;
 use crate::live::engine::lock_app;
 use crate::live::patch::json::JsonPatch;
 use crate::live::patch::KeyPath;
+use crate::secrets::VaultContext;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::path::Path;
@@ -9,7 +10,7 @@ use std::path::Path;
 use std::sync::RwLock;
 
 struct Fixture {
-    key: RwLock<VaultContext>,
+    key: RwLock<StorageContext>,
     _dir: tempfile::TempDir,
     store: DeviceStore,
     a: PathBuf,
@@ -28,7 +29,7 @@ impl Fixture {
         // 每个测试用自己的应用名，写锁互不影响。
         let app = format!("op-test-{}", dir.path().display());
         Self {
-            key: RwLock::new(VaultContext::generate().unwrap()),
+            key: RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap())),
             store: DeviceStore::at(dir.path().join("device")),
             a,
             b,
@@ -1215,7 +1216,10 @@ fn fresh_store_and_reauthenticated_key_recover_only_from_durable_journal() {
     failpoint::crash_at(None);
     let (metadata, exported_key) = {
         let vault = fx.key.read().unwrap();
-        (vault.metadata().clone(), vault.export_key())
+        (
+            vault.encrypted().unwrap().metadata().clone(),
+            vault.encrypted().unwrap().export_key(),
+        )
     };
     let Fixture {
         key,
@@ -1232,7 +1236,9 @@ fn fresh_store_and_reauthenticated_key_recover_only_from_durable_journal() {
     // No in-memory plans, old store, target callback state or original key
     // context survive. Reauthentication uses only synthetic fixture material.
     let reopened = DeviceStore::at(directory.path().join("device"));
-    let key = RwLock::new(VaultContext::from_key(metadata, exported_key).unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(
+        VaultContext::from_key(metadata, exported_key).unwrap(),
+    ));
     let target_path = directory.path().join("target-owner.json");
     let vault = key.read().unwrap();
     let guard = lock_app(&app);

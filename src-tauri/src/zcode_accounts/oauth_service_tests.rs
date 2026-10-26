@@ -244,9 +244,7 @@ fn fixture_family(
     let now = Instant::now();
     let binding = VaultBinding {
         root: super::super::synthetic_test_path("vault"),
-        vault_id: "vault".into(),
-        key_id: "key".into(),
-        revision: 1,
+        storage: super::super::synthetic_storage_identity(1),
     };
     let id = service
         .flows
@@ -873,9 +871,7 @@ async fn init_expiry_uses_official_deadline_and_does_not_start_a_poll_for_expire
     )]);
     let binding = VaultBinding {
         root: super::super::synthetic_test_path("vault"),
-        vault_id: "vault".into(),
-        key_id: "key".into(),
-        revision: 1,
+        storage: super::super::synthetic_storage_identity(1),
     };
     service.flows.cancel(&id, Instant::now()).unwrap();
     let id = service
@@ -1916,9 +1912,7 @@ async fn official_init_failure_reports_safe_stage_without_a_saved_identity() {
     );
     let binding = VaultBinding {
         root: super::super::synthetic_test_path("vault"),
-        vault_id: "vault".into(),
-        key_id: "key".into(),
-        revision: 1,
+        storage: super::super::synthetic_storage_identity(1),
     };
     let id = service
         .flows

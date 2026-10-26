@@ -21,3 +21,8 @@ pub(crate) mod inference_commands;
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub(crate) mod integration_fixture;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_plaintext_storage() {
+    store::plaintext_tests::run();
+}

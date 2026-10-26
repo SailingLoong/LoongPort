@@ -209,7 +209,7 @@ fn codex_service_preserves_native_auth_and_unowned_text() {
     let store = DeviceStore::for_device();
     let ciphertext = std::fs::read(store.path_for(&stash)).unwrap();
     assert!(stash
-        .decode(
+        .decode_storage(
             &fixture.state.db.secret_session().read().unwrap(),
             &ciphertext
         )

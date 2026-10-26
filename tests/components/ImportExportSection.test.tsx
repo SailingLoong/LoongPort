@@ -29,6 +29,46 @@ describe("ImportExportSection Component", () => {
     baseProps.onClear.mockReset();
   });
 
+  it("passes literal mixed-line-ending source input and clears before import resolves", async () => {
+    let finish!: () => void;
+    baseProps.onImport.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(
+      <ImportExportSection {...baseProps} selectedFile="/tmp/synthetic.sql" />,
+    );
+    const field = screen.getByLabelText("portableBackup.password");
+    const raw = "\r\n中文🔑 aB\rline\n ";
+    fireEvent.paste(field, { clipboardData: { getData: () => raw } });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
+    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
+    expect(baseProps.onImport).toHaveBeenCalledTimes(1);
+    expect(baseProps.onImport).toHaveBeenCalledWith(raw);
+    expect(field).toHaveValue("");
+    finish();
+  });
+
+  it("clears the original source text on file switch, clear selection and unmount", () => {
+    const view = render(
+      <ImportExportSection {...baseProps} selectedFile="/tmp/one.sql" />,
+    );
+    const field = screen.getByLabelText("portableBackup.password");
+    fireEvent.paste(field, { clipboardData: { getData: () => "one\r\nkey" } });
+    view.rerender(
+      <ImportExportSection {...baseProps} selectedFile="/tmp/two.sql" />,
+    );
+    expect(field).toHaveValue("");
+    fireEvent.paste(field, { clipboardData: { getData: () => "two\rkey" } });
+    fireEvent.click(screen.getByRole("button", { name: "common.clear" }));
+    expect(field).toHaveValue("");
+    fireEvent.paste(field, { clipboardData: { getData: () => "three\nkey" } });
+    view.unmount();
+    expect(field).toHaveValue("");
+  });
+
   it("passes the backup password on deliberate import and clears it after the attempt", async () => {
     baseProps.onImport.mockResolvedValue(undefined);
     render(

@@ -86,6 +86,13 @@ pub async fn get_settings() -> Result<crate::settings::AppSettings, String> {
     crate::settings::get_settings_for_frontend().map_err(|error| error.to_string())
 }
 
+/// Nonsecret, read-only startup projection; never a full editable settings response.
+#[tauri::command]
+pub async fn get_bootstrap_settings() -> Result<crate::settings::AppSettings, String> {
+    crate::app_store::initialize_active_scope().map_err(crate::secrets::error::public_code)?;
+    crate::settings::get_bootstrap_settings_for_frontend().map_err(|error| error.to_string())
+}
+
 /// Update one app preference under the settings owner's write lock.
 #[tauri::command]
 pub fn set_app_visibility(

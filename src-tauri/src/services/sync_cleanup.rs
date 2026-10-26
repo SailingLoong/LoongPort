@@ -130,7 +130,7 @@ async fn recoverable_head(
     let snapshot = remote.snapshot().await?;
     let hash = snapshot.manifest_hash.clone();
     let etag = require_strong_etag(snapshot.etag.as_deref())?;
-    let current = db.secrets.read()?.clone();
+    let current = db.secrets.read()?.encrypted()?.clone();
     tokio::task::spawn_blocking(move || {
         validate_manifest_compat(&snapshot.manifest, RemoteLayout::Current)?;
         let metadata = snapshot.manifest.vault_metadata()?;
@@ -626,6 +626,8 @@ mod tests {
         let alternate = db
             .secrets
             .read()
+            .unwrap()
+            .encrypted()
             .unwrap()
             .with_password("different cleanup password")
             .unwrap();

@@ -172,6 +172,12 @@ pub(super) fn ensure_no_pending_mode_operation(
     roots: Roots<'_>,
     vault: &VaultContext,
 ) -> Result<(), AppError> {
+    ensure_no_pending_mode_operation_with_storage(roots, &vault.clone().into())
+}
+pub(super) fn ensure_no_pending_mode_operation_with_storage(
+    roots: Roots<'_>,
+    context: &crate::secrets::storage::StorageContext,
+) -> Result<(), AppError> {
     let file = DeviceFile::registered(crate::secrets::owned_file::DEVICE_STATE_FILE)?;
     let path = roots.device.join(file.relative_path());
     let Some(bytes) = crate::config_file_io::read_regular_file(&path, 64 * 1024 * 1024)
@@ -179,7 +185,7 @@ pub(super) fn ensure_no_pending_mode_operation(
     else {
         return Ok(());
     };
-    let live = crate::mode::state::decode(&file.decode(vault, &bytes)?)
+    let live = crate::mode::state::decode(&file.decode_storage(context, &bytes)?)
         .map_err(|_| AppError::Config("mode.verification_required".into()))?;
     if !live.extra.is_empty()
         || live

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 mod windows_private_file;
 
 /// Read a caller-owned regular file without creating it or changing permissions.
-pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) fn open_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Option<fs::File>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -54,6 +54,14 @@ pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<
             "invalid regular file or read limit",
         ));
     }
+    Ok(Some(file))
+}
+
+/// Bounded byte reader, using the same no-follow/nonblocking platform opener as streaming owners.
+pub(crate) fn read_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let Some(file) = open_regular_file(path, max_bytes)? else {
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
@@ -510,6 +518,31 @@ pub(crate) fn write_durable_new(path: &Path, bytes: &[u8]) -> Result<(), AppErro
             .map_err(|e| AppError::io(parent, e))?;
     }
     Ok(())
+}
+
+/// Passive validation of existing directory ancestors; no writes or alias resolution.
+pub(crate) fn directory_exists_no_alias(path: &std::path::Path) -> Result<bool, AppError> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(AppError::Config("secret.invalid_storage_path".into()));
+    }
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        match std::fs::symlink_metadata(ancestor) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::io(ancestor, error)),
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

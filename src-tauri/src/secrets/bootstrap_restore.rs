@@ -265,6 +265,8 @@ fn finalize_with_hook(
     automatic_unlock: bool,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<Arc<SecretSession>, AppError> {
+    transition::ensure_legacy_generation_owner(root)?;
+    transition::ensure_legacy_metadata(prepared.data.next.metadata())?;
     super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     directory(root)?;
     if pending(root)? || super::reset::pending(root)? {
@@ -274,6 +276,7 @@ fn finalize_with_hook(
     let PreparedRestore { data, source } = prepared;
     let existing = if regular(&root.join("vault.json"))? {
         let saved = session::read_metadata(root)?;
+        transition::ensure_legacy_metadata(&saved.metadata)?;
         Some(
             VaultContext::from_key(saved.metadata, data.next.export_key())
                 .map_err(|_| AppError::Config("secret.source_key_required".into()))?,
@@ -342,6 +345,9 @@ fn install(
     store: &dyn KeyStore,
     automatic_unlock: bool,
 ) -> Result<Arc<SecretSession>, AppError> {
+    transition::ensure_legacy_generation_owner(root)?;
+    transition::ensure_legacy_metadata(current.metadata())?;
+    transition::ensure_legacy_metadata(data.next.metadata())?;
     let path = root.join(crate::config::DB_FILE_NAME);
     if !regular(&path)? {
         return Err(invalid());
@@ -393,6 +399,9 @@ fn finish_initial(
     store: &dyn KeyStore,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<Arc<SecretSession>, AppError> {
+    transition::ensure_legacy_generation_owner(root)?;
+    transition::ensure_legacy_metadata(&intent.metadata)?;
+    transition::ensure_legacy_metadata(data.next.metadata())?;
     if manifest.automatic_unlock {
         save_verified(
             store,
@@ -487,6 +496,7 @@ fn recover_record(
     password: Option<&str>,
     expected: Option<&[u8]>,
 ) -> Result<(), AppError> {
+    transition::ensure_legacy_generation_owner(root)?;
     let _skills = crate::services::skill::skill_state_write_guard();
     let Some(bytes) = pending_record(root)? else {
         return if expected.is_some() {
@@ -505,6 +515,7 @@ fn recover_record(
     if intent.version != 1 {
         return Err(invalid());
     }
+    transition::ensure_legacy_metadata(&intent.metadata)?;
     staging(root, &intent.id)?;
     let next = if let Some(password) = password {
         VaultContext::from_password(intent.metadata.clone(), password)
@@ -571,7 +582,7 @@ pub(crate) fn pending_record(root: &Path) -> Result<Option<Vec<u8>>, AppError> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
     use crate::secrets::{testing::MemoryKeyStore, upgrade::checkpoint};
@@ -598,6 +609,9 @@ mod tests {
                 .unwrap()
                 .with_password("remote recovery password")
                 .unwrap();
+            self.snapshot_for_context(version, context)
+        }
+        fn snapshot_for_context(&self, version: i32, context: VaultContext) -> DownloadedSnapshot {
             let connection = rusqlite::Connection::open_in_memory().unwrap();
             crate::database::vault::upgrade_staging_for_target(&connection, &context, version)
                 .unwrap();
@@ -675,16 +689,22 @@ mod tests {
         })
     }
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn pending_zcode_transaction_blocks_bootstrap_restore_before_mutation() {
         let fixture = Fixture::new();
         let root = fixture.root();
         let store = MemoryKeyStore::default();
         let session = SecretSession::open(&root, &store, None).unwrap();
-        let original = session.read().unwrap().metadata().clone();
+        let original = session
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let connection = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         let db = Database::from_connection(connection, session.clone());
@@ -724,7 +744,10 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(session.read().unwrap().metadata(), &original);
+        assert_eq!(
+            session.read().unwrap().encrypted().unwrap().metadata(),
+            &original
+        );
         assert_eq!(
             store.load(&original.vault_id, &original.key_id).unwrap(),
             key
@@ -755,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn password_only_first_restore_does_not_require_a_system_key_store() {
         use crate::secrets::key_store::KeyStoreError;
         struct UnavailableStore;
@@ -785,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn uncertain_key_store_write_keeps_a_durable_fixed_policy_intent() {
         use crate::secrets::key_store::KeyStoreError;
         struct FailReadback {
@@ -936,7 +959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn startup_preview_and_prepare_use_supplied_mock_transport_without_app_state() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
@@ -957,7 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn startup_s3_preview_and_prepare_keep_settings_locked_without_app_state() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
@@ -978,7 +1001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn normal_snapshot_fetch_requires_unlock_before_any_transport_request() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
@@ -1013,7 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn startup_and_normal_fetch_refuse_pending_and_corrupt_checkpoints_before_requests() {
         for corrupt in [false, true] {
             let fixture = Fixture::new();
@@ -1028,7 +1051,7 @@ mod tests {
                 checkpoint::create(
                     &fixture.root(),
                     &device,
-                    &db.secret_session().read().unwrap(),
+                    db.secret_session().read().unwrap().encrypted().unwrap(),
                     &[],
                 )
                 .unwrap();
@@ -1045,7 +1068,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn startup_and_normal_fetch_refuse_symlinked_checkpoint_before_requests() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
@@ -1065,13 +1088,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn normal_snapshot_fetch_keeps_completed_upgrade_sync_paused_before_requests() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
         let server = SnapshotServer::start(fixture.snapshot()).await;
         let db = crate::secrets::testing::initialize_database().unwrap();
-        crate::settings::set_upgrade_completion_with_vault(
+        crate::settings::set_upgrade_completion_with_storage(
             "completed-checkpoint-fixture",
             db.secret_session(),
             &db.secret_session().read().unwrap(),
@@ -1091,7 +1114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     async fn startup_transport_preserves_password_snapshot_and_hash_rejections() {
         let fixture = Fixture::new();
         let _settings = crate::settings::TestSettingsScope::enter().unwrap();
@@ -1131,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn wrong_password_and_changed_snapshot_leave_the_root_untouched() {
         let fixture = Fixture::new();
         for wrong_password in [true, false] {
@@ -1151,7 +1174,7 @@ mod tests {
         }
     }
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn every_bootstrap_checkpoint_recovers_with_only_the_remote_password() {
         for checkpoint in [
             Checkpoint::Published,
@@ -1191,7 +1214,11 @@ mod tests {
                     .unwrap();
             let connection =
                 rusqlite::Connection::open(root.join(crate::config::DB_FILE_NAME)).unwrap();
-            crate::database::vault::check_identity(&connection, &session.read().unwrap()).unwrap();
+            crate::database::vault::check_identity(
+                &connection,
+                session.read().unwrap().encrypted().unwrap(),
+            )
+            .unwrap();
             assert_eq!(
                 std::fs::read(root.join("skills/example/SKILL.md")).unwrap(),
                 b"restored skill"
@@ -1200,7 +1227,7 @@ mod tests {
         }
     }
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn lost_system_key_can_be_recovered_only_by_a_candidate_with_the_same_key() {
         for (source_version, local_version, same_key) in [
             (17, 17, true),
@@ -1306,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[cfg_attr(test, serial_test::serial)]
     fn first_restore_installs_remote_identity_and_encrypted_connection_settings() {
         let fixture = Fixture::new();
         let root = fixture.root();
@@ -1318,15 +1345,21 @@ mod tests {
             prepare_snapshot(snapshot, source(), "remote recovery password", &expected).unwrap();
         let store = MemoryKeyStore::default();
         let session = finalize(&root, prepared, &store, false).unwrap();
-        assert_eq!(session.read().unwrap().metadata(), &metadata);
+        assert_eq!(
+            session.read().unwrap().encrypted().unwrap().metadata(),
+            &metadata
+        );
         let settings = std::fs::read(crate::settings::settings_path()).unwrap();
         assert!(!String::from_utf8_lossy(&settings).contains("supplied-connection-canary"));
         assert_eq!(
-            crate::settings::decode_settings_with_vault(&settings, &session.read().unwrap())
-                .unwrap()
-                .webdav_sync
-                .unwrap()
-                .password,
+            crate::settings::decode_settings_with_vault(
+                &settings,
+                session.read().unwrap().encrypted().unwrap()
+            )
+            .unwrap()
+            .webdav_sync
+            .unwrap()
+            .password,
             "supplied-connection-canary"
         );
         assert_eq!(
@@ -1337,4 +1370,8 @@ mod tests {
         assert!(SecretSession::open_existing(&root, &store, None).is_err());
         SecretSession::open_existing(&root, &store, Some("remote recovery password")).unwrap();
     }
+    include!("bootstrap_restore_legacy_fence_tests.rs");
 }
+
+#[cfg(feature = "test-hooks")]
+pub(crate) use tests::verify_legacy_fence as verify_legacy_generation_fence_case;

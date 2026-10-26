@@ -13,10 +13,10 @@ fn state_file() -> DeviceFile {
 
 fn write_fixture(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     bytes: &[u8],
 ) -> Vec<u8> {
-    let sealed = state_file().encode(vault, bytes).unwrap();
+    let sealed = state_file().encode_storage(vault, bytes).unwrap();
     fs::write(store.state_path(), &sealed).unwrap();
     sealed
 }
@@ -42,7 +42,7 @@ fn sample_pending() -> Pending {
 fn app_scoped_reads_keep_unknown_peer_modes_without_direct_fallback() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     let bytes = serde_json::to_vec(&json!({"version":1,"apps":{
         "codex":{"mode":"direct"},
@@ -75,7 +75,7 @@ fn app_scoped_reads_keep_unknown_peer_modes_without_direct_fallback() {
 fn app_scoped_pending_updates_preserve_opaque_peers_and_refuse_their_mutation() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     let original = json!({"version":1,"futureRoot":{"preserve":true},"apps":{
         "codex":{"mode":"direct"},
@@ -88,7 +88,7 @@ fn app_scoped_pending_updates_preserve_opaque_peers_and_refuse_their_mutation() 
         Some(sample_pending())
     );
     let plain = state_file()
-        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .decode_storage(&vault, &fs::read(store.state_path()).unwrap())
         .unwrap();
     let after: Value = serde_json::from_slice(&plain).unwrap();
     assert_eq!(after["apps"]["claude"], original["apps"]["claude"]);
@@ -99,7 +99,7 @@ fn app_scoped_pending_updates_preserve_opaque_peers_and_refuse_their_mutation() 
     assert_eq!(fs::read(store.state_path()).unwrap(), before);
     set_pending(&store, &vault, "codex", None).unwrap();
     let plain = state_file()
-        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .decode_storage(&vault, &fs::read(store.state_path()).unwrap())
         .unwrap();
     let after: Value = serde_json::from_slice(&plain).unwrap();
     assert_eq!(after["apps"]["claude"], original["apps"]["claude"]);
@@ -110,7 +110,9 @@ fn app_scoped_pending_updates_preserve_opaque_peers_and_refuse_their_mutation() 
 fn app_scoped_pending_updates_share_original_serialization_and_keep_unknown_peer() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = Arc::new(DeviceStore::at(fixture.path()));
-    let key = Arc::new(RwLock::new(VaultContext::generate().unwrap()));
+    let key = Arc::new(RwLock::new(StorageContext::Encrypted(
+        VaultContext::generate().unwrap(),
+    )));
     let peer = json!({"mode":"future-mode","opaque":["synthetic-value",3]});
     write_fixture(
         &store,
@@ -141,7 +143,7 @@ fn app_scoped_pending_updates_share_original_serialization_and_keep_unknown_peer
         );
     }
     let plain = state_file()
-        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .decode_storage(&vault, &fs::read(store.state_path()).unwrap())
         .unwrap();
     assert_eq!(
         serde_json::from_slice::<Value>(&plain).unwrap()["apps"]["claude"],
@@ -153,7 +155,7 @@ fn app_scoped_pending_updates_share_original_serialization_and_keep_unknown_peer
 fn app_scoped_pending_rejects_invalid_shared_envelope_without_repair() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     for bytes in [
         br#"{"version":2,"apps":{"codex":{"mode":"direct"}}}"#.as_slice(),
@@ -171,7 +173,7 @@ fn app_scoped_pending_rejects_invalid_shared_envelope_without_repair() {
 fn app_scoped_pending_preserves_exact_opaque_peer_and_root_payloads() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let key = RwLock::new(VaultContext::generate().unwrap());
+    let key = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = key.read().unwrap();
     let peer = r#"{ "mode" : "future-mode", "precise" : 123456789012345678901234567890, "fraction" : 1.2345678901234567890123456789 }"#;
     let root = r#"{ "precise" : 123456789012345678901234567890 }"#;
@@ -179,7 +181,7 @@ fn app_scoped_pending_preserves_exact_opaque_peer_and_root_payloads() {
     write_fixture(&store, &vault, bytes.as_bytes());
     set_pending(&store, &vault, "codex", Some(sample_pending())).unwrap();
     let plain = state_file()
-        .decode(&vault, &fs::read(store.state_path()).unwrap())
+        .decode_storage(&vault, &fs::read(store.state_path()).unwrap())
         .unwrap();
     let text = std::str::from_utf8(&plain).unwrap();
     assert!(
@@ -193,7 +195,7 @@ fn app_scoped_pending_preserves_exact_opaque_peer_and_root_payloads() {
 fn missing_state_reads_are_empty_without_creating_storage() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path().join("not-created"));
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
 
     assert_eq!(load(&store, &vault).unwrap(), LiveState::default());
@@ -216,7 +218,7 @@ fn missing_state_reads_are_empty_without_creating_storage() {
 fn pending_round_trips_as_private_authenticated_ciphertext_and_clears() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
 
     set_pending(&store, &vault, "codex", Some(sample_pending())).unwrap();
@@ -235,7 +237,7 @@ fn pending_round_trips_as_private_authenticated_ciphertext_and_clears() {
     ] {
         assert!(!String::from_utf8_lossy(&sealed).contains(canary));
     }
-    let plaintext = state_file().decode(&vault, &sealed).unwrap();
+    let plaintext = state_file().decode_storage(&vault, &sealed).unwrap();
     assert_eq!(
         decode(&plaintext).unwrap().apps["codex"].pending,
         Some(sample_pending())
@@ -262,7 +264,7 @@ fn pending_round_trips_as_private_authenticated_ciphertext_and_clears() {
 fn getters_read_committed_modes_written_and_stack_without_changing_ciphertext() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     let state: LiveState = serde_json::from_value(json!({
         "version": 1,
@@ -307,7 +309,7 @@ fn getters_read_committed_modes_written_and_stack_without_changing_ciphertext() 
 fn failed_change_keeps_original_ciphertext_and_does_not_create_missing_state() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     let change = |current: &mut LiveState| -> Result<(), AppError> {
         current.apps.insert(
@@ -332,7 +334,7 @@ fn failed_change_keeps_original_ciphertext_and_does_not_create_missing_state() {
 fn invalid_authenticated_state_is_never_reset_renamed_or_overwritten() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
 
     for invalid in [
@@ -358,7 +360,7 @@ fn invalid_authenticated_state_is_never_reset_renamed_or_overwritten() {
 fn plaintext_wrong_key_and_wrong_file_identity_are_not_accepted_or_repaired() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     let other_vault = VaultContext::generate().unwrap();
     let plaintext = br#"{"version":1,"apps":{}}"#;
@@ -368,7 +370,7 @@ fn plaintext_wrong_key_and_wrong_file_identity_are_not_accepted_or_repaired() {
         state_file().encode(&other_vault, plaintext).unwrap(),
         DeviceFile::registered("codex-login-stash.json")
             .unwrap()
-            .encode(&vault, plaintext)
+            .encode_storage(&vault, plaintext)
             .unwrap(),
     ] {
         fs::write(store.state_path(), &bytes).unwrap();
@@ -402,7 +404,7 @@ fn unsupported_apps() -> Vec<Value> {
 fn untouched_future_data_survives_known_app_updates_but_cannot_be_changed_or_removed() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
 
     for unsupported in unsupported_apps() {
@@ -435,7 +437,7 @@ fn untouched_future_data_survives_known_app_updates_but_cannot_be_changed_or_rem
 fn updates_cannot_introduce_unknown_fields_or_unsupported_contracts() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     set_pending(&store, &vault, "codex", Some(sample_pending())).unwrap();
     let before = fs::read(store.state_path()).unwrap();
@@ -457,7 +459,7 @@ fn updates_cannot_introduce_unknown_fields_or_unsupported_contracts() {
 fn updates_cannot_change_unknown_root_fields_or_the_state_version() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     let before = write_fixture(
         &store,
@@ -489,7 +491,7 @@ fn updates_cannot_change_unknown_root_fields_or_the_state_version() {
 fn update_returns_closure_result_and_only_prunes_genuinely_empty_apps() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = RwLock::new(VaultContext::generate().unwrap());
+    let vault_lock = RwLock::new(StorageContext::Encrypted(VaultContext::generate().unwrap()));
     let vault = vault_lock.read().unwrap();
     let result = update(&store, &vault, |current| {
         current.apps.insert("empty".into(), AppLiveState::default());
@@ -529,7 +531,9 @@ fn update_returns_closure_result_and_only_prunes_genuinely_empty_apps() {
 fn concurrent_read_modify_write_preserves_every_app() {
     let fixture = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let store = DeviceStore::at(fixture.path());
-    let vault_lock = Arc::new(RwLock::new(VaultContext::generate().unwrap()));
+    let vault_lock = Arc::new(RwLock::new(StorageContext::Encrypted(
+        VaultContext::generate().unwrap(),
+    )));
     let start = Arc::new(Barrier::new(8));
     let workers: Vec<_> = (0..8)
         .map(|index| {

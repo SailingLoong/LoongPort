@@ -1639,7 +1639,10 @@ fn on_vendor_error(state: &AppState, row_id: i64, e: &VendorError) {
 /// 辅助函数变成两个模块之间的接口，而它就是三行。
 fn with_conn<T>(
     state: &AppState,
-    f: impl FnOnce(&rusqlite::Connection, &crate::secrets::VaultContext) -> Result<T, AppError>,
+    f: impl FnOnce(
+        &rusqlite::Connection,
+        &crate::secrets::storage::StorageContext,
+    ) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
     let vault = state.db.secrets.read()?;
     let conn = state

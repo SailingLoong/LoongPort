@@ -66,7 +66,7 @@ impl Fixture {
         let session = SecretSession::open(&root, &keys, None).unwrap();
         let conn = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         let db = Database::from_connection(conn, session.clone());
@@ -137,7 +137,8 @@ fn registered_inventory_covers_current_and_recovery_without_plaintext_fallback()
     let recovery = f.root.join("backups/vault-recovery").join(FILE);
     crate::config_file_io::write_durable(&recovery, &live).unwrap();
     let vault = f.db.secrets.read().unwrap();
-    let plans = files::stage_owned_files_with_vault(&f.root, &vault, false).unwrap();
+    let plans =
+        files::stage_owned_files_with_vault(&f.root, vault.encrypted().unwrap(), false).unwrap();
     let selected: Vec<_> = plans
         .iter()
         .filter(|p| p.file.relative_path() == std::path::Path::new(FILE))
@@ -147,15 +148,17 @@ fn registered_inventory_covers_current_and_recovery_without_plaintext_fallback()
         assert_eq!(plan.ciphertext, live);
         assert_eq!(
             plan.file
-                .decode(&vault, &plan.ciphertext)
+                .decode_storage(&vault, &plan.ciphertext)
                 .unwrap()
                 .as_slice(),
-            f.file().decode(&vault, &live).unwrap().as_slice()
+            f.file().decode_storage(&vault, &live).unwrap().as_slice()
         );
     }
-    let plain = f.file().decode(&vault, &live).unwrap();
+    let plain = f.file().decode_storage(&vault, &live).unwrap();
     crate::config_file_io::write_durable(&recovery, &plain).unwrap();
-    assert!(files::stage_owned_files_with_vault(&f.root, &vault, true).is_err());
+    assert!(
+        files::stage_owned_files_with_vault(&f.root, vault.encrypted().unwrap(), true).is_err()
+    );
 }
 
 #[test]
@@ -164,7 +167,14 @@ fn password_rewrap_preserves_account_and_reopens_in_a_fresh_process() {
     let f = Fixture::new(false);
     let expected = f.serialized_hash();
     let before = std::fs::read(f.root.join(FILE)).unwrap();
-    let old = f.db.secrets.read().unwrap().metadata().clone();
+    let old =
+        f.db.secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
     let fence = crate::rt::block_on(Lease::acquire(
         f.db.secrets.clone(),
         &f.id,
@@ -174,7 +184,14 @@ fn password_rewrap_preserves_account_and_reopens_in_a_fresh_process() {
     .fence();
     f.with_sync(|| rewrap::change_password(&f.db, &f.keys, PASSWORD, false))
         .unwrap();
-    let next = f.db.secrets.read().unwrap().metadata().clone();
+    let next =
+        f.db.secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
     assert_eq!(next.key_id, old.key_id);
     assert_eq!(next.vault_id, old.vault_id);
     assert!(next.revision > old.revision);
@@ -216,14 +233,20 @@ fn interrupted_original_rotation_recovers_in_fresh_process_without_enabling_pend
     let reopened =
         SecretSession::open_existing(&f.root, &MemoryKeyStore::default(), Some(PASSWORD)).unwrap();
     let next = reopened.read().unwrap();
-    assert_eq!(next.metadata().vault_id, old.metadata().vault_id);
-    assert_ne!(next.metadata().key_id, old.metadata().key_id);
+    assert_eq!(
+        next.encrypted().unwrap().metadata().vault_id,
+        old.encrypted().unwrap().metadata().vault_id
+    );
+    assert_ne!(
+        next.encrypted().unwrap().metadata().key_id,
+        old.encrypted().unwrap().metadata().key_id
+    );
     for path in [f.root.join(FILE), recovery] {
         let bytes = std::fs::read(path).unwrap();
-        assert!(f.file().decode(&old, &bytes).is_err());
+        assert!(f.file().decode_storage(&old, &bytes).is_err());
         assert_eq!(
             hex::encode(Sha256::digest(
-                f.file().decode(&next, &bytes).unwrap().as_slice()
+                f.file().decode_storage(&next, &bytes).unwrap().as_slice()
             )),
             expected
         );
@@ -286,7 +309,7 @@ fn explicit_reset_clears_live_account_and_retains_only_encrypted_recovery_archiv
     assert!(!String::from_utf8_lossy(&sealed).contains("synthetic-refresh"));
     assert_eq!(
         hex::encode(Sha256::digest(
-            file.decode(&old, &sealed).unwrap().as_slice()
+            file.decode_storage(&old, &sealed).unwrap().as_slice()
         )),
         expected
     );

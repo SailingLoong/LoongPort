@@ -3,6 +3,12 @@ use thiserror::Error;
 /// Stable, secret-free errors at the credential protection boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum SecretError {
+    #[error("Use the explicit credential protection generation owner")]
+    GenerationOwnerRequired,
+    #[error("Credential key text is required")]
+    UserTextRequired,
+    #[error("This vault requires its original legacy recovery material")]
+    UserTextUnavailable,
     #[error("Unsupported credential format")]
     UnsupportedFormat,
     #[error("Invalid credential envelope")]
@@ -36,6 +42,9 @@ pub(crate) enum SecretError {
 impl SecretError {
     pub(crate) const fn code(self) -> &'static str {
         match self {
+            Self::GenerationOwnerRequired => "protection.generation_owner_required",
+            Self::UserTextRequired => "protection.key_input_required",
+            Self::UserTextUnavailable => "protection.legacy_key_recovery_required",
             Self::UnsupportedFormat => "secret.unsupported_format",
             Self::InvalidEnvelope => "secret.invalid_envelope",
             Self::InvalidMetadata => "secret.invalid_metadata",
@@ -59,6 +68,7 @@ pub(crate) fn public_code(error: crate::error::AppError) -> String {
     match error {
         crate::error::AppError::Config(code)
             if code.starts_with("secret.")
+                || code.starts_with("protection.")
                 || code.starts_with("settings.")
                 || code.starts_with("upgrade.") =>
         {
