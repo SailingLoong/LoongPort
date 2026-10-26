@@ -17,6 +17,9 @@ describe.each([en, zh, ja, zhTW])(
         "description",
         "sourceKey",
         "sourceHelp",
+        "currentKey",
+        "currentHelp",
+        "noInputHelp",
         "resume",
         "recheck",
         "statusFailed",
@@ -34,9 +37,13 @@ describe.each([en, zh, ja, zhTW])(
       expect(copy.sourceHelp).toMatch(
         /cannot guarantee|无法保证|無法保證|保証しません/,
       );
-      expect(copy.sourceHelp + copy.sourceKey).not.toMatch(
-        /64|32|hex|强度|強度|strength|复杂度|複雜度/i,
-      );
+      expect(
+        copy.sourceHelp +
+          copy.sourceKey +
+          copy.currentHelp +
+          copy.currentKey +
+          copy.noInputHelp,
+      ).not.toMatch(/64|32|hex|强度|強度|strength|复杂度|複雜度/i);
     });
   },
 );

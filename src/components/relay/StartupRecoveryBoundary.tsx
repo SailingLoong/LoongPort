@@ -8,6 +8,7 @@ import { CredentialKeyRecoveryHelp } from "./CredentialKeyRecoveryHelp";
 import {
   startupRecoveryApi,
   startupRecoveryKey,
+  type StartupRecoveryView,
 } from "@/lib/api/startupRecovery";
 
 /** A fault-only inline consumer of the original recovery owner, never a shell gate. */
@@ -44,11 +45,28 @@ export function StartupRecoveryBoundary({ children }: { children: ReactNode }) {
     await recovery.refetch();
   };
   const recover = async (sourceText: string) => {
+    // A rendered handler can outlive a native inspection. Recheck the exact
+    // current journal authority before sending even an explicitly empty input.
+    const current = client.getQueryState<StartupRecoveryView | null>(
+      startupRecoveryKey,
+    );
+    const authority = current?.data;
     if (
       operationInFlight.current ||
       !canRecover ||
       !view ||
-      sourceText.length === 0
+      current?.status !== "success" ||
+      current.fetchStatus !== "idle" ||
+      !authority ||
+      authority.token !== view.token ||
+      authority.inputKind !== view.inputKind ||
+      authority.inputRequired !== view.inputRequired ||
+      authority.status !== "pending" ||
+      authority.canRecover !== true ||
+      authority.restartRequired ||
+      (authority.inputRequired
+        ? sourceText.length === 0
+        : sourceText.length !== 0)
     )
       return;
     operationInFlight.current = true;
@@ -70,7 +88,8 @@ export function StartupRecoveryBoundary({ children }: { children: ReactNode }) {
       setIssue(
         code === "secret.password_rejected" || code === "secret.key_rejected"
           ? "startupRecovery.keyRejected"
-          : code === "upgrade.source_changed"
+          : code === "upgrade.source_changed" ||
+              code === "secret.input_not_required"
             ? "startupRecovery.sourceChanged"
             : "startupRecovery.unknownResult",
       );
@@ -130,8 +149,9 @@ export function StartupRecoveryBoundary({ children }: { children: ReactNode }) {
       </p>
       {canRecover && (
         <RecoveryInput
-          key={`${view.token}:${inputRevision}`}
+          key={`${view.token}:${view.inputKind}:${inputRevision}`}
           busy={busy}
+          inputKind={view.inputKind}
           recover={recover}
         />
       )}
@@ -171,9 +191,11 @@ export function StartupRecoveryBoundary({ children }: { children: ReactNode }) {
 
 function RecoveryInput({
   busy,
+  inputKind,
   recover,
 }: {
   busy: boolean;
+  inputKind: StartupRecoveryView["inputKind"];
   recover: (sourceText: string) => Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -181,14 +203,15 @@ function RecoveryInput({
   const input = useRef<LiteralKeyInputHandle>(null);
   const submitting = useRef(false);
   const [hasInput, setHasInput] = useState(false);
+  const inputRequired = inputKind !== "none";
   return (
     <form
       className="space-y-3"
       onSubmit={(event) => {
         event.preventDefault();
         if (busy || submitting.current) return;
-        const sourceText = input.current?.value ?? "";
-        if (sourceText.length === 0) return;
+        const sourceText = inputRequired ? (input.current?.value ?? "") : "";
+        if (inputRequired && sourceText.length === 0) return;
         submitting.current = true;
         if (input.current) input.current.value = "";
         setHasInput(false);
@@ -197,21 +220,39 @@ function RecoveryInput({
         });
       }}
     >
-      <Label htmlFor={id}>{t("startupRecovery.sourceKey")}</Label>
-      <LiteralKeyInput
-        id={id}
-        ref={input}
-        disabled={busy}
-        autoComplete="off"
-        onValueChange={() =>
-          setHasInput((input.current?.value.length ?? 0) > 0)
-        }
-      />
-      <p className="text-xs text-muted-foreground">
-        {t("startupRecovery.sourceHelp")}
-      </p>
-      <CredentialKeyRecoveryHelp />
-      <Button type="submit" disabled={busy || !hasInput}>
+      {inputRequired ? (
+        <>
+          <Label htmlFor={id}>
+            {t(
+              inputKind === "current"
+                ? "startupRecovery.currentKey"
+                : "startupRecovery.sourceKey",
+            )}
+          </Label>
+          <LiteralKeyInput
+            id={id}
+            ref={input}
+            disabled={busy}
+            autoComplete="off"
+            onValueChange={() =>
+              setHasInput((input.current?.value.length ?? 0) > 0)
+            }
+          />
+          <p className="text-xs text-muted-foreground">
+            {t(
+              inputKind === "current"
+                ? "startupRecovery.currentHelp"
+                : "startupRecovery.sourceHelp",
+            )}
+          </p>
+          <CredentialKeyRecoveryHelp />
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {t("startupRecovery.noInputHelp")}
+        </p>
+      )}
+      <Button type="submit" disabled={busy || (inputRequired && !hasInput)}>
         {t("startupRecovery.resume")}
       </Button>
     </form>

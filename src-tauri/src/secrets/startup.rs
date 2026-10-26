@@ -889,23 +889,41 @@ impl StartupCoordinator {
             .get()
             .cloned()
             .ok_or("secret.no_pending_operation")?;
-        let (status, can_recover, restart_required) = match (&*inspection, *phase) {
+        use super::transition::RecoveryInputKind;
+        let (status, can_recover, restart_required, input_kind) = match (&*inspection, *phase) {
             (
                 super::upgrade::UpgradeInspection::RecoveryRequired(evidence),
                 Phase::Locked | Phase::UpgradeReview,
-            ) if evidence.verify_unchanged(&self.root, &token).is_ok() => ("pending", true, false),
+            ) if evidence.verify_unchanged(&self.root, &token).is_ok() => {
+                match evidence.input_kind(&self.root) {
+                    Ok(kind) => ("pending", true, false, kind),
+                    Err(_) => (
+                        "verification_required",
+                        false,
+                        true,
+                        RecoveryInputKind::None,
+                    ),
+                }
+            }
             (super::upgrade::UpgradeInspection::Stable(_), Phase::Recovered)
                 if inspection.verify_unchanged(&self.root).is_ok() =>
             {
-                ("completed", false, true)
+                ("completed", false, true, RecoveryInputKind::None)
             }
-            _ => ("verification_required", false, true),
+            _ => (
+                "verification_required",
+                false,
+                true,
+                RecoveryInputKind::None,
+            ),
         };
         Ok(StartupRecoveryView {
             token,
             status,
             can_recover,
             restart_required,
+            input_required: input_kind.required(),
+            input_kind,
         })
     }
 
@@ -978,6 +996,8 @@ pub(crate) struct StartupRecoveryView {
     status: &'static str,
     can_recover: bool,
     restart_required: bool,
+    input_required: bool,
+    input_kind: super::transition::RecoveryInputKind,
 }
 
 #[cfg(feature = "gui")]

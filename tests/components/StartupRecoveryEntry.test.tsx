@@ -436,3 +436,181 @@ it("rejects a non-string status instead of caching an invalid native DTO", async
   );
   expect(client.getQueryData(["startupRecovery"])).toBeUndefined();
 });
+
+it("continues an explicitly no-input native journal once without inventing a source key or a plaintext choice", async () => {
+  const noInput = { ...pending, inputRequired: false, inputKind: "none" };
+  let finish!: (value: unknown) => void;
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "get_startup_recovery") return noInput;
+    if (command === "recover_startup_operation")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return blockedProtection;
+  });
+  const { client } = mount();
+  const submit = await screen.findByRole("button", {
+    name: "startupRecovery.resume",
+  });
+  expect(submit).toBeEnabled();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(
+    screen.queryByLabelText("startupRecovery.sourceKey"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("startupRecovery.noInputHelp")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Settings" })).toBeEnabled();
+  expect(recoveryWrites()).toHaveLength(0);
+  fireEvent.click(submit);
+  fireEvent.click(submit);
+  expect(recoveryWrites()).toEqual([
+    ["recover_startup_operation", { token: pending.token, password: "" }],
+  ]);
+  finish({ ...completed, inputRequired: false, inputKind: "none" });
+  expect(await screen.findByText("startupRecovery.completed")).toBeVisible();
+  expect(client.getQueryData(["runtimeAvailability"])).toBeUndefined();
+  expect(client.getMutationCache().getAll()).toHaveLength(0);
+});
+it("requests the operation's current local key only when native says current, preserving the original text", async () => {
+  const current = { ...pending, inputRequired: true, inputKind: "current" };
+  vi.mocked(invoke).mockImplementation(async (command) =>
+    command === "recover_startup_operation"
+      ? { ...completed, inputRequired: false, inputKind: "none" }
+      : current,
+  );
+  const { client } = mount();
+  const input = await screen.findByLabelText("startupRecovery.currentKey");
+  expect(screen.getByText("startupRecovery.currentHelp")).toBeVisible();
+  expect(
+    screen.queryByText("startupRecovery.sourceHelp"),
+  ).not.toBeInTheDocument();
+  const original = " \r\n当前🔑e\u0301 MiXeD \r ";
+  pasteKey(input, original);
+  fireEvent.click(
+    screen.getByRole("button", { name: "startupRecovery.resume" }),
+  );
+  await waitFor(() =>
+    expect(recoveryWrites()).toEqual([
+      [
+        "recover_startup_operation",
+        { token: pending.token, password: original },
+      ],
+    ]),
+  );
+  expect(input).toHaveValue("");
+  expect(
+    JSON.stringify(
+      client
+        .getQueryCache()
+        .getAll()
+        .map((query) => query.state),
+    ),
+  ).not.toContain(original);
+  expect(JSON.stringify(localStorage)).not.toContain(original);
+  expect(JSON.stringify(sessionStorage)).not.toContain(original);
+});
+it("clears a transient key when the same journal's authoritative input kind changes", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) =>
+    command === "get_startup_recovery"
+      ? { ...pending, inputRequired: true, inputKind: "current" }
+      : blockedProtection,
+  );
+  const { client } = mount();
+  const old = await screen.findByLabelText("startupRecovery.currentKey");
+  pasteKey(old, "synthetic transient input");
+  client.setQueryData(["startupRecovery"], {
+    ...pending,
+    inputRequired: true,
+    inputKind: "source",
+  });
+  expect(await screen.findByLabelText("startupRecovery.sourceKey")).toHaveValue(
+    "",
+  );
+  expect(recoveryWrites()).toHaveLength(0);
+});
+it.each([
+  { ...pending, inputRequired: false },
+  { ...pending, inputKind: "none" },
+  { ...pending, inputRequired: true, inputKind: "none" },
+  { ...pending, inputRequired: false, inputKind: "current" },
+])(
+  "does not let malformed new input authority become no-input recovery (%j)",
+  async (view) => {
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "get_startup_recovery" ? view : blockedProtection,
+    );
+    mount();
+    await screen.findByText("startupRecovery.statusFailed");
+    expect(
+      screen.queryByRole("button", { name: "startupRecovery.resume" }),
+    ).not.toBeInTheDocument();
+    expect(recoveryWrites()).toHaveLength(0);
+  },
+);
+it("inspects a no-input recovery rejection without retrying or displaying a source-key prompt", async () => {
+  const noInput = { ...pending, inputRequired: false, inputKind: "none" };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "recover_startup_operation")
+      throw {
+        code: "secret.input_not_required",
+        restartRequired: false,
+        detail: "synthetic-private-detail",
+      };
+    return noInput;
+  });
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "startupRecovery.resume" }),
+  );
+  await screen.findByText("startupRecovery.sourceChanged");
+  expect(recoveryWrites()).toHaveLength(1);
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("synthetic-private-detail");
+});
+
+it.each([
+  { inputRequired: true, inputKind: "current" },
+  { token: "synthetic-new-journal" },
+  { canRecover: false },
+  { restartRequired: true },
+])(
+  "rechecks native authority when an old no-input handler is invoked (%j)",
+  async (changed) => {
+    const noInput = { ...pending, inputRequired: false, inputKind: "none" };
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "get_startup_recovery" ? noInput : blockedProtection,
+    );
+    const { client } = mount();
+    const submit = await screen.findByRole("button", {
+      name: "startupRecovery.resume",
+    });
+    // React has not rerendered this old button yet; native/query authority already changed.
+    client.setQueryData(["startupRecovery"], { ...noInput, ...changed });
+    fireEvent.click(submit);
+    expect(recoveryWrites()).toHaveLength(0);
+  },
+);
+it.each(["pending", "verification_required"])(
+  "does not turn a resolved no-input %s result into completion or replay",
+  async (status) => {
+    const noInput = { ...pending, inputRequired: false, inputKind: "none" };
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "recover_startup_operation"
+        ? { ...noInput, status, canRecover: false }
+        : noInput,
+    );
+    mount();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "startupRecovery.resume" }),
+    );
+    expect(
+      await screen.findByText("startupRecovery.notCompleted"),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("startupRecovery.completed"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "startupRecovery.resume" }),
+    ).not.toBeInTheDocument();
+    expect(recoveryWrites()).toHaveLength(1);
+  },
+);

@@ -421,6 +421,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             artifacts,
             vault: Some(metadata),
+            storage: None,
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let snapshot = DownloadedSnapshot {

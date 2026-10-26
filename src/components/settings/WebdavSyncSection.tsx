@@ -33,6 +33,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { settingsApi } from "@/lib/api";
+import { remoteSnapshotSourceInputRequired } from "@/lib/api/settings";
 import {
   startupUpgradeApi,
   type UpgradeSyncResumeChoice,
@@ -58,7 +59,8 @@ function canRequestSourceRestore(
   if (
     snapshot?.compatible !== true ||
     typeof snapshot.snapshotId !== "string" ||
-    snapshot.snapshotId.length === 0
+    snapshot.snapshotId.length === 0 ||
+    remoteSnapshotSourceInputRequired(snapshot) === null
   )
     return false;
   const message = extractErrorMessage(error);
@@ -1112,13 +1114,18 @@ export function WebdavSyncSection({
   const s3ShowAutoSyncError =
     !!s3LastError && s3Config?.status?.lastErrorSource === "auto";
 
+  const restoreSourceInputRequired = restoreRequest
+    ? remoteSnapshotSourceInputRequired(restoreRequest.snapshot)
+    : null;
+
   // ─── Render ─────────────────────────────────────────────
 
   return (
     <section className="space-y-4">
-      {restoreRequest && (
+      {restoreRequest && restoreSourceInputRequired !== null && (
         <SyncRestoreDialog
           deviceName={restoreRequest.snapshot.deviceName}
+          sourceInputRequired={restoreSourceInputRequired}
           onClose={() => setRestoreRequest(null)}
           onRestore={async (password) => {
             const restore =

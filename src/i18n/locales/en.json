@@ -644,7 +644,7 @@
     },
     "webdavSync": {
       "title": "WebDAV Cloud Sync",
-      "description": "Sync database and skill configurations across devices via WebDAV.",
+      "description": "Sync configuration and skills through WebDAV or S3. New remote backups follow your local encrypted or plaintext choice. Anyone who can read plaintext remote files can also read their credentials. Protection changes affect new backups only; existing remote history is not automatically converted or deleted.",
       "baseUrl": "WebDAV Server URL",
       "baseUrlPlaceholder": "https://dav.example.com/dav/",
       "username": "WebDAV Account",
@@ -654,7 +654,7 @@
       "remoteRoot": "Remote Root Directory",
       "profile": "Sync Profile Name",
       "autoSync": "Auto Sync",
-      "autoSyncHint": "When enabled, each database change triggers an automatic WebDAV upload.",
+      "autoSyncHint": "Automatically upload to WebDAV after each database change. New backups follow local protection; plaintext mode uploads plaintext credentials. Protection changes affect new backups only; existing remote history is not automatically converted or deleted.",
       "test": "Test Connection",
       "testing": "Testing...",
       "testSuccess": "Connection successful",
@@ -690,7 +690,7 @@
       "saveAndTestSuccess": "Config saved, connection OK",
       "saveAndTestFailed": "Config saved, but connection test failed: {{error}}",
       "noRemoteData": "No sync data found on the remote server",
-      "incompatibleVersion": "Remote data is incompatible (protocol v{{protocolVersion}}, database {{dbCompatVersion}}). This client supports protocol v2 / db-v6.",
+      "incompatibleVersion": "The remote data format or version is incompatible and cannot be restored here. Check it with a LoongPort version that supports the format.",
       "unsaved": "Unsaved",
       "saved": "Saved",
       "unsavedChanges": "Please save config first",
@@ -704,8 +704,8 @@
         "path": "Remote path",
         "dbCompat": "DB compatibility",
         "artifacts": "Contents",
-        "legacyNotice": "A legacy remote path was detected. After restoring, the next upload will write to the new v2/db-v6 path.",
-        "warning": "This will overwrite all local data and skill configurations",
+        "legacyNotice": "A legacy remote path was found. After restore, the next upload will use the current-format path.",
+        "warning": "Restore replaces local configuration and skills, retaining local sign-in and sync credentials. Your selected local protection mode and key remain unchanged.",
         "confirm": "Confirm Restore"
       },
       "confirmUpload": {
@@ -719,8 +719,8 @@
         "createdAt": "Uploaded at",
         "path": "Remote path",
         "dbCompat": "DB compatibility",
-        "warning": "This will overwrite existing sync data on the remote server",
-        "legacyNotice": "Legacy remote data was detected. This upload will write to the new v2/db-v6 path and will not overwrite the legacy path.",
+        "warning": "This overwrites existing remote sync data. New backups follow local protection. In plaintext mode, anyone who can read the remote files can also read their credentials. Protection changes affect new backups only; existing remote history is not automatically converted or deleted.",
+        "legacyNotice": "Data was found at a legacy remote path. This upload uses the current-format path and will not overwrite the legacy path.",
         "confirm": "Confirm Upload"
       }
     },
@@ -763,7 +763,7 @@
       "profile": "Sync Profile Name",
       "profileDefault": "Default: default",
       "autoSync": "Auto Sync",
-      "autoSyncHint": "When enabled, each database change triggers an automatic S3 upload.",
+      "autoSyncHint": "Automatically upload to S3 after each database change. New backups follow local protection; plaintext mode uploads plaintext credentials. Protection changes affect new backups only; existing remote history is not automatically converted or deleted.",
       "enabled": "Enable S3 Sync",
       "enabledHint": "Turn on S3 sync for manual and automatic cloud operations.",
       "mutualExclusionTitle": "Switch Sync Type",
@@ -795,7 +795,7 @@
       "autoSyncLastErrorHint": "Please check network or S3 settings. Auto sync will retry on future changes.",
       "missingBucket": "Please enter the S3 bucket",
       "noRemoteData": "No sync data found in the S3 bucket",
-      "incompatibleVersion": "Remote data is incompatible (version {{version}}). This client supports protocol v2 / db-v6.",
+      "incompatibleVersion": "The remote data format or version is incompatible and cannot be restored here. Check it with a LoongPort version that supports the format.",
       "unsaved": "Unsaved",
       "saved": "Saved",
       "unsavedChanges": "Please save config first",
@@ -809,7 +809,7 @@
         "deviceName": "Uploaded by",
         "createdAt": "Uploaded at",
         "artifacts": "Contents",
-        "warning": "This will overwrite all local data and skill configurations",
+        "warning": "Restore replaces local configuration and skills, retaining local sign-in and sync credentials. Your selected local protection mode and key remain unchanged.",
         "confirm": "Confirm Restore"
       },
       "confirmUpload": {
@@ -821,7 +821,7 @@
         "existingData": "Existing cloud data",
         "deviceName": "Uploaded by",
         "createdAt": "Uploaded at",
-        "warning": "This will overwrite existing sync data at the S3 path",
+        "warning": "This overwrites existing remote sync data. New backups follow local protection. In plaintext mode, anyone who can read the remote files can also read their credentials. Protection changes affect new backups only; existing remote history is not automatically converted or deleted.",
         "confirm": "Confirm Upload"
       }
     },
@@ -4396,13 +4396,15 @@
     "title": "Restore cloud configuration",
     "description": "Replace this device’s configuration and skills with the cloud snapshot. Local sign-in accounts and sync connection credentials will be retained.",
     "source": "Snapshot from {{deviceName}}",
-    "protection": "The input verifies the cloud snapshot’s source. A local protection mode you have already chosen is retained. Legacy configurations without a chosen mode still follow the original restore rules; a successful restore adopts the source’s protection information.",
-    "password": "Cloud protection password",
+    "protection": "Your selected local protection mode and key are retained. Legacy configurations without a chosen mode follow the original restore rules. When input is required, it only verifies this restore’s source.",
+    "password": "Source key or recovery passphrase",
     "confirm": "Restore configuration",
     "restoring": "Restoring…",
-    "failed": "Unable to restore. Check the cloud protection password and try again.",
+    "failed": "Recovery could not be confirmed. Check the remote snapshot and local configuration again before retrying.",
     "changed": "The cloud snapshot changed. Close this dialog and download again.",
-    "success": "Cloud configuration restored."
+    "success": "Cloud configuration restored.",
+    "descriptionPlain": "This source is plaintext and does not need a source key. Confirm to restore configuration and skills from this snapshot; local sign-in and sync connection credentials are retained.",
+    "noSourceInput": "This plaintext source has no source key to enter. Check the restore scope; your selected local protection mode will not change."
   },
   "portableBackup": {
     "password": "Backup protection password",
@@ -5362,6 +5364,9 @@
     "verificationRequired": "The result requires further verification; the original operation cannot continue. Preserve the original files and recheck.",
     "completed": "The original operation was recovered. Restart to inspect and reopen the data.",
     "restartDescription": "Recovery does not enable credential features in this process. Restart LoongPort.",
-    "restartFailed": "Restart could not complete. Close and reopen LoongPort manually."
+    "restartFailed": "Restart could not complete. Close and reopen LoongPort manually.",
+    "currentKey": "Local configuration key used by this operation",
+    "currentHelp": "Enter the original local configuration key used by this operation, unchanged. The source may be plaintext; this verifies the local configuration and does not replace your selected protection mode.",
+    "noInputHelp": "This original operation does not require a key. Use the button below to continue recovery. Omitting input does not change the local protection mode."
   }
 }

@@ -30,7 +30,9 @@ pub(crate) mod content_tests;
 mod device;
 #[cfg(feature = "test-hooks")]
 pub(crate) use codex_pending_tests::verify as verify_codex_pending;
-pub(crate) use content::install_sync_content;
+pub(crate) use content::{
+    install_sync_content, recovery_input_kind as content_recovery_input_kind, RecoveryInputKind,
+};
 use device::{RootBindings, Roots};
 
 pub(crate) struct SkillsReplacement {
@@ -1444,7 +1446,7 @@ fn recover_record(
             {
                 return Err(AppError::Config("secret.conflicting_transition".into()));
             }
-            return content::recover(root, bytes, password).map(Some);
+            return content::recover(root, bytes, store, password).map(Some);
         }
     }
     ensure_legacy_generation_owner(root)?;
@@ -1580,16 +1582,55 @@ fn capture_skill_artifacts(
     artifacts: &mut Vec<Artifact>,
     replacement: &SkillsReplacement,
 ) -> Result<SkillsTree, AppError> {
+    capture_skill_artifacts_with_codec(root, id, Some(auth), artifacts, replacement)
+}
+
+// Arbitrary artifact bytes are not credential strings: a plaintext SKILL file
+// beginning with "lpenc" remains raw content, not a fabricated vault envelope.
+fn seal_artifact_bytes(
+    auth: Option<&VaultContext>,
+    identity: &[&str],
+    bytes: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    match auth {
+        Some(auth) => auth
+            .seal(identity, bytes)
+            .map(String::into_bytes)
+            .map_err(inventory::secret_error),
+        None => Ok(bytes.to_vec()),
+    }
+}
+fn open_artifact_bytes(
+    auth: Option<&VaultContext>,
+    identity: &[&str],
+    bytes: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    match auth {
+        Some(auth) => auth
+            .open(identity, std::str::from_utf8(bytes).map_err(|_| invalid())?)
+            .map_err(inventory::secret_error),
+        None => Ok(Zeroizing::new(bytes.to_vec())),
+    }
+}
+fn capture_skill_artifacts_with_codec(
+    root: &Path,
+    id: &str,
+    auth: Option<&VaultContext>,
+    artifacts: &mut Vec<Artifact>,
+    replacement: &SkillsReplacement,
+) -> Result<SkillsTree, AppError> {
     let directories = visit_skills(&replacement.source, &mut |relative, plaintext| {
-        let bytes = auth
-            .seal(&["local", "transition-skill", id, &relative], &plaintext)
-            .map_err(inventory::secret_error)?;
+        let bytes = seal_artifact_bytes(
+            auth,
+            &["local", "transition-skill", id, &relative],
+            &plaintext,
+        )?;
         stage_artifact(
             root,
             id,
             artifacts,
             Destination::SkillFile { relative },
-            bytes.as_bytes(),
+            &bytes,
         )
     })?;
     Ok(SkillsTree {
@@ -1601,6 +1642,15 @@ fn prepare_skills_install(
     root: &Path,
     id: &str,
     next: &VaultContext,
+    artifacts: &[Artifact],
+    skills: &SkillsTree,
+) -> Result<(), AppError> {
+    prepare_skills_install_with_codec(root, id, Some(next), artifacts, skills)
+}
+fn prepare_skills_install_with_codec(
+    root: &Path,
+    id: &str,
+    auth: Option<&VaultContext>,
     artifacts: &[Artifact],
     skills: &SkillsTree,
 ) -> Result<(), AppError> {
@@ -1626,12 +1676,8 @@ fn prepare_skills_install(
     for (index, artifact) in artifacts.iter().enumerate() {
         if let Destination::SkillFile { relative } = &artifact.destination {
             let bytes = read_stage(root, id, index, artifact)?;
-            let plaintext = next
-                .open(
-                    &["local", "transition-skill", id, relative],
-                    std::str::from_utf8(&bytes).map_err(|_| invalid())?,
-                )
-                .map_err(inventory::secret_error)?;
+            let plaintext =
+                open_artifact_bytes(auth, &["local", "transition-skill", id, relative], &bytes)?;
             write_durable(&ready.join(safe_relative(relative)?), &plaintext)?;
         }
     }

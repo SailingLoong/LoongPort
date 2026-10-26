@@ -90,18 +90,25 @@ struct Fixture {
 }
 impl Fixture {
     fn new(current: StorageContext) -> Self {
+        Self::new_with_source(current, text(SOURCE_TEXT))
+    }
+    fn new_with_source(current: StorageContext, source_context: StorageContext) -> Self {
+        Self::new_with_source_and_skill(current, source_context, b"remote skill body")
+    }
+    fn new_with_source_and_skill(
+        current: StorageContext,
+        source_context: StorageContext,
+        skill_body: &[u8],
+    ) -> Self {
         let home = TestHome::new().unwrap();
         let root = crate::config::get_app_config_dir();
-        let source = database(
-            &home.path().join("authenticated-source"),
-            &text(SOURCE_TEXT),
-        );
+        let source = database(&home.path().join("authenticated-source"), &source_context);
         source
             .set_setting("common_config_claude", "remote-joint-canary")
             .unwrap();
         let skills = root.join("skills");
         std::fs::create_dir_all(skills.join("remote-skill")).unwrap();
-        std::fs::write(skills.join("remote-skill/SKILL.md"), b"remote skill body").unwrap();
+        std::fs::write(skills.join("remote-skill/SKILL.md"), skill_body).unwrap();
         crate::settings::unlock_settings_for_test(source.secrets.clone()).unwrap();
         let local = sync_protocol::build_local_snapshot(&source).unwrap();
         let snapshot = DownloadedSnapshot {
@@ -278,6 +285,13 @@ fn interrupt(fixture: &Fixture, point: Checkpoint) {
 }
 #[cfg(feature = "gui")]
 fn recovery_app(root: &Path) -> tauri::App<tauri::test::MockRuntime> {
+    recovery_app_with_store(root, Arc::new(NoStore))
+}
+#[cfg(feature = "gui")]
+fn recovery_app_with_store(
+    root: &Path,
+    store: Arc<dyn KeyStore>,
+) -> tauri::App<tauri::test::MockRuntime> {
     use crate::secrets::startup::{
         self, credential_protection::CommandDependencies, StartupCoordinator,
     };
@@ -287,9 +301,7 @@ fn recovery_app(root: &Path) -> tauri::App<tauri::test::MockRuntime> {
     assert!(inspected.is_recovery_required());
     tauri::test::mock_builder()
         .manage(StartupCoordinator::new(root.to_path_buf(), inspected))
-        .manage(
-            CommandDependencies::<tauri::test::MockRuntime>::recovery_test_store(Arc::new(NoStore)),
-        )
+        .manage(CommandDependencies::<tauri::test::MockRuntime>::recovery_test_store(store))
         .invoke_handler(tauri::generate_handler![
             startup::get_startup_recovery,
             startup::recover_startup_operation
@@ -602,3 +614,13 @@ fn actual_process_exit_reenters_original_recovery_command() {
         assert!(!root.join(INTENT).exists());
     }
 }
+
+#[path = "remote_plaintext_tests.rs"]
+pub(crate) mod remote_plaintext_tests;
+
+#[path = "remote_plaintext_transport_tests.rs"]
+pub(crate) mod remote_plaintext_transport;
+
+#[cfg(feature = "gui")]
+#[path = "remote_plaintext_recovery_tests.rs"]
+pub(crate) mod remote_plaintext_recovery;

@@ -12,12 +12,12 @@ use crate::settings::{update_s3_sync_status, S3SyncSettings, WebDavSyncStatus};
 
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
-    apply_downloaded_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort,
-    publication_condition, publication_conflict, sha256_hex, snapshot_artifact_path,
-    validate_artifact_size_limit, validate_manifest_compat, validate_upload_metadata,
-    verify_artifact, verify_write_conditions, DownloadedSnapshot, RemoteLayout, SyncManifest,
-    DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION,
-    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_downloaded_snapshot, build_local_snapshot, localized, parse_manifest,
+    persist_sync_success_best_effort, publication_condition, publication_conflict, sha256_hex,
+    snapshot_artifact_path, source_protection_view, validate_artifact_size_limit,
+    validate_manifest_compat, validate_upload_storage, verify_artifact, verify_write_conditions,
+    DownloadedSnapshot, RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
+    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -43,11 +43,7 @@ pub async fn upload(
     super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let snapshot = build_local_snapshot(db)?;
-    let manifest: SyncManifest =
-        serde_json::from_slice(&snapshot.manifest_bytes).map_err(|source| AppError::Json {
-            path: REMOTE_MANIFEST.into(),
-            source,
-        })?;
+    let manifest: SyncManifest = parse_manifest(&snapshot.manifest_bytes)?;
 
     let creds = creds_for(settings);
 
@@ -60,16 +56,9 @@ pub async fn upload(
         settings.status.last_remote_manifest_hash.as_deref(),
     )?;
     if let Some((bytes, _)) = &remote {
-        let remote_manifest: SyncManifest =
-            serde_json::from_slice(bytes).map_err(|source| AppError::Json {
-                path: REMOTE_MANIFEST.into(),
-                source,
-            })?;
+        let remote_manifest: SyncManifest = parse_manifest(bytes)?;
         validate_manifest_compat(&remote_manifest, RemoteLayout::Current)?;
-        validate_upload_metadata(
-            manifest.vault_metadata()?,
-            remote_manifest.vault_metadata()?,
-        )?;
+        validate_upload_storage(&manifest, &remote_manifest)?;
     }
     let db_key = s3_key(settings, &snapshot_artifact_path(&manifest, REMOTE_DB_SQL)?);
     s3::put_object(&creds, &db_key, snapshot.db_sql.clone(), "application/sql").await?;
@@ -137,11 +126,7 @@ async fn fetch_snapshot_inner(settings: &S3SyncSettings) -> Result<DownloadedSna
             )
         })?;
 
-    let manifest: SyncManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|e| AppError::Json {
-            path: REMOTE_MANIFEST.to_string(),
-            source: e,
-        })?;
+    let manifest: SyncManifest = parse_manifest(&manifest_bytes)?;
 
     validate_manifest_compat(&manifest, RemoteLayout::Current)?;
 
@@ -194,12 +179,10 @@ pub async fn fetch_remote_info(settings: &S3SyncSettings) -> Result<Option<Value
         return Ok(None);
     };
 
-    let manifest: SyncManifest = serde_json::from_slice(&bytes).map_err(|e| AppError::Json {
-        path: REMOTE_MANIFEST.to_string(),
-        source: e,
-    })?;
+    let manifest: SyncManifest = parse_manifest(&bytes)?;
 
-    let compatible = validate_manifest_compat(&manifest, RemoteLayout::Current).is_ok();
+    let (compatible, protection_mode, source_input_required) =
+        source_protection_view(&manifest, RemoteLayout::Current);
 
     let payload = serde_json::json!({
         "deviceName": manifest.device_name,
@@ -209,6 +192,8 @@ pub async fn fetch_remote_info(settings: &S3SyncSettings) -> Result<Option<Value
         "protocolVersion": manifest.version,
         "dbCompatVersion": manifest.db_compat_version,
         "compatible": compatible,
+        "protectionMode": protection_mode,
+        "sourceInputRequired": source_input_required,
         "artifacts": manifest.artifacts.keys().collect::<Vec<_>>(),
         "layout": RemoteLayout::Current.as_str(),
         "remotePath": s3_dir_display(settings),

@@ -5,6 +5,8 @@ export interface StartupRecoveryView {
   status: "pending" | "completed" | "verification_required";
   canRecover: boolean;
   restartRequired: boolean;
+  inputRequired: boolean;
+  inputKind: "none" | "source" | "current";
 }
 export const startupRecoveryKey = ["startupRecovery"] as const;
 
@@ -24,12 +26,37 @@ function readView(value: unknown): StartupRecoveryView {
     typeof value.restartRequired !== "boolean"
   )
     throw new Error("startupRecovery.invalidStatus");
+  const hasRequired = Object.hasOwn(value, "inputRequired");
+  const hasKind = Object.hasOwn(value, "inputKind");
+  // Only a completely legacy response retains the original source-input contract.
+  // Missing half of a new capability must never become a no-input permission.
+  let inputRequired = true;
+  let inputKind: StartupRecoveryView["inputKind"] = "source";
+  if (hasRequired || hasKind) {
+    if (
+      !hasRequired ||
+      !hasKind ||
+      !("inputRequired" in value) ||
+      typeof value.inputRequired !== "boolean" ||
+      !("inputKind" in value) ||
+      typeof value.inputKind !== "string" ||
+      !["none", "source", "current"].includes(value.inputKind) ||
+      value.inputRequired !== (value.inputKind !== "none") ||
+      ((!value.canRecover || value.status === "completed") &&
+        value.inputKind !== "none")
+    )
+      throw new Error("startupRecovery.invalidStatus");
+    inputRequired = value.inputRequired;
+    inputKind = value.inputKind as StartupRecoveryView["inputKind"];
+  }
   // Only the established public DTO enters the query cache, never extra fields.
   return {
     token: value.token,
     status: value.status as StartupRecoveryView["status"],
     canRecover: value.canRecover,
     restartRequired: value.restartRequired,
+    inputRequired,
+    inputKind,
   };
 }
 export const startupRecoveryApi = {
@@ -43,8 +70,8 @@ export const startupRecoveryApi = {
     }
   },
   recover: async (token: string, sourceText: string) => {
-    // Original wire name and original owner: this is the operation's SOURCE
-    // key/recovery passphrase, not a new protection choice or an ordinary unlock.
+    // Original wire and original owner. The inspected native journal decides
+    // source/current/no input; an empty string never selects a protection mode.
     const view = readView(
       await invoke<unknown>("recover_startup_operation", {
         token,

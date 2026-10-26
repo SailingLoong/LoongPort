@@ -288,7 +288,7 @@ describe("WebdavSyncSection", () => {
   );
 
   it.each(["webdav", "s3"] as const)(
-    "offers %s source restore for plaintext only after reviewing a compatible snapshot",
+    "offers %s encrypted-source restore for a plaintext target only after reviewing a compatible snapshot",
     async (transport) => {
       const api =
         transport === "webdav"
@@ -306,6 +306,8 @@ describe("WebdavSyncSection", () => {
         deviceName: "Source",
         snapshotId: "reviewed-original",
         compatible: true,
+        protectionMode: "encrypted",
+        sourceInputRequired: true,
         artifacts: [],
         version: 2,
       });
@@ -350,6 +352,174 @@ describe("WebdavSyncSection", () => {
         "中文",
       );
       expect(client.getMutationCache().getAll()).toHaveLength(0);
+    },
+  );
+
+  it.each(["webdav", "s3"] as const)(
+    "downloads a compatible %s plaintext source without asking for or submitting a source key",
+    async (transport) => {
+      const api =
+        transport === "webdav"
+          ? {
+              info: settingsApiMock.webdavSyncFetchRemoteInfo,
+              download: settingsApiMock.webdavSyncDownload,
+              restore: settingsApiMock.webdavSyncRestore,
+            }
+          : {
+              info: settingsApiMock.s3SyncFetchRemoteInfo,
+              download: settingsApiMock.s3SyncDownload,
+              restore: settingsApiMock.s3SyncRestore,
+            };
+      api.info.mockResolvedValue({
+        deviceName: "Plain source",
+        snapshotId: "plain-reviewed",
+        compatible: true,
+        artifacts: ["db.sql", "skills.zip"],
+        version: 4,
+        protocolVersion: 3,
+        layout: "current",
+        remotePath: "synthetic",
+        protectionMode: "plaintext",
+        sourceInputRequired: false,
+      });
+      api.download.mockResolvedValue({ status: "downloaded" });
+      renderSection(
+        transport === "webdav" ? baseConfig : undefined,
+        transport === "s3"
+          ? {
+              enabled: true,
+              bucket: "synthetic",
+              region: "test",
+              accessKeyId: "synthetic",
+              secretAccessKey: "synthetic",
+              status: {},
+            }
+          : undefined,
+      );
+      const prefix = `settings.${transport === "webdav" ? "webdavSync" : "s3Sync"}`;
+      fireEvent.click(
+        screen.getByRole("button", { name: `${prefix}.download` }),
+      );
+      const confirm = await screen.findByRole("button", {
+        name: `${prefix}.confirmDownload.confirm`,
+      });
+      expect(api.download).not.toHaveBeenCalled();
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+      fireEvent.click(confirm);
+      await waitFor(() => expect(api.download).toHaveBeenCalledOnce());
+      expect(api.restore).not.toHaveBeenCalled();
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["webdav", "s3"] as const)(
+    "does not turn a changed %s plaintext snapshot into successful download or source-key restoration",
+    async (transport) => {
+      const api =
+        transport === "webdav"
+          ? {
+              info: settingsApiMock.webdavSyncFetchRemoteInfo,
+              download: settingsApiMock.webdavSyncDownload,
+              restore: settingsApiMock.webdavSyncRestore,
+            }
+          : {
+              info: settingsApiMock.s3SyncFetchRemoteInfo,
+              download: settingsApiMock.s3SyncDownload,
+              restore: settingsApiMock.s3SyncRestore,
+            };
+      api.info.mockResolvedValue({
+        deviceName: "Plain source",
+        snapshotId: "plain-reviewed",
+        compatible: true,
+        artifacts: ["db.sql", "skills.zip"],
+        version: 4,
+        protocolVersion: 3,
+        layout: "current",
+        remotePath: "synthetic",
+        protectionMode: "plaintext",
+        sourceInputRequired: false,
+      });
+      api.download.mockRejectedValue("配置错误: sync.conflict");
+      renderSection(
+        transport === "webdav" ? baseConfig : undefined,
+        transport === "s3"
+          ? {
+              enabled: true,
+              bucket: "synthetic",
+              region: "test",
+              accessKeyId: "synthetic",
+              secretAccessKey: "synthetic",
+              status: {},
+            }
+          : undefined,
+      );
+      const prefix = `settings.${transport === "webdav" ? "webdavSync" : "s3Sync"}`;
+      fireEvent.click(
+        screen.getByRole("button", { name: `${prefix}.download` }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: `${prefix}.confirmDownload.confirm`,
+        }),
+      );
+      await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+      expect(api.download).toHaveBeenCalledOnce();
+      expect(api.restore).not.toHaveBeenCalled();
+      expect(toastSuccessMock).not.toHaveBeenCalled();
+      expect(
+        screen.queryByRole("button", { name: "syncRestore.confirm" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    { protectionMode: "plaintext" },
+    { sourceInputRequired: false },
+    { protectionMode: "plaintext", sourceInputRequired: true },
+    { protectionMode: "encrypted", sourceInputRequired: false },
+    { protectionMode: null, sourceInputRequired: false },
+    { protectionMode: "future-mode", sourceInputRequired: false },
+  ])(
+    "does not offer restoration from invalid source protection authority %j",
+    async (protection) => {
+      settingsApiMock.webdavSyncFetchRemoteInfo.mockResolvedValue({
+        deviceName: "Invalid source",
+        snapshotId: "synthetic-invalid",
+        compatible: true,
+        artifacts: [],
+        version: 4,
+        ...protection,
+      });
+      settingsApiMock.webdavSyncDownload.mockRejectedValue(
+        "sync.vault_adoption_required",
+      );
+      renderSection(baseConfig);
+      fireEvent.click(
+        screen.getByRole("button", { name: "settings.webdavSync.download" }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "settings.webdavSync.confirmDownload.confirm",
+        }),
+      );
+      await waitFor(() =>
+        expect(settingsApiMock.webdavSyncDownload).toHaveBeenCalledOnce(),
+      );
+      await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+      expect(
+        screen.queryByRole("button", { name: "syncRestore.confirm" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+      expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
     },
   );
 

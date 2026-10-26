@@ -299,3 +299,40 @@ pub(crate) fn tauri_test_origin() -> url::Url {
     .parse()
     .expect("Tauri test origin is a static valid URL")
 }
+
+#[cfg(feature = "test-hooks")]
+pub fn verify_remote_plaintext_case(case: &str) {
+    crate::secrets::transition::content_tests::remote_plaintext_tests::run(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_remote_plaintext_transport_case(case: &str) {
+    crate::secrets::transition::content_tests::remote_plaintext_transport::run_case(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_original_publication_control(case: &str) {
+    crate::services::sync_protocol::verify_original_publication_control(case);
+}
+
+#[doc(hidden)]
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_remote_plaintext_recovery_case(case: &str) {
+    crate::secrets::transition::content_tests::remote_plaintext_recovery::run(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_archive_stage_privacy_case(case: &str) {
+    crate::secrets::transition::content_tests::remote_plaintext_transport::run_archive_case(case);
+}
+
+#[doc(hidden)]
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_remote_plaintext_auto_attempt(case: &str) {
+    crate::secrets::transition::content_tests::remote_plaintext_transport::run_auto_attempt_case(
+        case,
+    );
+}

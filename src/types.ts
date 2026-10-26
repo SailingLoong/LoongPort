@@ -370,6 +370,9 @@ export type RemoteSnapshotLayout = "current" | "legacy";
 
 // 远端快照信息（下载前预览）
 export interface RemoteSnapshotInfo {
+  /** Native descriptor facts; both absent only on the legacy encrypted wire. */
+  protectionMode?: "encrypted" | "plaintext" | null;
+  sourceInputRequired?: boolean;
   deviceName: string;
   createdAt: string;
   snapshotId: string;

@@ -76,7 +76,11 @@ fn persist_auto_sync_error(settings: &mut S3SyncSettings, error: &AppError) {
     );
 }
 
-fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&str>) {
+fn emit_auto_sync_status_updated<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    status: &str,
+    error: Option<&str>,
+) {
     let payload = match error {
         Some(message) => json!({
             "source": "auto",
@@ -98,9 +102,9 @@ fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&s
         );
 }
 
-async fn run_auto_sync_upload(
+async fn run_auto_sync_upload<R: tauri::Runtime>(
     db: &crate::database::Database,
-    app: &AppHandle,
+    app: &AppHandle<R>,
 ) -> Result<(), AppError> {
     let mut settings = settings::get_s3_sync_settings()?;
     if !should_run_auto_sync(settings.as_ref()) {
@@ -185,6 +189,14 @@ async fn run_worker_loop(
             ),
         }
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) async fn run_auto_sync_upload_for_test<R: tauri::Runtime>(
+    db: &crate::database::Database,
+    app: &AppHandle<R>,
+) -> Result<(), AppError> {
+    run_auto_sync_upload(db, app).await
 }
 
 #[cfg(test)]
