@@ -1266,7 +1266,7 @@ mod tests {
     /// parallel tests in other modules.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
         let _guard = test_guard();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::secrets::testing::tempdir().unwrap();
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
         // Neutralize the env vars get_hermes_dir() consults, so an ambient

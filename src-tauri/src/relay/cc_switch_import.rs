@@ -1494,7 +1494,8 @@ mod tests {
         let before = std::fs::read(src.path()).expect("读源库字节");
 
         let report = {
-            let _guard = TestHomeGuard::set(tempfile::tempdir().unwrap().path());
+            let home = crate::secrets::testing::tempdir().unwrap();
+            let _guard = TestHomeGuard::set(home.path());
             execute_import(crate::store::AppState::new(db.clone()).unwrap(), src.path())
                 .expect("导入不该失败")
         };

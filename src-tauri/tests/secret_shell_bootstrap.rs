@@ -71,7 +71,7 @@ fn availability_requires_an_actual_available_session_without_custody_io() {
 // One test owns the process-global settings store and environment override.
 #[test]
 fn keyless_shell_reads_only_bootstrap_preserves_errors_and_cannot_save() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let _test_home = TestHome::enter(home.path());
     let root = home.path().join(".loongport");
     std::fs::create_dir_all(&root).unwrap();

@@ -385,7 +385,7 @@ mod tests {
 
         impl TestHome {
             fn new() -> Self {
-                let directory = tempfile::tempdir().unwrap();
+                let directory = crate::secrets::testing::tempdir().unwrap();
                 let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
                 let previous_hermes_home = std::env::var_os("HERMES_HOME");
                 let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");

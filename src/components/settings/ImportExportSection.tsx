@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -8,7 +8,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  LiteralKeyInput,
+  type LiteralKeyInputHandle,
+} from "@/components/relay/LiteralKeyInput";
 import { Label } from "@/components/ui/label";
 import { useTranslation } from "react-i18next";
 import type { ImportStatus } from "@/hooks/useImportExport";
@@ -37,13 +40,25 @@ export function ImportExportSection({
   onClear,
 }: ImportExportSectionProps) {
   const { t } = useTranslation();
-  const [password, setPassword] = useState("");
-  useEffect(() => setPassword(""), [selectedFile]);
+  const password = useRef<LiteralKeyInputHandle>(null);
+  const inFlight = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const clearPassword = () => {
+    if (password.current) password.current.value = "";
+  };
+  useEffect(clearPassword, [selectedFile]);
   const importSelectedFile = async () => {
+    if (inFlight.current || isImporting || !selectedFile) return;
+    const sourceInput = password.current?.value ?? "";
+    clearPassword();
+    inFlight.current = true;
+    setSubmitting(true);
     try {
-      await onImport(password || undefined);
+      // Empty means no supplied backup input, never a protection-mode selection.
+      await onImport(sourceInput.length > 0 ? sourceInput : undefined);
     } finally {
-      setPassword("");
+      inFlight.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -73,7 +88,7 @@ export function ImportExportSection({
               type="button"
               className={`w-full h-auto py-3 px-4 bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 text-white ${selectedFile && !isImporting ? "flex-col items-start" : "items-center"}`}
               onClick={!selectedFile ? onSelectFile : importSelectedFile}
-              disabled={isImporting}
+              disabled={isImporting || submitting}
             >
               <div className="flex items-center gap-2 w-full justify-center">
                 {isImporting ? (
@@ -102,7 +117,10 @@ export function ImportExportSection({
             {selectedFile && (
               <button
                 type="button"
-                onClick={onClear}
+                onClick={() => {
+                  clearPassword();
+                  onClear();
+                }}
                 className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-lg transition-colors z-10"
                 aria-label={t("common.clear")}
               >
@@ -129,13 +147,11 @@ export function ImportExportSection({
             <Label htmlFor="backup-protection-password">
               {t("portableBackup.password")}
             </Label>
-            <Input
+            <LiteralKeyInput
+              ref={password}
               id="backup-protection-password"
-              type="password"
-              autoComplete="off"
-              value={password}
-              disabled={isImporting}
-              onChange={(event) => setPassword(event.target.value)}
+              disabled={isImporting || submitting}
+              onValueChange={() => {}}
             />
             <p className="text-sm text-muted-foreground">
               {t("portableBackup.importNotice")}

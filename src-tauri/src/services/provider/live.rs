@@ -2526,7 +2526,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn openclaw_path_removal_uses_selected_file_when_state_directory_is_absent() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
         let state = temp.path().join("missing-state");
         let config = temp.path().join("config/custom.json5");
@@ -2548,7 +2548,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn openclaw_path_removal_of_missing_file_does_not_create_directories() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
         let state = temp.path().join("missing-state");
         let config = temp.path().join("missing-config/custom.json5");
@@ -2569,7 +2569,7 @@ mod tests {
     #[cfg(unix)]
     impl TestHome {
         fn new() -> Self {
-            let dir = tempfile::tempdir().expect("create isolated home");
+            let dir = crate::secrets::testing::tempdir().expect("create isolated home");
             let original = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
             crate::settings::reload_settings().expect("reload isolated settings");

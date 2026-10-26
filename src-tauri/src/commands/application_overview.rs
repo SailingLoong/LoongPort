@@ -431,7 +431,7 @@ mod tests {
                 }
             }
         }
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::secrets::testing::tempdir().unwrap();
         let _restore = TestHome(std::env::var_os("CC_SWITCH_TEST_HOME"));
         std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
         let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();

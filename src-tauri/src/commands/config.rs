@@ -333,7 +333,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn openclaw_path_config_directory_projects_selected_file_parent() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let _env = crate::openclaw_config::path_test_support::Environment::new(temp.path());
         let state = temp.path().join("missing-state");
         let config = temp.path().join("separate/config.json5");

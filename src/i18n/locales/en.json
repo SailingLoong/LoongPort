@@ -4396,7 +4396,7 @@
     "title": "Restore cloud configuration",
     "description": "Replace this device’s configuration and skills with the cloud snapshot. Local sign-in accounts and sync connection credentials will be retained.",
     "source": "Snapshot from {{deviceName}}",
-    "protection": "After restoring, this device will use the cloud snapshot’s protection password.",
+    "protection": "The input verifies the cloud snapshot’s source. A local protection mode you have already chosen is retained. Legacy configurations without a chosen mode still follow the original restore rules; a successful restore adopts the source’s protection information.",
     "password": "Cloud protection password",
     "confirm": "Restore configuration",
     "restoring": "Restoring…",
@@ -4406,7 +4406,7 @@
   },
   "portableBackup": {
     "password": "Backup protection password",
-    "importNotice": "Import replaces configuration and retains local sign-in and sync credentials. This device keeps its protection password. Older unencrypted backups do not need a password.",
+    "importNotice": "Import replaces configuration and retains local sign-in and sync credentials. The current protection mode and any existing key stay unchanged. Older unencrypted backups do not need a password.",
     "passwordRequired": "Enter the protection password for this backup.",
     "passwordRejected": "The backup protection password is incorrect.",
     "exportPasswordRequired": "Set a protection password in Credential protection before exporting a backup."

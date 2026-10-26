@@ -20,7 +20,7 @@ struct TestHomeGuard {
 
 impl TestHomeGuard {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create isolated test home");
+        let dir = crate::secrets::testing::tempdir().expect("create isolated test home");
         let original_home = env::var_os("HOME");
         let original_userprofile = env::var_os("USERPROFILE");
         let original_test_home = env::var_os("CC_SWITCH_TEST_HOME");

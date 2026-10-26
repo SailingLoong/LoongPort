@@ -48,6 +48,54 @@ afterEach(() => {
 });
 
 describe("useImportExport Hook", () => {
+  it.each(["reject", "resolved"])(
+    "does not log or display an untrusted %s import failure containing the source input",
+    async (kind) => {
+      const secret = "synthetic\r\nsource-key";
+      openFileDialogMock.mockResolvedValue("/tmp/source.sql");
+      if (kind === "reject")
+        importConfigMock.mockRejectedValue(new Error(`failure ${secret}`));
+      else
+        importConfigMock.mockResolvedValue({
+          success: false,
+          message: `failure ${secret}`,
+        });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { result } = renderHook(() => useImportExport());
+      await act(async () => {
+        await result.current.selectImportFile();
+      });
+      await act(async () => {
+        await result.current.importConfig(secret);
+      });
+      expect(importConfigMock).toHaveBeenCalledWith("/tmp/source.sql", secret);
+      expect(JSON.stringify(log.mock.calls)).not.toContain("source-key");
+      expect(result.current.errorMessage).not.toContain("source-key");
+      expect(JSON.stringify(toastErrorMock.mock.calls)).not.toContain(
+        "source-key",
+      );
+      log.mockRestore();
+    },
+  );
+
+  it.each([
+    ["backup.password_required", "portableBackup.passwordRequired"],
+    ["配置错误: backup.password_required", "portableBackup.passwordRequired"],
+    ["secret.password_rejected", "portableBackup.passwordRejected"],
+    ["配置错误: secret.password_rejected", "portableBackup.passwordRejected"],
+  ])("maps only the stable source-input error %s", async (code, message) => {
+    openFileDialogMock.mockResolvedValue("/tmp/source.sql");
+    importConfigMock.mockRejectedValue(code);
+    const { result } = renderHook(() => useImportExport());
+    await act(async () => {
+      await result.current.selectImportFile();
+    });
+    await act(async () => {
+      await result.current.importConfig("synthetic source");
+    });
+    expect(result.current.errorMessage).toBe(message);
+  });
+
   it("submits the explicit backup password and uses the backend projection result", async () => {
     openFileDialogMock.mockResolvedValue("/tmp/portable.sql");
     importConfigMock.mockResolvedValue({
@@ -152,9 +200,9 @@ describe("useImportExport Hook", () => {
     });
 
     expect(result.current.status).toBe("error");
-    expect(result.current.errorMessage).toBe("Config corrupted");
+    expect(result.current.errorMessage).toBe("导入配置失败");
     expect(result.current.selectedFile).toBe("/config.json");
-    expect(toastErrorMock).toHaveBeenCalledWith("Config corrupted");
+    expect(toastErrorMock).toHaveBeenCalledWith("导入配置失败");
   });
 
   it("should catch and display error when import process throws exception", async () => {
@@ -172,7 +220,7 @@ describe("useImportExport Hook", () => {
     });
 
     expect(result.current.status).toBe("error");
-    expect(result.current.errorMessage).toBe("Import failed");
+    expect(result.current.errorMessage).toBe("导入配置失败");
     expect(toastErrorMock).toHaveBeenCalledWith(
       expect.stringContaining("导入配置失败:"),
     );

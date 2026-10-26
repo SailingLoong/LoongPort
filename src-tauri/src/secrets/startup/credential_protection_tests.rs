@@ -94,7 +94,7 @@ fn invoke(
             cmd: cmd.into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            url: crate::integration_test_support::tauri_test_origin(),
             body: tauri::ipc::InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.into(),

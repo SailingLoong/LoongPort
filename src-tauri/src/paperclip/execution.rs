@@ -907,7 +907,7 @@ mod paperclip_admission_tests {
     }
     impl TestHome {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::secrets::testing::tempdir().unwrap();
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
             Self {

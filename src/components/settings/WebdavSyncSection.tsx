@@ -49,6 +49,26 @@ import type {
   WebDavSyncSettings,
 } from "@/types";
 
+// A compatible preview is not authentication: the original restore IPC re-fetches,
+// matches this snapshot id and authenticates the source before installation.
+function canRequestSourceRestore(
+  error: unknown,
+  snapshot: RemoteSnapshotInfo | null,
+): boolean {
+  if (
+    snapshot?.compatible !== true ||
+    typeof snapshot.snapshotId !== "string" ||
+    snapshot.snapshotId.length === 0
+  )
+    return false;
+  const message = extractErrorMessage(error);
+  return (
+    isSyncRestoreRequired(error) ||
+    message === "protection.encryption_required" ||
+    message === "配置错误: protection.encryption_required"
+  );
+}
+
 // ─── WebDAV service presets ─────────────────────────────────
 
 interface WebDavPreset {
@@ -781,7 +801,7 @@ export function WebdavSyncSection({
       toast.success(t("settings.webdavSync.downloadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
-      if (isSyncRestoreRequired(error) && remoteInfo) {
+      if (canRequestSourceRestore(error, remoteInfo) && remoteInfo) {
         setRestoreRequest({ transport: "webdav", snapshot: remoteInfo });
         return;
       }
@@ -988,7 +1008,7 @@ export function WebdavSyncSection({
       toast.success(t("settings.s3Sync.downloadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
-      if (isSyncRestoreRequired(error) && s3RemoteInfo) {
+      if (canRequestSourceRestore(error, s3RemoteInfo) && s3RemoteInfo) {
         setRestoreRequest({ transport: "s3", snapshot: s3RemoteInfo });
         return;
       }
@@ -1105,7 +1125,12 @@ export function WebdavSyncSection({
               restoreRequest.transport === "webdav"
                 ? settingsApi.webdavSyncRestore
                 : settingsApi.s3SyncRestore;
-            await restore(password, restoreRequest.snapshot.snapshotId);
+            const result = await restore(
+              password,
+              restoreRequest.snapshot.snapshotId,
+            );
+            if (result?.status !== "restored")
+              throw new Error("sync.restore_unverified");
             setRestoreRequest(null);
             toast.success(t("syncRestore.success"));
             await queryClient.invalidateQueries();

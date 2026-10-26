@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  LiteralKeyInput,
+  type LiteralKeyInputHandle,
+} from "@/components/relay/LiteralKeyInput";
 import { Label } from "@/components/ui/label";
 import {
   Dialog,
@@ -31,15 +34,30 @@ export function SyncRestoreDialog({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const [password, setPassword] = useState("");
+  const password = useRef<LiteralKeyInputHandle>(null);
+  const [hasPassword, setHasPassword] = useState(false);
+  const inFlight = useRef(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
+  const clearPassword = () => {
+    if (password.current) password.current.value = "";
+    setHasPassword(false);
+  };
+  const close = () => {
+    if (inFlight.current) return;
+    clearPassword();
+    onClose();
+  };
   const restore = async () => {
+    const sourceInput = password.current?.value ?? "";
+    if (inFlight.current || sourceInput.length === 0) return;
+    inFlight.current = true;
+    clearPassword();
     setPending(true);
     setFailure(null);
     try {
-      await onRestore(password);
+      await onRestore(sourceInput);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setFailure(
@@ -48,7 +66,7 @@ export function SyncRestoreDialog({
           : "syncRestore.failed",
       );
     } finally {
-      setPassword("");
+      inFlight.current = false;
       setPending(false);
     }
   };
@@ -57,7 +75,7 @@ export function SyncRestoreDialog({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !pending) onClose();
+        if (!open) close();
       }}
     >
       <DialogContent>
@@ -84,13 +102,13 @@ export function SyncRestoreDialog({
             <Label htmlFor="sync-restore-password">
               {t("syncRestore.password")}
             </Label>
-            <Input
+            <LiteralKeyInput
+              ref={password}
               id="sync-restore-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
               disabled={pending}
-              onChange={(event) => setPassword(event.target.value)}
+              onValueChange={() =>
+                setHasPassword((password.current?.value.length ?? 0) > 0)
+              }
             />
           </div>
           {failure && (
@@ -103,14 +121,14 @@ export function SyncRestoreDialog({
               type="button"
               variant="outline"
               disabled={pending}
-              onClick={onClose}
+              onClick={close}
             >
               {t("common.cancel")}
             </Button>
             <Button
               type="submit"
               variant="destructive"
-              disabled={pending || !password}
+              disabled={pending || !hasPassword}
             >
               {t(pending ? "syncRestore.restoring" : "syncRestore.confirm")}
             </Button>

@@ -41,22 +41,89 @@ describe.each([en, zh, ja, zhTW])(
   },
 );
 
-it("keeps the frontend recovery DTO and original command names aligned with the Rust owner", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const startup = await readFile("src-tauri/src/secrets/startup.rs", "utf8");
+function assertOriginalRecoveryContract(startup: string, registration: string) {
   const view = startup.match(
     /pub\(crate\) struct StartupRecoveryView\s*\{([^}]+)\}/,
   )?.[1];
+  expect(view).toBeDefined();
   expect(view).toMatch(/token:\s*String/);
   expect(view).toMatch(/status:\s*&'static str/);
   expect(view).toMatch(/can_recover:\s*bool/);
   expect(view).toMatch(/restart_required:\s*bool/);
+  // The native owner is generic over the Tauri runtime for its real IPC tests.
+  // Generics do not change the wire arguments; never make those arguments optional.
   const command = startup.match(
-    /async fn recover_startup_operation\(([^)]+)\)/,
+    /async\s+fn\s+recover_startup_operation\s*(?:<[^(){}]*>)?\s*\(([^)]+)\)/,
   )?.[1];
+  expect(command).toBeDefined();
   expect(command).toMatch(/token:\s*String/);
   expect(command).toMatch(/password:\s*String/);
-  const registration = await readFile("src-tauri/src/lib.rs", "utf8");
   expect(registration).toContain("secrets::startup::get_startup_recovery");
   expect(registration).toContain("secrets::startup::recover_startup_operation");
+}
+
+async function readNativeContract() {
+  const { readFile } = await import("node:fs/promises");
+  return Promise.all([
+    readFile("src-tauri/src/secrets/startup.rs", "utf8"),
+    readFile("src-tauri/src/lib.rs", "utf8"),
+  ]);
+}
+
+it("keeps the frontend recovery DTO and original command names aligned with the Rust owner", async () => {
+  const [startup, registration] = await readNativeContract();
+  assertOriginalRecoveryContract(startup, registration);
+});
+
+it("accepts the same original wire contract with or without a runtime generic", async () => {
+  const [startup, registration] = await readNativeContract();
+  const ordinary = startup.replace(
+    /recover_startup_operation\s*<[^(){}]*>\s*\(/,
+    "recover_startup_operation(",
+  );
+  assertOriginalRecoveryContract(ordinary, registration);
+  assertOriginalRecoveryContract(
+    ordinary.replace(
+      "async fn recover_startup_operation(",
+      "async fn recover_startup_operation <R: tauri::Runtime> (",
+    ),
+    registration,
+  );
+});
+
+it.each(["token", "password"])(
+  "still rejects a renamed recovery wire argument: %s",
+  async (argument) => {
+    const [startup, registration] = await readNativeContract();
+    const broken = startup.replace(
+      /(async\s+fn\s+recover_startup_operation\s*(?:<[^(){}]*>)?\s*\()([^)]+)(\))/,
+      (_, head: string, args: string, tail: string) =>
+        head +
+        args.replace(new RegExp(`\\b${argument}:`), "changed_argument:") +
+        tail,
+    );
+    expect(broken).not.toBe(startup);
+    expect(() =>
+      assertOriginalRecoveryContract(broken, registration),
+    ).toThrow();
+  },
+);
+
+it("still rejects a missing recovery capability field or command registration", async () => {
+  const [startup, registration] = await readNativeContract();
+  expect(() =>
+    assertOriginalRecoveryContract(
+      startup.replace("can_recover: bool", "changed_capability: bool"),
+      registration,
+    ),
+  ).toThrow();
+  expect(() =>
+    assertOriginalRecoveryContract(
+      startup,
+      registration.replaceAll(
+        "secrets::startup::recover_startup_operation",
+        "removed_command",
+      ),
+    ),
+  ).toThrow();
 });

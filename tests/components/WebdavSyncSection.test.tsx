@@ -287,6 +287,160 @@ describe("WebdavSyncSection", () => {
     },
   );
 
+  it.each(["webdav", "s3"] as const)(
+    "offers %s source restore for plaintext only after reviewing a compatible snapshot",
+    async (transport) => {
+      const api =
+        transport === "webdav"
+          ? {
+              info: settingsApiMock.webdavSyncFetchRemoteInfo,
+              download: settingsApiMock.webdavSyncDownload,
+              restore: settingsApiMock.webdavSyncRestore,
+            }
+          : {
+              info: settingsApiMock.s3SyncFetchRemoteInfo,
+              download: settingsApiMock.s3SyncDownload,
+              restore: settingsApiMock.s3SyncRestore,
+            };
+      api.info.mockResolvedValue({
+        deviceName: "Source",
+        snapshotId: "reviewed-original",
+        compatible: true,
+        artifacts: [],
+        version: 2,
+      });
+      api.download.mockRejectedValue(
+        "配置错误: protection.encryption_required",
+      );
+      api.restore.mockResolvedValue({ status: "restored" });
+      const { client } = renderSection(
+        transport === "webdav" ? baseConfig : undefined,
+        transport === "s3"
+          ? {
+              enabled: true,
+              bucket: "synthetic",
+              region: "test",
+              accessKeyId: "synthetic",
+              secretAccessKey: "synthetic",
+              status: {},
+            }
+          : undefined,
+      );
+      const prefix = `settings.${transport === "webdav" ? "webdavSync" : "s3Sync"}`;
+      fireEvent.click(
+        screen.getByRole("button", { name: `${prefix}.download` }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: `${prefix}.confirmDownload.confirm`,
+        }),
+      );
+      const field = await screen.findByLabelText("syncRestore.password");
+      expect(api.restore).not.toHaveBeenCalled();
+      const raw = "\r\n中文🔑 aB\rline\n ";
+      fireEvent.paste(field, { clipboardData: { getData: () => raw } });
+      fireEvent.click(
+        screen.getByRole("button", { name: "syncRestore.confirm" }),
+      );
+      await waitFor(() =>
+        expect(api.restore).toHaveBeenCalledWith(raw, "reviewed-original"),
+      );
+      expect(api.download).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(client.getQueryCache().getAll())).not.toContain(
+        "中文",
+      );
+      expect(client.getMutationCache().getAll()).toHaveLength(0);
+    },
+  );
+
+  it.each(["", undefined])(
+    "does not offer plaintext restore without a reviewed snapshot id (%s)",
+    async (snapshotId) => {
+      settingsApiMock.webdavSyncFetchRemoteInfo.mockResolvedValue({
+        deviceName: "Source",
+        snapshotId,
+        compatible: true,
+        artifacts: [],
+        version: 2,
+      });
+      settingsApiMock.webdavSyncDownload.mockRejectedValue(
+        "protection.encryption_required",
+      );
+      renderSection(baseConfig);
+      fireEvent.click(
+        screen.getByRole("button", { name: "settings.webdavSync.download" }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "settings.webdavSync.confirmDownload.confirm",
+        }),
+      );
+      await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+      expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not offer source restore for encryption-required upload or an unrelated error containing its code", async () => {
+    settingsApiMock.webdavSyncUpload.mockRejectedValue(
+      "protection.encryption_required",
+    );
+    settingsApiMock.webdavSyncDownload.mockRejectedValue(
+      "unrelated protection.encryption_required detail",
+    );
+    renderSection(baseConfig);
+    for (const action of ["upload", "download"] as const) {
+      fireEvent.click(
+        screen.getByRole("button", { name: `settings.webdavSync.${action}` }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: `settings.webdavSync.confirm${action === "upload" ? "Upload" : "Download"}.confirm`,
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          settingsApiMock[
+            action === "upload" ? "webdavSyncUpload" : "webdavSyncDownload"
+          ],
+        ).toHaveBeenCalled(),
+      );
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument();
+    }
+    expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
+  });
+
+  it("does not announce restoration or repeat an ambiguous native restore reply", async () => {
+    settingsApiMock.webdavSyncDownload.mockRejectedValue(
+      "sync.vault_adoption_required",
+    );
+    settingsApiMock.webdavSyncRestore.mockResolvedValue({ status: "unknown" });
+    renderSection(baseConfig);
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.download" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.webdavSync.confirmDownload.confirm",
+      }),
+    );
+    const field = await screen.findByLabelText("syncRestore.password");
+    fireEvent.change(field, { target: { value: "synthetic source" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "syncRestore.failed",
+    );
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+    expect(settingsApiMock.webdavSyncRestore).toHaveBeenCalledTimes(1);
+    expect(field).toHaveValue("");
+  });
+
   it("requires an explicit password restore after foreign vault admission and binds the reviewed snapshot", async () => {
     settingsApiMock.webdavSyncDownload.mockRejectedValue(
       "配置错误: sync.vault_adoption_required",

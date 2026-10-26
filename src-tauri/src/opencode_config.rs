@@ -487,7 +487,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn reads_existing_providers_and_mcp_from_xdg_config_home() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let home = temp.path().join("home");
         let xdg = temp.path().join("xdg");
         let _guard = TestHomeGuard::set(&home);
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn setters_only_update_xdg_config_and_preserve_home_bytes() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let home = temp.path().join("home");
         let xdg = temp.path().join("xdg");
         let _guard = TestHomeGuard::set(&home);
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn read_rejects_non_object_root_instead_of_panicking_downstream() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // 顶层数组/标量会让下游 `config["provider"] = …` 触发 serde_json panic。
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn set_mcp_server_normalizes_non_object_section() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::secrets::testing::tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());
 
         // `"mcp": []` 时旧代码的 as_object_mut 返回 None → 写入静默失效

@@ -287,3 +287,15 @@ pub fn verify_explicit_legacy_plaintext_file_restore() {
 pub fn verify_modern_unmarked_plaintext_backup() {
     crate::services::backup_transfer::verify_modern_unmarked_plaintext_backup();
 }
+
+/// Match Tauri's own platform-specific test WebView origin; never changes application ACLs.
+#[cfg(all(feature = "gui", any(test, feature = "test-hooks")))]
+pub(crate) fn tauri_test_origin() -> url::Url {
+    if cfg!(any(windows, target_os = "android")) {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    }
+    .parse()
+    .expect("Tauri test origin is a static valid URL")
+}
