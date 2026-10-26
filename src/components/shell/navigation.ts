@@ -5,6 +5,7 @@ import type { AppId } from "@/lib/api";
 export type ClientView =
   | "providers"
   | "services"
+  | "sharedGroups"
   | "image"
   | "records"
   | "usage"
@@ -29,6 +30,7 @@ export type ClientView =
 export const CLIENT_VIEWS: ClientView[] = [
   "providers",
   "services",
+  "sharedGroups",
   "image",
   "records",
   "usage",

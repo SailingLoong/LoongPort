@@ -17,6 +17,8 @@ pub mod error_mapper;
 pub(crate) mod failover_switch;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod forwarder;
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) use forwarder::verify_shared_final_model_override;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod free_models;
 pub mod gemini_url;
@@ -84,5 +86,14 @@ pub(crate) mod redirect_test_support;
 
 pub(crate) mod managed_accounts;
 
-#[cfg(all(test, feature = "gui"))]
+#[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
 pub(crate) mod opencode_vendor_fixture;
+
+#[cfg(all(feature = "test-hooks", feature = "gui"))]
+pub(crate) mod opencode_shared_fixture;
+
+#[cfg(all(feature = "test-hooks", feature = "gui"))]
+pub(crate) mod openrouter_shared_fixture;
+
+#[cfg(all(feature = "gui", feature = "test-hooks", unix))]
+pub(crate) mod zcode_shared_fixture;

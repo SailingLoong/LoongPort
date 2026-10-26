@@ -249,6 +249,36 @@ impl Lease {
         })
     }
 
+    /// Bind an explicit shared-route snapshot to this original owner capability.
+    /// Normal same-account credential rotation remains owned by the refresh path;
+    /// it is not an account replacement and does not change this source identity.
+    pub(crate) fn verify_routing_stamp(
+        &self,
+        expected: &crate::services::service_source_identity::MiniMaxStamp,
+    ) -> Result<(), ProxyError> {
+        let account = &self.snapshot.account;
+        let binding = &self.snapshot.binding;
+        let region = match account.region {
+            catalog::Region::Cn => "cn",
+            catalog::Region::Global => "global",
+        };
+        if expected.account_id != account.id
+            || expected.region != region
+            || expected.auth_generation != account.auth_generation
+            || expected.real_user_id != account.real_user_id
+            || expected.build_env != account.build_env
+            || expected.vault_id != binding.vault.store_id()
+            || expected.storage != binding.vault
+            || expected.session_epoch != binding.session_epoch
+            || expected.process_epoch != binding.process_epoch
+        {
+            return Err(ProxyError::AuthError(
+                "minimax_code.routing_identity_changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Non-secret, fixed routing metadata for the original forwarder's URL
     /// construction/conversion. This cannot override the dispatch destination.
     pub(crate) fn base_url(&self) -> &'static str {
@@ -640,7 +670,7 @@ async fn safe_error_response(
 
 /// A test-only capability issued after synthetic seeding. Neither a real vault
 /// reference nor an arbitrary request can manufacture this private payload.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) struct FixtureOwner {
     root: std::path::PathBuf,
     binding: catalog::Binding,
@@ -650,7 +680,7 @@ pub(crate) struct FixtureOwner {
 /// Request-extension fixture only. Production has no endpoint override or
 /// alternate account resolver. The shared router installs this trusted value;
 /// no HTTP header or request JSON can select it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Clone)]
 pub(crate) struct FixtureTransport {
     root: std::path::PathBuf,
@@ -660,7 +690,7 @@ pub(crate) struct FixtureTransport {
     client: reqwest::Client,
     attempts: Arc<std::sync::atomic::AtomicUsize>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl FixtureTransport {
     pub(crate) async fn loopback(owner: &FixtureOwner, origin: &str) -> Result<Self, Failure> {
         let url = url::Url::parse(origin).map_err(|_| Failure::UnsupportedContext)?;
@@ -789,7 +819,7 @@ impl FixtureTransport {
         .await
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl StreamTransport for FixtureTransport {
     fn request(
         &self,
@@ -826,7 +856,7 @@ impl StreamTransport for FixtureTransport {
         })
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl Transport for FixtureTransport {
     fn request(
         &self,
@@ -869,7 +899,7 @@ impl Transport for FixtureTransport {
         })
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl Lease {
     pub(crate) async fn dispatch_fixture(
         self,

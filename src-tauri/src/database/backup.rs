@@ -949,6 +949,7 @@ impl Database {
                 &[],
             )?;
             self.invalidate_pricing_observations()?;
+            self.secrets.invalidate_database_leases();
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "替换主数据库")?;
@@ -1262,6 +1263,7 @@ impl Database {
         self.verify_released_connection_identity(&current)?;
         self.invalidate_pricing_observations()?;
         {
+            self.secrets.invalidate_database_leases();
             let backup = Backup::new(&working, &mut current)?;
             Self::complete_backup(&backup, "Publish native binding schema")?;
         }
@@ -2038,6 +2040,7 @@ impl Database {
             )?;
             Self::preserve_qoder_states_on_restore(&main_conn, &staging_conn, &vault, &vault)?;
             self.invalidate_pricing_observations()?;
+            self.secrets.invalidate_database_leases();
             let backup = Backup::new(&staging_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "恢复主数据库")?;

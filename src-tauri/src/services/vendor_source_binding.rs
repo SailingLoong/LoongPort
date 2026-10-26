@@ -26,7 +26,7 @@ fn supported(app: &AppType) -> Result<(), AppError> {
 }
 
 /// Validate identity without reading credential columns. Names never establish ownership.
-fn identity(
+pub(crate) fn identity(
     conn: &Connection,
     source: &str,
 ) -> Result<(i64, Vendor, String, &'static vendor::PlanInfo), AppError> {
@@ -40,6 +40,7 @@ fn identity(
             r.get::<_, String>(2)?,
         ))
     })?;
+    let mut found = None;
     for row in rows {
         let (id, vendor_id, account) = row?;
         let Some(vendor) = Vendor::from_id(&vendor_id) else {
@@ -47,11 +48,14 @@ fn identity(
         };
         for plan in vendor::plans_for_account(vendor, Some(&account)) {
             if vendor::provision::provider_id_for(plan.id_segment, &account) == source {
-                return Ok((id, vendor, account, plan));
+                if found.is_some() {
+                    return Err(invalid());
+                }
+                found = Some((id, vendor, account.clone(), plan));
             }
         }
     }
-    Err(invalid())
+    found.ok_or_else(invalid)
 }
 
 fn template(
@@ -117,6 +121,34 @@ pub(crate) fn resolve_on(
     if !is_reference(provider) {
         return Ok(());
     }
+    let (id, _, _) = validate_reference_on(conn, app, provider)?;
+    let encrypted: String = conn.query_row(
+        "SELECT api_key FROM loongport_vendor WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let key = zeroize::Zeroizing::new(open_db(
+        vault,
+        "loongport_vendor",
+        "api_key",
+        &[&id.to_string()],
+        &encrypted,
+    )?);
+    if key.trim().is_empty() {
+        return Err(invalid());
+    }
+    if !provider_config::patch_api_key(&mut provider.settings_config, app, &key) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// The same credential-free reference validation used before original key resolution.
+pub(crate) fn validate_reference_on(
+    conn: &Connection,
+    app: &AppType,
+    provider: &Provider,
+) -> Result<(i64, Vendor, &'static vendor::PlanInfo), AppError> {
     let (id, vendor, account, plan) = identity(conn, &provider.id)?;
     let expected = template(vendor, &account, plan, app)?;
     let meta = provider.meta.as_ref().ok_or_else(invalid)?;
@@ -150,25 +182,38 @@ pub(crate) fn resolve_on(
             return Err(invalid());
         }
     }
-    let encrypted: String = conn.query_row(
-        "SELECT api_key FROM loongport_vendor WHERE id=?1",
-        [id],
-        |r| r.get(0),
-    )?;
-    let key = zeroize::Zeroizing::new(open_db(
-        vault,
-        "loongport_vendor",
-        "api_key",
-        &[&id.to_string()],
-        &encrypted,
-    )?);
-    if key.trim().is_empty() {
-        return Err(invalid());
+    Ok((id, vendor, plan))
+}
+
+/// Explicit shared intent may differ from a saved app default, but only for an
+/// original OpenCode plan/model/protocol combination evidenced by that owner.
+pub(crate) fn shared_model_supported_on(
+    conn: &Connection,
+    app: &AppType,
+    provider: &Provider,
+    model: &str,
+) -> Result<bool, AppError> {
+    if !is_reference(provider) {
+        return Ok(false);
     }
-    if !provider_config::patch_api_key(&mut provider.settings_config, app, &key) {
-        return Err(invalid());
+    let (_, vendor, _, plan) = identity(conn, &provider.id)?;
+    if vendor != Vendor::OpenCode || plan.id_segment != vendor::opencode_personal::GO {
+        return Ok(false);
     }
-    Ok(())
+    validate_reference_on(conn, app, provider)?;
+    let format = match app {
+        AppType::Claude => crate::proxy::providers::get_claude_api_format(provider),
+        AppType::Codex
+            if crate::proxy::providers::codex_provider_uses_chat_completions(provider) =>
+        {
+            "openai_chat"
+        }
+        _ => return Ok(false),
+    };
+    Ok(
+        vendor::opencode_personal::shared_model_protocol_supported(plan.id_segment, model, format)
+            && crate::relay::model_catalog::select_model(app, provider, model).is_ok(),
+    )
 }
 
 pub(crate) fn strip_key(app: &AppType, provider: &Provider) -> Result<serde_json::Value, AppError> {
@@ -303,7 +348,9 @@ pub fn bind_vendor_source(db: &Database, source: &str, app: &AppType) -> Result<
         let before = crate::proxy::application_routing::chain_ids_on(&tx, app.as_str())?;
         crate::proxy::application_routing::write_order_on(&tx, app.as_str(), &before)?;
     }
-    tx.execute("INSERT INTO providers(id,app_type,name,settings_config,website_url,category,meta,is_current,in_failover_queue) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0)",params![source,app.as_str(),provider.name,settings,provider.website_url,provider.category,meta])?;
+    // This is an original row creation (not a shared consumer read). Initialize
+    // its private incarnation in the same insert; subsequent no-op binds do not rotate it.
+    tx.execute("INSERT INTO providers(id,app_type,name,settings_config,website_url,category,meta,credential_revision,is_current,in_failover_queue) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,0)",params![source,app.as_str(),provider.name,settings,provider.website_url,provider.category,meta,crate::database::credential_revision::new_revision()])?;
     tx.commit()?;
     Ok(true)
 }

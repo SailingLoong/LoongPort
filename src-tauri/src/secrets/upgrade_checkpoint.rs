@@ -1005,9 +1005,23 @@ pub(crate) fn archive_and_release(
     db.migrate_released_checkpoint_schema(device, vault.encrypted()?)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod paperclip_schema_lifecycle_tests {
     use super::*;
+
+    #[cfg(feature = "test-hooks")]
+    pub(super) fn verify_prior_fixture(case: &str) {
+        match case {
+            "v24" => paperclip_native_v24_checkpoint_keeps_original_schema_and_digest(),
+            "v29" => actual_v29_checkpoint_preserves_its_original_shape_and_identity(),
+            "archive_v24" => {
+                paperclip_native_v24_completed_archive_migrates_only_authenticated_working_copy()
+            }
+            "current" => qoder_cn_current_checkpoint_keeps_unknown_receipt_and_recorded_identity(),
+            "boundary" => checkpoint_admission_covers_current_and_historical_but_rejects_future(),
+            _ => panic!("unknown original checkpoint fixture"),
+        }
+    }
 
     fn historical_source() -> super::super::checkpoint_tests::Fixture {
         super::super::checkpoint_tests::Fixture::new()
@@ -1200,8 +1214,8 @@ mod paperclip_schema_lifecycle_tests {
         );
     }
 
-    #[test]
-    fn qoder_cn_current_v29_checkpoint_keeps_unknown_receipt_and_recorded_identity() {
+    #[cfg_attr(test, test)]
+    fn qoder_cn_current_checkpoint_keeps_unknown_receipt_and_recorded_identity() {
         let f = historical_source();
         let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
         database::loongport_schema::apply(&source).unwrap();
@@ -1212,7 +1226,7 @@ mod paperclip_schema_lifecycle_tests {
         let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
         assert_eq!(
             database::loongport_schema::read_stored_version(&staged).unwrap(),
-            29
+            database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         assert_eq!(
             crate::database::read_qoder_campaign_operation_rows(&staged).unwrap(),
@@ -1231,19 +1245,53 @@ mod paperclip_schema_lifecycle_tests {
         database::vault::preflight_connection(&staged).unwrap();
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
+    fn actual_v29_checkpoint_preserves_its_original_shape_and_identity() {
+        let f = historical_qoder_source(28);
+        let source = Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        // Perform only the original v28->29 CN migration, never latest+old stamp.
+        database::migrate_qoder_cn_schema_for_test(&source).unwrap();
+        source
+            .execute(
+                "UPDATE loongport_schema_version SET version=29 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(!Database::table_exists(&source, "loongport_routing_groups").unwrap());
+        let columns: i64 = source.query_row("SELECT count(*) FROM pragma_table_info('providers') WHERE name='credential_revision'", [], |row| row.get(0)).unwrap();
+        assert_eq!(columns, 0);
+        source.execute_batch("INSERT INTO qoder_campaign_operations(attempt_id,subject,region,campaign_id,credential_generation,result,provider_id) VALUES('cn-v29-attempt','synthetic-subject','china','benefit:2026','cn-generation','unknown','synthetic-provider')").unwrap();
+        let before = Database::content_digest(&source).unwrap();
+        let rows = database::read_qoder_campaign_operation_rows(&source).unwrap();
+        let id = create(&f.root, &f.device, &f.vault, &[]).unwrap();
+        let staged = stage(&f.root, &f.device, &f.vault, &id).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&staged).unwrap(),
+            29
+        );
+        assert!(!Database::table_exists(&staged, "loongport_routing_groups").unwrap());
+        assert_eq!(
+            database::read_qoder_campaign_operation_rows(&staged).unwrap(),
+            rows
+        );
+        assert_eq!(Database::content_digest(&source).unwrap(), before);
+        database::vault::preflight_connection(&staged).unwrap();
+    }
+
+    #[cfg_attr(test, test)]
     fn checkpoint_admission_covers_current_and_historical_but_rejects_future() {
-        for version in [24, 25, 26, 27, 28, 29] {
+        for version in database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION
+            ..=database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+        {
             assert!(supports_loongport_version(version));
         }
         assert!(!supports_loongport_version(23));
-        assert!(!supports_loongport_version(30));
         assert!(!supports_loongport_version(
             database::loongport_schema::LOONGPORT_SCHEMA_VERSION + 1
         ));
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn paperclip_native_v24_checkpoint_keeps_original_schema_and_digest() {
         let f = historical_source();
         let before = std::fs::read(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
@@ -1255,6 +1303,15 @@ mod paperclip_schema_lifecycle_tests {
             24
         );
         assert!(!Database::table_exists(&staged, "paperclip_run_bindings").unwrap());
+        assert!(
+            !Database::table_exists(&staged, "loongport_routing_groups").unwrap(),
+            "a genuine v24 checkpoint cannot retain pool v30 tables"
+        );
+        let private_columns: i64 = staged.query_row("SELECT count(*) FROM pragma_table_info('providers') WHERE name='credential_revision'", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            private_columns, 0,
+            "genuine v24 cannot retain schema31 issuance columns"
+        );
         assert_eq!(
             std::fs::read(f.root.join(crate::config::DB_FILE_NAME)).unwrap(),
             before
@@ -1263,7 +1320,7 @@ mod paperclip_schema_lifecycle_tests {
         assert!(ensure_sync_admitted(&f.device).is_err());
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn paperclip_native_v24_completed_archive_migrates_only_authenticated_working_copy() {
         let f = historical_source();
         let id = write_archive(&f, 24, None);
@@ -1317,4 +1374,9 @@ mod paperclip_schema_lifecycle_tests {
         crate::config_file_io::write_durable(&archive_path(&f.device), &ciphertext).unwrap();
         assert!(archived_database(&f.root, &f.device, &f.vault, &id).is_err());
     }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_prior_fixture(case: &str) {
+    paperclip_schema_lifecycle_tests::verify_prior_fixture(case);
 }

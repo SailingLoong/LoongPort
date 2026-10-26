@@ -285,6 +285,13 @@ impl SecretSession {
         }
     }
 
+    /// Retire in-flight database-backed capabilities without changing admission.
+    /// Caller already owns the original vault/connection ordering. Failed
+    /// replacement attempts must not revive capabilities captured beforehand.
+    pub(crate) fn invalidate_database_leases(&self) {
+        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(crate) fn set_blocked(&self, blocked: bool) {
         if blocked {
             self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);

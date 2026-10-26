@@ -164,9 +164,314 @@ fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static s
     }
 }
 
+/// A user-confirmed application projection of an existing upstream group.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayTierSelection {
+    pub app: String,
+    pub group_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayDiscoveredTier {
+    pub app: String,
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub group_id: String,
+    pub prepared: bool,
+    /// Existing local projection evidence is not a fresh upstream model probe.
+    /// Cold choices remain explicitly unknown until selected provisioning reads
+    /// the key-backed catalog; protocol compatibility alone is insufficient.
+    pub compatibility: &'static str,
+}
+
+fn discovered_tier(
+    app: AppType,
+    provider_id: String,
+    group_id: String,
+    name: String,
+) -> RelayDiscoveredTier {
+    RelayDiscoveredTier {
+        app: app.as_str().into(),
+        id: provider_id.clone(),
+        provider_id,
+        name,
+        group_id,
+        prepared: false,
+        compatibility: "unknown",
+    }
+}
+
+fn sub2api_discovery_choices(
+    account: &creds::RelayAccount,
+    groups: &[sub2api::Group],
+) -> Vec<RelayDiscoveredTier> {
+    groups
+        .iter()
+        .filter(|group| group.is_usable_ignoring_platform())
+        .flat_map(|group| {
+            let apps = match platform_map::parse_platform(&group.platform) {
+                Some(platform_map::Platform::Composite) => vec![
+                    AppType::Claude,
+                    AppType::Codex,
+                    AppType::Gemini,
+                    AppType::GrokBuild,
+                    AppType::CodexImage,
+                ],
+                Some(platform) => {
+                    let mut apps: Vec<_> = platform.app_type().into_iter().collect();
+                    if apps.contains(&AppType::Codex) {
+                        apps.push(AppType::CodexImage);
+                    }
+                    apps
+                }
+                None => Vec::new(),
+            };
+            apps.into_iter().map(move |app| {
+                discovered_tier(
+                    app,
+                    managed::provider_id_for(&account.site_origin, account.account_id, group.id),
+                    group.id.to_string(),
+                    group.name.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Group discovery never claims, reveals, creates or deletes a key, and never persists a provider.
+async fn discover_backend_choices(
+    account: &creds::RelayAccount,
+    fallback: Option<sub2api::BrowserApiFallback>,
+) -> Result<Vec<RelayDiscoveredTier>, AppError> {
+    // usable_relay owns identity recovery. Never offer anonymous IDs that could
+    // change at confirmation time, or split one account across two write locks.
+    if account.account_id.is_none() {
+        return Err(AppError::Config(
+            "Relay account identity is unavailable; sign in again before configuring".into(),
+        ));
+    }
+    match account.backend_kind {
+        discovery::BackendKind::Sub2Api => {
+            let mut client = sub2api::Client::new(
+                &account.site_origin,
+                &account.auth_token,
+                account.account_id,
+                account.user_agent.as_deref(),
+                account.cf_clearance.as_deref(),
+            )?;
+            if let Some(fallback) = fallback {
+                client = client.with_browser_fallback(fallback);
+            }
+            Ok(sub2api_discovery_choices(
+                account,
+                &client.list_groups().await?,
+            ))
+        }
+        discovery::BackendKind::NewApi => {
+            let client = newapi::NewApiClient::with_optional_account_id(
+                &account.site_origin,
+                &account.auth_token,
+                account.account_id,
+            )?;
+            let remote = client.account().await?;
+            if account.account_id.is_some() && account.account_id != Some(remote.id) {
+                return Err(AppError::Config(
+                    "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
+                ));
+            }
+            Ok(client
+                .groups()
+                .await?
+                .into_iter()
+                .flat_map(|group| {
+                    let provider_id = managed::newapi_provider_id_for(
+                        &account.site_origin,
+                        remote.id,
+                        &group.identity.0,
+                    );
+                    [
+                        AppType::Claude,
+                        AppType::Codex,
+                        AppType::Gemini,
+                        AppType::CodexImage,
+                    ]
+                    .into_iter()
+                    .map(move |app| {
+                        discovered_tier(
+                            app,
+                            provider_id.clone(),
+                            group.identity.0.clone(),
+                            group.name.clone(),
+                        )
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn relay_discover_tiers(
+    app: tauri::AppHandle,
+    relay_id: i64,
+) -> Result<Vec<RelayDiscoveredTier>, String> {
+    let account = usable_relay(&app, relay_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut choices = discover_backend_choices(&account, Some(browser_api_fallback(&app)))
+        .await
+        .map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    for choice in &mut choices {
+        choice.prepared = state
+            .db
+            .get_provider_by_id(&choice.provider_id, &choice.app)
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if choice.prepared {
+            choice.compatibility = "configured";
+        }
+    }
+    Ok(choices)
+}
+
+fn restrict_batch_to_selection(
+    batch: &mut ManagedProvisionBatch,
+    selections: &[RelayTierSelection],
+) {
+    batch.candidates.retain(|candidate| {
+        selections.iter().any(|selection| {
+            selection.app == candidate.app_type.as_str() && selection.group_id == candidate.group_id
+        })
+    });
+    for selection in selections {
+        if !batch.candidates.iter().any(|candidate| {
+            candidate.app_type.as_str() == selection.app && candidate.group_id == selection.group_id
+        }) {
+            batch.failures.push(FailureInfo {
+                group_name: selection.group_id.clone(),
+                reason: format!("No supported configuration for {}", selection.app),
+            });
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn relay_prepare_tiers(
+    app: tauri::AppHandle,
+    relay_id: i64,
+    selections: Vec<RelayTierSelection>,
+) -> Result<ProvisionSummary, String> {
+    let account = usable_relay(&app, relay_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    prepare_relay_selection(&app, &account, &selections)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// Same account, different app/window: share the claim/create critical section.
+// Weak entries do not retain credentials or an ever-growing lock inventory.
+fn relay_provision_lock(
+    account: &creds::RelayAccount,
+) -> Result<Arc<tokio::sync::Mutex<()>>, AppError> {
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let key = format!(
+        "{:?}:{}:{:?}",
+        account.backend_kind,
+        crate::relay::identity::site_domain(&account.site_origin),
+        account.account_id
+    );
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| AppError::Config("Relay provisioning lock unavailable".into()))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn configured_selection(
+    account: &creds::RelayAccount,
+    app: &AppType,
+    providers: &[Provider],
+    choices: &[RelayDiscoveredTier],
+) -> Vec<RelayTierSelection> {
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.app == app.as_str()
+                && providers.iter().any(|provider| {
+                    provider.id == choice.provider_id
+                        && belongs_to_relay(provider, &account.site_origin, account.account_id)
+                })
+        })
+        .map(|choice| RelayTierSelection {
+            app: choice.app.clone(),
+            group_id: choice.group_id.clone(),
+        })
+        .collect()
+}
+
+async fn prepare_relay_selection(
+    app: &tauri::AppHandle,
+    account: &creds::RelayAccount,
+    selections: &[RelayTierSelection],
+) -> Result<ProvisionSummary, AppError> {
+    if selections.is_empty() {
+        return Ok(ProvisionSummary {
+            tiers: Vec::new(),
+            failures: Vec::new(),
+            keys_created: 0,
+            merged_providers: Vec::new(),
+        });
+    }
+    // Validate the complete confirmation before provisioning any resource. Re-read
+    // upstream availability rather than trusting a potentially stale UI snapshot.
+    let lock = relay_provision_lock(account)?;
+    let _guard = lock.lock().await;
+    let choices = discover_backend_choices(account, Some(browser_api_fallback(app))).await?;
+    if selections.iter().any(|selection| {
+        !choices
+            .iter()
+            .any(|choice| choice.app == selection.app && choice.group_id == selection.group_id)
+    }) {
+        return Err(AppError::Config(
+            "Selected configuration is no longer available; refresh choices".into(),
+        ));
+    }
+    let batch =
+        provision_backend_scope(account, Some(browser_api_fallback(app)), Some(selections)).await?;
+    let state = app.state::<AppState>().inner().clone();
+    let account = account.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_provision_batch_scope(&state, &account, batch, false)
+    })
+    .await
+    .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?
+}
+
+#[cfg(test)]
 pub(crate) async fn provision_backend(
     site_account: &creds::RelayAccount,
     browser_fallback: Option<sub2api::BrowserApiFallback>,
+) -> Result<ManagedProvisionBatch, AppError> {
+    provision_backend_scope(site_account, browser_fallback, None).await
+}
+
+async fn provision_backend_scope(
+    site_account: &creds::RelayAccount,
+    browser_fallback: Option<sub2api::BrowserApiFallback>,
+    selections: Option<&[RelayTierSelection]>,
 ) -> Result<ManagedProvisionBatch, AppError> {
     // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
     // sub2api 与 newapi 的选型纪律必须来自同一份数据（尺子 1.4：一个事实一个 owner）。
@@ -182,7 +487,7 @@ pub(crate) async fn provision_backend(
                 .field_display("site", crate::url_for_log(&site_account.site_origin))
         );
     }
-    match site_account.backend_kind {
+    let mut batch = match site_account.backend_kind {
         discovery::BackendKind::Sub2Api => {
             let mut client = sub2api::Client::new(
                 &site_account.site_origin,
@@ -196,13 +501,24 @@ pub(crate) async fn provision_backend(
             if let Some(fallback) = browser_fallback {
                 client = client.with_browser_fallback(fallback);
             }
-            let mut result = provision::provision(&client, &tables).await?;
+            let mut result = match selections {
+                None => provision::provision(&client, &tables).await?,
+                Some(selections) => {
+                    let ids = selections
+                        .iter()
+                        .map(|s| {
+                            s.group_id
+                                .parse::<i64>()
+                                .map_err(|_| AppError::Config("Invalid group identity".into()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    provision::provision_selected(&client, &tables, &ids).await?
+                }
+            };
             provision::sort_tiers(&mut result.tiers);
-            let keys_created = result
-                .tiers
-                .iter()
-                .filter(|targeted| targeted.tier.key_was_created)
-                .count();
+            // Count created resources independently of successful projections:
+            // a composite catalog can fail after its shared key was created.
+            let keys_created = result.keys_created;
             let candidates = result
                 .tiers
                 .into_iter()
@@ -228,7 +544,7 @@ pub(crate) async fn provision_backend(
                     }
                 })
                 .collect();
-            Ok(ManagedProvisionBatch {
+            Ok::<_, AppError>(ManagedProvisionBatch {
                 account_id: site_account.account_id,
                 site_declaration,
                 candidates,
@@ -253,7 +569,21 @@ pub(crate) async fn provision_backend(
                     "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
                 ));
             }
-            let result = newapi_provision::reconcile_for_account(&client, account.id).await?;
+            let result = match selections {
+                None => newapi_provision::reconcile_for_account(&client, account.id).await?,
+                Some(selections) => {
+                    let identities = selections
+                        .iter()
+                        .map(|s| newapi::GroupIdentity(s.group_id.clone()))
+                        .collect::<Vec<_>>();
+                    newapi_provision::reconcile_selected_for_account(
+                        &client,
+                        account.id,
+                        &identities,
+                    )
+                    .await?
+                }
+            };
 
             let mut batch = ManagedProvisionBatch {
                 account_id: Some(result.account_id),
@@ -352,53 +682,22 @@ pub(crate) async fn provision_backend(
             }
             Ok(batch)
         }
+    }?;
+    if let Some(selections) = selections {
+        restrict_batch_to_selection(&mut batch, selections);
     }
+    Ok(batch)
 }
 
-/// 拉分组、为每组备好 sk、写成 provider 记录 —— provision 的唯一入口
-/// （`relay_refresh` 命令在探活后调它；曾经的独立 `relay_provision` 命令前端零调用，
-/// 2026-09-07 删除，见 git 历史）。
-///
-/// ## 一次探全部平台，各归各的 tab（2026-08-03 改）
-///
-/// **不吃 `app` 参数** —— 每个分组落到哪个 CLI 由它自己的 `platform` 决定
-/// （`openai → codex`、`anthropic → claude`、`gemini → gemini`、`grok → grokbuild`），
-/// 见 [`provision::provision`]。用户在任何一个 tab 登录一次，全部平台的档位都备好了。
-///
-/// ### 为什么去掉那个参数（它曾经是 bug 的根源）
-///
-/// 原来签名吃 `app`，于是「拉哪些分组」和「写成什么形状」都由调用方决定 ——
-/// 在 claude tab 点「获取密钥」时**拉的是 openai 分组、却写成 claude 的配置形状**
-/// （openai 的 sk 配在 `ANTHROPIC_BASE_URL` 上，调用必失败），
-/// 而用户看到的是「claude 页出现了 chatgpt 的分组」。
-///
-/// 根因是把「分组属于哪个 CLI」的决定权交给了调用方，而那是分组自身的属性。
-/// 现在 `provision` 返回 [`provision::TargetedTier`]（分组 + 它该落到的 app_type），
-/// 调用方不需要知道 platform 映射规则 —— 那才是低耦合。
-///
-/// 认不出配置形状的 CLI（`settings_config_for` 返回 `None`）在循环里跳过并计入
-/// `failures`，不让整批失败。
-///
-/// ## `relay_id`：显式指定作用于哪个中转站（2026-08-03 加）
-///
-/// 原来它只吃 `AppHandle`，靠 `creds::load()` 读「`is_current = 1` 的那一行」。
-/// 于是多行并列的页面必须先 `set_current(id)` 才能让它作用到对的账号上
-/// （前端那个 `focusRelay`）—— 而 `is_current` 是**全局单例状态**：
-///
-/// 两个中转站同时 provision 时，B 的 `set_current(B)` 会改掉 A 那次操作的目标，
-/// A 后续的 balance / refresh 全串到 B 上。前端当时是用「任一操作进行中就禁用所有行」
-/// 兜住的 —— **那是拿全局禁用换正确性，修的是症状**：中转站之间本来毫无依赖，
-/// 用户点 A 的按钮却发现 B、C 的按钮全灰了。
-///
-/// 现在把目标变成参数，全局状态不再参与定位 ⇒ 各行真正独立、可并发。
-/// 这也正是「中转站（登录态）一个模块、分组（sk）一个模块」该有的样子：
-/// 分组操作显式说明「给哪个中转站」，而不是去读一个由 UI 顺手改掉的全局变量。
+/// Refresh only existing locally configured group/app projections. Newly discovered
+/// groups are offered by `relay_discover_tiers`, never implicitly prepared here.
+/// Explicit confirmation uses `relay_prepare_tiers`; neither subset path prunes
+/// remote keys or local configurations outside its selection.
 pub(crate) async fn refresh_relay_provision(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
     let site_account = usable_relay(app_handle, relay_id).await?;
-    let site_account = backfill_account_identity(app_handle, site_account).await;
     provision_relay(app_handle, &site_account).await
 }
 
@@ -406,14 +705,60 @@ async fn provision_relay(
     app_handle: &tauri::AppHandle,
     site_account: &creds::RelayAccount,
 ) -> Result<ProvisionSummary, AppError> {
-    let batch = provision_backend(site_account, Some(browser_api_fallback(app_handle))).await?;
+    let lock = relay_provision_lock(site_account)?;
+    let _guard = lock.lock().await;
+    let state = app_handle.state::<AppState>();
+    let choices =
+        discover_backend_choices(site_account, Some(browser_api_fallback(app_handle))).await?;
+    let mut selections = Vec::new();
+    let mut missing = Vec::new();
+    for app_type in AppType::all() {
+        let providers: Vec<_> = state
+            .db
+            .get_all_providers(app_type.as_str())?
+            .into_values()
+            .collect();
+        selections.extend(configured_selection(
+            site_account,
+            &app_type,
+            &providers,
+            &choices,
+        ));
+        for provider in providers {
+            if belongs_to_relay(
+                &provider,
+                &site_account.site_origin,
+                site_account.account_id,
+            ) && !choices
+                .iter()
+                .any(|choice| choice.app == app_type.as_str() && choice.provider_id == provider.id)
+            {
+                missing.push(FailureInfo { group_name: provider.name, reason: "Existing configuration is unavailable in the current group inventory; kept unchanged".into() });
+            }
+        }
+    }
+    if selections.is_empty() {
+        return Ok(ProvisionSummary {
+            tiers: Vec::new(),
+            failures: missing,
+            keys_created: 0,
+            merged_providers: Vec::new(),
+        });
+    }
+    let mut batch = provision_backend_scope(
+        site_account,
+        Some(browser_api_fallback(app_handle)),
+        Some(&selections),
+    )
+    .await?;
+    batch.failures.extend(missing);
     let state = app_handle.state::<AppState>();
     // Keep the existing synchronous provider/SQLite phase off runtime workers.
     // It shares the original AppState so all native writers use the same locks.
     let persist_state = state.inner().clone();
     let persist_account = site_account.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        persist_provision_batch(&persist_state, &persist_account, batch)
+        persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
     })
     .await
     .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?;
@@ -438,10 +783,20 @@ pub(crate) fn mark_pricing_after_success<T>(
     Ok(value)
 }
 
+#[cfg(test)]
 pub(crate) fn persist_provision_batch(
     state: &AppState,
     site_account: &creds::RelayAccount,
+    batch: ManagedProvisionBatch,
+) -> Result<ProvisionSummary, AppError> {
+    persist_provision_batch_scope(state, site_account, batch, true)
+}
+
+fn persist_provision_batch_scope(
+    state: &AppState,
+    site_account: &creds::RelayAccount,
     mut batch: ManagedProvisionBatch,
+    prune: bool,
 ) -> Result<ProvisionSummary, AppError> {
     let mut tiers = Vec::new();
     let mut merged_providers = Vec::new();
@@ -750,7 +1105,11 @@ pub(crate) fn persist_provision_batch(
 
     futures::executor::block_on(refresh_live_for_current_tiers(state, &refresh_live));
 
-    let removed = prune_stale_tiers(state, &site_account.site_origin, batch.account_id, &keep)?;
+    let removed = if prune {
+        prune_stale_tiers(state, &site_account.site_origin, batch.account_id, &keep)?
+    } else {
+        0
+    };
     if removed > 0 {
         log::info!(
             "清理了 {removed} 个不再存在的档位（{}）",
@@ -780,7 +1139,11 @@ pub(crate) fn persist_provision_batch(
             .flatten()
             .is_some()
     });
-    if tiers.is_empty() && !retained_observed {
+    // Selected preparation is additive and may have already prepared a remote
+    // key even when its catalog cannot produce the requested app projection.
+    // Preserve that partial receipt for an explicit retry instead of hiding it
+    // behind an all-or-nothing error. Never delete the key as rollback.
+    if prune && tiers.is_empty() && !retained_observed {
         let detail = batch
             .failures
             .iter()
@@ -1385,6 +1748,195 @@ mod tests {
         let json = serde_json::to_value(summary).expect("应能序列化");
         assert_eq!(json["mergedProviders"][0]["name"], "Imported duplicate");
         assert_eq!(json["mergedProviders"][0]["appId"], "codex");
+    }
+
+    #[test]
+    fn discovered_sub2api_choices_keep_stable_resource_identity_without_keys() {
+        let account = test_newapi_relay(7);
+        let groups = serde_json::from_value::<Vec<sub2api::Group>>(serde_json::json!([
+            {"id": 1, "name": "Codex group", "platform": "openai", "status": "active", "rate_multiplier": 1},
+            {"id": 2, "name": "Other group", "platform": "anthropic", "status": "active", "rate_multiplier": 1},
+            {"id": 3, "name": "Disabled", "platform": "openai", "status": "disabled", "rate_multiplier": 1}
+        ])).unwrap();
+        let choices = sub2api_discovery_choices(&account, &groups);
+        assert!(choices
+            .iter()
+            .any(|choice| choice.app == "codex" && choice.group_id == "1"));
+        assert!(choices.iter().all(|choice| choice.group_id != "3"));
+        for choice in choices {
+            assert_eq!(choice.id, choice.provider_id);
+            assert_eq!(
+                choice.provider_id,
+                managed::provider_id_for(
+                    &account.site_origin,
+                    Some(7),
+                    choice.group_id.parse().unwrap()
+                )
+            );
+            assert!(!choice.prepared);
+        }
+    }
+
+    #[test]
+    fn selected_batch_does_not_project_unselected_apps_or_prune_old_tiers() {
+        let site = "https://relay.example";
+        let tables = model_selection::ModelSelectionTables::builtin();
+        let group = test_newapi_group("shared", "fixture-key");
+        let mut batch = ManagedProvisionBatch {
+            candidates: newapi_candidates_for_group(site, 7, &group, &["gpt-5".into()], &tables),
+            ..Default::default()
+        };
+        restrict_batch_to_selection(
+            &mut batch,
+            &[RelayTierSelection {
+                app: "codex".into(),
+                group_id: "shared".into(),
+            }],
+        );
+        assert_eq!(batch.candidates.len(), 1);
+        assert_eq!(batch.candidates[0].app_type, AppType::Codex);
+    }
+
+    #[test]
+    fn selected_persistence_preserves_old_unselected_local_projections() {
+        let account = test_newapi_relay(7);
+        let db = Arc::new(crate::database::Database::memory().unwrap());
+        let state = AppState::new(db.clone()).unwrap();
+        let old_group = test_newapi_group("old", "old-fixture-key");
+        persist_provision_batch(&state, &account, newapi_batch(&account, &[old_group])).unwrap();
+        let old_id = managed::newapi_provider_id_for(&account.site_origin, 7, "old");
+        let mut batch = newapi_batch(
+            &account,
+            &[test_newapi_group("selected", "new-fixture-key")],
+        );
+        restrict_batch_to_selection(
+            &mut batch,
+            &[RelayTierSelection {
+                app: "codex".into(),
+                group_id: "selected".into(),
+            }],
+        );
+        let summary = persist_provision_batch_scope(&state, &account, batch, false).unwrap();
+        assert_eq!(summary.tiers.len(), 1);
+        for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            assert!(db
+                .get_provider_by_id(&old_id, app.as_str())
+                .unwrap()
+                .is_some());
+        }
+        let new_id = managed::newapi_provider_id_for(&account.site_origin, 7, "selected");
+        assert!(db.get_provider_by_id(&new_id, "codex").unwrap().is_some());
+        assert!(db.get_provider_by_id(&new_id, "claude").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_provision_lock_serializes_shared_account_but_not_other_accounts() {
+        let account = test_newapi_relay(7);
+        let same_account_other_row = creds::RelayAccount {
+            id: 999,
+            ..account.clone()
+        };
+        let first = relay_provision_lock(&account).unwrap();
+        let second = relay_provision_lock(&same_account_other_row).unwrap();
+        let other = relay_provision_lock(&test_newapi_relay(8)).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+        let guard = first.lock().await;
+        assert!(second.try_lock().is_err());
+        assert!(other.try_lock().is_ok());
+        drop(guard);
+        assert!(second.try_lock().is_ok());
+    }
+
+    #[test]
+    fn refresh_selection_excludes_removed_groups_and_other_accounts_without_deleting_them() {
+        let account = test_newapi_relay(7);
+        let owned_id = managed::newapi_provider_id_for(&account.site_origin, 7, "active");
+        let other_id = managed::newapi_provider_id_for(&account.site_origin, 8, "active");
+        let removed_id = managed::newapi_provider_id_for(&account.site_origin, 7, "removed");
+        let providers = [(&owned_id, 7), (&other_id, 8), (&removed_id, 7)]
+            .into_iter()
+            .map(|(id, owner)| {
+                let mut provider = provider_with_id(id);
+                provider.website_url = Some(account.site_origin.clone());
+                provider.meta = Some(managed_meta(&AppType::Codex, Some(owner), None));
+                provider
+            })
+            .collect::<Vec<_>>();
+        let choices = vec![discovered_tier(
+            AppType::Codex,
+            owned_id,
+            "active".into(),
+            "Same display name".into(),
+        )];
+        let selected = configured_selection(&account, &AppType::Codex, &providers, &choices);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].group_id, "active");
+        assert_eq!(providers.len(), 3);
+    }
+
+    #[test]
+    fn refresh_selection_matches_stable_provider_id_even_without_group_metadata() {
+        let account = test_newapi_relay(7);
+        let id = managed::newapi_provider_id_for(&account.site_origin, 7, "legacy");
+        let mut provider = provider_with_id(&id);
+        provider.website_url = Some(account.site_origin.clone());
+        let choices = vec![discovered_tier(
+            AppType::Codex,
+            id,
+            "legacy".into(),
+            "Renamed upstream group".into(),
+        )];
+        let selected = configured_selection(&account, &AppType::Codex, &[provider], &choices);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].group_id, "legacy");
+        assert!(configured_selection(&account, &AppType::Claude, &[], &choices).is_empty());
+    }
+
+    #[tokio::test]
+    async fn discovery_reads_only_account_and_groups_never_tokens() {
+        use axum::{routing::get, Json, Router};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let account_seen = Arc::clone(&seen);
+        let groups_seen = Arc::clone(&seen);
+        let app = Router::new()
+            .route("/api/user/self", get(move || {
+                account_seen.lock().unwrap().push("account");
+                async { Json(serde_json::json!({"success":true,"data":{"id":7,"username":"fixture","display_name":"Fixture","email":"fixture@example.test","group":"default","quota":0,"used_quota":0}})) }
+            }))
+            .route("/api/user/self/groups", get(move || {
+                groups_seen.lock().unwrap().push("groups");
+                async { Json(serde_json::json!({"success":true,"data":{"alpha":{"ratio":1,"desc":"Fixture"}}})) }
+            }));
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let account = creds::RelayAccount {
+            site_origin: origin,
+            ..test_newapi_relay(7)
+        };
+        let choices = discover_backend_choices(&account, None).await.unwrap();
+        assert_eq!(choices.len(), 4);
+        assert!(choices
+            .iter()
+            .all(|choice| !choice.prepared && choice.group_id == "alpha"));
+        assert_eq!(*seen.lock().unwrap(), vec!["account", "groups"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn discovery_refuses_unresolved_sub2api_identity_instead_of_unstable_anonymous_ids() {
+        let account = creds::RelayAccount {
+            account_id: None,
+            backend_kind: discovery::BackendKind::Sub2Api,
+            site_origin: "http://127.0.0.1:1".into(),
+            ..test_newapi_relay(7)
+        };
+        let error = discover_backend_choices(&account, None).await.unwrap_err();
+        assert!(error.to_string().contains("account identity"));
     }
 
     #[tokio::test]
@@ -2281,7 +2833,7 @@ mod tests {
                 .find("async fn refresh_relay_provision")
                 .expect("refresh_relay_provision 还在吗");
             let end = src[start..]
-                .find("let removed = prune_stale_tiers")
+                .find("let removed = if prune")
                 .expect("provision 末尾那段清理还在吗");
             &src[start..start + end]
         };
@@ -2541,4 +3093,14 @@ mod tests {
             .unwrap();
         assert_eq!(relay.pricing_synced_at, Some(123));
     }
+}
+
+// Dedicated integration fixtures avoid linking the entire desktop unit-test crate.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+#[path = "provision_fixture.rs"]
+mod integration_fixture;
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub(crate) async fn verify_selected_provisioning_fixture(case: &str) {
+    integration_fixture::verify(case).await;
 }

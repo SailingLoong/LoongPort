@@ -8,6 +8,7 @@ const preferenceKey = "loongport-sidebar-collapsed";
 const destinations = [
   ["applications", "providers"],
   ["services", "services"],
+  ["sharedGroups", "sharedGroups"],
   ["image", "image"],
   ["records", "records"],
   ["usage", "usage"],
@@ -46,7 +47,7 @@ function renderSidebar(
   return { ...rendered, onNavigate, onHelp };
 }
 
-describe("approved seven-destination shell", () => {
+describe("approved shell with one global shared-group destination", () => {
   beforeEach(() => {
     localStorage.removeItem(preferenceKey);
     resize(1200);
@@ -63,7 +64,9 @@ describe("approved seven-destination shell", () => {
     const navigation = screen.getByRole("navigation", {
       name: "client.navigation",
     });
-    expect(within(navigation).getAllByRole("button")).toHaveLength(7);
+    expect(within(navigation).getAllByRole("button")).toHaveLength(
+      destinations.length,
+    );
     const toggle = screen.getByRole("button", {
       name: "client.collapseSidebar",
     });

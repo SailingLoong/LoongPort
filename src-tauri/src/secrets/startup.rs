@@ -2211,9 +2211,8 @@ mod upgrade_handoff_tests {
             Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
             database::loongport_schema::apply(&conn).unwrap();
             if version == 24 {
-                // Historical fixture only: build the original pre-binding image
-                // before its checkpoint captures and authenticates the schema.
-                conn.execute_batch("DROP TABLE paperclip_run_bindings; UPDATE loongport_schema_version SET version=24 WHERE id=1;")
+                // Build the deployed v24 shape before provider writes or checkpoint capture.
+                conn.execute_batch(include_str!("test_fixtures/authenticated_v24.sql"))
                     .unwrap();
             }
             assert_eq!(

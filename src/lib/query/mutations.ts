@@ -168,7 +168,14 @@ export const useUpdateProviderMutation = (appId: AppId) => {
           return { app: appId, request: input.edit.request, status: "unknown" };
         }
       }
-      await providersApi.update(input.provider, appId, input.originalId);
+      if (input.credentialWrite)
+        await providersApi.update(
+          input.provider,
+          appId,
+          input.originalId,
+          true,
+        );
+      else await providersApi.update(input.provider, appId, input.originalId);
       return input.provider;
     },
     onSuccess: async (result, variables) => {

@@ -47,9 +47,82 @@ fn identity(meta: &ProviderMeta) -> Result<Identity, ProxyError> {
     Ok(Identity { row_id, account })
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct Snapshot {
+    storage: crate::secrets::storage::StorageIdentity,
     epoch: u64,
     encrypted_key_digest: String,
+    has_key: bool,
+}
+
+/// Selection intent only, never a credential lease. An empty later key can be
+/// captured without preventing an earlier usable member from being attempted.
+#[derive(Clone)]
+pub(crate) struct Expected {
+    app: AppType,
+    provider_id: String,
+    identity: Identity,
+    snapshot: Snapshot,
+}
+
+pub(crate) fn owns(provider: &Provider) -> bool {
+    provider.meta.as_ref().is_some_and(|meta| {
+        meta.auth_binding.as_ref().is_some_and(|binding| {
+            binding.source == AuthBindingSource::VendorApiKey
+                && binding.auth_provider.as_deref() == Some("opencode")
+        })
+    })
+}
+
+/// Only an explicit empty original key column is locally unavailable. Missing
+/// rows, invalid destinations and corrupt nonempty ciphertext are not empty.
+pub(crate) enum LocalKeyAvailability {
+    Present,
+    Missing,
+}
+
+pub(crate) fn local_availability_on(
+    conn: &rusqlite::Connection,
+    app: &AppType,
+    provider: &Provider,
+) -> Result<Option<LocalKeyAvailability>, ProxyError> {
+    if !owns(provider) {
+        return Ok(None);
+    }
+    super::vendor_source_binding::validate_reference_on(conn, app, provider)
+        .map_err(|_| unavailable())?;
+    let expected = identity(provider.meta.as_ref().ok_or_else(unavailable)?)?;
+    let (_, has_key) = key_state_on(conn, &expected)?;
+    Ok(Some(if has_key {
+        LocalKeyAvailability::Present
+    } else {
+        LocalKeyAvailability::Missing
+    }))
+}
+
+impl Expected {
+    pub(crate) fn capture_on(
+        conn: &rusqlite::Connection,
+        vault: &crate::secrets::storage::StorageContext,
+        epoch: u64,
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<Option<Self>, ProxyError> {
+        if !owns(provider) {
+            return Ok(None);
+        }
+        if !matches!(app, AppType::Claude | AppType::Codex) || provider.id.trim().is_empty() {
+            return Err(unavailable());
+        }
+        let identity = identity(provider.meta.as_ref().ok_or_else(unavailable)?)?;
+        let snapshot = snapshot_on(conn, vault, epoch, app, &provider.id, &identity)?;
+        Ok(Some(Self {
+            app: app.clone(),
+            provider_id: provider.id.clone(),
+            identity,
+            snapshot,
+        }))
+    }
 }
 
 struct Inner {
@@ -71,19 +144,46 @@ impl Fence {
         app: AppType,
         provider: &Provider,
     ) -> Result<Option<Self>, ProxyError> {
-        let Some(meta) = provider.meta.as_ref().filter(|meta| {
-            meta.auth_binding.as_ref().is_some_and(|binding| {
-                binding.source == AuthBindingSource::VendorApiKey
-                    && binding.auth_provider.as_deref() == Some("opencode")
-            })
-        }) else {
-            return Ok(None);
-        };
+        Self::acquire_inner(db, app, provider, None)
+    }
+
+    pub(crate) fn acquire_with_expected(
+        db: Arc<Database>,
+        app: AppType,
+        provider: &Provider,
+        expected: &Expected,
+    ) -> Result<Option<Self>, ProxyError> {
+        Self::acquire_inner(db, app, provider, Some(expected))
+    }
+
+    fn acquire_inner(
+        db: Arc<Database>,
+        app: AppType,
+        provider: &Provider,
+        expected: Option<&Expected>,
+    ) -> Result<Option<Self>, ProxyError> {
+        if !owns(provider) {
+            return if expected.is_some() {
+                Err(unavailable())
+            } else {
+                Ok(None)
+            };
+        }
+        let meta = provider.meta.as_ref().ok_or_else(unavailable)?;
         if !matches!(app, AppType::Claude | AppType::Codex) || provider.id.trim().is_empty() {
             return Err(unavailable());
         }
         let identity = identity(meta)?;
         let snapshot = snapshot(&db, &app, &provider.id, &identity)?;
+        if expected.is_some_and(|expected| {
+            expected.app != app
+                || expected.provider_id != provider.id
+                || expected.identity != identity
+                || expected.snapshot != snapshot
+        }) {
+            return Err(unavailable());
+        }
+
         Ok(Some(Self(Arc::new(Inner {
             db,
             app,
@@ -97,9 +197,7 @@ impl Fence {
     pub(crate) fn check(&self) -> Result<(), ProxyError> {
         let inner = &self.0;
         let current = snapshot(&inner.db, &inner.app, &inner.provider_id, &inner.identity)?;
-        if current.epoch != inner.snapshot.epoch
-            || current.encrypted_key_digest != inner.snapshot.encrypted_key_digest
-        {
+        if current != inner.snapshot {
             return Err(unavailable());
         }
         Ok(())
@@ -118,37 +216,82 @@ fn snapshot(
     let vault = db.secrets.read().map_err(|_| unavailable())?;
     let epoch = db.secrets.lifecycle_epoch();
     let conn = db.conn.lock().map_err(|_| unavailable())?;
-    let meta = Database::get_provider_meta_on_connection(&conn, &vault, provider_id, app.as_str())
+    let snapshot = snapshot_on(&conn, &vault, epoch, app, provider_id, expected)?;
+    db.secrets.ensure_available().map_err(|_| unavailable())?;
+    if db.secrets.lifecycle_epoch() != epoch || !snapshot.has_key {
+        return Err(unavailable());
+    }
+    Ok(snapshot)
+}
+
+fn snapshot_on(
+    conn: &rusqlite::Connection,
+    vault: &crate::secrets::storage::StorageContext,
+    epoch: u64,
+    app: &AppType,
+    provider_id: &str,
+    expected: &Identity,
+) -> Result<Snapshot, ProxyError> {
+    let meta = Database::get_provider_meta_on_connection(conn, vault, provider_id, app.as_str())
         .map_err(|_| unavailable())?
         .ok_or_else(unavailable)?;
     if identity(&meta)? != *expected {
         return Err(unavailable());
     }
-    let row: Option<(String, Option<String>, String)> = conn
+    let (encrypted_key_digest, has_key) = key_state_on(conn, expected)?;
+    Ok(Snapshot {
+        storage: vault.identity(),
+        epoch,
+        encrypted_key_digest,
+        has_key,
+    })
+}
+
+/// Review evidence from the same original owner while the caller holds its
+/// vault/SQLite publication transaction. No plaintext key or extra lock is read.
+pub(crate) fn review_evidence_on(
+    conn: &rusqlite::Connection,
+    provider: &Provider,
+) -> Result<Option<String>, ProxyError> {
+    let Some(meta) = provider.meta.as_ref().filter(|meta| {
+        meta.auth_binding.as_ref().is_some_and(|binding| {
+            binding.source == AuthBindingSource::VendorApiKey
+                && binding.auth_provider.as_deref() == Some("opencode")
+        })
+    }) else {
+        return Ok(None);
+    };
+    let (digest, has_key) = key_state_on(conn, &identity(meta)?)?;
+    if !has_key {
+        return Err(unavailable());
+    }
+    Ok(Some(digest))
+}
+
+fn key_state_on(
+    conn: &rusqlite::Connection,
+    expected: &Identity,
+) -> Result<(String, bool), ProxyError> {
+    let row: Option<(String, Option<String>, String, String)> = conn
         .query_row(
-            "SELECT vendor_id,account_id,api_key FROM loongport_vendor WHERE id=?1",
+            "SELECT vendor_id,account_id,api_key,api_key_revision FROM loongport_vendor WHERE id=?1",
             [expected.row_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|_| unavailable())?;
-    let (vendor, account, encrypted_key) = row.ok_or_else(unavailable)?;
+    let (vendor, account, encrypted_key, revision) = row.ok_or_else(unavailable)?;
     if vendor != "opencode"
         || account.as_deref() != Some(expected.account.as_str())
-        || encrypted_key.is_empty()
+        || !crate::database::credential_revision::valid(&revision)
     {
         return Err(unavailable());
     }
-    // set_api_key reseals this existing owner column with a fresh random nonce.
-    // Thus even reissuing identical plaintext retires the earlier snapshot.
-    // Token-only refresh, display edits and ordering do not change this column.
-    let encrypted_key_digest = crate::live::engine::sha256_hex(encrypted_key.as_bytes());
-    db.secrets.ensure_available().map_err(|_| unavailable())?;
-    if db.secrets.lifecycle_epoch() != epoch {
-        return Err(unavailable());
-    }
-    Ok(Snapshot {
-        epoch,
-        encrypted_key_digest,
-    })
+    // Original key writers rotate the private original-row incarnation in the
+    // same SQL write, including plaintext same-key reissue. Display, ordering and
+    // web-login token updates never rotate it. No revision is generated here.
+    Ok((
+        crate::live::engine::sha256_hex(format!("{revision}\0{encrypted_key}").as_bytes()),
+        !encrypted_key.is_empty(),
+    ))
 }

@@ -371,7 +371,11 @@ function EditSession({
       };
 
       if (!controlled) {
-        await onSubmit({ provider: updatedProvider, originalId: provider.id });
+        await onSubmit({
+          provider: updatedProvider,
+          originalId: provider.id,
+          ...(values.credentialWrite ? { credentialWrite: true } : {}),
+        });
         if (alive.current) closeDialog();
         return;
       }
@@ -408,6 +412,7 @@ function EditSession({
               edit: {
                 request,
                 deleteCredential,
+                ...(values.credentialWrite ? { credentialWrite: true } : {}),
                 ...(review.catalogDecision
                   ? { catalogDecision: review.catalogDecision }
                   : {}),
@@ -427,6 +432,7 @@ function EditSession({
             id,
             deleteCredential,
             attempt.catalogDecision,
+            ...(values.credentialWrite ? ([true] as const) : []),
           );
           if (!alive.current || draftVersion.current !== attempt.version)
             return;

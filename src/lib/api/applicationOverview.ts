@@ -1,3 +1,4 @@
+import type { ServiceAccountReference } from "./serviceSources";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProviderPresentation } from "@/types";
 import type { AppId } from "./types";
@@ -11,7 +12,7 @@ export interface ApplicationConfiguration {
   providerId: string;
   name: string;
   source: "official" | "relay" | "custom";
-  account: { kind: "relay" | "vendor"; id: number } | null;
+  account: ServiceAccountReference | null;
   serviceName: string | null;
   accountLabel: string | null;
   configurationName: string | null;

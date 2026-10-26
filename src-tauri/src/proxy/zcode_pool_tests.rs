@@ -491,7 +491,7 @@ async fn zcode_401_marks_only_selected_original_owner_needs_login_then_falls_bac
         assert_wire(&calls[1], &fixture.synthetic_tokens[1]);
         assert_eq!(
             Lease::acquire_fixture(
-                fixture.db.secrets.clone(),
+                fixture.db.clone(),
                 &fixture.account_ids[0],
                 "fixture-check",
                 &fixture.transport
@@ -501,7 +501,7 @@ async fn zcode_401_marks_only_selected_original_owner_needs_login_then_falls_bac
             Some(Failure::NeedsLogin)
         );
         assert!(Lease::acquire_fixture(
-            fixture.db.secrets.clone(),
+            fixture.db.clone(),
             &fixture.account_ids[1],
             "fixture-check",
             &fixture.transport

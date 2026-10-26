@@ -1,306 +1,136 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { useApplicationRouting } from "../useApplicationRouting";
-const mocks = vi.hoisted(() => ({
-  get: vi.fn(),
-  order: vi.fn(),
-  apply: vi.fn(),
-  prepare: vi.fn(),
-  query: vi.fn(),
-  failover: vi.fn(),
-  status: vi.fn(),
-  takeover: vi.fn(),
-  start: vi.fn(),
-  setTakeover: vi.fn(),
-  error: vi.fn(),
-  success: vi.fn(),
-}));
-vi.mock("@/lib/api/applicationRouting", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api/applicationRouting")>()),
-  applicationRoutingApi: {
-    get: mocks.get,
-    setOrder: mocks.order,
-    apply: mocks.apply,
-    prepareRequest: mocks.prepare,
-    queryRequest: mocks.query,
-    setFailover: mocks.failover,
-  },
-}));
-vi.mock("@/lib/api/proxy", () => ({
-  proxyApi: {
-    getProxyStatus: mocks.status,
-    getProxyTakeoverStatus: mocks.takeover,
-    startProxyServer: mocks.start,
-    setProxyTakeoverForApp: mocks.setTakeover,
-  },
-}));
+import {
+  applicationRoutingApi,
+  type ApplicationRouting,
+} from "@/lib/api/applicationRouting";
+import { failoverApi } from "@/lib/api/failover";
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
-vi.mock("sonner", () => ({
-  toast: { error: mocks.error, success: mocks.success },
-}));
 let client: QueryClient;
 const wrapper = ({ children }: { children: ReactNode }) => (
   <QueryClientProvider client={client}>{children}</QueryClientProvider>
 );
+const facts = (): ApplicationRouting => ({
+  autoFailoverEnabled: false,
+  routingActive: false,
+  tiers: [],
+  model: null,
+  modelOptions: [],
+  chainIds: ["a", "b"],
+});
 beforeEach(() => {
-  vi.resetAllMocks();
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  mocks.get.mockResolvedValue({
-    autoFailoverEnabled: false,
-    tiers: [],
-    modeState: {
-      status: "ready",
-      canWrite: true,
-      writeProtocol: "native",
-      blockedReason: null,
-    },
-  });
-  mocks.status.mockResolvedValue({ running: false });
-  mocks.takeover.mockResolvedValue({ codex: false });
-  mocks.start.mockResolvedValue({});
-  mocks.setTakeover.mockResolvedValue(undefined);
-  mocks.failover.mockResolvedValue(undefined);
-  mocks.order.mockResolvedValue(undefined);
-  mocks.prepare.mockImplementation(async (_app, _change, id) => ({
-    protocol: "native",
-    request: {
-      id,
-      scope: "applicationRouting",
-      draftDigest: "a".repeat(64),
-      revision: "b".repeat(64),
-    },
-  }));
-  mocks.query.mockImplementation(async (_app, request) => ({
-    request,
-    status: "unknown",
-  }));
+  vi.spyOn(applicationRoutingApi, "get").mockResolvedValue(facts());
+  vi.spyOn(applicationRoutingApi, "setOrder").mockResolvedValue(undefined);
+  vi.spyOn(applicationRoutingApi, "setTierBlocked").mockResolvedValue(
+    undefined,
+  );
+  vi.spyOn(applicationRoutingApi, "setFailover").mockResolvedValue(undefined);
+  vi.spyOn(applicationRoutingApi, "apply");
+  vi.spyOn(failoverApi, "resetCircuitBreaker").mockResolvedValue(undefined);
 });
-describe("application routing controls", () => {
-  it("reads the page without starting or reconfiguring routing", async () => {
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
+afterEach(() => {
+  client.clear();
+  vi.restoreAllMocks();
+});
+function mount() {
+  return renderHook(() => useApplicationRouting("opencode"), { wrapper });
+}
+describe("non-proxy routing facts and immediate actions", () => {
+  it("reads without starting routing, changing fallback, applying a target, or writing order", async () => {
+    const { result } = mount();
     await waitFor(() => expect(result.current.data).toBeDefined());
-    expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.setTakeover).not.toHaveBeenCalled();
-    expect(mocks.failover).not.toHaveBeenCalled();
+    expect(applicationRoutingApi.setFailover).not.toHaveBeenCalled();
+    expect(applicationRoutingApi.apply).not.toHaveBeenCalled();
+    expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
   });
-  it("enables routing through the backend operation", async () => {
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.data).toBeDefined());
-    await act(async () => {
-      await result.current.setFailover(true);
-    });
-    expect(mocks.failover).toHaveBeenCalledWith("codex", true);
-    expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.setTakeover).not.toHaveBeenCalled();
-    expect(mocks.success).toHaveBeenCalledWith("applications.failoverEnabled");
-  });
-  it("disabling changes only fallback permission", async () => {
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.data).toBeDefined());
-    await act(async () => {
-      await result.current.setFailover(false);
-    });
-    expect(mocks.failover).toHaveBeenCalledWith("codex", false);
-    expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.setTakeover).not.toHaveBeenCalled();
-  });
-  it("exposes backend activation failure without reporting success", async () => {
-    mocks.failover.mockRejectedValue(new Error("configuration is busy"));
+  it("saves native display order immediately and refreshes its source facts", async () => {
     const invalidate = vi.spyOn(client, "invalidateQueries");
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.data).toBeDefined());
-    await act(async () => {
-      await expect(result.current.setFailover(true)).rejects.toThrow(
-        "configuration is busy",
-      );
-    });
-    expect(mocks.success).not.toHaveBeenCalled();
-    expect(mocks.error).toHaveBeenCalled();
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: ["applicationRouting", "codex"],
-    });
-  });
-  it("saves the complete priority order without changing fallback or current tier", async () => {
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
+    const { result } = mount();
     await waitFor(() => expect(result.current.data).toBeDefined());
     await act(async () => {
       await result.current.setOrder(["b", "a"]);
     });
-    expect(mocks.order).toHaveBeenCalledWith("codex", ["b", "a"]);
-    expect(mocks.failover).not.toHaveBeenCalled();
-    expect(mocks.setTakeover).not.toHaveBeenCalled();
-  });
-  it("refreshes application state after success or failure but not while awaiting confirmation", async () => {
-    mocks.apply
-      .mockResolvedValueOnce({
-        status: "confirmationRequired",
-        targetName: "Example",
-      })
-      .mockResolvedValueOnce({
-        status: "switched",
-        providerName: "Example",
-        warnings: [],
-        chatgptWasRunning: false,
-        chatgptRelaunched: false,
-      })
-      .mockRejectedValueOnce(new Error("configuration write failed"));
-    const invalidate = vi.spyOn(client, "invalidateQueries");
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
+    expect(applicationRoutingApi.setOrder).toHaveBeenCalledExactlyOnceWith(
+      "opencode",
+      ["b", "a"],
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["applicationRouting", "opencode"],
     });
+    expect(applicationRoutingApi.setFailover).not.toHaveBeenCalled();
+    expect(applicationRoutingApi.apply).not.toHaveBeenCalled();
+  });
+  it("retains explicit unblock and error reset actions through their existing owners", async () => {
+    const { result } = mount();
     await waitFor(() => expect(result.current.data).toBeDefined());
-    const change = {
-      order: { profileName: "Travel", providerIds: ["b"] },
-      selection: { providerId: "b", model: "model-b" },
-    };
     await act(async () => {
-      await result.current.apply(change);
+      await result.current.blockTier({ providerId: "a", blocked: false });
     });
-    expect(invalidate).not.toHaveBeenCalled();
     await act(async () => {
-      await result.current.apply(change, false);
+      await result.current.resetTierErrors({ providerId: "b" });
     });
-    expect(mocks.apply).toHaveBeenLastCalledWith(
-      "codex",
-      change,
-      false,
-      expect.objectContaining({ scope: "applicationRouting" }),
+    expect(
+      applicationRoutingApi.setTierBlocked,
+    ).toHaveBeenCalledExactlyOnceWith("opencode", "a", false);
+    expect(failoverApi.resetCircuitBreaker).toHaveBeenCalledExactlyOnceWith(
+      "b",
+      "opencode",
     );
-    for (const owner of [
-      "applicationRouting",
-      "applicationOverview",
-      "providers",
-      "orderProfiles",
-    ]) {
-      expect(invalidate).toHaveBeenCalledWith({ queryKey: [owner, "codex"] });
-    }
-    expect(mocks.order).not.toHaveBeenCalled();
-    invalidate.mockClear();
-    await act(async () => {
-      await expect(result.current.apply(change, false)).rejects.toThrow(
-        "configuration write failed",
-      );
-    });
-    for (const owner of [
-      "applicationRouting",
-      "applicationOverview",
-      "providers",
-      "orderProfiles",
-    ]) {
-      expect(invalidate).toHaveBeenCalledWith({ queryKey: [owner, "codex"] });
-    }
+    expect(applicationRoutingApi.apply).not.toHaveBeenCalled();
   });
-  it("keeps the last successful read and blocks writes when the owner requires verification", async () => {
-    const last = {
-      autoFailoverEnabled: true,
-      routingActive: true,
-      tiers: [{ providerId: "a" }],
-    };
-    mocks.get.mockResolvedValue(last);
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.data).toEqual(last));
-    const changedAt = result.current.dataUpdatedAt;
-    mocks.get.mockRejectedValue({
-      code: "mode.verification_required",
-      modeState: {
-        status: "pending",
-        mode: null,
-        attached: null,
-        currentProviderId: null,
-        directProviderId: null,
-        publicationStarted: true,
-        canWrite: false,
-        canRecheck: true,
-      },
+  it("exposes a rejected immediate write without replaying it on refresh", async () => {
+    vi.mocked(applicationRoutingApi.setOrder).mockRejectedValue(
+      new Error("native order rejected"),
+    );
+    const { result } = mount();
+    await waitFor(() => expect(result.current.data).toBeDefined());
+    await act(async () => {
+      await expect(result.current.setOrder(["b", "a"])).rejects.toThrow(
+        "native order rejected",
+      );
     });
     await act(async () => {
       await result.current.refetch();
     });
-    expect(result.current.data).toEqual(last);
-    expect(result.current.dataUpdatedAt).toBe(changedAt);
+    expect(applicationRoutingApi.setOrder).toHaveBeenCalledTimes(1);
+    expect(result.current.data?.chainIds).toEqual(["a", "b"]);
+  });
+  it("keeps the last read, blocks every write on read failure, and retries only reads", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(result.current.data).toBeDefined());
+    const previous = result.current.data;
+    const updated = result.current.dataUpdatedAt;
+    vi.mocked(applicationRoutingApi.get).mockRejectedValue(
+      new Error("synthetic read unavailable"),
+    );
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.data).toEqual(previous);
+    expect(result.current.dataUpdatedAt).toBe(updated);
     await waitFor(() => expect(result.current.writeBlocked).toBe(true));
-    expect(result.current.modeState?.status).toBe("pending");
+    await expect(result.current.setOrder(["b", "a"])).rejects.toThrow(
+      "mode.verification_required",
+    );
+    await expect(
+      result.current.blockTier({ providerId: "a", blocked: false }),
+    ).rejects.toThrow("mode.verification_required");
+    await expect(
+      result.current.resetTierErrors({ providerId: "a" }),
+    ).rejects.toThrow("mode.verification_required");
+    vi.mocked(applicationRoutingApi.get).mockResolvedValue(facts());
     await act(async () => {
-      await expect(
-        result.current.apply({ selection: { providerId: "b" } }),
-      ).rejects.toThrow("mode.verification_required");
-      await expect(result.current.setFailover(true)).rejects.toThrow(
-        "mode.verification_required",
-      );
       await result.current.refetch();
     });
-    expect(mocks.apply).not.toHaveBeenCalled();
-    expect(mocks.failover).not.toHaveBeenCalled();
-    expect(result.current.data).toEqual(last);
+    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
+    expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
+    expect(applicationRoutingApi.setTierBlocked).not.toHaveBeenCalled();
+    expect(failoverApi.resetCircuitBreaker).not.toHaveBeenCalled();
   });
-});
-
-it("prepares a catalog decision before showing its confirmation and reuses the original request", async () => {
-  const catalog = {
-    ownership: "unclaimedExternal",
-    choice: "keep",
-    canManage: true,
-    revision: "catalog-v1",
-    beforePointer: "synthetic-external",
-    afterPointer: "synthetic-external",
-  };
-  mocks.apply
-    .mockResolvedValueOnce({
-      status: "confirmationRequired",
-      targetName: "Synthetic",
-      catalog,
-      quitRequired: false,
-    })
-    .mockResolvedValueOnce({
-      status: "switched",
-      providerName: "Synthetic",
-      warnings: [],
-      chatgptWasRunning: false,
-      chatgptRelaunched: false,
-    });
-  const { result } = renderHook(() => useApplicationRouting("codex"), {
-    wrapper,
-  });
-  await waitFor(() => expect(result.current.data).toBeDefined());
-  const change = { selection: { providerId: "b", model: "model-b" } };
-  await act(async () => {
-    await result.current.prepareRequest(change);
-  });
-  await act(async () => {
-    await result.current.apply(change);
-  });
-  expect(mocks.prepare).toHaveBeenCalledTimes(2);
-  expect(mocks.prepare.mock.calls[1][2]).toEqual(
-    mocks.prepare.mock.calls[0][2],
-  );
-  await act(async () => {
-    await result.current.apply(
-      {
-        ...change,
-        catalogDecision: { choice: "keep", revision: "catalog-v1" },
-        catalogPreviewOnly: false,
-      },
-      false,
-    );
-  });
-  expect(mocks.prepare).toHaveBeenCalledTimes(2);
-  expect(mocks.apply.mock.calls[1][3].id).toEqual(
-    mocks.apply.mock.calls[0][3].id,
-  );
 });

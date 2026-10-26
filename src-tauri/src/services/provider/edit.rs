@@ -79,8 +79,18 @@ fn scoped_draft_digest(
     delete: bool,
     catalog: Option<&CatalogDecision>,
     scope: state::SaveScope,
+    reissue: bool,
 ) -> Result<String, AppError> {
     let original_digest = draft_digest(app, provider, original, delete, catalog)?;
+    let original_digest = if reissue {
+        if scope != state::SaveScope::Provider {
+            return Err(problem("readOnly"));
+        }
+        crate::config::serialize_json_bytes(&json!([original_digest, "credentialWrite"]))
+            .map(|bytes| digest(Some(&bytes)).unwrap())?
+    } else {
+        original_digest
+    };
     match scope {
         state::SaveScope::Provider => Ok(original_digest),
         state::SaveScope::ProviderModelSettings if !delete && catalog.is_none() => {
@@ -378,6 +388,7 @@ struct EditOptions<'a> {
     delete_credential: bool,
     catalog: Option<&'a CatalogDecision>,
     scope: state::SaveScope,
+    reissue: bool,
 }
 
 fn planned(
@@ -393,6 +404,7 @@ fn planned(
         delete_credential: delete,
         catalog,
         scope,
+        reissue,
     } = options;
     admitted(state, app)?;
     if draft.id != original {
@@ -424,8 +436,12 @@ fn planned(
         }
         _ => return Err(problem("readOnly")),
     };
-    let plan =
+    if reissue && scope != state::SaveScope::Provider {
+        return Err(problem("readOnly"));
+    }
+    let mut plan =
         controller::plan_row_save(&state.proxy_service, app, &previous, &draft, id, catalog)?;
+    plan.credential_reissue = reissue;
     Ok((previous, draft, plan))
 }
 fn fields(previous: &Provider, next: &Provider) -> Vec<&'static str> {
@@ -515,6 +531,29 @@ pub(crate) fn preview_with_catalog(
     delete_credential: bool,
     catalog: Option<&CatalogDecision>,
 ) -> Result<Value, AppError> {
+    preview_with_intent(
+        state,
+        app,
+        provider,
+        original,
+        id,
+        delete_credential,
+        catalog,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn preview_with_intent(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    id: &str,
+    delete_credential: bool,
+    catalog: Option<&CatalogDecision>,
+    reissue: bool,
+) -> Result<Value, AppError> {
     preview_scoped(
         state,
         app,
@@ -526,6 +565,7 @@ pub(crate) fn preview_with_catalog(
             delete_credential,
             catalog,
             scope: state::SaveScope::Provider,
+            reissue,
         },
     )
 }
@@ -549,6 +589,7 @@ pub(crate) fn preview_model_settings(
             delete_credential: false,
             catalog: None,
             scope: state::SaveScope::ProviderModelSettings,
+            reissue: false,
         },
     )
 }
@@ -566,8 +607,17 @@ fn preview_scoped(
         delete_credential,
         catalog,
         scope,
+        reissue,
     } = options;
-    let draft = scoped_draft_digest(app, &provider, original, delete_credential, catalog, scope)?;
+    let draft = scoped_draft_digest(
+        app,
+        &provider,
+        original,
+        delete_credential,
+        catalog,
+        scope,
+        reissue,
+    )?;
     let mut request = SaveRequest {
         id: id.into(),
         scope,
@@ -590,6 +640,7 @@ fn preview_scoped(
             delete_credential,
             catalog,
             scope,
+            reissue,
         },
     ) {
         Ok((previous, provider, plan)) => {
@@ -659,6 +710,29 @@ pub(crate) fn confirm_with_catalog(
     delete_credential: bool,
     catalog: Option<&CatalogDecision>,
 ) -> Result<Value, AppError> {
+    confirm_with_intent(
+        state,
+        app,
+        provider,
+        original,
+        request,
+        delete_credential,
+        catalog,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn confirm_with_intent(
+    state: &AppState,
+    app: &AppType,
+    provider: Provider,
+    original: &str,
+    request: SaveRequest,
+    delete_credential: bool,
+    catalog: Option<&CatalogDecision>,
+    reissue: bool,
+) -> Result<Value, AppError> {
     confirm_scoped(
         state,
         app,
@@ -670,6 +744,7 @@ pub(crate) fn confirm_with_catalog(
             delete_credential,
             catalog,
             scope: state::SaveScope::Provider,
+            reissue,
         },
     )
 }
@@ -693,6 +768,7 @@ pub(crate) fn confirm_model_settings(
             delete_credential: false,
             catalog: None,
             scope: state::SaveScope::ProviderModelSettings,
+            reissue: false,
         },
     )
 }
@@ -710,13 +786,21 @@ fn confirm_scoped(
         delete_credential,
         catalog,
         scope,
+        reissue,
     } = options;
     request.validate()?;
     if request.scope != scope
         || request.provider_id.as_deref() != Some(original)
         || provider.id != original
-        || scoped_draft_digest(app, &provider, original, delete_credential, catalog, scope)?
-            != request.draft_digest
+        || scoped_draft_digest(
+            app,
+            &provider,
+            original,
+            delete_credential,
+            catalog,
+            scope,
+            reissue,
+        )? != request.draft_digest
     {
         return Ok(result(app, &request, "conflict", None));
     }
@@ -740,6 +824,7 @@ fn confirm_scoped(
             delete_credential,
             catalog,
             scope,
+            reissue,
         },
     ) {
         Ok(plan) => plan,

@@ -63,6 +63,8 @@ pub struct ProvisionResult {
     pub tiers: Vec<TargetedTier>,
     /// `(分组名, 失败原因)`。
     pub failures: Vec<(String, String)>,
+    /// Successful upstream creates, including keys whose later catalog read fails.
+    pub keys_created: usize,
 }
 
 pub fn key_name_for(account_id: Option<i64>, platform: &str, group_id: i64) -> String {
@@ -96,10 +98,47 @@ pub async fn provision(
     client: &Client,
     tables: &ModelSelectionTables,
 ) -> Result<ProvisionResult, AppError> {
-    // 账号身份从 `client` 取，**不另收一个参数** —— 「用哪个账号建 Key」与
-    // 「用哪个账号发请求」必须是同一个答案，两处各传一遍就可能不一致。
-    let account_id = client.account_id();
-    let groups = client.list_groups().await?;
+    provision_scope(client, tables, None).await
+}
+
+/// Prepare only explicitly confirmed upstream groups, sharing each group's key
+/// across its app projections. This additive operation never cleans up keys.
+pub async fn provision_selected(
+    client: &Client,
+    tables: &ModelSelectionTables,
+    selected_group_ids: &[i64],
+) -> Result<ProvisionResult, AppError> {
+    provision_scope(client, tables, Some(selected_group_ids)).await
+}
+
+async fn provision_scope(
+    client: &Client,
+    tables: &ModelSelectionTables,
+    selected_group_ids: Option<&[i64]>,
+) -> Result<ProvisionResult, AppError> {
+    if selected_group_ids.is_some_and(|ids| ids.is_empty()) {
+        return Ok(ProvisionResult::default());
+    }
+    let mut groups = client.list_groups().await?;
+    if let Some(ids) = selected_group_ids {
+        // Validate the complete selection before any key mutation. A stale or
+        // forged ID must not partially create the other selected resources.
+        if ids.iter().any(|id| {
+            !groups.iter().any(|group| {
+                group.id == *id
+                    && group.is_usable_ignoring_platform()
+                    && match super::platform_map::parse_platform(&group.platform) {
+                        Some(super::platform_map::Platform::Composite) => true,
+                        Some(platform) => platform.app_type().is_some(),
+                        None => false,
+                    }
+            })
+        }) {
+            return Err(AppError::Config("所选分组已不可用，请重新选择".into()));
+        }
+        let selected: HashSet<i64> = ids.iter().copied().collect();
+        groups.retain(|group| selected.contains(&group.id));
+    }
 
     // 「当前还存在哪些 (platform, group_id)」—— 用来判断哪些托管 key 成了孤儿。
     // ⚠️ 用**完整**分组列表而不是 usable：临时不可用的分组（维护中）key 还在被别的
@@ -156,7 +195,7 @@ pub async fn provision(
     for (group, app_type) in usable {
         match ensure_key_for(
             client,
-            account_id,
+            &mut result.keys_created,
             &app_type,
             &group,
             &existing,
@@ -189,7 +228,7 @@ pub async fn provision(
     for group in composite {
         match ensure_composite_tiers(
             client,
-            account_id,
+            &mut result.keys_created,
             &group,
             &existing,
             tables,
@@ -227,11 +266,13 @@ pub async fn provision(
         }
     }
 
+    // Only a full-inventory reconciliation may remove orphan keys. An explicit
+    // selection is additive, not evidence that unselected groups were removed.
     // 分组被删除 ⇒ 它的 sk 在服务端成了孤儿，顺手删掉（**含服务端那把**）。
     //
     // 已有分组的 key 只是认领、绝不重建/轮换（见 `ensure_key_for`）；这里只处理
     // 「名字能解析出 (platform, group_id) 且当前分组列表里已不存在」的 key。
-    for key in &existing {
+    for key in existing.iter().filter(|_| selected_group_ids.is_none()) {
         let Some((platform, group_id)) = parse_managed_key_name(&key.name) else {
             continue;
         };
@@ -244,7 +285,7 @@ pub async fn provision(
         }
     }
 
-    if result.tiers.is_empty() {
+    if result.tiers.is_empty() && selected_group_ids.is_none() {
         let detail = result
             .failures
             .iter()
@@ -260,10 +301,12 @@ pub async fn provision(
 
 async fn claim_or_create_key(
     client: &Client,
-    account_id: Option<i64>,
+    keys_created: &mut usize,
     group: &Group,
     existing: &[ApiKey],
 ) -> Result<(String, bool, ApiKey), AppError> {
+    // Authentication and key ownership must come from the same client identity.
+    let account_id = client.account_id();
     match claim_key(existing, account_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
         Some(k) => Ok((k.key.clone(), false, k.clone())),
@@ -299,6 +342,9 @@ async fn claim_or_create_key(
                 same_prefix,
             );
             let created = client.create_key(&name, group.id).await?;
+            // Keep the remote effect in the receipt even when later validation
+            // or model discovery fails; a retry can claim this existing resource.
+            *keys_created += 1;
             if created.key.is_empty() {
                 return Err(AppError::Config("服务端返回的密钥是空的".into()));
             }
@@ -310,7 +356,7 @@ async fn claim_or_create_key(
 
 async fn ensure_key_for(
     client: &Client,
-    account_id: Option<i64>,
+    keys_created: &mut usize,
     app_type: &AppType,
     group: &Group,
     existing: &[ApiKey],
@@ -318,7 +364,7 @@ async fn ensure_key_for(
     subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Tier, AppError> {
     let (api_key, created, key_meta) =
-        claim_or_create_key(client, account_id, group, existing).await?;
+        claim_or_create_key(client, keys_created, group, existing).await?;
 
     // 拉这个分组能调哪些模型 —— 只为决定写什么模型名（纯生图分组必须写它自己的
     // `gpt-image-*`，写文本模型会 404）。
@@ -390,14 +436,14 @@ fn composite_app_targets(models: &[String]) -> Vec<AppType> {
 
 async fn ensure_composite_tiers(
     client: &Client,
-    account_id: Option<i64>,
+    keys_created: &mut usize,
     group: &Group,
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
     subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Vec<TargetedTier>, AppError> {
     let (api_key, created, key_meta) =
-        claim_or_create_key(client, account_id, group, existing).await?;
+        claim_or_create_key(client, keys_created, group, existing).await?;
     let models = super::sub2api::list_models(client.site_origin(), &api_key)
         .await
         .map_err(|e| AppError::Config(format!("拉不到模型目录，无法判定该落到哪些 CLI: {e}")))?
@@ -458,6 +504,183 @@ pub fn sort_tiers(tiers: &mut [TargetedTier]) {
 mod tests {
     use super::*;
     use crate::relay::model_selection::DEFAULT_MODEL;
+
+    // The fixture records actual HTTP writes: broadening the selected group filter
+    // or enabling full-inventory cleanup must fail these assertions.
+    #[derive(Default)]
+    struct SelectionFixture {
+        keys: Vec<serde_json::Value>,
+        writes: Vec<(String, String)>,
+        requests: usize,
+        inactive_group: Option<i64>,
+    }
+
+    async fn selection_fixture() -> (
+        Client,
+        std::sync::Arc<std::sync::Mutex<SelectionFixture>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{body::Body, extract::Request, routing::any, Json, Router};
+        use serde_json::json;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(SelectionFixture::default()));
+        let handler_state = state.clone();
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let state = handler_state.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+                    .await.unwrap();
+                let mut state = state.lock().unwrap();
+                state.requests += 1;
+                if method != "GET" {
+                    state.writes.push((method.clone(), path.clone()));
+                }
+                if path == "/v1/models" {
+                    return Json(json!({"data": [{"id": "gpt-5"}, {"id": "claude-opus-4"}]}));
+                }
+                let data = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/v1/groups/available") => json!([
+                        {"id": 1, "name": "alpha", "platform": "openai", "status": "active", "rate_multiplier": 1.0},
+                        {"id": 2, "name": "beta", "platform": "anthropic", "status": if state.inactive_group == Some(2) { "inactive" } else { "active" }, "rate_multiplier": 1.0},
+                        {"id": 3, "name": "shared", "platform": "composite", "status": "active", "rate_multiplier": 1.0}
+                    ]),
+                    ("GET", "/api/v1/keys") => json!({"items": state.keys, "pages": 1}),
+                    ("POST", "/api/v1/keys") => {
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let id = body["group_id"].as_i64().unwrap();
+                        let key = json!({"id": id, "key": format!("fixture-key-{id}"), "name": body["name"], "status": "active"});
+                        state.keys.push(key.clone());
+                        key
+                    }
+                    ("GET", "/api/v1/subscriptions") => json!([]),
+                    ("GET", "/api/v1/groups/rates") => json!({}),
+                    ("DELETE", _) => json!(null),
+                    _ => panic!("unexpected fixture request: {method} {path}"),
+                };
+                Json(json!({"code": 0, "message": "success", "data": data}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            Client::new(&origin, "fixture-token", Some(7), None, None).unwrap(),
+            state,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn selected_provision_creates_only_selected_group_and_reuses_key() {
+        let (client, state, server) = selection_fixture().await;
+        let tables = ModelSelectionTables::builtin();
+        let first = provision_selected(&client, &tables, &[1, 1]).await.unwrap();
+        let second = provision_selected(&client, &tables, &[1]).await.unwrap();
+        assert_eq!(first.tiers.len(), 1);
+        assert_eq!(first.tiers[0].tier.group_id, 1);
+        assert!(first.tiers[0].tier.key_was_created);
+        assert!(!second.tiers[0].tier.key_was_created);
+        assert_eq!(first.tiers[0].tier.api_key, second.tiers[0].tier.api_key);
+        assert_eq!(
+            state.lock().unwrap().writes,
+            vec![("POST".into(), "/api/v1/keys".into())]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_provision_empty_selection_has_no_requests() {
+        let (client, state, server) = selection_fixture().await;
+        let result = provision_selected(&client, &ModelSelectionTables::builtin(), &[])
+            .await
+            .unwrap();
+        assert!(result.tiers.is_empty());
+        assert_eq!(state.lock().unwrap().requests, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_provision_rejects_unknown_id_before_creating_valid_selection() {
+        let (client, state, server) = selection_fixture().await;
+        assert!(
+            provision_selected(&client, &ModelSelectionTables::builtin(), &[1, 99])
+                .await
+                .is_err()
+        );
+        assert!(state.lock().unwrap().writes.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_provision_rejects_newly_inactive_group_before_any_write() {
+        let (client, state, server) = selection_fixture().await;
+        state.lock().unwrap().inactive_group = Some(2);
+        assert!(
+            provision_selected(&client, &ModelSelectionTables::builtin(), &[1, 2])
+                .await
+                .is_err()
+        );
+        assert!(state.lock().unwrap().writes.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_provision_keeps_unselected_and_removed_group_keys() {
+        let (client, state, server) = selection_fixture().await;
+        state.lock().unwrap().keys = [2, 99].into_iter().map(|id| serde_json::json!({
+            "id": id, "key": format!("fixture-key-{id}"), "name": key_name_for(Some(7), "anthropic", id), "status": "active"
+        })).collect();
+        provision_selected(&client, &ModelSelectionTables::builtin(), &[1])
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().unwrap().writes,
+            vec![("POST".into(), "/api/v1/keys".into())]
+        );
+        assert_eq!(state.lock().unwrap().keys.len(), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn selected_provision_composite_shares_one_key_across_apps() {
+        let (client, state, server) = selection_fixture().await;
+        let result = provision_selected(&client, &ModelSelectionTables::builtin(), &[3, 3])
+            .await
+            .unwrap();
+        assert!(result.tiers.len() >= 2);
+        assert!(result
+            .tiers
+            .iter()
+            .all(|tier| tier.tier.api_key == result.tiers[0].tier.api_key));
+        assert_eq!(state.lock().unwrap().writes.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn full_provision_retains_existing_inventory_cleanup_behavior() {
+        let (client, state, server) = selection_fixture().await;
+        state.lock().unwrap().keys.push(serde_json::json!({
+            "id": 99, "key": "fixture-old-key", "name": "LoongPort/a7/anthropic/99", "status": "active"
+        }));
+        let result = provision(&client, &ModelSelectionTables::builtin())
+            .await
+            .unwrap();
+        assert_eq!(result.tiers.len(), 4);
+        let writes = state.lock().unwrap().writes.clone();
+        assert_eq!(
+            writes.iter().filter(|(method, _)| method == "POST").count(),
+            3
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(method, _)| method == "DELETE")
+                .count(),
+            1
+        );
+        server.abort();
+    }
 
     fn key(id: i64, name: &str, status: &str) -> ApiKey {
         ApiKey {

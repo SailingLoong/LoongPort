@@ -147,13 +147,49 @@ pub async fn reconcile_for_account(
     client: &NewApiClient,
     account_id: i64,
 ) -> Result<ReconcileResult, AppError> {
+    reconcile_scope(client, account_id, None).await
+}
+
+/// Prepare only explicitly confirmed upstream groups. This is not an inventory
+/// reconciliation: neither unselected nor obsolete resources are deleted.
+pub async fn reconcile_selected_for_account(
+    client: &NewApiClient,
+    account_id: i64,
+    selected: &[GroupIdentity],
+) -> Result<ReconcileResult, AppError> {
+    reconcile_scope(client, account_id, Some(selected)).await
+}
+
+async fn reconcile_scope(
+    client: &NewApiClient,
+    account_id: i64,
+    selected: Option<&[GroupIdentity]>,
+) -> Result<ReconcileResult, AppError> {
     let groups = client.groups().await?;
     let observed_groups = groups
         .iter()
         .map(|group| group.identity.clone())
         .collect::<Vec<_>>();
     let observed_set = observed_groups.iter().cloned().collect::<HashSet<_>>();
-    let initial_tokens = client.list_tokens().await?;
+    if let Some(selected) = selected {
+        if selected
+            .iter()
+            .any(|identity| !observed_set.contains(identity))
+        {
+            return Err(AppError::Config(
+                "Selected group is no longer available; refresh choices".into(),
+            ));
+        }
+    }
+    let groups = groups
+        .into_iter()
+        .filter(|group| selected.is_none_or(|selection| selection.contains(&group.identity)))
+        .collect::<Vec<_>>();
+    let initial_tokens = if groups.is_empty() {
+        Vec::new()
+    } else {
+        client.list_tokens().await?
+    };
 
     let mut result = ReconcileResult {
         account_id,
@@ -242,7 +278,9 @@ pub async fn reconcile_for_account(
                 && !observed_set.contains(&GroupIdentity(token.group.clone()))
         })
         .collect::<Vec<_>>();
-    delete_stale_tokens(client, &mut result, removed_group_tokens).await;
+    if selected.is_none() {
+        delete_stale_tokens(client, &mut result, removed_group_tokens).await;
+    }
 
     let mut revealed_duplicate_tokens = Vec::new();
     for item in canonical {
@@ -265,7 +303,9 @@ pub async fn reconcile_for_account(
             )),
         }
     }
-    delete_stale_tokens(client, &mut result, revealed_duplicate_tokens).await;
+    if selected.is_none() {
+        delete_stale_tokens(client, &mut result, revealed_duplicate_tokens).await;
+    }
 
     Ok(result)
 }
@@ -565,6 +605,95 @@ mod tests {
             managed_token_name(7, &identity),
             managed_token_name(8, &identity)
         );
+    }
+
+    #[tokio::test]
+    async fn selected_reconcile_creates_only_selected_group_once_and_reuses_it() {
+        let server = TestServer::spawn(TestState::new(7, &["alpha", "beta"], vec![])).await;
+        let client = NewApiClient::new(&server.origin, "fixture-token").unwrap();
+        // Two apps selecting the same upstream group must share one resource.
+        let selected = vec![GroupIdentity("alpha".into()), GroupIdentity("alpha".into())];
+        let first = reconcile_selected_for_account(&client, 7, &selected)
+            .await
+            .unwrap();
+        let second = reconcile_selected_for_account(&client, 7, &selected)
+            .await
+            .unwrap();
+        assert_eq!(first.tokens_created, 1);
+        assert_eq!(first.groups.len(), 1);
+        assert_eq!(first.groups[0].identity, selected[0]);
+        assert_eq!(first.observed_groups.len(), 2);
+        assert_eq!(second.tokens_created, 0);
+        assert_eq!(second.groups[0].api_key, first.groups[0].api_key);
+        let state = server.state.lock().await;
+        assert_eq!(state.created.len(), 1);
+        assert_eq!(state.created[0].1, "alpha");
+        assert!(state.deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_reconcile_empty_selection_does_not_create_or_delete() {
+        let removed = GroupIdentity("removed".into());
+        let server = TestServer::spawn(TestState::new(
+            7,
+            &["alpha"],
+            vec![token(10, managed_token_name(7, &removed), "removed", 1)],
+        ))
+        .await;
+        let client = NewApiClient::new(&server.origin, "fixture-token").unwrap();
+        let result = reconcile_selected_for_account(&client, 7, &[])
+            .await
+            .unwrap();
+        assert!(result.groups.is_empty());
+        assert_eq!(result.tokens_created, 0);
+        let state = server.state.lock().await;
+        assert!(state.created.is_empty());
+        assert!(state.deleted.is_empty());
+        assert_eq!(state.token_list_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn selected_reconcile_rejects_unknown_selection_before_any_write() {
+        let server = TestServer::spawn(TestState::new(7, &["alpha"], vec![])).await;
+        let client = NewApiClient::new(&server.origin, "fixture-token").unwrap();
+        let selected = vec![
+            GroupIdentity("alpha".into()),
+            GroupIdentity("missing".into()),
+        ];
+        assert!(reconcile_selected_for_account(&client, 7, &selected)
+            .await
+            .is_err());
+        let state = server.state.lock().await;
+        assert!(state.created.is_empty());
+        assert!(state.deleted.is_empty());
+        assert_eq!(state.token_list_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn selected_reconcile_preserves_unselected_and_removed_group_tokens() {
+        let tokens = ["alpha", "beta", "removed"]
+            .iter()
+            .enumerate()
+            .map(|(i, group)| {
+                token(
+                    i as i64 + 10,
+                    managed_token_name(7, &GroupIdentity((*group).into())),
+                    group,
+                    1,
+                )
+            })
+            .collect();
+        let server = TestServer::spawn(TestState::new(7, &["alpha", "beta"], tokens)).await;
+        let client = NewApiClient::new(&server.origin, "fixture-token").unwrap();
+        let result = reconcile_selected_for_account(&client, 7, &[GroupIdentity("alpha".into())])
+            .await
+            .unwrap();
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.stale_tokens_deleted, 0);
+        let state = server.state.lock().await;
+        assert!(state.created.is_empty());
+        assert!(state.deleted.is_empty());
+        assert_eq!(state.tokens.len(), 3);
     }
 
     #[tokio::test]

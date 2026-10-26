@@ -1,233 +1,177 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import {
   applicationRoutingApi,
   type ApplicationRouting,
 } from "@/lib/api/applicationRouting";
 import { useApplicationRouting } from "../useApplicationRouting";
+import { failoverApi } from "@/lib/api/failover";
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
-
-const change = { selection: { providerId: "b", model: "model-b" } };
-const review = { draftDigest: "a".repeat(64), revision: "b".repeat(64) };
-const switched = {
-  status: "switched" as const,
-  providerName: "B",
-  warnings: [],
-  chatgptWasRunning: false,
-  chatgptRelaunched: false,
-};
-const facts = (
-  protocol: "native" | "legacy" | null = "legacy",
-): ApplicationRouting => ({
-  modeState: {
-    status: protocol ? "ready" : "unknown",
-    mode: protocol === "native" ? "proxy" : null,
-    attached: protocol === "native" ? true : null,
-    currentProviderId: "a",
-    directProviderId: "a",
-    publicationStarted: false,
-    canWrite: Boolean(protocol),
-    canRecheck: true,
-    writeProtocol: protocol,
-    blockedReason: protocol ? null : "upgrade.checkpoint_pending",
-  },
+const facts = (): ApplicationRouting => ({
   autoFailoverEnabled: false,
   routingActive: false,
-  model: "model-a",
+  model: null,
   modelOptions: [],
-  chainIds: ["a", "b"],
+  chainIds: [],
   tiers: [],
 });
+const blocked = {
+  status: "unknown" as const,
+  mode: null,
+  attached: null,
+  currentProviderId: null,
+  directProviderId: null,
+  publicationStarted: false,
+  canWrite: false,
+  canRecheck: true,
+  writeProtocol: null,
+  blockedReason: "upgrade.checkpoint_pending",
+};
 let client: QueryClient;
 const wrapper = ({ children }: { children: ReactNode }) => (
   <QueryClientProvider client={client}>{children}</QueryClientProvider>
 );
 beforeEach(() => {
-  client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(applicationRoutingApi, "get").mockResolvedValue(facts());
-  vi.spyOn(applicationRoutingApi, "prepareRequest").mockResolvedValue({
-    protocol: "legacy",
-    review,
-  });
-  vi.spyOn(applicationRoutingApi, "apply").mockResolvedValue(switched);
-  vi.spyOn(applicationRoutingApi, "queryRequest");
-  vi.spyOn(applicationRoutingApi, "setFailover").mockResolvedValue(undefined);
+  vi.spyOn(applicationRoutingApi, "setOrder").mockResolvedValue(undefined);
 });
 afterEach(() => {
   client.clear();
   vi.restoreAllMocks();
 });
-
-describe("managed routing capability and explicit legacy review", () => {
-  it("uses the reviewed legacy command without fabricating a native receipt", async () => {
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    await act(async () => {
-      await result.current.prepareRequest(change);
-    });
-    await act(async () => {
-      expect(await result.current.apply(change)).toEqual(switched);
-    });
-    expect(applicationRoutingApi.apply).toHaveBeenCalledWith(
-      "codex",
-      change,
-      undefined,
-      undefined,
-      review,
-    );
-    expect(applicationRoutingApi.queryRequest).not.toHaveBeenCalled();
-    expect(result.current.originalResult).toBeNull();
-  });
-  it("does not replay or query a failed legacy write and needs a fresh read before a new action", async () => {
-    const get = vi.mocked(applicationRoutingApi.get);
-    vi.mocked(applicationRoutingApi.apply).mockRejectedValueOnce(
-      new Error("reply lost"),
-    );
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    get.mockRejectedValue(new Error("read offline"));
-    await act(async () => {
-      await expect(result.current.apply(change)).rejects.toThrow("reply lost");
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(true));
-    expect(result.current.originalResult).toBeNull();
-    expect(applicationRoutingApi.queryRequest).not.toHaveBeenCalled();
-    expect(applicationRoutingApi.apply).toHaveBeenCalledTimes(1);
-    get.mockResolvedValue(facts());
-    await act(async () => {
-      await result.current.refetch();
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    expect(applicationRoutingApi.apply).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      await result.current.apply(change);
-    });
-    expect(applicationRoutingApi.prepareRequest).toHaveBeenCalledTimes(2);
-    expect(applicationRoutingApi.apply).toHaveBeenCalledTimes(2);
-    expect(applicationRoutingApi.queryRequest).not.toHaveBeenCalled();
-  });
-  it.each(["claude", "codex", "gemini", "grokbuild"] as const)(
-    "fails closed without modeState for managed %s",
-    async (app) => {
-      const data = facts();
-      delete data.modeState;
-      vi.mocked(applicationRoutingApi.get).mockResolvedValue(data);
-      const { result } = renderHook(() => useApplicationRouting(app), {
-        wrapper,
-      });
-      await waitFor(() => expect(result.current.data).toBeDefined());
-      expect(result.current.writeBlocked).toBe(true);
-      await expect(result.current.setFailover(true)).rejects.toThrow(
-        "mode.verification_required",
-      );
-      expect(applicationRoutingApi.setFailover).not.toHaveBeenCalled();
-    },
-  );
-  it("does not require managed routing capabilities for an independent app", async () => {
-    const data = facts();
-    delete data.modeState;
-    vi.mocked(applicationRoutingApi.get).mockResolvedValue(data);
-    const { result } = renderHook(() => useApplicationRouting("opencode"), {
+it.each(["claude-desktop", "opencode", "openclaw", "hermes", "pi"] as const)(
+  "does not fabricate managed mode requirements for independent %s",
+  async (appId) => {
+    const { result } = renderHook(() => useApplicationRouting(appId), {
       wrapper,
     });
     await waitFor(() => expect(result.current.data).toBeDefined());
     expect(result.current.writeBlocked).toBe(false);
-  });
-  it.each([undefined, null, "invalid"])(
-    "blocks a missing or invalid write protocol: %s",
-    async (protocol) => {
-      const data = facts();
-      Object.assign(data.modeState!, { writeProtocol: protocol });
-      vi.mocked(applicationRoutingApi.get).mockResolvedValue(data);
-      const { result } = renderHook(() => useApplicationRouting("codex"), {
-        wrapper,
-      });
-      await waitFor(() => expect(result.current.data).toBeDefined());
-      expect(result.current.writeBlocked).toBe(true);
-      await expect(result.current.prepareRequest(change)).rejects.toThrow(
-        "mode.verification_required",
-      );
-      expect(applicationRoutingApi.prepareRequest).not.toHaveBeenCalled();
-    },
-  );
-  it("blocks while loading, through checkpoint state, and unlocks only after a successful recovery read", async () => {
-    let resolve!: (value: ApplicationRouting) => void;
-    vi.mocked(applicationRoutingApi.get).mockReturnValueOnce(
-      new Promise((r) => {
-        resolve = r;
-      }),
-    );
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    expect(result.current.writeBlocked).toBe(true);
     await act(async () => {
-      resolve(facts(null));
+      await result.current.setOrder(["a"]);
+    });
+    expect(applicationRoutingApi.setOrder).toHaveBeenCalledWith(appId, ["a"]);
+  },
+);
+it.each(["claude", "codex", "gemini", "grokbuild"] as const)(
+  "still fails closed if managed %s is accidentally passed without mode facts",
+  async (appId) => {
+    const { result } = renderHook(() => useApplicationRouting(appId), {
+      wrapper,
     });
     await waitFor(() => expect(result.current.data).toBeDefined());
     expect(result.current.writeBlocked).toBe(true);
+    await expect(result.current.setOrder(["a"])).rejects.toThrow(
+      "mode.verification_required",
+    );
+    expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
+  },
+);
+it("blocks loading and checkpoint state until a successful independent-app read recovers", async () => {
+  let resolve!: (value: ApplicationRouting) => void;
+  vi.mocked(applicationRoutingApi.get).mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const { result } = renderHook(() => useApplicationRouting("claude-desktop"), {
+    wrapper,
+  });
+  expect(result.current.writeBlocked).toBe(true);
+  await act(async () => resolve({ ...facts(), modeState: blocked }));
+  await waitFor(() =>
     expect(result.current.modeState?.blockedReason).toBe(
       "upgrade.checkpoint_pending",
-    );
-    await expect(result.current.apply(change)).rejects.toThrow(
-      "mode.verification_required",
-    );
-    await act(async () => {
-      await result.current.refetch();
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    expect(applicationRoutingApi.apply).not.toHaveBeenCalled();
+    ),
+  );
+  await expect(result.current.setOrder(["a"])).rejects.toThrow(
+    "mode.verification_required",
+  );
+  await act(async () => {
+    await result.current.refetch();
   });
-  it("rejects a prepare protocol mismatch before any write", async () => {
-    vi.mocked(applicationRoutingApi.prepareRequest).mockResolvedValue({
-      protocol: "native",
-      request: { id: "native", scope: "applicationRouting", ...review },
-    });
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    await act(async () => {
-      await expect(result.current.apply(change)).rejects.toThrow(
-        "mode.verification_required",
-      );
-    });
-    expect(applicationRoutingApi.apply).not.toHaveBeenCalled();
-    expect(applicationRoutingApi.queryRequest).not.toHaveBeenCalled();
+  await waitFor(() => expect(result.current.writeBlocked).toBe(false));
+  expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
+});
+it("checks the current source cache before writes even before React has rendered the new owner state", async () => {
+  const { result } = renderHook(() => useApplicationRouting("opencode"), {
+    wrapper,
   });
-  it("does not submit a second legacy write while the first reply is pending", async () => {
-    let resolve!: (value: typeof switched) => void;
-    vi.mocked(applicationRoutingApi.apply).mockReturnValueOnce(
-      new Promise((r) => {
-        resolve = r;
-      }),
-    );
-    const { result } = renderHook(() => useApplicationRouting("codex"), {
-      wrapper,
-    });
-    await waitFor(() => expect(result.current.writeBlocked).toBe(false));
-    let pending!: Promise<unknown>;
-    await act(async () => {
-      pending = result.current.apply(change);
-    });
-    await waitFor(() =>
-      expect(applicationRoutingApi.apply).toHaveBeenCalledTimes(1),
-    );
-    await expect(result.current.apply(change)).rejects.toThrow(
-      "mode.verification_required",
-    );
-    await act(async () => {
-      resolve(switched);
-      await pending;
-    });
-    expect(applicationRoutingApi.apply).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(result.current.writeBlocked).toBe(false));
+  const setOrder = result.current.setOrder;
+  client.setQueryData(["applicationRouting", "opencode"], {
+    ...facts(),
+    modeState: blocked,
   });
+  await expect(setOrder(["a"])).rejects.toThrow("mode.verification_required");
+  expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
+});
+it("surfaces a blocking owner from a failed read without replacing retained routing facts", async () => {
+  const { result } = renderHook(() => useApplicationRouting("pi"), { wrapper });
+  await waitFor(() => expect(result.current.data).toBeDefined());
+  const retained = result.current.data;
+  vi.mocked(applicationRoutingApi.get).mockRejectedValue({
+    modeState: blocked,
+  });
+  await act(async () => {
+    await result.current.refetch();
+  });
+  expect(result.current.data).toEqual(retained);
+  await waitFor(() => expect(result.current.modeState).toEqual(blocked));
+  expect(result.current.writeBlocked).toBe(true);
+  await expect(result.current.setOrder(["a"])).rejects.toThrow(
+    "mode.verification_required",
+  );
+  expect(applicationRoutingApi.setOrder).not.toHaveBeenCalled();
+});
+
+it("keeps original proxy block/reset actions guarded without restoring the old route writer", async () => {
+  const writable = {
+    ...blocked,
+    status: "ready" as const,
+    mode: "proxy" as const,
+    attached: true,
+    canWrite: true,
+    writeProtocol: "native" as const,
+    blockedReason: null,
+  };
+  vi.mocked(applicationRoutingApi.get).mockResolvedValue({
+    ...facts(),
+    modeState: writable,
+  });
+  const block = vi
+    .spyOn(applicationRoutingApi, "setTierBlocked")
+    .mockResolvedValue(undefined);
+  const reset = vi
+    .spyOn(failoverApi, "resetCircuitBreaker")
+    .mockResolvedValue(undefined);
+  const { result } = renderHook(() => useApplicationRouting("codex"), {
+    wrapper,
+  });
+  await waitFor(() => expect(result.current.writeBlocked).toBe(false));
+  await act(async () => {
+    await result.current.blockTier({ providerId: "p", blocked: false });
+  });
+  await act(async () => {
+    await result.current.resetTierErrors({ providerId: "p" });
+  });
+  expect(block).toHaveBeenCalledExactlyOnceWith("codex", "p", false);
+  expect(reset).toHaveBeenCalledExactlyOnceWith("p", "codex");
+  const actions = result.current;
+  client.setQueryData(["applicationRouting", "codex"], {
+    ...facts(),
+    modeState: blocked,
+  });
+  await expect(
+    actions.blockTier({ providerId: "p", blocked: true }),
+  ).rejects.toThrow("mode.verification_required");
+  await expect(actions.resetTierErrors({ providerId: "p" })).rejects.toThrow(
+    "mode.verification_required",
+  );
+  expect(block).toHaveBeenCalledTimes(1);
+  expect(reset).toHaveBeenCalledTimes(1);
+  expect(actions).not.toHaveProperty("apply");
 });

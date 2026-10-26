@@ -1,0 +1,108 @@
+{
+  "manual": {
+    "target": {
+      "kind": "manual",
+      "sourceId": "synthetic-source",
+      "model": "model-a"
+    },
+    "request": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "scope": "applicationRouting",
+      "draftDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expectedBindingRevision": null,
+    "groupRevision": null
+  },
+  "ordered": {
+    "target": {
+      "kind": "orderedGroup",
+      "groupId": "00000000-0000-4000-8000-000000000002"
+    },
+    "request": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "scope": "applicationRouting",
+      "draftDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expectedBindingRevision": 1,
+    "groupRevision": 2
+  },
+  "preparedGroup": {
+    "group": {
+      "name": "Daily",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "revision": 2,
+      "members": [
+        {
+          "sourceId": "synthetic-source",
+          "model": "model-a"
+        }
+      ]
+    },
+    "expectedRevision": 1,
+    "draftDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "affectedAppIds": ["claude", "codex"]
+  },
+  "emptyState": {
+    "appId": "claude",
+    "binding": null,
+    "groups": [
+      {
+        "name": "Daily",
+        "id": "00000000-0000-4000-8000-000000000002",
+        "revision": 2,
+        "members": [
+          {
+            "sourceId": "synthetic-source",
+            "model": "model-a"
+          }
+        ]
+      }
+    ],
+    "canApply": false,
+    "blockedReason": "routing_groups.connection_required",
+    "pendingRequest": null
+  },
+  "pendingState": {
+    "appId": "claude",
+    "binding": {
+      "target": {
+        "kind": "manual",
+        "sourceId": "synthetic-source",
+        "model": "model-a"
+      },
+      "revision": 1
+    },
+    "groups": [
+      {
+        "name": "Daily",
+        "id": "00000000-0000-4000-8000-000000000002",
+        "revision": 2,
+        "members": [
+          {
+            "sourceId": "synthetic-source",
+            "model": "model-a"
+          }
+        ]
+      }
+    ],
+    "canApply": false,
+    "blockedReason": "routing_groups.recovery_required",
+    "pendingRequest": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "scope": "applicationRouting",
+      "draftDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "completed": {
+    "request": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "scope": "applicationRouting",
+      "draftDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "status": "completed"
+  }
+}

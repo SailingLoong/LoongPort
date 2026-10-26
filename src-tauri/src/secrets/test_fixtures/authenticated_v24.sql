@@ -1,4 +1,8 @@
 -- Downgrade only a freshly created, empty current test database to deployed v24.
+DROP TABLE IF EXISTS loongport_application_route_bindings;
+DROP TABLE IF EXISTS loongport_routing_groups;
+ALTER TABLE providers DROP COLUMN credential_revision;
+ALTER TABLE loongport_vendor DROP COLUMN api_key_revision;
 DROP TABLE IF EXISTS paperclip_run_bindings;
 DROP TABLE IF EXISTS qoder_campaign_operations;
 ALTER TABLE providers DROP COLUMN qoder_http_secret;

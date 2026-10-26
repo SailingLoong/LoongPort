@@ -81,6 +81,9 @@ import {
   useClientNavigation,
   type ClientView as View,
 } from "@/components/shell/navigation";
+import { ApplicationRouteWorkspace } from "@/components/applications/ApplicationRouteWorkspace";
+import { SharedGroupsPage } from "@/components/applications/SharedGroupsPage";
+import { serviceSourceDestination } from "@/components/applications/serviceSourceNavigation";
 import {
   ApplicationWorkspace,
   type ApplicationWorkspaceHandle,
@@ -272,6 +275,7 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const currentView = navigation.view;
+  const isC2View = currentView === "providers" && isProxyAppId(activeApp);
   const setCurrentView = useCallback(
     (...args: Parameters<typeof navigation.navigate>) => {
       if (
@@ -864,6 +868,7 @@ function App() {
     provider,
     originalId,
     edit,
+    credentialWrite,
   }: ProviderUpdateInput) => {
     if (providerWritesBlocked && !edit?.queryOnly) {
       if (edit)
@@ -875,6 +880,8 @@ function App() {
         };
       return;
     }
+    if (credentialWrite === true)
+      return updateProvider(provider, originalId, edit, true);
     return edit
       ? updateProvider(provider, originalId, edit)
       : updateProvider(provider, originalId);
@@ -1157,6 +1164,19 @@ function App() {
     }
   };
 
+  const applicationSwitcher = (
+    <AppSwitcher
+      activeApp={activeApp}
+      variant={isC2View ? "workspace" : "default"}
+      onSwitch={setActiveApp}
+      visibleApps={visibleApps}
+      applications={APP_IDS.filter((app) => app !== "codex-image")}
+      disabled={visibilityBusy || !credentialRuntimeAvailable}
+      onHideApp={(app) => void changeAppVisibility(app, false)}
+      onShowApp={(app) => void changeAppVisibility(app, true)}
+    />
+  );
+
   const renderContent = () => {
     const providerList = (mutationsDisabled = false) => (
       <ProviderList
@@ -1213,6 +1233,14 @@ function App() {
     );
     const content = (() => {
       switch (currentView) {
+        case "sharedGroups":
+          return (
+            <SharedGroupsPage
+              ref={workspaceRef}
+              appId={isProxyAppId(activeApp) ? activeApp : "claude"}
+              onOpenApplications={() => setCurrentView("providers")}
+            />
+          );
         case "records":
         case "resources":
           return (
@@ -1318,20 +1346,8 @@ function App() {
         default:
           return (
             <div className="page-content flex flex-col flex-1 min-h-0 gap-5 overflow-hidden">
-              {activeApp !== "codex-image" && (
-                <div className="flex min-w-0">
-                  <AppSwitcher
-                    activeApp={activeApp}
-                    onSwitch={setActiveApp}
-                    visibleApps={visibleApps}
-                    applications={APP_IDS.filter(
-                      (app) => app !== "codex-image",
-                    )}
-                    disabled={visibilityBusy}
-                    onHideApp={(app) => void changeAppVisibility(app, false)}
-                    onShowApp={(app) => void changeAppVisibility(app, true)}
-                  />
-                </div>
+              {activeApp !== "codex-image" && !isC2View && (
+                <div className="flex min-w-0">{applicationSwitcher}</div>
               )}
               <div className="flex-1 overflow-y-auto overflow-x-hidden pb-4">
                 <AnimatePresence mode="wait">
@@ -1364,6 +1380,40 @@ function App() {
                         <ImageTabPage onOpenAddHub={handleOpenAddHub} />
                         {providerList()}
                       </>
+                    ) : isProxyAppId(activeApp) ? (
+                      <ApplicationRouteWorkspace
+                        ref={workspaceRef}
+                        key={activeApp}
+                        appId={activeApp}
+                        onOpenSource={(account) => {
+                          const destination = serviceSourceDestination(
+                            account,
+                            activeApp,
+                          );
+                          setCurrentView(
+                            destination.view,
+                            destination.app,
+                            destination.account,
+                            destination.platform,
+                          );
+                        }}
+                        onManageGroups={() => setCurrentView("sharedGroups")}
+                        onAdd={() => handleOpenAddHub()}
+                      >
+                        {(mutationsDisabled) => (
+                          <>
+                            {providerList(mutationsDisabled)}
+                            {(activeApp === "claude" ||
+                              activeApp === "codex") && (
+                              <ManagedAccountApplicationPanel
+                                key={activeApp}
+                                appId={activeApp}
+                                ref={managedAccountRef}
+                              />
+                            )}
+                          </>
+                        )}
+                      </ApplicationRouteWorkspace>
                     ) : (
                       <ApplicationWorkspace
                         ref={workspaceRef}
@@ -1382,13 +1432,6 @@ function App() {
                       >
                         {(mutationsDisabled) => providerList(mutationsDisabled)}
                       </ApplicationWorkspace>
-                    )}
-                    {(activeApp === "claude" || activeApp === "codex") && (
-                      <ManagedAccountApplicationPanel
-                        key={activeApp}
-                        appId={activeApp}
-                        ref={managedAccountRef}
-                      />
                     )}
                   </motion.div>
                 </AnimatePresence>
@@ -1417,7 +1460,12 @@ function App() {
   return (
     <div
       data-client-shell
-      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
+      className={cn(
+        "flex flex-col h-screen overflow-hidden selection:bg-primary/30 pl-[var(--sidebar-width)]",
+        isC2View
+          ? "bg-[#edf0f5] text-[#17212f] dark:bg-background dark:text-foreground"
+          : "bg-background text-foreground",
+      )}
       style={{
         overflowX: "hidden",
         paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
@@ -1530,7 +1578,10 @@ function App() {
 
       <header
         hidden={currentView === "addHub"}
-        className="fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default bg-background"
+        className={cn(
+          "fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default",
+          isC2View ? "bg-[#f5f7fb] dark:bg-background" : "bg-background",
+        )}
         {...DRAG_REGION_ATTR}
         style={
           {
@@ -1551,10 +1602,12 @@ function App() {
           style={{ ...DRAG_REGION_STYLE } as any}
         >
           <div
-            className="flex items-center gap-1"
+            className={cn("flex items-center gap-1", isC2View && "min-w-0")}
             style={{ WebkitAppRegion: "no-drag" } as any}
           >
-            {!isApplicationView ? (
+            {isC2View && credentialRuntimeAvailable ? (
+              applicationSwitcher
+            ) : !isApplicationView ? (
               <div className="flex items-center gap-2">
                 {navigation.canGoBack && (
                   <Button
@@ -1579,6 +1632,7 @@ function App() {
                   )}
                 >
                   {currentView === "services" && t("client.services")}
+                  {currentView === "sharedGroups" && t("client.sharedGroups")}
                   {currentView === "records" && t("client.records")}
                   {currentView === "usage" && t("usage.title")}
                   {currentView === "resources" && t("client.resources")}
@@ -1620,7 +1674,12 @@ function App() {
           </div>
 
           {credentialRuntimeAvailable && (
-            <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
+            <div
+              className={cn(
+                "flex min-w-0 items-center justify-end gap-1.5",
+                isC2View ? "shrink-0" : "flex-1",
+              )}
+            >
               {currentView === "providers" &&
                 (activeApp === "claude-desktop" || proxyAppId) && (
                   <div

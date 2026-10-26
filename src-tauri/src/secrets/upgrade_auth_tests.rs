@@ -6238,7 +6238,7 @@ fn u03_completion_keeps_checkpoint_when_pause_disappears_before_release() {
 
 #[test]
 #[serial_test::serial]
-fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live_to_v29() {
+fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live_to_current() {
     fn table_rows(conn: &rusqlite::Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
         let mut statement = conn
             .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
@@ -6399,7 +6399,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     let live = db.conn.lock().unwrap();
     assert_eq!(
         database::loongport_schema::read_stored_version(&live).unwrap(),
-        29
+        database::loongport_schema::LOONGPORT_SCHEMA_VERSION
     );
     assert_eq!(
         crate::database::read_qoder_campaign_operation_rows(&live).unwrap(),
@@ -6601,4 +6601,17 @@ fn native_archive_publication_readback_failure_retains_authenticated_recovery() 
     })
     .unwrap();
     assert_eq!(snapshot(f.home.path()), before);
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_ci_retained_attached_case(case: &str) {
+    if case == "admitted_create" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_creation_keeps_historical_owner();
+    } else if case == "admitted_key_edit" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_key_edit_keeps_historical_owner();
+    } else if case == "admitted_same_key_reissue" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_same_key_reissue_keeps_historical_owner();
+    } else {
+        attached_recovery_tests::verify_ci_retained_attached_case(case);
+    }
 }

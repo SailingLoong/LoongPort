@@ -624,3 +624,12 @@ pub(crate) mod remote_plaintext_transport;
 #[cfg(feature = "gui")]
 #[path = "remote_plaintext_recovery_tests.rs"]
 pub(crate) mod remote_plaintext_recovery;
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+#[path = "pool_restore_consumer_tests.rs"]
+mod pool_restore_consumer_tests;
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) async fn verify_pool_restore(case: &str) {
+    pool_restore_consumer_tests::verify(case).await;
+}

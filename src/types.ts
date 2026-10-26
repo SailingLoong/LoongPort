@@ -58,7 +58,8 @@ export interface ProviderPresentation {
   canSetAsDefault: boolean;
   routingBadge: ProviderRoutingBadge | null;
   routingReason: ProviderRoutingReason | null;
-  switchBlockedReason: "officialBlockedByProxy" | null;
+  switchBlockedReason:
+    "officialBlockedByProxy" | "nativeSourceUnavailable" | null;
 }
 
 export interface AppConfig {

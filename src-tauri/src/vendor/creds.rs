@@ -107,6 +107,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             login_identifier TEXT NOT NULL DEFAULT '',
             auth_token TEXT NOT NULL DEFAULT '',
             api_key TEXT NOT NULL DEFAULT '',
+            api_key_revision TEXT NOT NULL DEFAULT '',
             sort_index INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0
         )",
@@ -199,7 +200,7 @@ pub fn set_api_key(
     api_key: &str,
 ) -> Result<(), AppError> {
     conn.execute(
-        "UPDATE loongport_vendor SET api_key = ?1 WHERE id = ?2",
+        "UPDATE loongport_vendor SET api_key = ?1, api_key_revision = ?3 WHERE id = ?2",
         params![
             seal_db(
                 vault,
@@ -208,7 +209,8 @@ pub fn set_api_key(
                 &[&row_id.to_string()],
                 api_key
             )?,
-            row_id
+            row_id,
+            crate::database::credential_revision::new_revision()
         ],
     )
     .map_err(|e| AppError::Database(format!("保存密钥失败: {e}")))?;

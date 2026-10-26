@@ -472,7 +472,48 @@ impl Database {
         self.save_provider_with_vault_owned(
             app_type,
             provider,
-            (expected, mark_user_edited),
+            (expected, mark_user_edited, false, None),
+            session,
+            vault,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// An original explicit key-edit operation, not a generic metadata save.
+    pub(crate) fn save_provider_with_credential_intent(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        reissue: bool,
+    ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
+        self.save_provider_with_vault_owned(
+            app_type,
+            provider,
+            (None, false, reissue, None),
+            self.secrets.as_ref(),
+            &vault,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_provider_with_vault_credential_write(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        expected: &str,
+        mark_user_edited: bool,
+        session: &crate::secrets::session::SecretSession,
+        vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
+        proof: Option<&crate::database::credential_revision::WriteProof>,
+    ) -> Result<(), AppError> {
+        self.save_provider_with_vault_owned(
+            app_type,
+            provider,
+            (Some(expected), mark_user_edited, false, proof),
             session,
             vault,
             None,
@@ -484,12 +525,17 @@ impl Database {
         &self,
         app_type: &str,
         provider: &Provider,
-        comparison: (Option<&str>, bool),
+        comparison: (
+            Option<&str>,
+            bool,
+            bool,
+            Option<&crate::database::credential_revision::WriteProof>,
+        ),
         session: &crate::secrets::session::SecretSession,
         vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
         qoder_operation: Option<&crate::services::provider::qoder_daily::Operation>,
     ) -> Result<crate::services::provider::qoder_daily::PersistOutcome, AppError> {
-        let (expected, mark_user_edited) = comparison;
+        let (expected, mark_user_edited, reissue, credential_write) = comparison;
         if !std::ptr::eq(session, self.secrets.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
         }
@@ -499,7 +545,7 @@ impl Database {
         // connections. Reserve the writer before reading, so SQLite's busy
         // handler can wait instead of failing a deferred lock-upgrade deadlock.
         // Ordinary provider saves retain their existing transaction behavior.
-        let behavior = if qoder_operation.is_some() {
+        let behavior = if qoder_operation.is_some() || credential_write.is_some() {
             rusqlite::TransactionBehavior::Immediate
         } else {
             rusqlite::TransactionBehavior::Deferred
@@ -509,6 +555,8 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
+        let credential_revisions =
+            crate::database::credential_revision::original_provider_uses_revisions(&tx)?;
         let current =
             Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
         let mut replacement = provider.clone();
@@ -547,6 +595,25 @@ impl Database {
                     != crate::services::vendor_source_binding::is_reference(&replacement)
         });
         let provider = &replacement;
+        let credential_applied = if let Some(proof) = credential_write {
+            proof.validate()?;
+            let previous = current
+                .as_ref()
+                .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
+            let revision =
+                crate::database::credential_revision::provider_on(&tx, app_type, &provider.id)?;
+            let actual = Self::provider_update_digest(previous)?;
+            let desired = Self::provider_update_digest(provider)?;
+            if revision == proof.next && actual == desired {
+                true
+            } else if revision == proof.before && Some(actual.as_str()) == expected {
+                false
+            } else {
+                return Err(AppError::Config("mode.provider_changed".into()));
+            }
+        } else {
+            false
+        };
         if let Some(expected) = expected {
             let current = current
                 .as_ref()
@@ -560,7 +627,10 @@ impl Database {
                     .meta
                     .as_ref()
                     .and_then(|m| m.qoder_campaign_state.as_ref());
-            if current_digest == Self::provider_update_digest(provider)? && backend_state_equal {
+            if current_digest == Self::provider_update_digest(provider)?
+                && backend_state_equal
+                && (credential_write.is_none() || credential_applied)
+            {
                 if mark_user_edited {
                     tx.execute(
                         "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
@@ -687,6 +757,25 @@ impl Database {
             }
         }
 
+        // Incarnation belongs to this original row and this same credential transaction.
+        // Ordinary label/model/route writes preserve it; explicit reissue never relies on equality.
+        let rotate = reissue
+            || current.as_ref().is_none_or(|previous| {
+                crate::database::credential_revision::authentication_changed(
+                    app_type, previous, provider,
+                )
+            });
+        // Original admitted legacy writes keep their original CAS/journal contract;
+        // they cannot mint a shared proof before the schema owner's real migration.
+        if credential_revisions && (credential_write.is_some() || rotate) {
+            let revision = credential_write
+                .map(|proof| proof.next.clone())
+                .unwrap_or_else(crate::database::credential_revision::new_revision);
+            tx.execute(
+                "UPDATE providers SET credential_revision=?1 WHERE id=?2 AND app_type=?3",
+                params![revision, provider.id, app_type],
+            )?;
+        }
         if mark_user_edited {
             tx.execute(
                 "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
@@ -767,7 +856,7 @@ impl Database {
         self.save_provider_with_vault_owned(
             "codex",
             &next,
-            (Some(&expected), false),
+            (Some(&expected), false, false, None),
             self.secrets.as_ref(),
             &vault,
             Some(operation),

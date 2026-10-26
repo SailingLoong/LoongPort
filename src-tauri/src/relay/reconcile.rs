@@ -1014,6 +1014,24 @@ mod tests {
             [],
         )
         .expect("建原有 Provider 表");
+        // The original v1 vendor owner also precedes this partial v13 fixture.
+        // Keep its historical shape; the v31 migration must add its own column.
+        conn.execute_batch(
+            "CREATE TABLE loongport_vendor (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vendor_id TEXT NOT NULL,
+                account_id TEXT,
+                account_label TEXT NOT NULL DEFAULT '',
+                login_identifier TEXT NOT NULL DEFAULT '',
+                auth_token TEXT NOT NULL DEFAULT '',
+                api_key TEXT NOT NULL DEFAULT '',
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE UNIQUE INDEX idx_loongport_vendor_account
+            ON loongport_vendor(vendor_id, account_id);",
+        )
+        .expect("建原有 Vendor 表");
         // 造一个停在 v13 的库：版本表写 13，不建快照表。
         conn.execute(
             "CREATE TABLE loongport_schema_version (

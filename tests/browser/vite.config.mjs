@@ -14,6 +14,7 @@ export default defineConfig({
       input: [
         path.resolve(import.meta.dirname, "zcode-provider.html"),
         path.resolve(import.meta.dirname, "unified-accounts.html"),
+        path.resolve(import.meta.dirname, "applications-c2.html"),
       ],
     },
   },

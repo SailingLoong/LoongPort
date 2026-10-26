@@ -28,7 +28,7 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-const source: ServiceSource = {
+const source: ServiceSource & { account: { kind: "relay"; id: number } } = {
   sourceId: "shared-plan",
   account: { kind: "relay", id: 7 },
   name: "Standard",
@@ -59,9 +59,11 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 });
 afterEach(() => client.clear());
-function renderList(account = source.account) {
+function renderList(
+  account: { kind: "relay" | "vendor"; id: number } = source.account,
+) {
   const onOpenApp = vi.fn();
-  const content = (account: ServiceSource["account"]) => (
+  const content = (account: { kind: "relay" | "vendor"; id: number }) => (
     <QueryClientProvider client={client}>
       <ServiceSourceList account={account} onOpenApp={onOpenApp} />
     </QueryClientProvider>
@@ -70,7 +72,7 @@ function renderList(account = source.account) {
   return {
     ...result,
     onOpenApp,
-    changeAccount: (account: ServiceSource["account"]) =>
+    changeAccount: (account: { kind: "relay" | "vendor"; id: number }) =>
       result.rerender(content(account)),
   };
 }

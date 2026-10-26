@@ -195,7 +195,18 @@ pub async fn update_proxy_config_for_app(
 ) -> Result<(), String> {
     let db = &state.db;
     let app_type = config.app_type.clone();
-    require_proxy_app(&app_type)?;
+    let app = require_proxy_app(&app_type)?;
+    let _switch = state.proxy_service.lock_switch_for_app(&app_type).await;
+    let current = db
+        .get_proxy_config_for_app(&app_type)
+        .await
+        .map_err(|error| error.to_string())?;
+    if config.enabled != current.enabled
+        || config.auto_failover_enabled != current.auto_failover_enabled
+    {
+        crate::services::shared_routing::ensure_legacy_policy_edit_allowed(db, &app)
+            .map_err(|error| error.to_string())?;
+    }
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)

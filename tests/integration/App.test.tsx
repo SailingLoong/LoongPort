@@ -15,9 +15,14 @@ import { http, HttpResponse } from "msw";
 import App from "@/App";
 import type {
   ApplicationRouting,
-  ApplicationRoutingChange,
   ApplicationRoutingRequest,
 } from "@/lib/api/applicationRouting";
+import type {
+  PreparedRouteTarget,
+  RouteTarget,
+  SharedRoutingState,
+} from "@/lib/api/sharedRouting";
+import type { ServiceSource } from "@/lib/api/serviceSources";
 import {
   GITHUB_REPO,
   LAST_APP_STORAGE_KEY,
@@ -89,6 +94,35 @@ vi.mock(
               : props.children}
             <button
               onClick={() => props.onOpenAccount({ kind: "relay", id: 1 })}
+            >
+              open-account
+            </button>
+          </>
+        ),
+    };
+  },
+);
+
+// Proxy applications now mount C2. Provider-action tests keep their original
+// visible harness, while navigation/draft tests opt into the real C2 controller.
+vi.mock(
+  "@/components/applications/ApplicationRouteWorkspace",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/components/applications/ApplicationRouteWorkspace")
+      >();
+    return {
+      ApplicationRouteWorkspace: (props: any) =>
+        workspaceHarness.real ? (
+          <actual.ApplicationRouteWorkspace {...props} />
+        ) : (
+          <>
+            {typeof props.children === "function"
+              ? props.children(false)
+              : props.children}
+            <button
+              onClick={() => props.onOpenSource({ kind: "relay", id: 1 })}
             >
               open-account
             </button>
@@ -340,35 +374,88 @@ async function renderRoutingDraft(client = new QueryClient()) {
   workspaceHarness.real = true;
   const apply = vi.fn();
   const requests = new Map<string, ApplicationRoutingRequest>();
+  const sources: ServiceSource[] = ["saved-source", "draft-source"].map(
+    (sourceId, index) => ({
+      sourceId,
+      name: index === 0 ? "Saved source" : "Custom source",
+      account: { kind: "relay", id: index + 1 },
+      serviceName: null,
+      accountLabel: null,
+      configurationName: null,
+      bindings: (["claude", "codex", "gemini", "grokbuild"] as const).map(
+        (appId) => ({
+          appId,
+          providerId: `${appId}-${index + 1}`,
+          model: "model-a",
+          usageState: "enabled",
+          canSelect: true,
+        }),
+      ),
+    }),
+  );
   server.use(
+    http.post("http://tauri.local/get_service_sources", () =>
+      HttpResponse.json(sources),
+    ),
     http.post(
-      "http://tauri.local/prepare_application_routing_request",
+      "http://tauri.local/get_shared_routing_state",
       async ({ request }) => {
-        const { appType, change, requestId } = (await request.json()) as {
+        const { appType } = (await request.json()) as { appType: string };
+        const state: SharedRoutingState = {
+          appId: appType,
+          binding: {
+            revision: 1,
+            target: {
+              kind: "manual",
+              sourceId: "saved-source",
+              model: "model-a",
+            },
+          },
+          groups: [],
+          pendingRequest: null,
+          canApply: true,
+          blockedReason: null,
+        };
+        return HttpResponse.json(state);
+      },
+    ),
+    http.post(
+      "http://tauri.local/prepare_application_route_target",
+      async ({ request }) => {
+        const { appType, target } = (await request.json()) as {
           appType: string;
-          change: ApplicationRoutingChange;
-          requestId: string;
+          target: RouteTarget;
         };
         expect(appType).toBe("claude");
-        expect(change.order?.providerIds.length).toBeGreaterThan(0);
-        const prepared: ApplicationRoutingRequest = {
-          id: requestId,
+        expect(target).toEqual({
+          kind: "manual",
+          sourceId: "draft-source",
+          model: "model-a",
+        });
+        const original: ApplicationRoutingRequest = {
+          id: `synthetic-route-${requests.size + 1}`,
           scope: "applicationRouting",
           draftDigest: "d".repeat(64),
           revision: "e".repeat(64),
         };
-        requests.set(requestId, prepared);
-        return HttpResponse.json({ protocol: "native", request: prepared });
+        requests.set(original.id, original);
+        const prepared: PreparedRouteTarget = {
+          target,
+          request: original,
+          expectedBindingRevision: 1,
+          groupRevision: null,
+        };
+        return HttpResponse.json(prepared);
       },
     ),
     http.post(
-      "http://tauri.local/get_application_routing_request_result",
+      "http://tauri.local/get_application_route_target_result",
       async ({ request }) => {
         const { request: original } = (await request.json()) as {
           request: ApplicationRoutingRequest;
         };
         expect(original).toEqual(requests.get(original.id));
-        // This flow rejects apply before any commit; a read cannot invent success.
+        // Failed apply has not committed. A read must not invent successful publication.
         return HttpResponse.json({ request: original, status: "notRecorded" });
       },
     ),
@@ -382,9 +469,15 @@ async function renderRoutingDraft(client = new QueryClient()) {
         return HttpResponse.json({
           modeState: {
             status: "ready",
+            mode: "proxy",
+            attached: true,
+            currentProviderId: null,
+            directProviderId: null,
+            publicationStarted: false,
             canWrite: true,
             writeProtocol: "native",
             blockedReason: null,
+            canRecheck: true,
           },
           autoFailoverEnabled: true,
           routingActive: true,
@@ -404,20 +497,34 @@ async function renderRoutingDraft(client = new QueryClient()) {
         });
       },
     ),
-    http.post("http://tauri.local/get_order_profiles", () =>
-      HttpResponse.json({ profiles: [], current: "default" }),
+    http.post(
+      "http://tauri.local/apply_application_route_target",
+      async ({ request }) => {
+        const { prepared } = (await request.json()) as {
+          prepared: PreparedRouteTarget;
+        };
+        expect(prepared.request).toEqual(requests.get(prepared.request.id));
+        apply();
+        return HttpResponse.json({
+          request: prepared.request,
+          status: "notRecorded",
+        });
+      },
     ),
-    http.post("http://tauri.local/get_model_verification_summaries", () =>
-      HttpResponse.json([]),
-    ),
-    http.post("http://tauri.local/apply_application_routing", () => {
-      apply();
-      return HttpResponse.json({ status: "switched", warnings: [] });
-    }),
   );
   renderApp(client);
-  await userEvent.type(await screen.findByRole("searchbox"), "Custom");
-  expect(await screen.findByText("applications.pendingChanges")).toBeVisible();
+  const source = await screen.findByRole("combobox", {
+    name: "routingWorkspace.source",
+  });
+  await waitFor(() => expect(source).toBeEnabled());
+  await userEvent.selectOptions(source, "draft-source");
+  await userEvent.selectOptions(
+    screen.getByRole("combobox", { name: "routingWorkspace.model" }),
+    "model-a",
+  );
+  expect(
+    await screen.findByText("routingWorkspace.draftUnsaved"),
+  ).toBeVisible();
   return apply;
 }
 
@@ -652,9 +759,11 @@ describe("App integration with MSW", () => {
         );
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
-      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(
+        screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+      ).toHaveValue("draft-source");
       expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
-      expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+      expect(screen.getByText("routingWorkspace.draftUnsaved")).toBeVisible();
       await selectApplication("Codex");
       await userEvent.click(
         screen.getByRole("button", { name: "applications.discardAndLeave" }),
@@ -683,8 +792,10 @@ describe("App integration with MSW", () => {
       "false",
     );
     expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
-    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
-    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+    expect(
+      screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+    ).toHaveValue("draft-source");
+    expect(screen.getByText("routingWorkspace.draftUnsaved")).toBeVisible();
     await selectApplication("Codex");
     await userEvent.click(
       screen.getByRole("button", { name: "applications.discardAndLeave" }),
@@ -700,9 +811,11 @@ describe("App integration with MSW", () => {
     await waitFor(() =>
       expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude"),
     );
-    expect(await screen.findByRole("searchbox")).toHaveValue("");
     expect(
-      screen.queryByText("applications.pendingChanges"),
+      await screen.findByRole("combobox", { name: "routingWorkspace.source" }),
+    ).toHaveValue("saved-source");
+    expect(
+      screen.queryByText("routingWorkspace.draftUnsaved"),
     ).not.toBeInTheDocument();
     expect(apply).not.toHaveBeenCalled();
   });
@@ -732,7 +845,9 @@ describe("App integration with MSW", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "client.applications" }),
     );
-    expect(await screen.findByRole("searchbox")).toHaveValue("");
+    expect(
+      await screen.findByRole("combobox", { name: "routingWorkspace.source" }),
+    ).toHaveValue("saved-source");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(apply).not.toHaveBeenCalled();
   });
@@ -744,9 +859,11 @@ describe("App integration with MSW", () => {
     );
     await selectApplication("Claude Code");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+    expect(
+      screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+    ).toHaveValue("draft-source");
     await userEvent.click(
-      screen.getByRole("button", { name: "applications.discardOrder" }),
+      screen.getByRole("button", { name: "routingWorkspace.discard" }),
     );
     await userEvent.click(
       screen.getByRole("button", { name: "client.services" }),
@@ -765,19 +882,19 @@ describe("App integration with MSW", () => {
       settle = resolve;
     });
     server.use(
-      http.post("http://tauri.local/apply_application_routing", () => {
+      http.post("http://tauri.local/apply_application_route_target", () => {
         apply();
         return response;
       }),
     );
     try {
       await userEvent.click(
-        screen.getByRole("button", { name: /applications.applyOrder/ }),
+        screen.getByRole("button", { name: /routingWorkspace.preview/ }),
       );
       await userEvent.click(
         within(
-          screen.getByRole("dialog", { name: "applications.reviewChanges" }),
-        ).getByRole("button", { name: "common.confirm" }),
+          screen.getByRole("dialog", { name: "routingWorkspace.reviewTitle" }),
+        ).getByRole("button", { name: "routingWorkspace.confirm" }),
       );
       await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
       const services = screen.getByRole("button", { name: "client.services" });
@@ -791,9 +908,11 @@ describe("App integration with MSW", () => {
       ).toHaveAttribute("aria-pressed", "true");
       expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
-      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
       expect(
-        screen.getByRole("button", { name: "applications.discardOrder" }),
+        screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+      ).toHaveValue("draft-source");
+      expect(
+        screen.getByRole("button", { name: "routingWorkspace.discard" }),
       ).toBeDisabled();
       expect(toastInfoMock).toHaveBeenCalledWith("common.saving");
       expect(apply).toHaveBeenCalledTimes(1);
@@ -805,7 +924,7 @@ describe("App integration with MSW", () => {
       );
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "applications.discardOrder" }),
+          screen.getByRole("button", { name: "routingWorkspace.discard" }),
         ).toBeEnabled(),
       );
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
@@ -815,7 +934,9 @@ describe("App integration with MSW", () => {
           name: "loongport.tier.editConfirmButton",
         }),
       );
-      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(
+        screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+      ).toHaveValue("draft-source");
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
       await userEvent.click(services);
       await userEvent.click(
@@ -861,7 +982,9 @@ describe("App integration with MSW", () => {
           name: "loongport.tier.editConfirmButton",
         }),
       );
-      expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+      expect(
+        screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+      ).toHaveValue("draft-source");
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
       expect(toastInfoMock).not.toHaveBeenCalled();
       expect(apply).not.toHaveBeenCalled();
@@ -879,7 +1002,9 @@ describe("App integration with MSW", () => {
     ).toBeVisible();
     await userEvent.keyboard("{Escape}");
     expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
-    expect(screen.getByRole("searchbox")).toHaveValue("Custom");
+    expect(
+      screen.getByRole("combobox", { name: "routingWorkspace.source" }),
+    ).toHaveValue("draft-source");
     fireEvent.keyDown(window, { key: ",", metaKey: true });
     await userEvent.click(
       screen.getByRole("button", { name: "applications.discardAndLeave" }),
@@ -1376,6 +1501,7 @@ describe("U02 App original result callback", () => {
   ])(
     "returns the original outcome and permits a read-only query while application writes are blocked: %j",
     async (blockedMode) => {
+      workspaceHarness.real = false;
       localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
       localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
       const row = {

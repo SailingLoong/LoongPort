@@ -12,6 +12,7 @@ use std::{
 };
 
 struct Seal {
+    session_address: usize,
     root: PathBuf,
     context: LibraryContext,
     storage: crate::secrets::storage::StorageIdentity,
@@ -19,14 +20,65 @@ struct Seal {
     accounts: Vec<(String, [u8; 32], String)>,
     _home: tempfile::TempDir,
 }
-pub(crate) struct FixtureOwner(Arc<Seal>);
-impl FixtureOwner {
+pub(crate) struct FixtureOwner<'a> {
+    seal: Arc<Seal>,
+    // Always retain the original borrow, including unit-only builds.
+    _session: &'a SecretSession,
+}
+impl FixtureOwner<'_> {
     pub(crate) fn account_id(&self, index: usize) -> &str {
-        &self.0.accounts[index].0
+        &self.seal.accounts[index].0
+    }
+    /// Generated fixture state only. The production selection reader remains the
+    /// sole authority for effective identity; this does not call it or pre-freeze it.
+    #[cfg(all(feature = "gui", feature = "test-hooks", unix))]
+    pub(crate) fn seed_source_fixture(
+        &self,
+        db: &crate::database::Database,
+        native: Option<&str>,
+        selected: Option<&str>,
+    ) {
+        assert!(std::ptr::eq(self._session, db.secret_session()));
+        let root = self.seal.context.data_root();
+        crate::config_file_io::ensure_private_directory(root).unwrap();
+        let path = root.join("telemetry-state.json");
+        if let Some(id) = native {
+            std::fs::write(&path, serde_json::json!({"deviceMid":id}).to_string()).unwrap();
+        } else {
+            assert!(!path.exists());
+        }
+        let ids = selected.into_iter().collect::<Vec<_>>();
+        db.set_setting("zcode_device_ids_v1", &serde_json::json!({"scopes":{
+            self.seal.context.context_id(): {"devices":ids,"selectedDeviceMid":selected,"revision":1}
+        }}).to_string()).unwrap();
+    }
+    #[cfg(all(feature = "gui", feature = "test-hooks", unix))]
+    pub(crate) fn assert_source_fixture_headers(
+        &self,
+        actual: &http::HeaderMap,
+        effective: Option<&str>,
+    ) {
+        let version =
+            super::super::native_context::library_app_version(self.seal.context.data_root());
+        let expected = super::super::source_context::SourceContext::observe(Some(
+            self.seal.context.data_root(),
+        ))
+        .with_device_mid(effective)
+        .headers(version.as_deref());
+        for (name, value) in &expected {
+            assert!(
+                actual.get(name) == Some(value),
+                "original source header missing or changed: {name}"
+            );
+        }
+        assert!(
+            actual.get("x-device-mid").and_then(|v| v.to_str().ok()) == effective,
+            "effective device selection must be original-owner frozen, including absence"
+        );
     }
     /// These values are generated synthetic tokens, never read from an account.
     pub(crate) fn synthetic_token(&self, index: usize) -> &str {
-        &self.0.accounts[index].2
+        &self.seal.accounts[index].2
     }
 }
 
@@ -40,7 +92,9 @@ pub(crate) struct FixtureTransport {
 impl FixtureTransport {
     /// Issue a capability only after sealing generated accounts into an empty,
     /// private temporary session root. Existing credentials are never adopted.
-    pub(crate) async fn seed_accounts(session: &SecretSession) -> Result<FixtureOwner, Failure> {
+    pub(crate) async fn seed_accounts(
+        session: &SecretSession,
+    ) -> Result<FixtureOwner<'_>, Failure> {
         let temporary = std::env::temp_dir()
             .canonicalize()
             .map_err(|_| Failure::UnsupportedContext)?;
@@ -116,17 +170,21 @@ impl FixtureTransport {
             .map_err(|_| Failure::StorageUnavailable)?;
         crate::config_file_io::write_durable(&root.join(PROFILE_FILE), sealed.as_bytes())
             .map_err(|_| Failure::StorageUnavailable)?;
-        Ok(FixtureOwner(Arc::new(Seal {
-            root,
-            context,
-            storage: vault.identity(),
-            epoch: session.lifecycle_epoch(),
-            accounts,
-            _home: home,
-        })))
+        Ok(FixtureOwner {
+            seal: Arc::new(Seal {
+                session_address: session as *const SecretSession as usize,
+                root,
+                context,
+                storage: vault.identity(),
+                epoch: session.lifecycle_epoch(),
+                accounts,
+                _home: home,
+            }),
+            _session: session,
+        })
     }
 
-    pub(crate) fn loopback(owner: &FixtureOwner, origin: &str) -> Result<Self, Failure> {
+    pub(crate) fn loopback(owner: &FixtureOwner<'_>, origin: &str) -> Result<Self, Failure> {
         let url = url::Url::parse(origin).map_err(|_| Failure::UnsupportedContext)?;
         if url.scheme() != "http"
             || !url
@@ -157,7 +215,7 @@ impl FixtureTransport {
             .build()
             .map_err(|_| Failure::UnsupportedContext)?;
         Ok(Self {
-            seal: owner.0.clone(),
+            seal: owner.seal.clone(),
             origin: origin.trim_end_matches('/').into(),
             client,
             attempts: Arc::new(AtomicUsize::new(0)),
@@ -295,12 +353,13 @@ impl StreamTransport for FixtureTransport {
 }
 impl Lease {
     pub(crate) async fn acquire_fixture(
-        session: Arc<SecretSession>,
+        db: Arc<crate::database::Database>,
         account_id: &str,
         request_session_id: &str,
         fixture: &FixtureTransport,
     ) -> Result<Self, Failure> {
-        fixture.matches_session(&session)?;
+        let session = db.secret_session();
+        fixture.matches_session(session)?;
         if !fixture
             .seal
             .accounts
@@ -310,7 +369,7 @@ impl Lease {
             return Err(Failure::StaleIdentity);
         }
         let lease = Self::acquire_in_context(
-            session,
+            db,
             fixture.seal.context.clone(),
             account_id,
             request_session_id,
@@ -328,4 +387,98 @@ impl Lease {
         fixture.matches(&self).map_err(owner_error)?;
         self.dispatch_with(body, timeout, fixture).await
     }
+}
+
+// Test-only capability registry: only seed_accounts can mint Seal. It accepts no
+// caller-chosen context, OS identity or credential and never changes production
+// library selection. The scoped guard owns the registration and borrows the
+// original session, so its memory cannot be reused while the capability is live.
+fn routing_capabilities(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Seal>>> {
+    static CAPS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Seal>>>,
+    > = std::sync::OnceLock::new();
+    CAPS.get_or_init(Default::default)
+}
+#[cfg(feature = "test-hooks")]
+pub(crate) struct RoutingCapability<'a> {
+    seal: Arc<Seal>,
+    _session: &'a SecretSession,
+}
+#[cfg(feature = "test-hooks")]
+impl<'a> FixtureOwner<'a> {
+    pub(crate) fn install_routing_capability(
+        &self,
+        session: &SecretSession,
+    ) -> Result<RoutingCapability<'a>, Failure> {
+        if !std::ptr::eq(self._session, session) {
+            return Err(Failure::StaleIdentity);
+        }
+        let vault = session.read().map_err(|_| Failure::StorageUnavailable)?;
+        validate_routing_session(&self.seal, session, &vault)?;
+        let mut caps = routing_capabilities()
+            .lock()
+            .map_err(|_| Failure::StorageUnavailable)?;
+        if caps
+            .get(&self.seal.root)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some()
+        {
+            return Err(Failure::StaleIdentity);
+        }
+        caps.insert(self.seal.root.clone(), Arc::downgrade(&self.seal));
+        Ok(RoutingCapability {
+            seal: self.seal.clone(),
+            _session: self._session,
+        })
+    }
+}
+#[cfg(feature = "test-hooks")]
+impl Drop for RoutingCapability<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut caps) = routing_capabilities().lock() {
+            if caps
+                .get(&self.seal.root)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|seal| Arc::ptr_eq(&seal, &self.seal))
+            {
+                caps.remove(&self.seal.root);
+            }
+        }
+    }
+}
+fn validate_routing_session(
+    seal: &Seal,
+    session: &SecretSession,
+    vault: &crate::secrets::storage::StorageContext,
+) -> Result<(), Failure> {
+    if session as *const SecretSession as usize != seal.session_address
+        || session
+            .root()
+            .canonicalize()
+            .map_err(|_| Failure::UnsupportedContext)?
+            != seal.root
+        || session.lifecycle_epoch() != seal.epoch
+        || vault.identity() != seal.storage
+    {
+        return Err(Failure::StaleIdentity);
+    }
+    Ok(())
+}
+pub(super) fn routing_context(
+    session: &SecretSession,
+    vault: &crate::secrets::storage::StorageContext,
+) -> Result<LibraryContext, Failure> {
+    let root = session
+        .root()
+        .canonicalize()
+        .map_err(|_| Failure::UnsupportedContext)?;
+    let seal = routing_capabilities()
+        .lock()
+        .map_err(|_| Failure::StorageUnavailable)?
+        .get(&root)
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or(Failure::UnsupportedContext)?;
+    validate_routing_session(&seal, session, vault)?;
+    Ok(seal.context.clone())
 }

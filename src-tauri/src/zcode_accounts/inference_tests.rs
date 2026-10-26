@@ -19,6 +19,7 @@ fn jwt(exp: u64, marker: &str) -> String {
 struct Fixture {
     _root: tempfile::TempDir,
     session: Arc<SecretSession>,
+    db: Arc<Database>,
     context: LibraryContext,
     ids: Vec<String>,
     tokens: Vec<String>,
@@ -34,7 +35,8 @@ impl Fixture {
         )
         .unwrap();
         let native = context.cipher().unwrap();
-        let session = SecretSession::ephemeral().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let session = db.secrets.clone();
         crate::config_file_io::ensure_private_directory(session.root()).unwrap();
         let tokens = vec![jwt(exp, "a"), jwt(exp, "b")];
         let mut catalog = ProfileCatalog::default();
@@ -74,6 +76,7 @@ impl Fixture {
         Self {
             _root: root,
             session,
+            db,
             context,
             ids,
             tokens,
@@ -81,7 +84,7 @@ impl Fixture {
     }
     async fn lease(&self, index: usize) -> Result<Lease, Failure> {
         Lease::acquire_in_context(
-            self.session.clone(),
+            self.db.clone(),
             self.context.clone(),
             &self.ids[index],
             "fixture-session",
@@ -150,7 +153,8 @@ fn expiry_is_only_a_local_rejection_hint_never_an_authorization_proof() {
 
 #[tokio::test]
 async fn sealed_fixture_rejects_existing_catalog_cross_root_and_non_loopback() {
-    let session = SecretSession::ephemeral().unwrap();
+    let db = Arc::new(Database::memory().unwrap());
+    let session = db.secrets.clone();
     let owner = FixtureTransport::seed_accounts(&session).await.unwrap();
     assert!(FixtureTransport::seed_accounts(&session).await.is_err());
     for origin in [
@@ -163,22 +167,19 @@ async fn sealed_fixture_rejects_existing_catalog_cross_root_and_non_loopback() {
         assert!(FixtureTransport::loopback(&owner, origin).is_err());
     }
     let transport = FixtureTransport::loopback(&owner, "http://127.0.0.1:9").unwrap();
-    let other = SecretSession::ephemeral().unwrap();
+    let other = Arc::new(Database::memory().unwrap());
     assert!(
         Lease::acquire_fixture(other, owner.account_id(0), "fixture-session", &transport)
             .await
             .is_err()
     );
-    assert!(Lease::acquire_fixture(
-        session.clone(),
-        "unknown-account",
-        "fixture-session",
-        &transport
-    )
-    .await
-    .is_err());
+    assert!(
+        Lease::acquire_fixture(db.clone(), "unknown-account", "fixture-session", &transport)
+            .await
+            .is_err()
+    );
     let lease = Lease::acquire_fixture(
-        session.clone(),
+        db.clone(),
         owner.account_id(0),
         "fixture-session",
         &transport,
@@ -522,7 +523,7 @@ async fn wrong_context_cannot_borrow_the_selected_vault_authority() {
     )
     .unwrap();
     assert!(
-        Lease::acquire_in_context(f.session.clone(), wrong, &f.ids[0], "request")
+        Lease::acquire_in_context(f.db.clone(), wrong, &f.ids[0], "request")
             .await
             .is_err()
     );

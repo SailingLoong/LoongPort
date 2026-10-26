@@ -144,6 +144,29 @@ export interface RelayDirectoryListing {
   syncedAt: number;
 }
 
+/** Read-only group discovery; no access key or provider is created. */
+export interface RelayTierChoice {
+  app: AppId;
+  id: string;
+  providerId: string;
+  name: string;
+  groupId: string;
+  prepared?: boolean;
+  compatibility?: "unknown" | "configured";
+}
+
+export interface RelayTierSelection {
+  app: AppId;
+  groupId: string;
+}
+
+export interface ProvisionSummary {
+  tiers: TierInfo[];
+  failures: { groupName: string; reason: string }[];
+  keysCreated: number;
+  mergedProviders: { name: string; appId: string }[];
+}
+
 export interface TierInfo {
   providerId: string;
   /**
@@ -573,6 +596,15 @@ export const relayApi = {
    */
   balance: (relayId: number, force = false): Promise<RowBalanceResult> =>
     invoke("relay_balance", { relayId, force }),
+
+  discoverTiers: (relayId: number): Promise<RelayTierChoice[]> =>
+    invoke("relay_discover_tiers", { relayId }),
+
+  prepareTiers: (
+    relayId: number,
+    selections: RelayTierSelection[],
+  ): Promise<ProvisionSummary> =>
+    invoke("relay_prepare_tiers", { relayId, selections }),
 
   refresh: (relayId: number, app: AppId): Promise<RefreshResult> =>
     invoke("relay_refresh", { relayId, app }),

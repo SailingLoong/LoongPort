@@ -1,6 +1,6 @@
 //! Selected pool entries dispatch through their existing private account owner.
 use super::{hyper_client::ProxyResponse, response_lease::ResponseLease, ProxyError};
-use crate::{provider::Provider, secrets::session::SecretSession};
+use crate::{database::Database, provider::Provider};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
@@ -86,24 +86,32 @@ pub(crate) struct PreparedAccount {
 impl PreparedAccount {
     #[cfg(any(feature = "gui", test))]
     pub(crate) async fn acquire(
-        session: Arc<SecretSession>,
+        db: Arc<Database>,
         kind: AccountKind,
         account_id: &str,
         request_session: &str,
         _extensions: &http::Extensions,
     ) -> Result<Self, ProxyError> {
+        let session = db.secrets.clone();
         let lease = match kind {
-            AccountKind::MiniMax => AccountLease::MiniMax(
-                crate::minimax_code::inference::Lease::acquire(
+            AccountKind::MiniMax => {
+                let lease = crate::minimax_code::inference::Lease::acquire(
                     session,
                     account_id,
                     request_session,
                 )
                 .await
-                .map_err(|_| ProxyError::AuthError("MiniMax Code account unavailable".into()))?,
-            ),
+                .map_err(|_| ProxyError::AuthError("MiniMax Code account unavailable".into()))?;
+                if let Some(crate::services::service_source_identity::NativeStamp::MiniMax(
+                    expected,
+                )) = _extensions.get::<crate::services::service_source_identity::NativeStamp>()
+                {
+                    lease.verify_routing_stamp(expected)?;
+                }
+                AccountLease::MiniMax(lease)
+            }
             AccountKind::ZCode => {
-                #[cfg(all(test, unix))]
+                #[cfg(all(any(test, feature = "test-hooks"), unix))]
                 let lease = {
                     let fixture = _extensions
                         .get::<crate::zcode_accounts::inference::FixtureTransport>()
@@ -113,29 +121,45 @@ impl PreparedAccount {
                             )
                         })?;
                     crate::zcode_accounts::inference::Lease::acquire_fixture(
-                        session,
+                        db.clone(),
                         account_id,
                         request_session,
                         fixture,
                     )
                     .await
                 };
-                #[cfg(all(test, not(unix)))]
+                #[cfg(all(any(test, feature = "test-hooks"), not(unix)))]
                 return Err(ProxyError::ConfigError(
                     "ZCode synthetic owner is unsupported on this test platform".into(),
                 ));
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-hooks")))]
                 let lease = crate::zcode_accounts::inference::Lease::acquire(
-                    session,
+                    db.clone(),
                     account_id,
                     request_session,
                 )
                 .await;
-                #[cfg(any(not(test), unix))]
+                #[cfg(any(not(any(test, feature = "test-hooks")), unix))]
                 {
-                    AccountLease::ZCode(lease.map_err(|_| {
-                        ProxyError::AuthError("ZCode Start Plan account unavailable".into())
-                    })?)
+                    let expected = match _extensions
+                        .get::<crate::services::service_source_identity::NativeStamp>(
+                    ) {
+                        Some(crate::services::service_source_identity::NativeStamp::ZCode(
+                            stamp,
+                        )) => Some(stamp),
+                        _ => None,
+                    };
+                    let lease = lease.map_err(|_| {
+                        if expected.is_some() {
+                            ProxyError::Internal("zcode.routing_identity_changed".into())
+                        } else {
+                            ProxyError::AuthError("ZCode Start Plan account unavailable".into())
+                        }
+                    })?;
+                    if let Some(expected) = expected {
+                        lease.verify_routing_stamp(expected)?;
+                    }
+                    AccountLease::ZCode(lease)
                 }
             }
             AccountKind::Trae => AccountLease::Trae(
@@ -147,18 +171,35 @@ impl PreparedAccount {
                 .await
                 .map_err(|_| ProxyError::Internal("trae.account_unavailable".into()))?,
             ),
-            AccountKind::WorkBuddy => AccountLease::WorkBuddy(
-                crate::workbuddy::inference::Lease::acquire(session, account_id)
+            AccountKind::WorkBuddy => {
+                let lease = if let Some(
+                    crate::services::service_source_identity::NativeStamp::WorkBuddy(expected),
+                ) =
+                    _extensions.get::<crate::services::service_source_identity::NativeStamp>()
+                {
+                    crate::workbuddy::inference::Lease::acquire_for_route(
+                        session, account_id, expected,
+                    )
                     .await
-                    .map_err(|_| ProxyError::AuthError("WorkBuddy account unavailable".into()))?,
-            ),
+                    .map_err(|_| {
+                        ProxyError::AuthError("workbuddy.routing_identity_changed".into())
+                    })?
+                } else {
+                    crate::workbuddy::inference::Lease::acquire(session, account_id)
+                        .await
+                        .map_err(|_| {
+                            ProxyError::AuthError("WorkBuddy account unavailable".into())
+                        })?
+                };
+                AccountLease::WorkBuddy(lease)
+            }
         };
         Ok(Self { lease })
     }
 
     #[cfg(not(any(feature = "gui", test)))]
     pub(crate) async fn acquire(
-        _session: Arc<SecretSession>,
+        _db: Arc<Database>,
         _kind: AccountKind,
         _account_id: &str,
         _request_session: &str,
@@ -194,7 +235,7 @@ impl PreparedAccount {
     ) -> Result<(ProxyResponse, ResponseLease), ProxyError> {
         match self.lease {
             AccountLease::MiniMax(lease) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-hooks"))]
                 let result = {
                     let fixture = _extensions
                         .get::<crate::minimax_code::inference::FixtureTransport>()
@@ -205,7 +246,7 @@ impl PreparedAccount {
                         })?;
                     lease.dispatch_fixture(body, timeout, fixture).await?
                 };
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-hooks")))]
                 let result = lease.dispatch(body, timeout).await?;
                 let fence = result.fence;
                 Ok((
@@ -247,7 +288,7 @@ impl PreparedAccount {
                 ))
             }
             AccountLease::WorkBuddy(lease) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-hooks"))]
                 let result = {
                     let fixture = _extensions
                         .get::<crate::workbuddy::inference::FixtureTransport>()
@@ -258,7 +299,7 @@ impl PreparedAccount {
                         })?;
                     lease.dispatch_fixture(body, timeout, fixture).await?
                 };
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-hooks")))]
                 let result = lease.dispatch(body, timeout).await?;
                 let fence = result.fence;
                 Ok((
@@ -271,7 +312,7 @@ impl PreparedAccount {
             }
             #[cfg(any(not(test), unix))]
             AccountLease::ZCode(lease) => {
-                #[cfg(all(test, unix))]
+                #[cfg(all(any(test, feature = "test-hooks"), unix))]
                 let result = {
                     let fixture = _extensions
                         .get::<crate::zcode_accounts::inference::FixtureTransport>()
@@ -282,9 +323,13 @@ impl PreparedAccount {
                         })?;
                     lease.dispatch_fixture(body, timeout, fixture).await?
                 };
-                #[cfg(not(test))]
+                #[cfg(all(any(test, feature = "test-hooks"), not(unix)))]
+                return Err(ProxyError::ConfigError(
+                    "ZCode synthetic owner is unsupported on this test platform".into(),
+                ));
+                #[cfg(not(any(test, feature = "test-hooks")))]
                 let result = lease.dispatch(body, timeout).await?;
-                #[cfg(any(not(test), unix))]
+                #[cfg(any(not(any(test, feature = "test-hooks")), unix))]
                 {
                     let fence = result.fence;
                     Ok((
@@ -383,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn zcode_non_unix_fixture_acquisition_remains_closed() {
         let result = PreparedAccount::acquire(
-            SecretSession::ephemeral().unwrap(),
+            Arc::new(Database::memory().unwrap()),
             AccountKind::ZCode,
             "synthetic-account",
             "synthetic-session",

@@ -4,13 +4,37 @@
 //! The caller supplies only verified managed account/configuration facts.
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+
+/// Stable non-secret native source identity, independent of app projection IDs.
+pub(crate) fn native_source_id(platform: &str, account: &str, model: &str) -> String {
+    let bytes = serde_json::to_vec(&(platform, account, model)).expect("string tuple");
+    format!("native:{platform}:{}", hex::encode(Sha256::digest(bytes)))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SourceAccountReference {
-    Relay { id: i64 },
-    Vendor { id: i64 },
+    Relay {
+        id: i64,
+    },
+    Vendor {
+        id: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    LocalProvider {
+        platform: String,
+        id: String,
+        origin_app: String,
+        origin_provider_id: String,
+    },
+    NativeAccount {
+        platform: String,
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+    },
 }
 
 /// Legacy site-only association is display compatibility, not account evidence.
@@ -66,6 +90,14 @@ pub struct ServiceSourceBinding {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ServiceSourceTarget {
+    pub app_id: String,
+    pub model: String,
+    pub can_select: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceSource {
     /// Existing managed provider identity, shared by its application projections.
     pub source_id: String,
@@ -76,6 +108,9 @@ pub struct ServiceSource {
     pub configuration_name: Option<String>,
     /// Configured applications, not a prediction of protocol compatibility.
     pub bindings: Vec<ServiceSourceBinding>,
+    /// Verified transient adapter capability, never a fabricated persisted binding.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supported_targets: Vec<ServiceSourceTarget>,
 }
 
 /// Only display facts enter this projection; no credential-bearing Provider does.
@@ -99,7 +134,36 @@ pub fn project_service_sources(candidates: Vec<ServiceSourceCandidate>) -> Vec<S
     for candidate in candidates {
         if candidate.source_id.is_empty()
             || candidate.binding.app_id.is_empty()
-            || candidate.binding.provider_id != candidate.source_id
+            || !match &candidate.account {
+                SourceAccountReference::NativeAccount {
+                    platform,
+                    id,
+                    region,
+                } => {
+                    ((platform == "minimax_code"
+                        && matches!(region.as_deref(), Some("cn" | "global")))
+                        || (matches!(
+                            platform.as_str(),
+                            "workbuddy" | "qoder_sdk" | "qoder_cn" | "zcode_start_plan"
+                        ) && region.is_none()))
+                        && candidate.binding.model.as_deref().is_some_and(|model| {
+                            native_source_id(platform, id, model) == candidate.source_id
+                        })
+                }
+                SourceAccountReference::LocalProvider {
+                    platform,
+                    id,
+                    origin_app,
+                    origin_provider_id,
+                } => {
+                    platform == "openrouter"
+                        && id == &candidate.source_id
+                        && id.starts_with("local:openrouter:")
+                        && origin_app == &candidate.binding.app_id
+                        && origin_provider_id == &candidate.binding.provider_id
+                }
+                _ => candidate.binding.provider_id == candidate.source_id,
+            }
         {
             invalid.insert(candidate.source_id);
             continue;
@@ -126,6 +190,7 @@ pub fn project_service_sources(candidates: Vec<ServiceSourceCandidate>) -> Vec<S
                 account_label: candidate.account_label,
                 configuration_name: candidate.configuration_name,
                 bindings: vec![candidate.binding],
+                supported_targets: Vec::new(),
             });
         }
     }

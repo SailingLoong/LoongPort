@@ -76,6 +76,7 @@ pub struct RequestContext {
     pub provider: Provider,
     /// 完整的 Provider 列表（用于故障转移）
     providers: Vec<Provider>,
+    group_route: Option<super::provider_router::GroupRouteSnapshot>,
     /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
     ///
     /// 这里使用本地 settings 的设备级 current provider。
@@ -224,9 +225,9 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
+        let selection = state
             .provider_router
-            .select_providers_with_mode(app_type_str, app_config.auto_failover_enabled)
+            .select_route_with_mode(app_type_str, app_config.auto_failover_enabled)
             .await
             .map_err(|e| match e {
                 crate::error::AppError::AllProvidersCircuitOpen => {
@@ -236,6 +237,11 @@ impl RequestContext {
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
 
+        let group_route = selection.group;
+        let failover_active = group_route
+            .as_ref()
+            .map_or(failover_active, |route| route.automatic);
+        let providers = selection.providers;
         let provider = providers
             .first()
             .cloned()
@@ -260,6 +266,7 @@ impl RequestContext {
             failover_active,
             provider,
             providers,
+            group_route,
             current_provider_id,
             request_model,
             outbound_model: None,
@@ -316,7 +323,15 @@ impl RequestContext {
         };
 
         // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
-        let max_retries = if self.failover_active {
+        let max_retries = if self
+            .group_route
+            .as_ref()
+            .is_some_and(|route| route.automatic)
+        {
+            // Explicit ordered groups own the cross-member attempt boundary.
+            // A legacy app retry preference must not truncate this snapshot.
+            u32::try_from(self.providers.len().saturating_sub(1)).unwrap_or(u32::MAX)
+        } else if self.failover_active {
             self.app_config.max_retries
         } else {
             0
@@ -345,8 +360,13 @@ impl RequestContext {
             self.copilot_optimizer_config.clone(),
             max_retries,
             state.model_alignment.clone(),
-            self.app_config.auto_failover_enabled,
+            self.group_route
+                .as_ref()
+                .map_or(self.app_config.auto_failover_enabled, |route| {
+                    route.automatic
+                }),
         )
+        .with_group_route(self.group_route.clone())
         .with_request_start(self.start_time)
         .with_request_identity(self.request_identity.clone())
         .with_personal_session_hint(self.personal_session_hint.clone())

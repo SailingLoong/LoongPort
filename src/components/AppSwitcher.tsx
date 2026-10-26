@@ -35,6 +35,7 @@ const APP_BADGE_ICON: Partial<
 
 interface AppSwitcherProps {
   activeApp: AppId;
+  variant?: "default" | "workspace";
   onSwitch: (app: AppId) => void;
   visibleApps?: VisibleApps;
   applications?: AppId[];
@@ -116,6 +117,7 @@ const DRAG_START_THRESHOLD_PX = 4;
 
 export function AppSwitcher({
   activeApp,
+  variant = "default",
   onSwitch,
   visibleApps,
   onHideApp,
@@ -236,7 +238,12 @@ export function AppSwitcher({
   return (
     <TooltipProvider delayDuration={350}>
       <div
-        className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-2xl border border-border/60 bg-card p-2 shadow-sm"
+        className={cn(
+          "inline-flex max-w-full min-w-0 items-center gap-2 rounded-2xl border p-2",
+          variant === "workspace"
+            ? "border-transparent bg-[#f5f7fb] dark:bg-background"
+            : "border-border/60 bg-card shadow-sm",
+        )}
         style={{ WebkitAppRegion: "no-drag" } as any}
       >
         {/* 可滚动 tab 条带：tab 多到放不下时不再被静默裁剪，滚轮 / 拖拽平移
@@ -266,9 +273,13 @@ export function AppSwitcher({
                       aria-label={name}
                       className={cn(
                         "inline-flex items-center justify-center w-12 h-11 rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
-                        isActive
-                          ? "bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/30 dark:text-blue-400"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                        variant === "workspace"
+                          ? isActive
+                            ? "border border-[#315feb] bg-[#edf2ff] text-[#315feb] dark:border-primary/50 dark:bg-primary/10 dark:text-blue-400"
+                            : "border border-[#e2e6ec] bg-white text-muted-foreground hover:bg-muted dark:border-border dark:bg-card"
+                          : isActive
+                            ? "bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/30 dark:text-blue-400"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted",
                       )}
                     >
                       <AppGlyph app={app} isActive={isActive} />
@@ -291,7 +302,10 @@ export function AppSwitcher({
                     className={cn(
                       "absolute -top-1 -right-1 z-10 flex h-5 w-5 items-center justify-center",
                       "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
-                      "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 hover:text-foreground",
+                      "transition-opacity hover:text-foreground",
+                      variant === "workspace"
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100",
                     )}
                   >
                     <X

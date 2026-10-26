@@ -487,11 +487,26 @@ impl<'a> UsageLogger<'a> {
             PRICING_SOURCE_RESPONSE.to_string()
         };
 
-        let provider = self
-            .db
-            .get_provider_by_id(provider_id, app_type)
+        let provider = if provider_id.starts_with("local:openrouter:") {
+            // Keep the request's consumer-app defaults, but read explicit
+            // overrides from its one original credential/configuration row.
+            (|| -> Result<Option<crate::provider::Provider>, AppError> {
+                let vault = self.db.secrets.read()?;
+                let conn = self.db.conn.lock()?;
+                crate::services::service_source_identity::provider_for_local_reference_on(
+                    &conn,
+                    &vault,
+                    provider_id,
+                )
+            })()
             .ok()
-            .flatten();
+            .flatten()
+        } else {
+            self.db
+                .get_provider_by_id(provider_id, app_type)
+                .ok()
+                .flatten()
+        };
 
         let (provider_multiplier, provider_pricing_source) = provider
             .as_ref()

@@ -1,53 +1,35 @@
+import { createRef } from "react";
+import { act, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { beforeEach, expect, it, vi } from "vitest";
 import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApplicationWorkspace } from "../ApplicationWorkspace";
+  ApplicationWorkspace,
+  type ApplicationWorkspaceHandle,
+} from "../ApplicationWorkspace";
 
 const state = vi.hoisted(() => ({
   data: {} as any,
   routing: {} as any,
-  select: vi.fn(),
-  apply: vi.fn(),
-  prepareRequest: vi.fn(),
+  writeBlocked: false,
   setOrder: vi.fn(),
-  setFailover: vi.fn(),
-  blockTier: vi.fn(),
+  select: vi.fn(),
+  table: null as any,
 }));
-
-// 表格子组件打桩：直接拿 onReorder 模拟拖拽产物（splice 语义在主测试文件
-// 纯函数覆盖），这里专测工作台的「拖拽暂存 → 应用此顺序」状态机。
-// visibleTierIds 是可见性唯源（工作台算应用目标也用它），mock 里保留真实现。
-const tableProps = vi.hoisted(() => ({ current: null as any }));
-vi.mock("../ApplicationTierTable", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../ApplicationTierTable")>();
-  return {
-    ...actual,
-    ApplicationTierTable: (props: unknown) => {
-      tableProps.current = props;
-      return <table aria-label="tier table" />;
-    },
-  };
-});
+vi.mock("../ApplicationTierTable", () => ({
+  ApplicationTierTable: (props: unknown) => {
+    state.table = props;
+    return <table aria-label="native tier table" />;
+  },
+}));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
     data: state.data,
     isPending: false,
     error: null,
+    busy: false,
     refetch: vi.fn(),
     select: state.select,
-    busy: false,
     confirmation: null,
-    cancel: vi.fn(),
-    confirm: vi.fn(),
   }),
 }));
 vi.mock("../useApplicationRouting", () => ({
@@ -55,911 +37,121 @@ vi.mock("../useApplicationRouting", () => ({
     data: state.routing,
     isPending: false,
     error: null,
-    refetch: vi.fn(),
+    writeBlocked: state.writeBlocked,
     busy: false,
+    refetch: vi.fn(),
     setOrder: state.setOrder,
-    apply: state.apply,
-    prepareRequest: state.prepareRequest,
-    setFailover: state.setFailover,
-    blockTier: state.blockTier,
   }),
-}));
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
 }));
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
 }));
-const profilesApi = vi.hoisted(() => ({
-  saved: [] as { name: string; providerIds: string[] }[],
-  current: "default",
-  saveCalls: [] as { appType: string; name: string; ids: string[] }[],
-  setCurrent: vi.fn(),
-  rename: vi.fn(),
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
 }));
-vi.mock("@/lib/api/orderProfiles", () => ({
-  orderProfilesApi: {
-    list: vi.fn(() =>
-      Promise.resolve({
-        profiles: profilesApi.saved,
-        current: profilesApi.current,
-      }),
-    ),
-    save: vi.fn(
-      (appType: string, name: string, providerIds: string[]) =>
-        new Promise<void>((resolve) => {
-          profilesApi.saveCalls.push({ appType, name, ids: providerIds });
-          profilesApi.saved.push({ name, providerIds });
-          resolve();
-        }),
-    ),
-    setCurrent: (appType: string, name: string): Promise<void> => {
-      profilesApi.setCurrent(appType, name);
-      profilesApi.current = name;
-      return Promise.resolve();
-    },
-    rename: (appType: string, from: string, to: string): Promise<void> => {
-      profilesApi.rename(appType, from, to);
-      profilesApi.saved = profilesApi.saved.map((profile) =>
-        profile.name === from ? { ...profile, name: to } : profile,
-      );
-      if (profilesApi.current === from) profilesApi.current = to;
-      return Promise.resolve();
-    },
-    remove: vi.fn(
-      (_appType: string, name: string) =>
-        new Promise<void>((resolve) => {
-          profilesApi.saved = profilesApi.saved.filter((p) => p.name !== name);
-          if (profilesApi.current === name) {
-            profilesApi.current = profilesApi.saved[0]?.name ?? "default";
-          }
-          resolve();
-        }),
-    ),
-    import: vi.fn(() => Promise.resolve(null)),
-    export: vi.fn(() => Promise.resolve(null)),
-  },
-}));
-vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
-  SwitchTierConfirmDialog: ({ targetName, onCancel, onSwitch }: any) =>
-    targetName ? (
-      <div role="dialog">
-        <button onClick={onCancel}>Cancel switch</button>
-        <button onClick={() => onSwitch(false)}>Confirm switch</button>
-      </div>
-    ) : null,
-}));
-
-const config = (id: string, name: string, current = false) => ({
-  providerId: id,
-  name,
-  source: "relay",
-  account: { kind: "relay", id: 7 },
-  serviceName: "Example service",
-  accountLabel: "Personal",
-  configurationName: name,
-  model: null,
-  presentation: { isCurrent: current, isInConfig: true, isDefaultModel: false },
-  canSelect: true,
-  selection: { kind: "relay" },
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.writeBlocked = false;
+  state.setOrder.mockResolvedValue(undefined);
+  state.data = {
+    configurations: ["a", "b", "c"].map((id) => ({
+      providerId: id,
+      name: id,
+      model: null,
+      presentation: { isCurrent: id === "a" },
+    })),
+    isAdditive: true,
+  };
+  state.routing = {
+    autoFailoverEnabled: false,
+    tiers: ["a", "b", "c"].map((providerId, position) => ({
+      providerId,
+      position,
+      rateMultiplier: position + 1,
+      models: [],
+    })),
+  };
 });
-const props = {
-  appId: "codex" as const,
-  providers: {},
-  onSwitchProvider: vi.fn(),
-  onOpenAccount: vi.fn(),
-  onAdd: vi.fn(),
-  children: <div>Advanced configuration actions</div>,
-};
-// describe 级共享同一个 client：rerender 换新 client 会重挂全部查询。
-let queryClient: QueryClient;
-const workspaceElement = () => (
-  <QueryClientProvider client={queryClient}>
-    <ApplicationWorkspace {...props} />
-  </QueryClientProvider>
-);
-const renderWorkspace = () => render(workspaceElement());
-const rerenderWorkspace = (view: ReturnType<typeof renderWorkspace>) =>
-  view.rerender(workspaceElement());
-
-const drag = (ids: string[]) =>
-  act(async () => {
-    tableProps.current.onReorder(ids);
+function mount() {
+  const ref = createRef<ApplicationWorkspaceHandle>();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
   });
-
-const openReview = async () => {
-  await userEvent.click(
-    screen.getByRole("button", { name: /applications.applyOrder/ }),
+  const view = () => (
+    <QueryClientProvider client={client}>
+      <ApplicationWorkspace
+        ref={ref}
+        appId="pi"
+        providers={{}}
+        onSwitchProvider={vi.fn()}
+        onOpenAccount={vi.fn()}
+        onAdd={vi.fn()}
+        children={null}
+      />
+    </QueryClientProvider>
   );
-  return screen.getByRole("dialog", { name: "applications.reviewChanges" });
-};
-const reviewAndConfirm = async () => {
-  const dialog = await openReview();
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: "common.confirm" }),
+  const rendered = render(view());
+  return { ref, rerender: () => rendered.rerender(view()) };
+}
+it("persists non-proxy reorder immediately without creating a route draft", async () => {
+  const { ref } = mount();
+  expect(state.table.reorderEnabled).toBe(true);
+  await act(async () => state.table.onReorder(["c", "a", "b"]));
+  expect(state.setOrder).toHaveBeenCalledExactlyOnceWith(["c", "a", "b"]);
+  expect(state.table.orderedIds).toEqual(["c", "a", "b"]);
+  expect(ref.current?.hasPendingChanges).toBe(false);
+  expect(ref.current?.submitting).toBe(false);
+  expect(state.select).not.toHaveBeenCalled();
+});
+it("keeps navigation busy while the immediate order write is pending and rejects another reorder", async () => {
+  let finish!: () => void;
+  state.setOrder.mockReturnValueOnce(
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    }),
   );
-};
-
-describe("failover order staging", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    state.prepareRequest.mockResolvedValue(undefined);
-    queryClient = new QueryClient();
-    state.setOrder.mockResolvedValue(undefined);
-    state.apply.mockResolvedValue({
-      status: "switched",
-      providerName: "Example",
-      warnings: [],
-      chatgptWasRunning: false,
-      chatgptRelaunched: false,
-    });
-    state.setFailover.mockResolvedValue(undefined);
-    state.blockTier.mockResolvedValue(undefined);
-    profilesApi.saved = [];
-    profilesApi.current = "default";
-    profilesApi.saveCalls = [];
-    state.data = {
-      configurations: [
-        config("a", "Standard", true),
-        config("b", "Premium"),
-        config("c", "Unknown"),
-      ],
-      recentProviderIds: [],
-      isAdditive: false,
-    };
-    state.routing = {
-      autoFailoverEnabled: true,
-      chainIds: ["a", "b", "c"],
-      tiers: [
-        {
-          providerId: "a",
-          position: 0,
-          skipReason: null,
-          rateMultiplier: 2,
-          canFailover: true,
-          canVerifyModels: true,
-          models: [],
-        },
-        {
-          providerId: "b",
-          position: 1,
-          skipReason: null,
-          rateMultiplier: 1,
-          canFailover: true,
-          canVerifyModels: true,
-          models: [],
-        },
-        {
-          providerId: "c",
-          position: 2,
-          skipReason: null,
-          rateMultiplier: 3,
-          canFailover: true,
-          canVerifyModels: true,
-          models: [],
-        },
-      ],
-    };
+  const { ref } = mount();
+  await act(async () => state.table.onReorder(["b", "a", "c"]));
+  expect(ref.current?.submitting).toBe(true);
+  expect(state.table.orderBusy).toBe(true);
+  await act(async () => state.table.onReorder(["c", "b", "a"]));
+  expect(state.setOrder).toHaveBeenCalledTimes(1);
+  await act(async () => finish());
+  expect(ref.current?.submitting).toBe(false);
+});
+it("restores the last order after rejection and never automatically replays it", async () => {
+  state.setOrder.mockRejectedValueOnce(new Error("synthetic rejected order"));
+  const { rerender, ref } = mount();
+  await act(async () => state.table.onReorder(["b", "a", "c"]));
+  expect(state.table.orderedIds).toEqual(["a", "b", "c"]);
+  expect(ref.current?.hasPendingChanges).toBe(false);
+  state.routing = { ...state.routing };
+  rerender();
+  expect(state.setOrder).toHaveBeenCalledTimes(1);
+  expect(state.select).not.toHaveBeenCalled();
+});
+it("uses authoritative order on the next routing read instead of keeping an optimistic mirror", async () => {
+  const { rerender } = mount();
+  await act(async () => state.table.onReorder(["b", "a", "c"]));
+  state.routing = {
+    ...state.routing,
+    tiers: [...state.routing.tiers].reverse(),
+  };
+  rerender();
+  await waitFor(() => expect(state.table.orderedIds).toEqual(["c", "b", "a"]));
+  expect(state.setOrder).toHaveBeenCalledTimes(1);
+});
+it("keeps metric sort local and allows no immediate order write while the owner is blocked", async () => {
+  state.writeBlocked = true;
+  const { ref } = mount();
+  act(() => state.table.onSort("rateMultiplier"));
+  expect(state.table.sort).toEqual({
+    key: "rateMultiplier",
+    descending: false,
   });
-
-  it("reviews an inline source/model selection without changing the failover order", async () => {
-    state.routing.tiers[1].models = ["synthetic-model"];
-    renderWorkspace();
-    await waitFor(() =>
-      expect(screen.getByLabelText("applications.source")).toBeEnabled(),
-    );
-    await userEvent.click(screen.getByLabelText("applications.source"));
-    await userEvent.click(screen.getByRole("option", { name: /Premium/ }));
-    await userEvent.click(
-      screen.getByLabelText(
-        "applications.currentConfiguration · applications.modelFilter",
-      ),
-    );
-    await userEvent.click(
-      screen.getByRole("option", { name: "synthetic-model" }),
-    );
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.reviewChanges" }),
-    );
-    const change = { selection: { providerId: "b", model: "synthetic-model" } };
-    expect(state.prepareRequest).toHaveBeenCalledWith(change);
-    expect(state.apply).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("dialog", {
-      name: "applications.reviewChanges",
-    });
-    expect(
-      within(dialog).queryByText("applications.proposedOrder"),
-    ).not.toBeInTheDocument();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    );
-    await waitFor(() =>
-      expect(state.apply).toHaveBeenCalledWith(change, undefined),
-    );
-    expect(state.setOrder).not.toHaveBeenCalled();
-    expect(state.select).not.toHaveBeenCalled();
-  });
-
-  it("invalidates an inline review when its bound model directory changes", async () => {
-    state.routing.tiers[1].models = ["synthetic-model"];
-    const view = renderWorkspace();
-    await waitFor(() =>
-      expect(screen.getByLabelText("applications.source")).toBeEnabled(),
-    );
-    await userEvent.click(screen.getByLabelText("applications.source"));
-    await userEvent.click(screen.getByRole("option", { name: /Premium/ }));
-    await userEvent.click(
-      screen.getByLabelText(
-        "applications.currentConfiguration · applications.modelFilter",
-      ),
-    );
-    await userEvent.click(
-      screen.getByRole("option", { name: "synthetic-model" }),
-    );
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.reviewChanges" }),
-    );
-    state.routing = {
-      ...state.routing,
-      tiers: state.routing.tiers.map((tier: any) => ({ ...tier, models: [] })),
-    };
-    rerenderWorkspace(view);
-    const dialog = screen.getByRole("dialog", {
-      name: "applications.reviewChanges",
-    });
-    expect(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    ).toBeDisabled();
-    expect(state.apply).not.toHaveBeenCalled();
-  });
-
-  it("reviews the concrete applied order before writing and keeps the draft on cancel", async () => {
-    renderWorkspace();
-    await drag(["c", "a", "b"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    );
-    expect(state.apply).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("dialog", {
-      name: "applications.reviewChanges",
-    });
-    const proposed = within(dialog).getByRole("list", {
-      name: "applications.proposedOrder",
-    });
-    expect(
-      within(proposed)
-        .getAllByRole("listitem")
-        .map((row) => row.textContent),
-    ).toEqual([
-      "Unknown · Example service · Personal",
-      "Standard · Example service · Personal",
-      "Premium · Example service · Personal",
-    ]);
-    expect(
-      within(dialog).getByText("applications.noExplicitSelection"),
-    ).toBeVisible();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "common.cancel" }),
-    );
-    expect(state.apply).not.toHaveBeenCalled();
-    expect(tableProps.current.orderedIds).toEqual(["c", "a", "b"]);
-    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
-  });
-
-  it("confirms the displayed request once even when clicked repeatedly", async () => {
-    let resolve!: (value: unknown) => void;
-    state.apply.mockImplementation(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    const dialog = await openReview();
-    const confirm = within(dialog).getByRole("button", {
-      name: "common.confirm",
-    });
-    act(() => {
-      fireEvent.click(confirm);
-      fireEvent.click(confirm);
-    });
-    expect(state.apply).toHaveBeenCalledTimes(1);
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "default", providerIds: ["b", "a", "c"] } },
-      undefined,
-    );
-    await act(async () => {
-      resolve({ status: "switched", warnings: [] });
-    });
-  });
-
-  it.each(["common.close", "Escape"])(
-    "keeps the draft when the review is dismissed with %s",
-    async (action) => {
-      renderWorkspace();
-      await drag(["b", "a", "c"]);
-      const dialog = await openReview();
-      if (action === "Escape") await userEvent.keyboard("{Escape}");
-      else
-        await userEvent.click(
-          within(dialog).getByRole("button", { name: action }),
-        );
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-      expect(state.apply).not.toHaveBeenCalled();
-      expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    },
-  );
-
-  it("requires reviewing a changed draft again instead of submitting different contents", async () => {
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    const dialog = await openReview();
-    await drag(["c", "b", "a"]);
-    expect(within(dialog).getByRole("alert")).toHaveTextContent(
-      "applications.reviewChanged",
-    );
-    expect(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    ).toBeDisabled();
-    expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "common.cancel" }),
-    );
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "default", providerIds: ["c", "b", "a"] } },
-      undefined,
-    );
-  });
-
-  it.each(["chain", "current", "model", "blocked"])(
-    "invalidates review when applied %s facts change",
-    async (fact) => {
-      const view = renderWorkspace();
-      await drag(["b", "a", "c"]);
-      const dialog = await openReview();
-      if (fact === "chain")
-        state.routing = { ...state.routing, chainIds: ["a", "c"] };
-      if (fact === "model")
-        state.routing = { ...state.routing, model: "new-model" };
-      if (fact === "blocked")
-        state.routing = { ...state.routing, modeState: { canWrite: false } };
-      if (fact === "current")
-        state.data = {
-          ...state.data,
-          configurations: state.data.configurations.map((item: any) => ({
-            ...item,
-            presentation: {
-              ...item.presentation,
-              isCurrent: item.providerId === "c",
-            },
-          })),
-        };
-      rerenderWorkspace(view);
-      expect(
-        within(dialog).getByRole("button", { name: "common.confirm" }),
-      ).toBeDisabled();
-      expect(within(dialog).getByRole("alert")).toHaveTextContent(
-        "applications.reviewChanged",
-      );
-      expect(state.apply).not.toHaveBeenCalled();
-    },
-  );
-
-  it("checks the existing routing cache again before confirming, even before a render", async () => {
-    queryClient.setQueryData(["applicationRouting", "codex"], state.routing);
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    const dialog = await openReview();
-    act(() => {
-      queryClient.setQueryData(["applicationRouting", "codex"], {
-        ...state.routing,
-        chainIds: ["c"],
-      });
-      fireEvent.click(
-        within(dialog).getByRole("button", { name: "common.confirm" }),
-      );
-    });
-    expect(state.apply).not.toHaveBeenCalled();
-    expect(within(dialog).getByRole("alert")).toHaveTextContent(
-      "applications.reviewChanged",
-    );
-  });
-
-  it("keeps a review usable across unchanged readback and unrelated metrics", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    const dialog = await openReview();
-    state.routing = {
-      ...state.routing,
-      tiers: state.routing.tiers.map((tier: any) => ({
-        ...tier,
-        balanceUsd: 99,
-      })),
-    };
-    rerenderWorkspace(view);
-    expect(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    ).toBeEnabled();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    );
-    expect(state.apply).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows the explicit current tier and model request without claiming a runtime result", async () => {
-    state.routing.model = "model-a";
-    state.routing.tiers[0].models = ["model-a"];
-    state.routing.tiers[1].models = ["model-b"];
-    state.routing.tiers[2].models = ["model-a"];
-    renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-    const dialog = await openReview();
-    expect(
-      within(dialog).getByText("Standard · Example service · Personal", {
-        selector: "p",
-      }),
-    ).toBeVisible();
-    expect(within(dialog).getByText("model-a")).toBeVisible();
-    expect(within(dialog).getByText("model-b")).toBeVisible();
-    expect(
-      within(dialog).getByText("applications.requestedSelection"),
-    ).toBeVisible();
-    expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "common.confirm" }),
-    );
-    expect(state.apply).toHaveBeenCalledWith(
-      {
-        order: { profileName: "default", providerIds: ["b"] },
-        selection: { providerId: "b", model: "model-b" },
-      },
-      undefined,
-    );
-  });
-
-  it("submits a reordered chain and its profile together, and converges after readback", async () => {
-    const view = renderWorkspace();
-    await waitFor(() =>
-      expect(
-        queryClient.getQueryData(["orderProfiles", "codex"]),
-      ).toBeDefined(),
-    );
-    await drag(["c", "a", "b"]);
-    expect(state.apply).not.toHaveBeenCalled();
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "default", providerIds: ["c", "a", "b"] } },
-      undefined,
-    );
-    expect(profilesApi.saveCalls).toEqual([]);
-    state.routing = {
-      ...state.routing,
-      chainIds: ["c", "a", "b"],
-      tiers: [
-        state.routing.tiers[2],
-        state.routing.tiers[0],
-        state.routing.tiers[1],
-      ],
-    };
-    rerenderWorkspace(view);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("loads a profile locally and immediately applies to that exact profile", async () => {
-    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
-    renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /Travel/ }),
-    );
-    expect(profilesApi.setCurrent).not.toHaveBeenCalled();
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "Travel", providerIds: ["c", "b"] } },
-      undefined,
-    );
-    expect(profilesApi.saveCalls).toEqual([]);
-  });
-
-  it("keeps a partial applied list after refresh and exposes all tiers explicitly", async () => {
-    state.routing.chainIds = ["b", "c"];
-    const view = renderWorkspace();
-    expect(tableProps.current.orderedIds).toEqual(["b", "c"]);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.showAllTiers" }),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.discardOrder" }),
-    );
-    state.routing = { ...state.routing };
-    rerenderWorkspace(view);
-    expect(tableProps.current.orderedIds).toEqual(["b", "c"]);
-  });
-
-  it("allows cancelling an empty profile draft without changing the current profile", async () => {
-    profilesApi.saved = [{ name: "Other device", providerIds: ["unknown"] }];
-    renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /Other device/ }),
-    );
-    expect(tableProps.current.orderedIds).toEqual([]);
-    expect(screen.getByText("applications.emptyChain")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    ).toBeDisabled();
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.discardOrder" }),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-    expect(profilesApi.setCurrent).not.toHaveBeenCalled();
-  });
-
-  it("applies a model-only change even when all chain members support the model", async () => {
-    state.routing.model = "model-a";
-    state.routing.tiers.forEach((tier: any) => {
-      tier.models = ["model-a", "model-b"];
-      tier.effectiveModel = "model-a";
-    });
-    renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      {
-        order: { profileName: "default", providerIds: ["a", "b", "c"] },
-        selection: { providerId: "a", model: "model-b" },
-      },
-      undefined,
-    );
-    expect(state.select).not.toHaveBeenCalled();
-  });
-
-  it.each(["relay", "provider", "vendor"])(
-    "passes the selected model for %s configurations",
-    async (kind) => {
-      state.data.configurations[1].selection = { kind };
-      state.routing.tiers.forEach((tier: any) => {
-        tier.models = ["model-a", "model-b"];
-        tier.effectiveModel = "model-a";
-      });
-      renderWorkspace();
-      await userEvent.click(
-        screen.getByRole("combobox", { name: "applications.modelFilter" }),
-      );
-      await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-      await act(async () => {
-        tableProps.current.onSelect(state.data.configurations[1]);
-      });
-      expect(state.apply).toHaveBeenCalledWith(
-        { selection: { providerId: "b", model: "model-b" } },
-        undefined,
-      );
-    },
-  );
-
-  it("holds the complete change through confirmation and cancellation writes nothing else", async () => {
-    state.apply.mockResolvedValue({
-      status: "confirmationRequired",
-      targetName: "Example",
-    });
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    await reviewAndConfirm();
-    expect(screen.getByRole("dialog")).toBeVisible();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Cancel switch" }),
-    );
-    expect(state.apply).toHaveBeenCalledTimes(1);
-    expect(profilesApi.saveCalls).toEqual([]);
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    await reviewAndConfirm();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Confirm switch" }),
-    );
-    expect(state.apply).toHaveBeenLastCalledWith(
-      { order: { profileName: "default", providerIds: ["b", "a", "c"] } },
-      false,
-    );
-  });
-
-  it("requires a fresh review when applied facts change during native confirmation", async () => {
-    state.apply.mockResolvedValue({
-      status: "confirmationRequired",
-      targetName: "Example",
-    });
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledTimes(1);
-    state.routing = { ...state.routing, model: "new-model" };
-    rerenderWorkspace(view);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Confirm switch" }),
-    );
-    expect(state.apply).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-  });
-
-  it("retains the draft on failure", async () => {
-    state.apply.mockRejectedValue(new Error("Cannot update"));
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    await reviewAndConfirm();
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
-  });
-
-  it("discards chain drafts when failover is disabled", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    state.routing = { ...state.routing, autoFailoverEnabled: false };
-    rerenderWorkspace(view);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    state.routing = { ...state.routing, autoFailoverEnabled: true };
-    rerenderWorkspace(view);
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-  });
-
-  it("keeps a staged draft across routing refresh", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    state.routing = { ...state.routing };
-    rerenderWorkspace(view);
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-  });
-  it("saving as a new profile creates a draft without replacing the applied profile", async () => {
-    renderWorkspace();
-    await drag(["c", "b", "a"]);
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getByRole("menuitem", {
-        name: "applications.orderProfileSaveCurrent",
-      }),
-    );
-    await userEvent.type(
-      screen.getByRole("textbox", {
-        name: "applications.orderProfileNamePlaceholder",
-      }),
-      "Travel",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
-      "Travel",
-    );
-    expect(state.apply).not.toHaveBeenCalled();
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "Travel", providerIds: ["c", "b", "a"] } },
-      undefined,
-    );
-  });
-  it("explains why a model-filtered draft cannot be applied when no tier is available", async () => {
-    state.routing.tiers[0].effectiveModel = "model-a";
-    state.routing.tiers[1].effectiveModel = "model-b";
-    state.routing.tiers[1].skipReason = "circuit_open";
-    renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-    expect(screen.getByText("applications.noSwitchableTier")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: /applications.applyOrder/ }),
-    ).toBeDisabled();
-    expect(state.apply).not.toHaveBeenCalled();
-  });
-  it("converges after applying a partial profile and reading the backend result", async () => {
-    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
-    const view = renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /Travel/ }),
-    );
-    await reviewAndConfirm();
-    state.routing = {
-      ...state.routing,
-      chainIds: ["c", "b"],
-      tiers: [
-        state.routing.tiers[2],
-        state.routing.tiers[1],
-        state.routing.tiers[0],
-      ],
-    };
-    profilesApi.current = "Travel";
-    rerenderWorkspace(view);
-    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.showAllTiers" }),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["c", "b", "a"]);
-  });
-  it("does not report a change after dragging back to the applied order", async () => {
-    renderWorkspace();
-    await drag(["b", "a", "c"]);
-    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
-    await drag(["a", "b", "c"]);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-  });
-  it("preserves the selected model when saving the current draft under a new name", async () => {
-    state.routing.model = "model-a";
-    state.routing.tiers.forEach((tier: any) => {
-      tier.models = ["model-a", "model-b"];
-      tier.effectiveModel = "model-a";
-    });
-    renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getByRole("menuitem", {
-        name: "applications.orderProfileSaveCurrent",
-      }),
-    );
-    await userEvent.type(
-      screen.getByRole("textbox", {
-        name: "applications.orderProfileNamePlaceholder",
-      }),
-      "Travel",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-    );
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      {
-        order: { profileName: "Travel", providerIds: ["a", "b", "c"] },
-        selection: { providerId: "a", model: "model-b" },
-      },
-      undefined,
-    );
-  });
-
-  it("applies the displayed metric order after filtering and excludes blocked tiers", async () => {
-    state.routing.tiers[2].skipReason = "blocked";
-    state.data.configurations[0].name = "Plan Standard";
-    state.data.configurations[1].name = "Plan Premium";
-    renderWorkspace();
-    await waitFor(() =>
-      expect(
-        queryClient.getQueryData(["orderProfiles", "codex"]),
-      ).toBeDefined(),
-    );
-    await act(async () => tableProps.current.onSort("rateMultiplier"));
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    await userEvent.type(screen.getByRole("searchbox"), "Plan");
-    expect(state.apply).not.toHaveBeenCalled();
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "default", providerIds: ["b", "a"] } },
-      undefined,
-    );
-  });
-
-  it("cancels a filtered metric sort back to the applied list without changing runtime selection", async () => {
-    renderWorkspace();
-    await waitFor(() =>
-      expect(
-        queryClient.getQueryData(["orderProfiles", "codex"]),
-      ).toBeDefined(),
-    );
-    await act(async () => tableProps.current.onSort("rateMultiplier"));
-    await userEvent.type(screen.getByRole("searchbox"), "Premium");
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.discardOrder" }),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-    expect(tableProps.current.sort).toBeNull();
-    expect(screen.getByRole("searchbox")).toHaveValue("");
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    expect(state.apply).not.toHaveBeenCalled();
-    expect(state.select).not.toHaveBeenCalled();
-  });
-
-  it("renames the loaded draft and applies its members under the new identity", async () => {
-    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
-    renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /Travel/ }),
-    );
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfileRename" }),
-    );
-    await userEvent.clear(screen.getByRole("textbox"));
-    await userEvent.type(screen.getByRole("textbox"), "Remote");
-    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
-      "Remote",
-    );
-    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
-    expect(state.apply).not.toHaveBeenCalled();
-    await userEvent.keyboard("{Escape}");
-    await reviewAndConfirm();
-    expect(state.apply).toHaveBeenCalledWith(
-      { order: { profileName: "Remote", providerIds: ["c", "b"] } },
-      undefined,
-    );
-  });
-
-  it("deleting the loaded draft returns to the active profile and applied chain", async () => {
-    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
-    renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /Travel/ }),
-    );
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
-    );
-    await waitFor(() =>
-      expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
-        "default",
-      ),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    expect(state.apply).not.toHaveBeenCalled();
-  });
-
-  it("deleting the active profile reads the surviving identity while preserving the runtime chain", async () => {
-    profilesApi.current = "Daily";
-    profilesApi.saved = [
-      { name: "Daily", providerIds: ["a", "b", "c"] },
-      { name: "Travel", providerIds: ["c", "b"] },
-    ];
-    renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getAllByRole("button", {
-        name: "applications.orderProfileDelete",
-      })[0],
-    );
-    await waitFor(() =>
-      expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
-        "Travel",
-      ),
-    );
-    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    expect(state.apply).not.toHaveBeenCalled();
-  });
+  await act(async () => state.table.onReorder(["b", "a", "c"]));
+  expect(state.setOrder).not.toHaveBeenCalled();
+  expect(state.table.busy).toBe(true);
+  expect(state.table.orderBusy).toBe(false);
+  expect(ref.current?.hasPendingChanges).toBe(false);
 });

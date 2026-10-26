@@ -127,7 +127,36 @@ fn check_enter_listener_after_restart(address: &str, app: AppType) {
             .review_app_with_state(&inspected, &token, &app, &restarted)
             .unwrap();
         drop(context);
-        assert!(completion.can_complete_app, "the original recovered attached owner must support completion without requiring detach");
+        // On failure, expose the exact original read-only planner rejection;
+        // do not turn a retained historical schema into a current one to pass.
+        let completion_diagnostic = if completion.can_complete_app {
+            None
+        } else {
+            let before_plan = snapshot(f.home.path());
+            let row = restarted
+                .db
+                .get_provider_by_id("a", app.as_str())
+                .unwrap()
+                .unwrap();
+            let context = reactor.enter();
+            let result = crate::mode::controller::plan_row_save_with_generation(
+                &restarted.proxy_service,
+                &app,
+                &row,
+                &row,
+                &token,
+                None,
+                None,
+            );
+            drop(context);
+            assert_no_recovery_writes(
+                &before_plan,
+                &snapshot(f.home.path()),
+                "completion planner query",
+            );
+            result.err().map(|error| format!("{error:?}"))
+        };
+        assert!(completion.can_complete_app, "the original recovered attached owner must support completion without requiring detach; planner rejection: {completion_diagnostic:?}");
         runtime.db.set_current_provider(app.as_str(), "b").unwrap();
         let before = snapshot(f.home.path());
         let context = reactor.enter();
@@ -1328,5 +1357,15 @@ fn retained_checkpoint_listener_rejects_late_disabled_mirror() {
             checkpoint
         );
         println!("PASS late global enabled {point}");
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(super) fn verify_ci_retained_attached_case(case: &str) {
+    match case {
+        "dead_accept" => retained_checkpoint_attached_recovery_rejects_dead_accept_loop(),
+        "late_disabled" => retained_checkpoint_listener_rejects_late_disabled_mirror(),
+        "restart" => retained_checkpoint_recovers_enter_listener_after_restart(),
+        _ => panic!("unknown retained checkpoint attached case"),
     }
 }

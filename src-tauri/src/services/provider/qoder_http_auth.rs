@@ -406,6 +406,15 @@ pub(crate) async fn acquire(
     transport: &dyn AuthTransport,
     now_ms: impl Fn() -> i64,
 ) -> Result<RequestSnapshot, AcquireError> {
+    acquire_for_route(db, selected, transport, now_ms, None).await
+}
+pub(crate) async fn acquire_for_route(
+    db: &Database,
+    selected: &Provider,
+    transport: &dyn AuthTransport,
+    now_ms: impl Fn() -> i64,
+    route: Option<&crate::services::service_source_identity::QoderStamp>,
+) -> Result<RequestSnapshot, AcquireError> {
     let (expected, _) = SourceBinding::from_provider(selected).map_err(AcquireError::preflight)?;
     if transport.source_kind() != expected.source {
         return Err(AcquireError::NonRetryable);
@@ -413,10 +422,17 @@ pub(crate) async fn acquire(
     // Only these synchronous source/acquisition checks may classify a
     // zero-network preflight failure. Never reuse the classifier for
     // publication, cleanup or snapshot fences.
-    match db
-        .qoder_http_acquire(&expected, now_ms())
-        .map_err(AcquireError::preflight)?
-    {
+    let acquisition = if let Some(route) = route {
+        db.qoder_http_acquire_for_route(
+            &expected,
+            now_ms(),
+            Some(&route.fact),
+            Some(route.session_epoch),
+        )
+    } else {
+        db.qoder_http_acquire(&expected, now_ms())
+    };
+    match acquisition.map_err(AcquireError::preflight)? {
         Acquisition::Ready(snapshot) => Ok(snapshot),
         Acquisition::Refresh(lease) => {
             let response = transport

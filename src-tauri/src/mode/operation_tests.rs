@@ -1410,6 +1410,7 @@ fn bound_editor_target() -> PendingTarget {
             revision: "c".repeat(64),
         }),
         saved_row: Some(state::SavedRow {
+            credential_write: None,
             before: digest,
             provider: Database::provider_update_value(&row).unwrap(),
             clear_model_preference: false,

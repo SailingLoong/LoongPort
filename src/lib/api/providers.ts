@@ -202,9 +202,11 @@ export function matchesCodexCatalogRestoreResult(
 export interface ProviderUpdateInput {
   provider: Provider;
   originalId?: string;
+  credentialWrite?: boolean;
   edit?: {
     request: ProviderEditRequest;
     deleteCredential: boolean;
+    credentialWrite?: boolean;
     catalogDecision?: ProviderCatalogDecision;
     // Frontend routing only. The query command receives just app + request.
     queryOnly?: true;
@@ -316,6 +318,7 @@ export const providersApi = {
     requestId: string,
     deleteCredential: boolean,
     catalogDecision?: ProviderCatalogDecision,
+    credentialWrite?: boolean,
   ): Promise<ProviderEditPreview> {
     return await invoke("preview_provider_edit", {
       app: appId,
@@ -323,6 +326,7 @@ export const providersApi = {
       originalId,
       requestId,
       deleteCredential,
+      ...(credentialWrite ? { credentialWrite: true } : {}),
       ...(catalogDecision ? { catalogDecision } : {}),
     });
   },
@@ -338,6 +342,7 @@ export const providersApi = {
       originalId: input.originalId,
       request: input.edit.request,
       deleteCredential: input.edit.deleteCredential,
+      ...(input.edit.credentialWrite ? { credentialWrite: true } : {}),
       ...(input.edit.catalogDecision
         ? { catalogDecision: input.edit.catalogDecision }
         : {}),
@@ -391,11 +396,13 @@ export const providersApi = {
     provider: Provider,
     appId: AppId,
     originalId?: string,
+    credentialWrite?: boolean,
   ): Promise<boolean> {
     return await invoke("update_provider", {
       provider,
       app: appId,
       originalId,
+      ...(credentialWrite ? { credentialWrite: true } : {}),
     });
   },
 

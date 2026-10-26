@@ -40,6 +40,7 @@ describe("client navigation", () => {
 it.each([
   "providers",
   "services",
+  "sharedGroups",
   "image",
   "records",
   "resources",
@@ -74,6 +75,7 @@ it("restores image context after an account detail flow", () => {
 it.each([
   "providers",
   "services",
+  "sharedGroups",
   "image",
   "records",
   "resources",

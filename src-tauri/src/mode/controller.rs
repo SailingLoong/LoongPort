@@ -718,6 +718,8 @@ pub(crate) async fn switch_route_locked_with_catalog(
     route: Provider,
     catalog: Option<codex_direct::CatalogDecision>,
 ) -> Result<(), String> {
+    crate::services::shared_routing::ensure_legacy_selection_allowed(service.database(), app)
+        .map_err(err)?;
     if catalog.is_some() && *app != AppType::Codex {
         return Err(err(invalid()));
     }
@@ -777,8 +779,43 @@ pub(crate) fn save_row_locked(
     provider: &Provider,
     clear_model_preference: bool,
 ) -> Result<(), AppError> {
-    let (before, in_use, target) =
+    save_row_locked_with_credential_intent(
+        service,
+        app,
+        previous,
+        provider,
+        clear_model_preference,
+        false,
+    )
+}
+
+pub(crate) fn save_row_locked_with_credential_intent(
+    service: &ProxyService,
+    app: &AppType,
+    previous: &Provider,
+    provider: &Provider,
+    clear_model_preference: bool,
+    reissue: bool,
+) -> Result<(), AppError> {
+    let (before, in_use, mut target) =
         save_row_target(service, app, previous, provider, clear_model_preference)?;
+    if reissue {
+        let conn = service.database().conn.lock()?;
+        if crate::database::credential_revision::original_provider_uses_revisions(&conn)? {
+            target
+                .saved_row
+                .as_mut()
+                .ok_or_else(invalid)?
+                .credential_write = Some(crate::database::credential_revision::WriteProof {
+                before: crate::database::credential_revision::provider_on(
+                    &conn,
+                    app.as_str(),
+                    &previous.id,
+                )?,
+                next: crate::database::credential_revision::new_revision(),
+            });
+        }
+    }
     if in_use.as_deref() != Some(provider.id.as_str()) || (before.is_proxy() && !before.attached) {
         write_target_only(service, app, op::APPLY, target)?;
         return Ok(());
@@ -824,6 +861,7 @@ pub(crate) fn select_locked_with_catalog(
     mut target: PendingTarget,
     catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<bool, AppError> {
+    crate::services::shared_routing::ensure_legacy_selection_allowed(service.database(), app)?;
     if catalog.is_some() && *app != AppType::Codex {
         return Err(invalid());
     }
@@ -884,6 +922,10 @@ pub(crate) fn preview_catalog_selection(
     provider: &Provider,
     catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<Option<codex_direct::CatalogPreview>, AppError> {
+    crate::services::shared_routing::ensure_legacy_selection_allowed(
+        service.database(),
+        &AppType::Codex,
+    )?;
     let result = (|| {
         let before = mode(service, &AppType::Codex)?;
         if before.is_proxy() && !before.attached {
@@ -908,6 +950,7 @@ pub(crate) fn apply_order_locked(
     app: &AppType,
     target: PendingTarget,
 ) -> Result<(), AppError> {
+    crate::services::shared_routing::ensure_legacy_policy_edit_allowed(service.database(), app)?;
     mode(service, app)?;
     write_target_only(service, app, op::APPLY, target)
 }
@@ -938,7 +981,8 @@ pub(crate) fn recover_locked_with_checks(
         return codex_direct::recover_locked_with_checks(service, checks);
     }
     let write = AppWrite::open_mode_with_recovery(service, app, checks)?;
-    if let Some(pending) = state::pending(&write.store, &write.vault, app.as_str())? {
+    let original_pending = state::pending(&write.store, &write.vault, app.as_str())?;
+    if let Some(pending) = &original_pending {
         operation::verify_saved_row(
             service.database(),
             service.database().secret_session(),
@@ -948,6 +992,13 @@ pub(crate) fn recover_locked_with_checks(
         )?;
     }
     let verify = |pending: &state::Pending, live: Option<&state::LiveState>| {
+        operation::verify_saved_row(
+            service.database(),
+            service.database().secret_session(),
+            &write.vault,
+            app,
+            &pending.target,
+        )?;
         checks.map_or(Ok(()), |checks| {
             (checks.verify)(&write.vault, pending, live)
         })
@@ -955,11 +1006,28 @@ pub(crate) fn recover_locked_with_checks(
     let finished = |pending: &state::Pending, live: Option<&state::LiveState>| {
         write.verify_recovered_target(pending, live)
     };
-    let admission = checks.map(|checks| operation::RecoveryAdmission {
-        expected_pending: checks.pending,
-        verify: &verify,
-        finished: &finished,
-    });
+    let admission = checks
+        .map(|checks| operation::RecoveryAdmission {
+            expected_pending: checks.pending,
+            verify: &verify,
+            finished: &finished,
+        })
+        .or_else(|| {
+            original_pending
+                .as_ref()
+                .filter(|p| {
+                    p.target.route_target.is_some()
+                        || p.target
+                            .saved_row
+                            .as_ref()
+                            .is_some_and(|row| row.credential_write.is_some())
+                })
+                .map(|pending| operation::RecoveryAdmission {
+                    expected_pending: pending,
+                    verify: &verify,
+                    finished: &finished,
+                })
+        });
     operation::recover_checked_guarded(
         &write.store,
         &write.vault,
@@ -1218,6 +1286,7 @@ fn save_row_target(
     };
     let in_use = current::provider_for(service.database(), app, current::Purpose::InUse)?;
     let row = SavedRow {
+        credential_write: None,
         before: Database::provider_update_digest(previous)?,
         provider: Database::provider_update_value(provider)?,
         clear_model_preference: clear_model_preference
@@ -1232,6 +1301,8 @@ fn save_row_target(
 
 /// A request-local plan, not a second draft or persistent operation owner.
 pub(crate) struct SaveRowPlan {
+    pub(crate) credential_reissue: bool,
+    credential_before: Option<String>,
     pub(crate) files: Vec<(LiveFile, crate::live::patch::Guarded)>,
     pub(crate) target: PendingTarget,
     pub(crate) revision: String,
@@ -1442,22 +1513,58 @@ pub(crate) fn plan_row_save_with_generation(
         .iter()
         .map(|(file, patch)| (&file.path, file.private, &patch.expected_pre))
         .collect::<Vec<_>>();
-    let source = serde_json::to_vec(&(
-        request_id,
-        app.as_str(),
-        service.database().secret_session().root(),
-        &target.saved_row,
-        &before,
-        &in_use,
-        &direct,
-        entry,
-        &file_versions,
-        &endpoint,
-        &codex_revision,
-        crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
-    ))
+    let credential_before = {
+        let conn = service.database().conn.lock()?;
+        if crate::database::credential_revision::original_provider_uses_revisions(&conn)? {
+            Some(crate::database::credential_revision::provider_on(
+                &conn,
+                app.as_str(),
+                &previous.id,
+            )?)
+        } else {
+            // No shared issuance proof exists in an original retained schema.
+            // Preserve that original plan image rather than adding a null field.
+            None
+        }
+    };
+    // Keep both pre-existing wire images exact: LP31 prefixes its authoritative
+    // revision; retained pre31 plans use the original tuple, not a new null field.
+    let source = if let Some(credential_before) = &credential_before {
+        serde_json::to_vec(&(
+            credential_before,
+            request_id,
+            app.as_str(),
+            service.database().secret_session().root(),
+            &target.saved_row,
+            &before,
+            &in_use,
+            &direct,
+            entry,
+            &file_versions,
+            &endpoint,
+            &codex_revision,
+            crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+        ))
+    } else {
+        serde_json::to_vec(&(
+            request_id,
+            app.as_str(),
+            service.database().secret_session().root(),
+            &target.saved_row,
+            &before,
+            &in_use,
+            &direct,
+            entry,
+            &file_versions,
+            &endpoint,
+            &codex_revision,
+            crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+        ))
+    }
     .map_err(|source| AppError::JsonSerialize { source })?;
     Ok(SaveRowPlan {
+        credential_reissue: false,
+        credential_before,
         files,
         target,
         revision: crate::live::engine::sha256_hex(&source),
@@ -1466,6 +1573,60 @@ pub(crate) fn plan_row_save_with_generation(
         catalog,
         catalog_inputs,
     })
+}
+
+/// Borrow the original gateway projection plan as readback witnesses only.
+/// No credential provisioning, file rewrite, or alternate recovery owner.
+pub(crate) fn gateway_route_plan(
+    service: &ProxyService,
+    app: &AppType,
+    request_id: &str,
+) -> Result<SaveRowPlan, AppError> {
+    let before = {
+        let write = AppWrite::begin_mode(service, app)?;
+        let before = current::validate_known_mode(&write.store, &write.vault, app)?;
+        if !before.is_proxy() || !before.attached {
+            return Err(AppError::Config(
+                "routing_groups.connection_required".into(),
+            ));
+        }
+        before
+    };
+    let id = before.proxy_route.as_ref().ok_or_else(invalid)?;
+    let provider = service
+        .database()
+        .get_provider_by_id(id, app.as_str())?
+        .ok_or_else(invalid)?;
+    let mut plan = plan_row_save(service, app, &provider, &provider, request_id, None)?;
+    if plan.files.is_empty() || plan.target.state.as_ref() != Some(&before) {
+        return Err(invalid());
+    }
+    if *app == AppType::Codex {
+        let vault = service.database().secret_session().read()?;
+        if !codex_direct::planned_files_match(&plan.files, &vault)? {
+            return Err(invalid());
+        }
+    }
+    for (file, patch) in &mut plan.files {
+        let bytes = crate::live::engine::read_current(&file.path)?;
+        if crate::live::engine::digest(bytes.as_deref()) != patch.expected_pre {
+            return Err(invalid());
+        }
+        if *app != AppType::Codex {
+            let expected = match &patch.then {
+                crate::live::patch::WholeFile::Write(bytes) => Some(bytes.as_slice()),
+                crate::live::patch::WholeFile::Delete => None,
+            };
+            if expected != bytes.as_deref() {
+                return Err(invalid());
+            }
+        }
+        // Retain exact original bytes, including formatting and encrypted stash.
+        patch.then = bytes
+            .map(crate::live::patch::WholeFile::Write)
+            .unwrap_or(crate::live::patch::WholeFile::Delete);
+    }
+    Ok(plan)
 }
 
 pub(crate) fn consume_row_save(
@@ -1478,6 +1639,22 @@ pub(crate) fn consume_row_save(
         inputs.verify_references()?;
     }
     let mut target = plan.target;
+    if plan.credential_reissue {
+        if request.scope != state::SaveScope::Provider {
+            return Err(invalid());
+        }
+        let row = target.saved_row.as_mut().ok_or_else(invalid)?;
+        if let Some(before) = plan.credential_before {
+            row.credential_write = Some(crate::database::credential_revision::WriteProof {
+                before,
+                next: crate::database::credential_revision::new_revision(),
+            });
+        }
+        // Legacy key-touched edits retain the original saved-row CAS and journal,
+        // without fabricating a future-schema issuance proof or shared authority.
+    }
+    // The private proof is persisted/authenticated by this original journal
+    // before any native files or SQL row are published. Recovery never regenerates it.
     target.save_request = Some(request.clone());
     if plan.files.is_empty() {
         return write_target_only(service, app, op::APPLY, target);
@@ -1505,4 +1682,9 @@ pub(crate) fn consume_row_save(
     AppWrite::begin_mode(service, app)?
         .run(op::APPLY, &changes, target)
         .map(|_| ())
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) fn verify_credential_write_fixture(case: &str) {
+    super::controller_tests::verify_credential_write(case);
 }

@@ -31,8 +31,11 @@ fn retained_pre_client_managed_projection_is_authenticated_and_read_only() {
     for version in [24, 27] {
         let f = Fixture::new();
         source_version(&f, version);
-        let (_, _, _, runtime) =
-            super::native_recovery_tests::native_runtime(&f, &crate::app_config::AppType::Claude);
+        let (_, _, _, runtime) = super::native_recovery_tests::native_runtime_at_version(
+            &f,
+            &crate::app_config::AppType::Claude,
+            version,
+        );
         let before = snapshot(f.home.path());
         for app in managed::CLI_APPS {
             runtime.db.provision_managed_client_credential(app).unwrap();
@@ -159,14 +162,20 @@ fn legacy_client_projection_rechecks_epoch_after_final_sql_reads() {
 #[test]
 #[serial_test::serial]
 fn current_client_schema_never_falls_back_when_missing_or_revoked() {
-    for version in [28, 29] {
+    let current_schema = database::loongport_schema::LOONGPORT_SCHEMA_VERSION;
+    for version in [28, current_schema] {
         let f = Fixture::new();
         source_version(&f, 28);
         publish_resume_fixture(&f);
         let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        if version == 29 {
+        if version == current_schema {
             database::loongport_schema::apply(&conn).unwrap();
         }
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            version,
+            "the missing-table negative must exercise the declared schema"
+        );
         conn.execute_batch("DROP TABLE loongport_client_credentials")
             .unwrap();
         let db = Database::from_connection(
@@ -185,4 +194,39 @@ fn current_client_schema_never_falls_back_when_missing_or_revoked() {
         .unwrap();
     assert!(db.provision_managed_client_credential("claude").is_err());
     assert!(managed::key(&db, "claude").is_err());
+}
+
+#[test]
+#[serial_test::serial]
+fn native_runtime_preserves_explicit_historical_versions() {
+    for version in [24, 27, 28] {
+        let f = Fixture::new();
+        source_version(&f, version);
+        let conn = rusqlite::Connection::open(f.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            version
+        );
+        drop(conn);
+        let (_, _, _, runtime) = super::native_recovery_tests::native_runtime_at_version(
+            &f,
+            &crate::app_config::AppType::Claude,
+            version,
+        );
+        let conn = runtime.db.conn.lock().unwrap();
+        assert_eq!(
+            database::loongport_schema::read_stored_version(&conn).unwrap(),
+            version
+        );
+        assert_eq!(
+            Database::table_exists(&conn, "loongport_client_credentials").unwrap(),
+            version >= 28
+        );
+        assert!(!conn
+            .prepare("PRAGMA table_xinfo(providers)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|name| name.unwrap().eq_ignore_ascii_case("credential_revision")));
+    }
 }

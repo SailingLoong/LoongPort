@@ -1018,6 +1018,23 @@ fn valid_digest(value: &Option<String>) -> bool {
 }
 
 fn validate_operation(app: &str, op: &str, target: &PendingTarget) -> Result<(), AppError> {
+    if let Some(route) = &target.route_target {
+        route.validate()?;
+        let request = target.save_request.as_ref().ok_or_else(invalid_pending)?;
+        request.validate()?;
+        let mut effects = target.clone();
+        effects.save_request = None;
+        effects.route_target = None;
+        if !matches!(app, "claude" | "codex" | "gemini" | "grokbuild")
+            || op != state::op::APPLY
+            || request.scope != state::SaveScope::ApplicationRouting
+            || !effects.is_empty()
+        {
+            return Err(invalid_pending());
+        }
+        return Ok(());
+    }
+
     if let Some(request) = &target.save_request {
         request.validate()?;
         let explicit_enter =
@@ -1381,12 +1398,52 @@ pub(crate) fn saved_provider(row: &state::SavedRow) -> Result<crate::provider::P
     if !valid_digest(&Some(row.before.clone())) {
         return Err(invalid_pending());
     }
+    if let Some(proof) = &row.credential_write {
+        proof.validate().map_err(|_| invalid_pending())?;
+    }
     let provider: crate::provider::Provider =
         serde_json::from_value(row.provider.clone()).map_err(|_| invalid_pending())?;
     if provider.id.is_empty() || Database::provider_update_value(&provider)? != row.provider {
         return Err(invalid_pending());
     }
     Ok(provider)
+}
+
+/// Read the original provider, private issuance and optional edit flag from one
+/// SQLite snapshot. No decoder or credential owner is duplicated here.
+fn saved_row_snapshot(
+    db: &Database,
+    session: &SecretSession,
+    vault: &RwLockReadGuard<'_, StorageContext>,
+    app: &AppType,
+    row: &state::SavedRow,
+    read_edited: bool,
+) -> Result<Option<(crate::provider::Provider, Option<String>, bool)>, AppError> {
+    if !std::ptr::eq(session, db.secret_session()) {
+        return Err(AppError::Config("settings.session_mismatch".into()));
+    }
+    session.ensure_available()?;
+    let planned = saved_provider(row)?;
+    let mut conn = db.conn.lock()?;
+    let tx = conn.transaction()?;
+    let Some(provider) =
+        Database::get_provider_by_id_on_connection(&tx, vault, &planned.id, app.as_str())?
+    else {
+        return Ok(None);
+    };
+    let revision = row
+        .credential_write
+        .as_ref()
+        .map(|_| crate::database::credential_revision::provider_on(&tx, app.as_str(), &planned.id))
+        .transpose()?;
+    let edited = !read_edited
+        || tx.query_row(
+            "SELECT user_edited FROM providers WHERE id=?1 AND app_type=?2",
+            rusqlite::params![&planned.id, app.as_str()],
+            |value| value.get::<_, bool>(0),
+        )?;
+    tx.commit()?;
+    Ok(Some((provider, revision, edited)))
 }
 
 pub(crate) fn verify_saved_row(
@@ -1396,6 +1453,9 @@ pub(crate) fn verify_saved_row(
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
+    if let Some(route) = &target.route_target {
+        crate::services::shared_routing::verify_publication(db, vault, app, route, false)?;
+    }
     let model_settings = target
         .save_request
         .as_ref()
@@ -1415,10 +1475,20 @@ pub(crate) fn verify_saved_row(
     }
     if let Some(row) = &target.saved_row {
         let planned = saved_provider(row)?;
-        let current = db
-            .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
+        let (current, revision, _) = saved_row_snapshot(db, session, vault, app, row, false)?
             .ok_or_else(|| AppError::Config("mode.provider_changed".into()))?;
         let digest = Database::provider_update_digest(&current)?;
+        if let Some(proof) = &row.credential_write {
+            if model_settings {
+                return Err(invalid_pending());
+            }
+            let before = revision.as_deref() == Some(proof.before.as_str()) && digest == row.before;
+            let applied = revision.as_deref() == Some(proof.next.as_str())
+                && digest == Database::provider_update_digest(&planned)?;
+            if !before && !applied {
+                return Err(AppError::Config("mode.provider_changed".into()));
+            }
+        }
         if digest != row.before && digest != Database::provider_update_digest(&planned)? {
             return Err(AppError::Config("mode.provider_changed".into()));
         }
@@ -1547,17 +1617,24 @@ fn verify_committed_target(
     target: &PendingTarget,
     live: &state::LiveState,
 ) -> Result<(), AppError> {
+    if let Some(route) = &target.route_target {
+        crate::services::shared_routing::verify_publication(db, vault, app, route, true)?;
+    }
     if let Some(row) = &target.saved_row {
         let planned = saved_provider(row)?;
-        let actual = db
-            .get_provider_by_id_with_vault(&planned.id, app.as_str(), session, vault)?
-            .ok_or_else(verification_required)?;
+        let read_edited = target
+            .save_request
+            .as_ref()
+            .is_some_and(|request| request.scope == state::SaveScope::Provider);
+        let (actual, revision, edited) =
+            saved_row_snapshot(db, session, vault, app, row, read_edited)?
+                .ok_or_else(verification_required)?;
         if Database::provider_update_digest(&actual)? != Database::provider_update_digest(&planned)?
-            || (target
-                .save_request
+            || !edited
+            || row
+                .credential_write
                 .as_ref()
-                .is_some_and(|request| request.scope == state::SaveScope::Provider)
-                && !db.get_user_edited(app.as_str(), &planned.id)?)
+                .is_some_and(|proof| revision.as_deref() != Some(proof.next.as_str()))
         {
             return Err(verification_required());
         }
@@ -1651,19 +1728,36 @@ fn commit_target_with_pointer(
         super::current::validate_known_mode(store, vault, app)?;
     }
     verify_saved_row(db, session, vault, app, target)?;
+    if let Some(route) = &target.route_target {
+        let mode = super::current::validate_known_mode(store, vault, app)?;
+        if !mode.is_proxy() || !mode.attached {
+            return Err(verification_required());
+        }
+        crate::services::shared_routing::publish_target(db, vault, app, route)?;
+    }
+
     if let Some(row) = &target.saved_row {
         let provider = saved_provider(row)?;
-        db.save_provider_with_vault(
+        db.save_provider_with_vault_credential_write(
             app.as_str(),
             &provider,
-            Some(&row.before),
+            &row.before,
             target
                 .save_request
                 .as_ref()
                 .is_some_and(|request| request.scope == state::SaveScope::Provider),
             session,
             vault,
+            row.credential_write.as_ref(),
         )?;
+        if let Some(proof) = &row.credential_write {
+            let conn = db.conn.lock()?;
+            if crate::database::credential_revision::provider_on(&conn, app.as_str(), &provider.id)?
+                != proof.next
+            {
+                return Err(AppError::Config("mode.provider_changed".into()));
+            }
+        }
         let current = db
             .get_provider_by_id_with_vault(&provider.id, app.as_str(), session, vault)?
             .ok_or_else(invalid_pending)?;
@@ -1768,6 +1862,7 @@ pub(crate) fn published_pointer_target<'a>(
         || target.saved_row.is_some()
         || target.model_preference.is_some()
         || target.routing_order.is_some()
+        || target.route_target.is_some()
         || !target.extra.is_empty()
     {
         return Err(verification_required());
@@ -2069,7 +2164,12 @@ impl<'a> AppWrite<'a> {
         target: PendingTarget,
     ) -> Result<OperationReport, AppError> {
         verify_saved_row(self.db, self.session, &self.vault, &self.app, &target)?;
-        if target.save_request.is_some() {
+        if target.save_request.is_some()
+            || target
+                .saved_row
+                .as_ref()
+                .is_some_and(|row| row.credential_write.is_some())
+        {
             return run_checked(
                 &self.store,
                 &self.vault,
