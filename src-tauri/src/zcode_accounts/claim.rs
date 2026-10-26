@@ -1,6 +1,6 @@
 //! Claim parsing adapted from pjpv/zcode-switch f34225686dfef05d84c256a56f868719248f15ff.
 //! Copyright (c) 2026 zcode-switch contributors; MIT, see licenses/zcode-switch-MIT.txt.
-//! Activation telemetry and generated device identities are deliberately excluded.
+//! Activation reports and generated device identities are deliberately excluded.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +105,57 @@ pub(crate) fn prior_plan_ids(balance: &Value) -> Option<Vec<String>> {
             })
             .collect(),
     )
+}
+
+/// Only explicit server-delivered claim actions contribute plan IDs. Campaign IDs,
+/// presentation text, links and unrelated actions never become executable commands.
+pub(crate) fn marketing_plans(body: &Value) -> Result<Vec<Plan>, &'static str> {
+    if response_code(body) != Some(0) {
+        return Err("rejected");
+    }
+    let deliveries = body
+        .pointer("/data/deliveries")
+        .and_then(Value::as_array)
+        .filter(|items| items.len() <= 32)
+        .ok_or("invalidResponse")?;
+    let mut plans = Vec::new();
+    for delivery in deliveries {
+        let container = match delivery.get("resource_position").and_then(Value::as_str) {
+            Some("banner") => delivery.get("banner"),
+            Some("popup") => delivery.get("popup"),
+            _ => continue,
+        };
+        let Some(buttons) = container
+            .and_then(|c| c.get("buttons"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for action in buttons.iter().take(4).filter_map(|b| b.get("action")) {
+            if action.get("type").and_then(Value::as_str) != Some("claim_zcode_plan") {
+                continue;
+            }
+            let id = action
+                .get("args")
+                .and_then(|args| text(args, "plan_id", "plan_id"))
+                .ok_or("invalidResponse")?;
+            if plans.iter().any(|p: &Plan| p.id == id) {
+                continue;
+            }
+            plans.push(Plan {
+                id,
+                name: None,
+                description: None,
+                priority: delivery
+                    .get("priority")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                units: None,
+                grants: Vec::new(),
+            });
+        }
+    }
+    Ok(plans)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -4908,6 +4908,22 @@
         "openOfficialClient": "Open official ZCode, then check again",
         "notDue": "Plan is still valid; check after expiry"
       }
+    },
+    "devices": {
+      "title": "Device IDs",
+      "description": "Import device IDs for this ZCode environment. All accounts use the same selection.",
+      "input": "Device IDs to import",
+      "placeholder": "One UUID per line, or paste JSON",
+      "file": "Device ID file",
+      "chooseFile": "Choose file",
+      "import": "Import device IDs",
+      "selected": "Device ID for the next session",
+      "native": "Use local ZCode",
+      "restart": "Restart LoongPort to use the selected device ID.",
+      "error": "Unable to update device IDs. Check the UUID format and try again.",
+      "retry": "Retry",
+      "saved": "{{count}} device IDs saved",
+      "current": "Current session: {{device}}"
     }
   },
   "workbuddy": {

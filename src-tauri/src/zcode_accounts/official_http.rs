@@ -8,38 +8,57 @@ use zeroize::Zeroizing;
 
 pub struct ReqwestOfficialTransport {
     client: reqwest::Client,
+    source_headers: reqwest::header::HeaderMap,
 }
 impl ReqwestOfficialTransport {
     pub fn new() -> Result<Self, OfficialError> {
         Ok(Self {
+            source_headers: super::source_context::SourceContext::observe(None).headers(None),
             client: http_client_builder()
                 .build()
                 .map_err(|_| OfficialError::Transport)?,
         })
     }
+    pub(super) fn with_context(mut self, root: &std::path::Path, version: Option<&str>) -> Self {
+        self.source_headers =
+            super::source_context::SourceContext::observe(Some(root)).headers(version);
+        self
+    }
+    pub(super) fn with_device_mid(mut self, imported: Option<&str>) -> Self {
+        super::source_context::apply_device_mid(&mut self.source_headers, imported);
+        self
+    }
+    fn build_request(&self, request: OfficialRequest) -> Result<reqwest::Request, OfficialError> {
+        validate_request(&request)?;
+        let method = match request.method {
+            OfficialMethod::Get => reqwest::Method::GET,
+            OfficialMethod::Post => reqwest::Method::POST,
+        };
+        let url = url::Url::parse(&request.url).map_err(|_| OfficialError::InvalidInput)?;
+        let mut builder = self
+            .client
+            .request(method, url.clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        // Device context belongs to the ZCode origin, not the other credential providers.
+        if url.host_str() == Some("zcode.z.ai") {
+            builder = builder.headers(self.source_headers.clone());
+        }
+        if let Some(authorization) = request.authorization.as_ref() {
+            let mut header = reqwest::header::HeaderValue::from_str(authorization.expose())
+                .map_err(|_| OfficialError::InvalidInput)?;
+            header.set_sensitive(true);
+            builder = builder.header(reqwest::header::AUTHORIZATION, header);
+        }
+        if let Some(body) = request.body.as_ref() {
+            builder = builder.body(body.to_vec());
+        }
+        builder.build().map_err(|_| OfficialError::InvalidInput)
+    }
 }
 impl OfficialTransport for ReqwestOfficialTransport {
     fn send(&self, request: OfficialRequest) -> TransportFuture<'_> {
         Box::pin(async move {
-            validate_request(&request)?;
-            let method = match request.method {
-                OfficialMethod::Get => reqwest::Method::GET,
-                OfficialMethod::Post => reqwest::Method::POST,
-            };
-            let mut builder = self
-                .client
-                .request(method, &request.url)
-                .header(reqwest::header::CONTENT_TYPE, "application/json");
-            if let Some(authorization) = request.authorization.as_ref() {
-                let mut header = reqwest::header::HeaderValue::from_str(authorization.expose())
-                    .map_err(|_| OfficialError::InvalidInput)?;
-                header.set_sensitive(true);
-                builder = builder.header(reqwest::header::AUTHORIZATION, header);
-            }
-            if let Some(body) = request.body.as_ref() {
-                builder = builder.body(body.to_vec());
-            }
-            let request = builder.build().map_err(|_| OfficialError::InvalidInput)?;
+            let request = self.build_request(request)?;
             execute_bounded(&self.client, request).await
         })
     }

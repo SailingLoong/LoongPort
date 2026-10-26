@@ -224,16 +224,17 @@ pub(crate) struct MetadataDiscovery {
 }
 /// Informational version of one actually observed matching installation. An
 /// absent/ambiguous observation never substitutes a fabricated API version.
+/// Billing reads the observed version; native writes use the separate artifact gate.
 pub(super) fn library_app_version(data_root: &std::path::Path) -> Option<String> {
     let metadata = discover_metadata(None).ok()?;
-    if metadata.data_root != data_root || metadata.candidates.len() != 1 {
-        return None;
-    }
-    let candidate = metadata.candidates.into_iter().next()?;
-    if candidate.verified_build {
-        candidate.version
-    } else {
-        None
+    metadata.app_version_for(data_root)
+}
+impl MetadataDiscovery {
+    fn app_version_for(&self, data_root: &std::path::Path) -> Option<String> {
+        if self.data_root != data_root || self.candidates.len() != 1 {
+            return None;
+        }
+        self.candidates.first()?.version.clone()
     }
 }
 /// OS identity and a directory label only; no installation, process, native

@@ -150,3 +150,6 @@ pub(crate) mod trae_models;
 
 mod shared_routing;
 pub use shared_routing::*;
+
+mod zcode_devices;
+pub(crate) use zcode_devices::*;

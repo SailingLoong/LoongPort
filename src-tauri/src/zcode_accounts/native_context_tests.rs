@@ -704,6 +704,58 @@ fn metadata_discovery_rejects_symlink_or_unreadable_bootstrap_and_never_trusts_c
 }
 
 #[test]
+fn billing_uses_observed_version_without_admitting_native_writes() {
+    let f = Fixture::new();
+    fs::write(f.selection.install_path.join("Contents/Info.plist"), "<plist><dict><key>CFBundleShortVersionString</key><string>99.1.2</string><key>CFBundleVersion</key><string>99.1.2.1234</string></dict></plist>").unwrap();
+    let report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        std::slice::from_ref(&f.manifest),
+    )
+    .unwrap();
+    assert_eq!(
+        report.app_version_for(&f.selection.data_root).as_deref(),
+        Some("99.1.2")
+    );
+    assert!(!report.candidates[0].verified_build);
+    assert!(matches!(
+        NativeContextProbe::from_parts(f.selection.clone(), f.user.clone(), &f.manifest),
+        Err(BlockedReason::UnsupportedBuild)
+    ));
+    assert_eq!(
+        report.app_version_for(&f.selection.data_root.join("other")),
+        None
+    );
+}
+
+#[test]
+fn billing_version_requires_one_matching_installation_with_a_version() {
+    let f = Fixture::new();
+    let mut report = discover_from_candidates(
+        &f.user,
+        std::slice::from_ref(&f.selection.install_path),
+        std::slice::from_ref(&f.manifest),
+    )
+    .unwrap();
+    assert_eq!(
+        report.app_version_for(&f.selection.data_root).as_deref(),
+        Some("3.14.4")
+    );
+    report.candidates.push(MetadataCandidate {
+        install_path: f.selection.install_path.join("another"),
+        version: Some("99.1.2".into()),
+        build: None,
+        verified_build: false,
+    });
+    assert_eq!(report.app_version_for(&f.selection.data_root), None);
+    report.candidates.pop();
+    report.candidates[0].version = None;
+    assert_eq!(report.app_version_for(&f.selection.data_root), None);
+    report.candidates.clear();
+    assert_eq!(report.app_version_for(&f.selection.data_root), None);
+}
+
+#[test]
 fn metadata_unknown_version_labels_do_not_admit_an_unknown_build() {
     let f = Fixture::new();
     fs::write(f.selection.install_path.join("Contents/Info.plist"), "<plist><dict><key>CFBundleShortVersionString</key><string>99.0</string><key>CFBundleVersion</key><string>99.0.1</string></dict></plist>").unwrap();

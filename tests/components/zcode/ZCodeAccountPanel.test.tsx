@@ -18,6 +18,19 @@ import {
   type SessionCheckDisplay,
 } from "@/lib/api/zcodeAccounts";
 
+vi.mock("@/lib/api/zcodeDevices", () => ({
+  zcodeDeviceApi: {
+    state: vi.fn().mockResolvedValue({
+      devices: [],
+      selectedDeviceMid: null,
+      effectiveDeviceMid: null,
+      restartRequired: false,
+      revision: 0,
+    }),
+    import: vi.fn(),
+    select: vi.fn(),
+  },
+}));
 vi.mock("@/lib/api/zcodeClaim", () => ({
   zcodeClaimApi: {
     state: vi.fn().mockResolvedValue({
