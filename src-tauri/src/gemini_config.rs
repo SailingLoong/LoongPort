@@ -34,6 +34,9 @@ pub fn parse_env_file(content: &str) -> HashMap<String, String> {
             continue;
         }
 
+        // Gemini CLI 用 dotenv 加载 .env，dotenv 把 `export KEY=VALUE` 当 `KEY=VALUE` 读
+        let line = line.strip_prefix("export ").unwrap_or(line);
+
         // 解析 KEY=VALUE
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim().to_string();
@@ -459,6 +462,22 @@ GEMINI_MODEL=gemini-3.5-flash
             map.get("GEMINI_MODEL"),
             Some(&"gemini-3.5-flash".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_env_file_reads_export_lines() {
+        let content = r#"# Gemini CLI
+export GOOGLE_GEMINI_BASE_URL=https://example.com
+export GEMINI_MODEL=gemini-2.5-pro
+"#;
+
+        let map = parse_env_file(content);
+
+        assert_eq!(
+            map.get("GOOGLE_GEMINI_BASE_URL"),
+            Some(&"https://example.com".to_string())
+        );
+        assert_eq!(map.get("GEMINI_MODEL"), Some(&"gemini-2.5-pro".to_string()));
     }
 
     #[test]
