@@ -660,6 +660,7 @@ mod tests {
                 snapshot_id: sync_protocol::compute_snapshot_id(&artifacts, &metadata),
                 artifacts,
                 vault: Some(metadata),
+                storage: None,
             };
             DownloadedSnapshot {
                 manifest_hash: sync_protocol::sha256_hex(&serde_json::to_vec(&manifest).unwrap()),

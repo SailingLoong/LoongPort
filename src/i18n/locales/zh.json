@@ -644,7 +644,7 @@
     },
     "webdavSync": {
       "title": "WebDAV 云同步",
-      "description": "通过 WebDAV 在多设备间同步数据库和技能配置。",
+      "description": "通过 WebDAV 或 S3 同步配置与技能。新远端备份跟随本机选择的加密或明文方式；能读取明文远端文件的人也能读取其中的凭据。保护方式只影响新备份；已有远端历史快照不会自动转换或删除。",
       "baseUrl": "WebDAV 服务器地址",
       "baseUrlPlaceholder": "https://dav.jianguoyun.com/dav/",
       "username": "WebDAV 账户",
@@ -654,7 +654,7 @@
       "remoteRoot": "远程根目录",
       "profile": "同步配置名",
       "autoSync": "自动同步",
-      "autoSyncHint": "开启后每次数据库变更都会自动上传到 WebDAV。",
+      "autoSyncHint": "开启后每次数据库变更都会自动上传到 WebDAV。新备份跟随本机保护方式，明文模式会上传明文凭据。保护方式只影响新备份；已有远端历史快照不会自动转换或删除。",
       "test": "测试连接",
       "testing": "测试中...",
       "testSuccess": "连接成功",
@@ -690,7 +690,7 @@
       "saveAndTestSuccess": "配置已保存，连接正常",
       "saveAndTestFailed": "配置已保存，但连接测试失败：{{error}}",
       "noRemoteData": "云端没有找到同步数据",
-      "incompatibleVersion": "远端数据版本不兼容（协议 v{{protocolVersion}}，数据库 {{dbCompatVersion}}），当前支持协议 v2 / db-v6",
+      "incompatibleVersion": "远端数据格式或版本不兼容，当前不能恢复。请使用支持该格式的 LoongPort 版本检查。",
       "unsaved": "未保存",
       "saved": "已保存",
       "unsavedChanges": "请先保存配置",
@@ -704,8 +704,8 @@
         "path": "远端路径",
         "dbCompat": "数据库兼容层",
         "artifacts": "包含内容",
-        "legacyNotice": "检测到旧版云端路径。恢复完成后，下次上传将写入新路径 v2/db-v6。",
-        "warning": "恢复将覆盖本地所有数据和技能配置",
+        "legacyNotice": "检测到旧版云端路径。恢复完成后，下次上传将写入当前格式的路径。",
+        "warning": "恢复将替换本地配置和技能，保留本机登录及同步凭据；已选择的本机保护方式与密钥保持不变。",
         "confirm": "确认恢复"
       },
       "confirmUpload": {
@@ -719,8 +719,8 @@
         "createdAt": "上传时间",
         "path": "远端路径",
         "dbCompat": "数据库兼容层",
-        "warning": "将覆盖云端已有的同步数据",
-        "legacyNotice": "检测到旧版云端路径数据。本次上传将写入新路径 v2/db-v6，不会覆盖旧路径。",
+        "warning": "将覆盖云端已有的同步数据。新备份跟随本机保护方式；明文模式下，能读取远端文件的人也能读取其中的凭据。保护方式只影响新备份；已有远端历史快照不会自动转换或删除。",
+        "legacyNotice": "检测到旧版云端路径数据。本次上传将写入当前格式的路径，不会覆盖旧路径。",
         "confirm": "确认上传"
       }
     },
@@ -763,7 +763,7 @@
       "profile": "同步配置名",
       "profileDefault": "默认: default",
       "autoSync": "自动同步",
-      "autoSyncHint": "开启后每次数据库变更都会自动上传到 S3。",
+      "autoSyncHint": "开启后每次数据库变更都会自动上传到 S3。新备份跟随本机保护方式，明文模式会上传明文凭据。保护方式只影响新备份；已有远端历史快照不会自动转换或删除。",
       "enabled": "启用 S3 同步",
       "enabledHint": "开启后可使用 S3 上传/下载和自动同步。",
       "mutualExclusionTitle": "切换同步方式",
@@ -795,7 +795,7 @@
       "autoSyncLastErrorHint": "请检查网络或 S3 配置，系统会在后续变更时继续自动重试。",
       "missingBucket": "请填写 S3 存储桶",
       "noRemoteData": "S3 存储桶中没有找到同步数据",
-      "incompatibleVersion": "远端数据版本不兼容（版本 {{version}}），当前支持协议 v2 / db-v6",
+      "incompatibleVersion": "远端数据格式或版本不兼容，当前不能恢复。请使用支持该格式的 LoongPort 版本检查。",
       "unsaved": "未保存",
       "saved": "已保存",
       "unsavedChanges": "请先保存配置",
@@ -809,7 +809,7 @@
         "deviceName": "上传设备",
         "createdAt": "上传时间",
         "artifacts": "包含内容",
-        "warning": "恢复将覆盖本地所有数据和技能配置",
+        "warning": "恢复将替换本地配置和技能，保留本机登录及同步凭据；已选择的本机保护方式与密钥保持不变。",
         "confirm": "确认恢复"
       },
       "confirmUpload": {
@@ -821,7 +821,7 @@
         "existingData": "云端已有数据",
         "deviceName": "上传设备",
         "createdAt": "上传时间",
-        "warning": "将覆盖该 S3 路径下已有的同步数据",
+        "warning": "将覆盖云端已有的同步数据。新备份跟随本机保护方式；明文模式下，能读取远端文件的人也能读取其中的凭据。保护方式只影响新备份；已有远端历史快照不会自动转换或删除。",
         "confirm": "确认上传"
       }
     },
@@ -4397,13 +4397,15 @@
     "title": "恢复云端配置",
     "description": "用云端快照替换此设备的配置和技能。本机登录账号和同步连接凭据会保留。",
     "source": "快照来自 {{deviceName}}",
-    "protection": "输入用于验证云端快照来源；已选择的本机保护方式会保留。尚未选择保护方式的旧版配置仍按原恢复规则处理，成功恢复时会采用来源保护信息。",
-    "password": "云端保护口令",
+    "protection": "已选择的本机保护方式与密钥会保留；尚未选择保护方式的旧版配置按原恢复规则处理。需要输入时，仅用于验证本次恢复的来源。",
+    "password": "来源密钥或恢复口令",
     "confirm": "恢复配置",
     "restoring": "正在恢复…",
-    "failed": "无法恢复，请检查云端保护口令后重试。",
+    "failed": "未能确认恢复完成。请重新检查远端快照与本机配置后重试。",
     "changed": "云端快照已变化，请关闭此对话框后重新下载。",
-    "success": "已恢复云端配置。"
+    "success": "已恢复云端配置。",
+    "descriptionPlain": "此来源以明文保存，不需要来源密钥。确认后用该快照恢复配置和技能；本机登录及同步连接凭据保留。",
+    "noSourceInput": "此明文来源没有可输入的密钥。请确认恢复范围；不会因此改变已选择的本机保护方式。"
   },
   "portableBackup": {
     "password": "备份保护口令",
@@ -5379,7 +5381,10 @@
     "verificationRequired": "当前结果需要进一步核验，不能继续原操作。请保留原文件并重新检查。",
     "completed": "原操作已恢复，需要重启后重新检查并打开数据。",
     "restartDescription": "本次恢复不会直接启用当前进程的凭据功能。请重启 LoongPort。",
-    "restartFailed": "重启未能完成，请手动关闭并重新打开 LoongPort。"
+    "restartFailed": "重启未能完成，请手动关闭并重新打开 LoongPort。",
+    "currentKey": "本次操作使用的本机配置密钥",
+    "currentHelp": "请输入本次操作原本使用的本机配置密钥，保持原文。来源可能为明文，这里验证的是本机配置；不会更换已选择的保护方式。",
+    "noInputHelp": "此原操作不需要密钥。点击下方按钮继续恢复；不会因省略输入而更改本机保护方式。"
   },
   "routingWorkspace": {
     "workspace": "应用路由工作台",

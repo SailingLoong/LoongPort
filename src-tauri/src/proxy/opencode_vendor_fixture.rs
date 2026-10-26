@@ -53,7 +53,23 @@ impl FixtureOwner {
     pub(crate) fn personal_go() -> Self {
         Self::new_inner(true, 2, true)
     }
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn personal_go_plaintext() -> Self {
+        Self::new_inner_with_database(true, 2, true, || {
+            crate::services::native_source_guard::storage_fixture::fresh_plaintext_database()
+        })
+    }
     fn new_inner(initialize_chain: bool, bind_count: usize, personal_go: bool) -> Self {
+        Self::new_inner_with_database(initialize_chain, bind_count, personal_go, || {
+            crate::secrets::testing::initialize_database().unwrap()
+        })
+    }
+    fn new_inner_with_database(
+        initialize_chain: bool,
+        bind_count: usize,
+        personal_go: bool,
+        initialize: impl FnOnce() -> Database,
+    ) -> Self {
         let accounts: [String; 2] = std::array::from_fn(|i| {
             if personal_go {
                 vendor::opencode_personal::identity(PERSONAL_KEYS[i]).unwrap()
@@ -69,7 +85,7 @@ impl FixtureOwner {
         };
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        let db = Arc::new(initialize());
         Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
         // Existing-app routing fixtures start from a deliberately initialized empty chain.
         // The separate missing-priority regression below exercises the original gap.

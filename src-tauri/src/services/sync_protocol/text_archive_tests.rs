@@ -41,6 +41,7 @@ fn manifest(metadata: &VaultMetadata) -> SyncManifest {
         snapshot_id: compute_snapshot_id(&artifacts, metadata),
         artifacts,
         vault: Some(metadata.clone()),
+        storage: None,
     }
 }
 fn assert_code<T>(result: Result<T, AppError>, code: &str) {
@@ -246,7 +247,7 @@ fn authenticated_text_restore_rejects_an_unsigned_target_protection_record() {
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn plaintext_mode_does_not_become_a_remote_plaintext_snapshot_or_a_fake_vault() {
+fn plaintext_mode_uses_an_explicit_remote_descriptor_without_a_fake_vault() {
     let home = TestHome::new().unwrap();
     let root = crate::config::get_app_config_dir();
     assert!(root.starts_with(home.path()));
@@ -261,10 +262,22 @@ fn plaintext_mode_does_not_become_a_remote_plaintext_snapshot_or_a_fake_vault() 
     let session = SecretSession::from_storage_context(root.clone(), context);
     crate::settings::unlock_settings_for_test(session.clone()).unwrap();
     let db = Database::from_connection(conn, session);
-    db.set_setting("common_config_claude", "plaintext-stays-local-canary")
-        .unwrap();
+    db.set_setting(
+        "common_config_claude",
+        "synthetic-authorized-plaintext-remote-canary",
+    )
+    .unwrap();
     let before = Database::content_digest(&db.conn.lock().unwrap()).unwrap();
-    assert_code(build_local_snapshot(&db), "protection.encryption_required");
+    let exported = build_local_snapshot(&db).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&exported.manifest_bytes).unwrap();
+    assert_eq!(manifest["version"], PLAINTEXT_PROTOCOL_VERSION);
+    assert_eq!(manifest["storage"]["mode"], "plaintext");
+    assert!(manifest.get("vault").is_none());
+    assert!(std::str::from_utf8(&exported.db_sql)
+        .unwrap()
+        .contains("synthetic-authorized-plaintext-remote-canary"));
+    // The original encrypted-only portable wrapper still cannot fabricate a vault.
+    assert_code(db.export_sync_snapshot(), "protection.encryption_required");
     assert_eq!(
         Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
         before
@@ -389,8 +402,8 @@ pub(crate) fn run_case(case: &str) {
         "installer_fence" => {
             authenticated_text_restore_rejects_an_unsigned_target_protection_record()
         }
-        "plaintext_blocked" => {
-            plaintext_mode_does_not_become_a_remote_plaintext_snapshot_or_a_fake_vault()
+        "plaintext_explicit" => {
+            plaintext_mode_uses_an_explicit_remote_descriptor_without_a_fake_vault()
         }
         "backup_restore_same_generation" => {
             protected_active_backup_restore_uses_the_same_generation_database_installer()

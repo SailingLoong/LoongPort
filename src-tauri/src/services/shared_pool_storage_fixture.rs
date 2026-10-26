@@ -1,4 +1,4 @@
-//! Fresh synthetic plaintext owners only; no storage-mode conversion or real account data.
+//! Synthetic original storage owners and isolated restore consumers; no real account data.
 use super::*;
 use crate::{
     database::Database,
@@ -166,7 +166,21 @@ fn vendor_credential_retirement(case: &str) {
     }
 }
 
+#[path = "shared_pool_restore_proofs.rs"]
+mod restore_proofs;
+pub(crate) use restore_proofs::seed_restore_proofs;
+
 pub(crate) async fn verify(case: &str) {
+    if case == "restore_stream_control" {
+        return crate::proxy::opencode_shared_fixture::verify("personal_stream_same_owner_control")
+            .await;
+    }
+    if case == "restore_sql_stream" {
+        return crate::proxy::opencode_shared_fixture::verify("personal_stream_sql_restore").await;
+    }
+    if let Some(point) = case.strip_prefix("restore_joint_") {
+        return crate::secrets::transition::content_tests::verify_pool_restore(point).await;
+    }
     if let Some(case) = case.strip_prefix("revision_") {
         return crate::database::credential_revision::verify_fixture(case);
     }

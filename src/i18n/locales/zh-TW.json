@@ -616,7 +616,7 @@
     },
     "webdavSync": {
       "title": "WebDAV 雲端同步",
-      "description": "透過 WebDAV 在多裝置間同步資料庫和技能設定。",
+      "description": "透過 WebDAV 或 S3 同步設定與技能。新遠端備份跟隨本機選擇的加密或明文方式；能讀取明文遠端檔案的人也能讀取其中的憑證。保護方式只影響新備份；既有遠端歷史快照不會自動轉換或刪除。",
       "baseUrl": "WebDAV 伺服器位址",
       "baseUrlPlaceholder": "https://dav.jianguoyun.com/dav/",
       "username": "WebDAV 帳號",
@@ -626,7 +626,7 @@
       "remoteRoot": "遠端根目錄",
       "profile": "同步設定名稱",
       "autoSync": "自動同步",
-      "autoSyncHint": "開啟後每次資料庫變更都會自動上傳至 WebDAV。",
+      "autoSyncHint": "開啟後每次資料庫變更都會自動上傳到 WebDAV。新備份跟隨本機保護方式，明文模式會上傳明文憑證。保護方式只影響新備份；既有遠端歷史快照不會自動轉換或刪除。",
       "test": "測試連線",
       "testing": "測試中...",
       "testSuccess": "連線成功",
@@ -662,7 +662,7 @@
       "saveAndTestSuccess": "設定已儲存，連線正常",
       "saveAndTestFailed": "設定已儲存，但連線測試失敗：{{error}}",
       "noRemoteData": "雲端沒有找到同步資料",
-      "incompatibleVersion": "遠端資料版本不相容（協定 v{{protocolVersion}}，資料庫 {{dbCompatVersion}}），目前支援協定 v2 / db-v6",
+      "incompatibleVersion": "遠端資料格式或版本不相容，目前無法還原。請使用支援該格式的 LoongPort 版本檢查。",
       "unsaved": "未儲存",
       "saved": "已儲存",
       "unsavedChanges": "請先儲存設定",
@@ -676,8 +676,8 @@
         "path": "遠端路徑",
         "dbCompat": "資料庫相容層",
         "artifacts": "包含內容",
-        "legacyNotice": "檢測到舊版雲端路徑。還原完成後，下次上傳將寫入新路徑 v2/db-v6。",
-        "warning": "還原將覆寫本地所有資料和技能設定",
+        "legacyNotice": "偵測到舊版雲端路徑。還原完成後，下次上傳將寫入目前格式的路徑。",
+        "warning": "還原將取代本機設定和技能，保留本機登入及同步憑證；已選擇的本機保護方式與密鑰保持不變。",
         "confirm": "確認還原"
       },
       "confirmUpload": {
@@ -691,8 +691,8 @@
         "createdAt": "上傳時間",
         "path": "遠端路徑",
         "dbCompat": "資料庫相容層",
-        "warning": "將覆寫雲端已有的同步資料",
-        "legacyNotice": "檢測到舊版雲端路徑資料。本次上傳將寫入新路徑 v2/db-v6，不會覆寫舊路徑。",
+        "warning": "將覆蓋雲端現有的同步資料。新備份跟隨本機保護方式；明文模式下，能讀取遠端檔案的人也能讀取其中的憑證。保護方式只影響新備份；既有遠端歷史快照不會自動轉換或刪除。",
+        "legacyNotice": "偵測到舊版雲端路徑資料。本次上傳將寫入目前格式的路徑，不會覆蓋舊路徑。",
         "confirm": "確認上傳"
       }
     },
@@ -735,7 +735,7 @@
       "profile": "同步設定檔名稱",
       "profileDefault": "預設: default",
       "autoSync": "自動同步",
-      "autoSyncHint": "開啟後每次資料庫變更都會自動上傳到 S3。",
+      "autoSyncHint": "開啟後每次資料庫變更都會自動上傳到 S3。新備份跟隨本機保護方式，明文模式會上傳明文憑證。保護方式只影響新備份；既有遠端歷史快照不會自動轉換或刪除。",
       "enabled": "啟用 S3 同步",
       "enabledHint": "開啟後可使用 S3 上傳/下載和自動同步。",
       "mutualExclusionTitle": "切換同步方式",
@@ -767,7 +767,7 @@
       "autoSyncLastErrorHint": "請檢查網路或 S3 設定，系統會在後續變更時繼續自動重試。",
       "missingBucket": "請填寫 S3 儲存桶",
       "noRemoteData": "S3 儲存桶中沒有找到同步資料",
-      "incompatibleVersion": "遠端資料版本不相容（版本 {{version}}），目前支援協議 v2 / db-v6",
+      "incompatibleVersion": "遠端資料格式或版本不相容，目前無法還原。請使用支援該格式的 LoongPort 版本檢查。",
       "unsaved": "未儲存",
       "saved": "已儲存",
       "unsavedChanges": "請先儲存設定",
@@ -781,7 +781,7 @@
         "deviceName": "上傳裝置",
         "createdAt": "上傳時間",
         "artifacts": "包含內容",
-        "warning": "還原將覆寫本地所有資料和技能設定",
+        "warning": "還原將取代本機設定和技能，保留本機登入及同步憑證；已選擇的本機保護方式與密鑰保持不變。",
         "confirm": "確認還原"
       },
       "confirmUpload": {
@@ -793,7 +793,7 @@
         "existingData": "雲端已有資料",
         "deviceName": "上傳裝置",
         "createdAt": "上傳時間",
-        "warning": "將覆寫該 S3 路徑下已有的同步資料",
+        "warning": "將覆蓋雲端現有的同步資料。新備份跟隨本機保護方式；明文模式下，能讀取遠端檔案的人也能讀取其中的憑證。保護方式只影響新備份；既有遠端歷史快照不會自動轉換或刪除。",
         "confirm": "確認上傳"
       }
     },
@@ -4364,13 +4364,15 @@
     "title": "還原雲端設定",
     "description": "以雲端快照取代此裝置的設定和技能。本機登入帳號和同步連線憑證將會保留。",
     "source": "快照來自 {{deviceName}}",
-    "protection": "輸入用於驗證雲端快照來源；已選擇的本機保護方式會保留。尚未選擇保護方式的舊版設定仍按原還原規則處理，成功還原時會採用來源保護資訊。",
-    "password": "雲端保護密碼",
+    "protection": "已選擇的本機保護方式與密鑰會保留；尚未選擇保護方式的舊版設定按原還原規則處理。需要輸入時，僅用於驗證本次還原的來源。",
+    "password": "來源密鑰或還原密碼",
     "confirm": "還原設定",
     "restoring": "正在還原…",
-    "failed": "無法還原，請檢查雲端保護密碼後重試。",
+    "failed": "未能確認還原完成。請重新檢查遠端快照與本機設定後重試。",
     "changed": "雲端快照已變更，請關閉此對話框後重新下載。",
-    "success": "已還原雲端設定。"
+    "success": "已還原雲端設定。",
+    "descriptionPlain": "此來源以明文儲存，不需要來源密鑰。確認後用該快照還原設定和技能；本機登入及同步連線憑證保留。",
+    "noSourceInput": "此明文來源沒有可輸入的密鑰。請確認還原範圍；不會因此改變已選擇的本機保護方式。"
   },
   "portableBackup": {
     "password": "備份保護密碼",
@@ -5309,7 +5311,10 @@
     "verificationRequired": "目前結果需要進一步驗證，無法繼續原操作。請保留原始檔案並重新檢查。",
     "completed": "原操作已復原，需要重新啟動後重新檢查並開啟資料。",
     "restartDescription": "本次復原不會直接啟用目前處理程序的憑證功能。請重新啟動 LoongPort。",
-    "restartFailed": "重新啟動未能完成，請手動關閉並重新開啟 LoongPort。"
+    "restartFailed": "重新啟動未能完成，請手動關閉並重新開啟 LoongPort。",
+    "currentKey": "本次操作使用的本機設定密鑰",
+    "currentHelp": "請輸入本次操作原本使用的本機設定密鑰，保持原文。來源可能為明文，這裡驗證的是本機設定；不會更換已選擇的保護方式。",
+    "noInputHelp": "此原操作不需要密鑰。點擊下方按鈕繼續還原；不會因省略輸入而更改本機保護方式。"
   },
   "routingWorkspace": {
     "workspace": "應用路由工作台",

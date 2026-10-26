@@ -322,6 +322,8 @@ it("mounts original-operation recovery in the actual App tree without enabling c
     status: "pending" as const,
     canRecover: true,
     restartRequired: false,
+    inputRequired: true,
+    inputKind: "source" as const,
   };
   vi.mocked(startupRecoveryApi.status).mockResolvedValue(pending);
   const recover = vi.spyOn(startupRecoveryApi, "recover").mockResolvedValue({
@@ -329,6 +331,8 @@ it("mounts original-operation recovery in the actual App tree without enabling c
     status: "completed",
     canRecover: false,
     restartRequired: true,
+    inputRequired: false,
+    inputKind: "none",
   });
   const protection = await import("@/lib/api/credentialProtection");
   const unlock = vi.spyOn(protection.credentialProtectionApi, "unlock");

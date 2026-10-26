@@ -81,11 +81,11 @@ pub(crate) fn stage_skills_zip(raw: &[u8]) -> Result<PreparedSkills, AppError> {
     fs::write(&zip_path, raw).map_err(|e| AppError::io(&zip_path, e))?;
 
     let file = fs::File::open(&zip_path).map_err(|e| AppError::io(&zip_path, e))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+    let mut archive = zip::ZipArchive::new(file).map_err(|_| {
         localized(
             "webdav.sync.skills_zip_parse_failed",
-            format!("解析 skills.zip 失败: {e}"),
-            format!("Failed to parse skills.zip: {e}"),
+            "解析 skills.zip 失败",
+            "Failed to parse skills.zip",
         )
     })?;
 
@@ -106,34 +106,42 @@ pub(crate) fn stage_skills_zip(raw: &[u8]) -> Result<PreparedSkills, AppError> {
         ));
     }
 
+    // Member names and decoder diagnostics are untrusted archive content.
+    // Keep detailed IO paths inside this private staging owner, not in errors.
+    let entry_error = || {
+        localized(
+            "webdav.sync.skills_zip_entry_read_failed",
+            "读取或提取 ZIP 项失败",
+            "Failed to read or extract ZIP entry.",
+        )
+    };
     let mut total_bytes: u64 = 0;
     for idx in 0..archive.len() {
-        let mut entry = archive.by_index(idx).map_err(|e| {
-            localized(
-                "webdav.sync.skills_zip_entry_read_failed",
-                format!("读取 ZIP 项失败: {e}"),
-                format!("Failed to read ZIP entry: {e}"),
-            )
-        })?;
+        let mut entry = archive.by_index(idx).map_err(|_| entry_error())?;
         let Some(safe_name) = entry.enclosed_name() else {
             continue;
         };
         let out_path = extracted.join(safe_name);
         if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|e| AppError::io(&out_path, e))?;
+            fs::create_dir_all(&out_path).map_err(|_| entry_error())?;
             continue;
         }
         if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            fs::create_dir_all(parent).map_err(|_| entry_error())?;
         }
-        let mut out = fs::File::create(&out_path).map_err(|e| AppError::io(&out_path, e))?;
+        let mut out = fs::File::create(&out_path).map_err(|_| entry_error())?;
         let _written = copy_entry_with_total_limit(
             &mut entry,
             &mut out,
             &mut total_bytes,
             MAX_SYNC_ARTIFACT_BYTES,
             &out_path,
-        )?;
+        )
+        .map_err(|error| match error {
+            AppError::Io { .. } => entry_error(),
+            // Preserve the original streaming quota error and its numeric limit.
+            other => other,
+        })?;
     }
 
     Ok(PreparedSkills {

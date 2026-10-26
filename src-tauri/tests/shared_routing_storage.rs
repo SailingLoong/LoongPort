@@ -1,5 +1,5 @@
 //! Synthetic original storage, credential writers, and journal consumers.
-//! Not real-account credit consumption, user-data recovery, or protection-mode conversion.
+//! Includes isolated synthetic DB/skills recovery; not real-account consumption or user-data acceptance.
 #![cfg(all(feature = "gui", feature = "test-hooks"))]
 macro_rules! storage_case {
     ($name:ident, $case:literal) => {
@@ -288,4 +288,23 @@ storage_case!(
 storage_case!(
     credential_legacy_mixed_case_schema_is_rejected,
     "revision_legacy_mixed_case"
+);
+
+// Actual original SQL/content installation, not direct session epoch manipulation.
+storage_case!(
+    real_sql_restore_retires_native_vendor_proofs_and_stream_tail,
+    "restore_sql_stream"
+);
+storage_case!(
+    real_joint_restore_intent_recovery_retires_old_pool_session,
+    "restore_joint_intent"
+);
+storage_case!(
+    real_joint_restore_database_recovery_retires_old_pool_session,
+    "restore_joint_database"
+);
+
+storage_case!(
+    real_sql_restore_stream_control_admits_unreplaced_owner,
+    "restore_stream_control"
 );

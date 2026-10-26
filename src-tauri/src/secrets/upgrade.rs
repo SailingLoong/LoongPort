@@ -72,6 +72,21 @@ impl RecoveryEvidence {
         }
         Ok(())
     }
+    pub(crate) fn input_kind(
+        &self,
+        root: &Path,
+    ) -> Result<super::transition::RecoveryInputKind, AppError> {
+        self.verify_unchanged(root, &self.token())?;
+        if let Some(bytes) = self.records[2].as_deref() {
+            if super::transition::is_content_record(bytes)? {
+                if [0, 1, 3].into_iter().any(|i| self.records[i].is_some()) {
+                    return Err(AppError::Config("secret.conflicting_transition".into()));
+                }
+                return super::transition::content_recovery_input_kind(root, bytes);
+            }
+        }
+        Ok(super::transition::RecoveryInputKind::Source)
+    }
     pub(crate) fn recover(
         &self,
         root: &Path,

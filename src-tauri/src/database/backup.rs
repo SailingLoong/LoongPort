@@ -231,8 +231,21 @@ impl Database {
 
     /// SQL and public key metadata come from the same SQLite backup while the
     /// active vault generation is pinned. Callers never read live metadata later.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn export_sync_snapshot(&self) -> Result<(String, VaultMetadata), AppError> {
         self.export_portable_snapshot(SYNC_SKIP_TABLES, "sync.recovery_password_required")
+    }
+
+    /// SQL and the explicit storage identity come from one pinned snapshot.
+    pub(crate) fn export_sync_storage_snapshot(
+        &self,
+    ) -> Result<(String, StorageIdentity), AppError> {
+        let context = self.secrets.read()?;
+        self.export_snapshot_for_storage(
+            &context,
+            SYNC_SKIP_TABLES,
+            "sync.recovery_password_required",
+        )
     }
 
     fn export_portable_snapshot(
@@ -241,19 +254,47 @@ impl Database {
         password_error: &str,
     ) -> Result<(String, VaultMetadata), AppError> {
         let context = self.secrets.read()?;
-        let vault = context.encrypted()?;
-        let snapshot = self.snapshot_to_memory()?;
-        super::vault::check_identity(&snapshot, vault)?;
-        crate::secrets::inventory::validate_database(&snapshot, vault)?;
-        let metadata = super::vault::stored_metadata(&snapshot)?
-            .ok_or_else(|| AppError::Config("sync.vault_metadata_required".into()))?;
-        if !metadata
-            .recovery_input_available()
-            .map_err(crate::secrets::inventory::secret_error)?
-        {
-            return Err(AppError::Config(password_error.into()));
+        context.encrypted()?;
+        let (sql, identity) =
+            self.export_snapshot_for_storage(&context, skip_tables, password_error)?;
+        match identity {
+            StorageIdentity::Encrypted(metadata) => Ok((sql, *metadata)),
+            StorageIdentity::Plaintext(_) => {
+                Err(AppError::Config("protection.encryption_required".into()))
+            }
         }
-        Ok((Self::dump_sql(&snapshot, skip_tables)?, metadata))
+    }
+
+    /// Both exporters pin the original session guard before calling this owner.
+    fn export_snapshot_for_storage(
+        &self,
+        context: &StorageContext,
+        skip_tables: &[&str],
+        password_error: &str,
+    ) -> Result<(String, StorageIdentity), AppError> {
+        let snapshot = self.snapshot_to_memory()?;
+        super::storage::check_identity(&snapshot, context)?;
+        crate::secrets::inventory::validate_storage_database(&snapshot, context)?;
+        let identity = match context {
+            StorageContext::Encrypted(_) => {
+                let metadata = super::vault::stored_metadata(&snapshot)?
+                    .ok_or_else(|| AppError::Config("sync.vault_metadata_required".into()))?;
+                if !metadata
+                    .recovery_input_available()
+                    .map_err(crate::secrets::inventory::secret_error)?
+                {
+                    return Err(AppError::Config(password_error.into()));
+                }
+                StorageIdentity::Encrypted(Box::new(metadata))
+            }
+            StorageContext::Plaintext(_) => {
+                let identity = super::storage_identity::stored(&snapshot)?.ok_or_else(|| {
+                    AppError::Config("protection.database_identity_required".into())
+                })?;
+                StorageIdentity::Plaintext(identity)
+            }
+        };
+        Ok((Self::dump_sql(&snapshot, skip_tables)?, identity))
     }
 
     /// Compatibility wrapper; the ordinary preparation owner is storage-aware.
@@ -332,8 +373,7 @@ impl Database {
         })
     }
 
-    /// Manifest/source authentication remains with the existing crypto owner;
-    /// this path only admits that actual image for the real receiver's schema.
+    /// Compatibility wrapper; encrypted authentication keeps its original owner.
     pub(crate) fn prepare_sync_snapshot_for_storage(
         &self,
         sql: &str,
@@ -342,11 +382,57 @@ impl Database {
         current: &StorageContext,
         destination: &StorageContext,
     ) -> Result<ValidatedSyncSnapshot, AppError> {
+        self.prepare_sync_storage_snapshot_for_storage(
+            sql,
+            &StorageIdentity::Encrypted(Box::new(expected.clone())),
+            &StorageContext::from(authenticated_source.clone()),
+            current,
+            destination,
+        )
+    }
+
+    /// Manifest/source admission shares the original receiver, sandbox and lease
+    /// owner. Plaintext requires its actual explicit stamp, never missing metadata.
+    pub(crate) fn prepare_sync_storage_snapshot_for_storage(
+        &self,
+        sql: &str,
+        expected: &StorageIdentity,
+        source: &StorageContext,
+        current: &StorageContext,
+        destination: &StorageContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
         let epoch = self.secrets.lifecycle_epoch();
         let target = self.storage_restore_target(current)?;
-        Self::validate_sync_source(authenticated_source, expected)?;
+        let source = match (expected, source) {
+            (StorageIdentity::Encrypted(expected), StorageContext::Encrypted(authenticated)) => {
+                // Preserve authenticated older revisions of the same encrypted
+                // key; comparing the caller's full metadata would reject them.
+                Self::validate_sync_source(authenticated, expected)?;
+                VaultContext::from_key((**expected).clone(), authenticated.export_key())
+                    .map(StorageContext::from)
+                    .map_err(crate::secrets::inventory::secret_error)?
+            }
+            (StorageIdentity::Plaintext(expected), StorageContext::Plaintext(actual)) => {
+                expected
+                    .validate()
+                    .map_err(crate::secrets::inventory::secret_error)?;
+                if expected != actual {
+                    return Err(AppError::Config("sync.source_identity_mismatch".into()));
+                }
+                StorageContext::Plaintext(expected.clone())
+            }
+            _ => return Err(AppError::Config("sync.source_identity_mismatch".into())),
+        };
         let connection = Self::stage_import_sql(sql, true)?;
-        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+        let identity_matches = match &source {
+            StorageContext::Encrypted(vault) => {
+                super::vault::stored_metadata(&connection)?.as_ref() == Some(vault.metadata())
+            }
+            StorageContext::Plaintext(identity) => {
+                super::storage_identity::stored(&connection)?.as_ref() == Some(identity)
+            }
+        };
+        if !identity_matches {
             return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
         // The original upstream4 receiver accepts only its exact published
@@ -360,9 +446,6 @@ impl Database {
                 "sync.database_version_incompatible".into(),
             ));
         }
-        let source = VaultContext::from_key(expected.clone(), authenticated_source.export_key())
-            .map(StorageContext::from)
-            .map_err(crate::secrets::inventory::secret_error)?;
         let connection =
             Self::prepare_storage_source_image(connection, Some(&source), destination, target)?;
         self.secrets.ensure_available()?;
@@ -5248,5 +5331,16 @@ impl Database {
     #[doc(hidden)]
     pub fn verify_storage_source_case(case: &str) {
         storage_source_tests::verify(case);
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_storage_sync_tests.rs"]
+mod storage_sync_tests;
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_remote_storage_snapshot_case(case: &str) {
+        storage_sync_tests::verify(case);
     }
 }

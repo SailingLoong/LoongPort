@@ -31,6 +31,7 @@ impl FixtureOwner<'_> {
     }
     /// Generated fixture state only. The production selection reader remains the
     /// sole authority for effective identity; this does not call it or pre-freeze it.
+    #[cfg(all(feature = "gui", feature = "test-hooks", unix))]
     pub(crate) fn seed_source_fixture(
         &self,
         db: &crate::database::Database,
@@ -51,6 +52,7 @@ impl FixtureOwner<'_> {
             self.seal.context.context_id(): {"devices":ids,"selectedDeviceMid":selected,"revision":1}
         }}).to_string()).unwrap();
     }
+    #[cfg(all(feature = "gui", feature = "test-hooks", unix))]
     pub(crate) fn assert_source_fixture_headers(
         &self,
         actual: &http::HeaderMap,

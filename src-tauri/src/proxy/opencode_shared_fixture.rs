@@ -32,6 +32,7 @@ struct Fixture {
     calls: Arc<Mutex<Vec<Capture>>>,
     upstream: tokio::task::JoinHandle<()>,
     release: Arc<tokio::sync::Notify>,
+    tail_waiting: Arc<tokio::sync::Notify>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -45,9 +46,13 @@ impl Fixture {
         streaming: bool,
         epoch_tail: bool,
         reseal_before_b: bool,
+        plaintext: bool,
     ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let owner = if personal {
+        let owner = if plaintext {
+            assert!(personal);
+            FixtureOwner::personal_go_plaintext()
+        } else if personal {
             FixtureOwner::personal_go()
         } else {
             FixtureOwner::new()
@@ -60,9 +65,12 @@ impl Fixture {
         let original_db = owner.state().db.clone();
         let release = Arc::new(tokio::sync::Notify::new());
         let upstream_release = release.clone();
+        let tail_waiting = Arc::new(tokio::sync::Notify::new());
+        let upstream_waiting = tail_waiting.clone();
         let upstream_router = axum::Router::new().fallback(axum::routing::post(move |uri: Uri, headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
             let captures = captures.clone();
             let release = upstream_release.clone();
+            let waiting = upstream_waiting.clone();
             let db = original_db.clone();
             async move {
                 let first = headers.get("authorization").and_then(|v| v.to_str().ok()) == Some(format!("Bearer {first_key}").as_str()) || headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some(first_key);
@@ -78,6 +86,7 @@ impl Fixture {
                 if streaming {
                     let stream = async_stream::stream! {
                         yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: {\"id\":\"chatcmpl_stream\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"shared-visible-prefix.\"},\"finish_reason\":null}]}\n\n"));
+                        waiting.notify_one();
                         release.notified().await;
                         if epoch_tail {
                             yield Ok(axum::body::Bytes::from_static(b"data: {\"id\":\"chatcmpl_stream\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"forbidden-after-epoch.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"));
@@ -120,6 +129,7 @@ impl Fixture {
             calls,
             upstream,
             release,
+            tail_waiting,
         }
     }
     async fn connect(&self, app: &AppType, selected: usize) {
@@ -230,13 +240,28 @@ pub(crate) async fn verify(case: &str) {
     let fail_first = case.ends_with("ordered")
         || case.ends_with("manual_failure")
         || case == "personal_snapshot_reseal";
-    let streaming = matches!(case, "personal_stream" | "personal_stream_epoch");
+    let streaming = matches!(
+        case,
+        "personal_stream"
+            | "personal_stream_epoch"
+            | "personal_stream_sql_restore"
+            | "personal_stream_same_owner_control"
+    );
     let f = Fixture::new(
         personal,
         fail_first,
         streaming,
-        case == "personal_stream_epoch",
+        matches!(
+            case,
+            "personal_stream_epoch"
+                | "personal_stream_sql_restore"
+                | "personal_stream_same_owner_control"
+        ),
         case == "personal_snapshot_reseal",
+        matches!(
+            case,
+            "personal_stream_sql_restore" | "personal_stream_same_owner_control"
+        ),
     )
     .await;
     let state = f.owner.state();
@@ -558,6 +583,19 @@ pub(crate) async fn verify(case: &str) {
     }
     if streaming {
         use futures::StreamExt;
+        let restore_proofs = if matches!(
+            case,
+            "personal_stream_sql_restore" | "personal_stream_same_owner_control"
+        ) {
+            Some(
+                crate::services::native_source_guard::storage_fixture::seed_restore_proofs(
+                    state.db.clone(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         let response = f.request_raw(&AppType::Codex, true, true).await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body().into_data_stream();
@@ -579,6 +617,76 @@ pub(crate) async fn verify(case: &str) {
             state.db.secrets.set_blocked(true);
             state.db.secrets.set_blocked(false);
         }
+        if matches!(
+            case,
+            "personal_stream_sql_restore" | "personal_stream_same_owner_control"
+        ) {
+            tokio::time::timeout(Duration::from_secs(5), f.tail_waiting.notified())
+                .await
+                .unwrap();
+            assert!(
+                futures::poll!(body.next()).is_pending(),
+                "tail must actually be gated before restore"
+            );
+            let proofs = restore_proofs.as_ref().unwrap();
+            proofs.assert_current().await;
+            let original_epoch = state.db.secrets.lifecycle_epoch();
+            let sql = state.db.export_sql_string().unwrap();
+            state
+                .db
+                .set_setting("synthetic_real_restore_marker", "after-snapshot")
+                .unwrap();
+            proofs.assert_current().await;
+            assert!(state.db.secrets.read().unwrap().is_plaintext());
+            let consumed_identity = || {
+                state.db.conn.lock().unwrap().query_row(
+                    "SELECT account_id,api_key,api_key_revision FROM loongport_vendor WHERE id=701", [],
+                    |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)),
+                ).unwrap()
+            };
+            let consumed_before = consumed_identity();
+            let provider_before = serde_json::to_value(
+                state
+                    .db
+                    .get_provider_by_id(&f.owner.ids()[0], "codex")
+                    .unwrap(),
+            )
+            .unwrap();
+            if case == "personal_stream_sql_restore" {
+                tokio::task::block_in_place(|| state.db.import_sql_string(&sql)).unwrap();
+                assert!(
+                    state
+                        .db
+                        .get_setting("synthetic_real_restore_marker")
+                        .unwrap()
+                        .is_none(),
+                    "real SQL image must actually replace the receiver"
+                );
+                assert!(state.db.secrets.lifecycle_epoch() > original_epoch);
+                proofs.assert_same_credentials(&state.db);
+                proofs.assert_retired().await;
+                proofs.assert_fresh(state.db.clone()).await;
+            } else {
+                proofs.assert_same_credentials(&state.db);
+                proofs.assert_current().await;
+                assert_eq!(state.db.secrets.lifecycle_epoch(), original_epoch);
+            }
+            assert!(
+                consumed_identity() == consumed_before,
+                "actual streamed vendor account, key and revision remain byte-identical"
+            );
+            assert!(
+                serde_json::to_value(
+                    state
+                        .db
+                        .get_provider_by_id(&f.owner.ids()[0], "codex")
+                        .unwrap()
+                )
+                .unwrap()
+                    == provider_before,
+                "actual streamed original provider remains identical"
+            );
+        }
         f.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(chunk) = body.next().await {
@@ -591,14 +699,25 @@ pub(crate) async fn verify(case: &str) {
         .await
         .unwrap();
         let text = String::from_utf8_lossy(&bytes);
-        assert!(
-            !text.contains("forbidden-after-epoch"),
-            "retired session must suppress later original upstream content"
-        );
-        assert!(
-            !text.contains("response.completed"),
-            "partial response must not become completed"
-        );
+        if case == "personal_stream_same_owner_control" {
+            assert!(
+                text.contains("forbidden-after-epoch"),
+                "unchanged owner must admit the exact gated tail"
+            );
+            assert!(
+                text.contains("response.completed"),
+                "control proves the original producer's tail is complete"
+            );
+        } else {
+            assert!(
+                !text.contains("forbidden-after-epoch"),
+                "retired session must suppress later original upstream content"
+            );
+            assert!(
+                !text.contains("response.completed"),
+                "partial response must not become completed"
+            );
+        }
         assert!(
             !text.contains("synthetic connection interrupted"),
             "private upstream failure must not leak"
