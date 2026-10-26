@@ -327,11 +327,13 @@ impl Transport for Http {
         Box::pin(async move {
             let outgoing = self.build_request(request)?;
             let error = |e: reqwest::Error| {
-                if e.is_timeout() {
+                let kind = if e.is_timeout() {
                     OfficialError::Timeout
                 } else {
                     OfficialError::Transport
-                }
+                };
+                log::warn!("ZCode claim transport failed: {:?}", e.without_url());
+                kind
             };
             let mut response = self.client.execute(outgoing).await.map_err(error)?;
             if response
@@ -397,8 +399,11 @@ pub(crate) fn read_data(value: Value) -> Result<Value, OfficialError> {
     if matches!(super::claim::response_code(&value), Some(401 | 403)) {
         return Err(OfficialError::Unauthorized);
     }
-    if super::claim::response_code(&value).is_some_and(|c| c != 0 && c != 200) {
-        return Err(OfficialError::BusinessRejected);
+    if let Some(code) = super::claim::response_code(&value) {
+        if code != 0 && code != 200 {
+            log::warn!("ZCode billing read rejected: code={code}");
+            return Err(OfficialError::BusinessRejected);
+        }
     }
     value
         .get("data")

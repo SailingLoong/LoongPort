@@ -551,6 +551,7 @@ where
 }
 
 fn failure(r: &mut Record, error: OfficialError) {
+    log::warn!("ZCode claim check failed: {error}");
     r.status = if error == OfficialError::Unauthorized {
         Status::LoginExpired
     } else if error == OfficialError::Cancelled {
