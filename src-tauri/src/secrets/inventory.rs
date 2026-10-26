@@ -200,16 +200,26 @@ pub(crate) fn table_identity_columns(table: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-/// 明文导出投影（只读）：按 `TABLES` 唯源遍历，把每个受保护值解密成明文交给
-/// 调用方收集；不写库、不改密文。与迁移/轮换走同一个 walker，覆盖面不分叉。
+/// Legacy encrypted test callers use the same storage-aware export walker.
+#[cfg(test)]
 pub(crate) fn collect_plaintext_values(
     conn: &Connection,
     vault: &VaultContext,
+    collect: impl FnMut(&str, &str, Vec<String>, String),
+) -> Result<(), AppError> {
+    collect_plaintext_values_with_storage(conn, &StorageContext::from(vault.clone()), collect)
+}
+
+/// 明文导出投影（只读）：按 `TABLES` 唯源遍历，用当前存储 codec 解读每个受保护值。
+/// 不写库、不改源值；与迁移/轮换走同一个 walker，覆盖面不分叉。
+pub(crate) fn collect_plaintext_values_with_storage(
+    conn: &Connection,
+    context: &StorageContext,
     mut collect: impl FnMut(&str, &str, Vec<String>, String),
 ) -> Result<(), AppError> {
     process_values(conn, |table, column, keys: &[&str], value| {
         let owned: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
-        let plaintext = open_encrypted_db(vault, table, column, keys, value)?;
+        let plaintext = open_db(context, table, column, keys, value)?;
         // Derived credentials are deliberately excluded from plaintext export.
         // Still authenticate them above; encrypted complete-image archives retain
         // the column and all restore owners retire it before publication.

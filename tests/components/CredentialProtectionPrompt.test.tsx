@@ -23,6 +23,8 @@ beforeEach(() => {
   vi.mocked(invoke)
     .mockReset()
     .mockImplementation(async (command) => {
+      if (command === "get_startup_recovery")
+        throw "secret.no_pending_operation";
       if (command === "get_credential_protection_status") return status;
       return {
         ...status,
@@ -57,8 +59,10 @@ it("opens the requested setup dialog with key and repeated-key fields, not a ful
   expect(
     vi
       .mocked(invoke)
-      .mock.calls.every(
-        ([command]) => command === "get_credential_protection_status",
+      .mock.calls.every(([command]) =>
+        ["get_credential_protection_status", "get_startup_recovery"].includes(
+          command,
+        ),
       ),
   ).toBe(true);
 });
@@ -78,8 +82,10 @@ it("closing the dialog never silently chooses plaintext or saves a key", async (
   expect(
     vi
       .mocked(invoke)
-      .mock.calls.every(
-        ([command]) => command === "get_credential_protection_status",
+      .mock.calls.every(([command]) =>
+        ["get_credential_protection_status", "get_startup_recovery"].includes(
+          command,
+        ),
       ),
   ).toBe(true);
   expect(

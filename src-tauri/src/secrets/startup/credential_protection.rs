@@ -286,6 +286,18 @@ pub(crate) struct CommandDependencies<R: Runtime> {
     store: Arc<dyn KeyStore>,
     initialize: InitializeRuntime<R>,
 }
+impl<R: Runtime> CommandDependencies<R> {
+    pub(super) fn key_store(&self) -> &dyn KeyStore {
+        &*self.store
+    }
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn recovery_test_store(store: Arc<dyn KeyStore>) -> Self {
+        Self {
+            store,
+            initialize: |_, _, _| Err("unexpected runtime initialization".into()),
+        }
+    }
+}
 impl CommandDependencies<tauri::Wry> {
     pub(crate) fn production() -> Self {
         Self {

@@ -210,7 +210,7 @@ fn original_database_export_and_snapshot_builder_accept_authenticated_text_gener
 
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn authenticated_text_restore_still_requires_the_protection_generation_installer() {
+fn authenticated_text_restore_rejects_an_unsigned_target_protection_record() {
     let home = TestHome::new().unwrap();
     let vault = text_vault();
     let db = encrypted_database(&home, &vault);
@@ -223,7 +223,7 @@ fn authenticated_text_restore_still_requires_the_protection_generation_installer
     let id = snapshot.manifest.snapshot_id.clone();
     assert_code(
         restore_from_sync(&db, &snapshot, &id, TEXT, &NoStore),
-        "protection.generation_owner_required",
+        "protection.record_authentication_failed",
     );
     assert_eq!(
         Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
@@ -387,7 +387,7 @@ pub(crate) fn run_case(case: &str) {
             original_database_export_and_snapshot_builder_accept_authenticated_text_generation()
         }
         "installer_fence" => {
-            authenticated_text_restore_still_requires_the_protection_generation_installer()
+            authenticated_text_restore_rejects_an_unsigned_target_protection_record()
         }
         "plaintext_blocked" => {
             plaintext_mode_does_not_become_a_remote_plaintext_snapshot_or_a_fake_vault()

@@ -25,7 +25,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let old = temp.path().join("old-data");
         let device = temp.path().join("old-device");
         fs::create_dir(&old).unwrap();
@@ -608,4 +608,16 @@ fn v2_root_selection_is_mode_neutral_and_does_not_require_a_vault() {
         .initialize_at(&f.store)
         .expect("v2 root identity does not choose credential protection");
     assert_eq!(cache.root().unwrap(), Some(root));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_verbatim_drive_root_is_never_probed_as_a_bare_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    assert!(root.is_absolute());
+    validate_existing_ancestors(&root).unwrap();
+    let nested = root.join("private/new-control");
+    create_private_directories(&nested).unwrap();
+    validate_directory(&nested).unwrap();
 }

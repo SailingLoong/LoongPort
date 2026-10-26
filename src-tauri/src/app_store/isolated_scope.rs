@@ -640,6 +640,11 @@ fn validate_existing_ancestors(path: &Path) -> Result<(), AppError> {
     let mut current = PathBuf::new();
     for c in path.components() {
         current.push(c);
+        // A Windows drive/verbatim prefix is not yet a filesystem root (for
+        // example `\\?\C:`). Probe only after the following RootDir is present.
+        if matches!(c, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(meta) => {
                 if !meta.is_dir() || meta.file_type().is_symlink() {
@@ -672,6 +677,9 @@ fn create_private_directories(path: &Path) -> Result<(), AppError> {
     let mut current = PathBuf::new();
     for part in path.components() {
         current.push(part);
+        if matches!(part, Component::Prefix(_)) {
+            continue;
+        }
         if !current.exists() {
             crate::config_file_io::ensure_private_directory(&current)?;
         }

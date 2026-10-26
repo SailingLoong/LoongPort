@@ -1360,8 +1360,8 @@ pub(crate) async fn recover_startup_upgrade_app(
 
 #[cfg(feature = "gui")]
 #[tauri::command]
-pub(crate) async fn get_startup_recovery(
-    app: tauri::AppHandle,
+pub(crate) async fn get_startup_recovery<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
 ) -> Result<StartupRecoveryView, String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<StartupCoordinator>().recovery_view())
         .await
@@ -1370,8 +1370,8 @@ pub(crate) async fn get_startup_recovery(
 
 #[cfg(feature = "gui")]
 #[tauri::command]
-pub(crate) async fn recover_startup_operation(
-    app: tauri::AppHandle,
+pub(crate) async fn recover_startup_operation<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     token: String,
     password: String,
 ) -> Result<StartupRecoveryView, StartupError> {
@@ -1379,8 +1379,9 @@ pub(crate) async fn recover_startup_operation(
     let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         let coordinator = app.state::<StartupCoordinator>();
+        let dependencies = app.state::<credential_protection::CommandDependencies<R>>();
         coordinator
-            .recover_operation(&token, &password, &SystemKeyStore)
+            .recover_operation(&token, &password, dependencies.key_store())
             .map_err(|code| StartupError {
                 code,
                 restart_required: coordinator.restart_required(),

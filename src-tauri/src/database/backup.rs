@@ -216,7 +216,7 @@ impl Database {
         Ok(hex::encode(hash.finalize()))
     }
     /// Raw snapshots are test fixtures; public file exports require portable keys.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, &[])
@@ -470,19 +470,19 @@ impl Database {
         Ok(connection)
     }
 
-    /// Same-generation SQL-only restoration delegates the original atomic DB
-    /// replacement. This typed proof never grants a key/mode/skills transition.
-    pub(crate) fn install_backup_content_for_storage(
+    /// Shared receiver admission for the original installer and joint preparer.
+    /// The caller pins the current context with the original session guard.
+    fn validate_prepared_receiver(
         &self,
-        incoming: ValidatedSyncSnapshot,
-    ) -> Result<String, AppError> {
-        let current = self.secrets.read()?;
-        crate::secrets::protection::validate_runtime_storage(self.secrets.root(), &current)?;
+        incoming: &ValidatedSyncSnapshot,
+        current: &StorageContext,
+    ) -> Result<(), AppError> {
+        crate::secrets::protection::validate_runtime_storage(self.secrets.root(), current)?;
         if incoming.destination != current.identity() {
             return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
-        super::storage::check_identity(&incoming.connection, &current)?;
-        crate::secrets::inventory::validate_storage_database(&incoming.connection, &current)?;
+        super::storage::check_identity(&incoming.connection, current)?;
+        crate::secrets::inventory::validate_storage_database(&incoming.connection, current)?;
         let belongs_to_current_session =
             incoming.receiver.as_ref().is_some_and(|(receiver, epoch)| {
                 receiver
@@ -493,6 +493,30 @@ impl Database {
         if !belongs_to_current_session {
             return Err(AppError::Config("sync.source_identity_mismatch".into()));
         }
+        Ok(())
+    }
+
+    /// The joint owner already holds the original session write and database
+    /// guards. It must prepare before blocking the session or writing an intent.
+    /// This returns only a private same-storage image, never an installation.
+    pub(crate) fn prepare_sync_join_for_receiver(
+        &self,
+        incoming: ValidatedSyncSnapshot,
+        current_conn: &Connection,
+        current: &StorageContext,
+    ) -> Result<Connection, AppError> {
+        self.validate_prepared_receiver(&incoming, current)?;
+        Self::prepare_sync_join_for_storage(incoming, current_conn, current, current)
+    }
+
+    /// Same-generation SQL-only restoration delegates the original atomic DB
+    /// replacement. This typed proof never grants a key/mode/skills transition.
+    pub(crate) fn install_backup_content_for_storage(
+        &self,
+        incoming: ValidatedSyncSnapshot,
+    ) -> Result<String, AppError> {
+        let current = self.secrets.read()?;
+        self.validate_prepared_receiver(&incoming, &current)?;
         {
             let conn = self.conn.lock()?;
             super::storage::check_identity(&conn, &current)?;

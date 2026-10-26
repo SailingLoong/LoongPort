@@ -678,9 +678,234 @@ fn typed_preparation_is_bound_to_original_receiver_session() {
     fixture::assert_unchanged(&another.conn.lock().unwrap(), &digest);
 }
 
+// Receiver-bound joint preparation must be checked before the existing journal
+// owner mutates any live file. These fixtures hold the actual original guards.
+fn receiver_prepared(
+    home: &TestHome,
+    current: &StorageContext,
+) -> (Database, ValidatedSyncSnapshot) {
+    let local = db(home, current, 17);
+    let source_context = plain();
+    let source = db(home, &source_context, 17);
+    durable_runtime(&local, current);
+    runtime_rows(&local, current, "local-before");
+    runtime_rows(&source, &source_context, "incoming-value");
+    local_facts(&local, current, 17);
+    let prepared = {
+        let pinned = local.secret_session().read().unwrap();
+        local
+            .prepare_backup_content_for_storage(&sql(&source), None, &pinned, &pinned)
+            .unwrap()
+    };
+    (local, prepared)
+}
+fn reject_receiver_join(
+    home: &TestHome,
+    local: &Database,
+    incoming: ValidatedSyncSnapshot,
+    expected: &str,
+) {
+    use rusqlite::config::DbConfig;
+    let current = local.secret_session().write().unwrap();
+    let conn = local.conn.lock().unwrap();
+    let before = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+    let before_tree = tree(home.path());
+    let flags = conn
+        .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+        .unwrap();
+    code(
+        local.prepare_sync_join_for_receiver(incoming, &conn, &current),
+        expected,
+    );
+    assert_eq!(
+        &*conn.serialize(rusqlite::MAIN_DB).unwrap(),
+        before.as_slice()
+    );
+    assert_eq!(
+        conn.db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+            .unwrap(),
+        flags
+    );
+    assert_eq!(tree(home.path()), before_tree);
+}
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn receiver_join_returns_private_image_under_original_guards() {
+    use rusqlite::config::DbConfig;
+    let home = TestHome::new().unwrap();
+    let source_context = text();
+    let source_vault = source_context.encrypted().unwrap();
+    for current in [plain(), text()] {
+        for version in [17, 20] {
+            let local = db(&home, &current, version);
+            let source = db(&home, &source_context, version);
+            durable_runtime(&local, &current);
+            runtime_rows(&local, &current, "local-before");
+            runtime_rows(&source, &source_context, "incoming-value");
+            local_facts(&local, &current, version);
+            source.conn.lock().unwrap().execute_batch("CREATE TRIGGER synthetic_receiver_audit AFTER UPDATE ON providers BEGIN UPDATE future_unknown_data SET value=X'010203' WHERE id=7; END;").unwrap();
+            let staged = {
+                let pinned = local.secret_session().read().unwrap();
+                local
+                    .prepare_sync_snapshot_for_storage(
+                        &sql(&source),
+                        source_vault.metadata(),
+                        source_vault,
+                        &pinned,
+                        &pinned,
+                    )
+                    .unwrap()
+            };
+            let pinned = local.secret_session().write().unwrap();
+            let conn = local.conn.lock().unwrap();
+            let before = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+            let before_tree = tree(home.path());
+            let flags = conn
+                .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+                .unwrap();
+            let joined = local
+                .prepare_sync_join_for_receiver(staged, &conn, &pinned)
+                .unwrap();
+            assert_local_facts(&joined, &current, version);
+            assert_eq!(
+                joined
+                    .query_row(
+                        "SELECT value FROM settings WHERE key='source-marker'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "incoming-value"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT value FROM settings WHERE key='source-marker'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "local-before"
+            );
+            assert_eq!(
+                joined
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE name='synthetic_receiver_audit'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                &*conn.serialize(rusqlite::MAIN_DB).unwrap(),
+                before.as_slice()
+            );
+            assert_eq!(
+                conn.db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+                    .unwrap(),
+                flags
+            );
+            assert_eq!(tree(home.path()), before_tree);
+        }
+    }
+}
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn receiver_join_rejects_foreign_session_without_writes() {
+    let home = TestHome::new().unwrap();
+    let current = plain();
+    let (_local, staged) = receiver_prepared(&home, &current);
+    let another = db(&home, &current, 17);
+    durable_runtime(&another, &current);
+    runtime_rows(&another, &current, "another-before");
+    reject_receiver_join(&home, &another, staged, "sync.source_identity_mismatch");
+}
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn receiver_join_rejects_expired_epoch_without_writes() {
+    let home = TestHome::new().unwrap();
+    let (local, staged) = receiver_prepared(&home, &plain());
+    local.secret_session().set_blocked(true);
+    local.secret_session().set_blocked(false);
+    reject_receiver_join(&home, &local, staged, "sync.source_identity_mismatch");
+}
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn receiver_join_rejects_changed_scope_and_unbound_proof_without_writes() {
+    let home = TestHome::new().unwrap();
+    for change in ["destination", "live-identity", "live-schema", "unbound"] {
+        let current = plain();
+        let (local, mut staged) = receiver_prepared(&home, &current);
+        let expected = match change {
+            "destination" => {
+                staged.destination = plain().identity();
+                "sync.source_identity_mismatch"
+            }
+            "live-identity" => {
+                let StorageContext::Plaintext(other) = plain() else {
+                    unreachable!()
+                };
+                local
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE loongport_plaintext_storage SET identity=?1",
+                        [serde_json::to_string(&other).unwrap()],
+                    )
+                    .unwrap();
+                "protection.database_identity_mismatch"
+            }
+            "live-schema" => {
+                local
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute_batch("PRAGMA user_version=21")
+                    .unwrap();
+                "sync.database_version_incompatible"
+            }
+            "unbound" => {
+                staged.receiver = None;
+                "sync.source_identity_mismatch"
+            }
+            _ => unreachable!(),
+        };
+        reject_receiver_join(&home, &local, staged, expected);
+    }
+}
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn receiver_join_reauthenticates_staged_secret_before_private_writes() {
+    let home = TestHome::new().unwrap();
+    let current = text();
+    let (local, staged) = receiver_prepared(&home, &current);
+    staged
+        .connection
+        .execute("UPDATE providers SET settings_config='lpenc1.!invalid'", [])
+        .unwrap();
+    reject_receiver_join(&home, &local, staged, "secret.invalid_envelope");
+}
+
 #[cfg(feature = "test-hooks")]
 pub(super) fn verify(case: &str) {
     match case {
+        "receiver_join_returns_private_image_under_original_guards" => {
+            receiver_join_returns_private_image_under_original_guards()
+        }
+        "receiver_join_rejects_foreign_session_without_writes" => {
+            receiver_join_rejects_foreign_session_without_writes()
+        }
+        "receiver_join_rejects_expired_epoch_without_writes" => {
+            receiver_join_rejects_expired_epoch_without_writes()
+        }
+        "receiver_join_rejects_changed_scope_and_unbound_proof_without_writes" => {
+            receiver_join_rejects_changed_scope_and_unbound_proof_without_writes()
+        }
+        "receiver_join_reauthenticates_staged_secret_before_private_writes" => {
+            receiver_join_reauthenticates_staged_secret_before_private_writes()
+        }
+
         "typed_preparation_cannot_revive_after_session_block_unblock" => {
             typed_preparation_cannot_revive_after_session_block_unblock()
         }

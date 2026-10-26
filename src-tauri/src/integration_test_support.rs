@@ -258,3 +258,32 @@ pub fn verify_imagegen_storage_case(case: &str) {
 pub fn verify_file_postflight_case(case: &str) {
     crate::secrets::protection::generation_files::postflight_tests::run_case(case);
 }
+
+#[cfg(feature = "test-hooks")]
+pub fn verify_joint_storage_content_case(case: &str) {
+    crate::secrets::transition::content_tests::run(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_aggregate_storage_export_case(case: &str) {
+    crate::secrets::export::storage_tests::run_case(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_sync_admission_case(case: &str) {
+    crate::services::sync_protocol::verify_sync_admission_case(case);
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_explicit_legacy_plaintext_file_restore() {
+    crate::services::backup_transfer::verify_explicit_legacy_plaintext_file_restore();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn verify_modern_unmarked_plaintext_backup() {
+    crate::services::backup_transfer::verify_modern_unmarked_plaintext_backup();
+}

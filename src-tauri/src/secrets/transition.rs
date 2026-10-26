@@ -24,9 +24,13 @@ const LEGACY_FORMAT: u32 = 1;
 
 #[cfg(any(test, feature = "test-hooks"))]
 mod codex_pending_tests;
+mod content;
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod content_tests;
 mod device;
 #[cfg(feature = "test-hooks")]
 pub(crate) use codex_pending_tests::verify as verify_codex_pending;
+pub(crate) use content::install_sync_content;
 use device::{RootBindings, Roots};
 
 pub(crate) struct SkillsReplacement {
@@ -804,9 +808,18 @@ fn stage_bytes(
     destination: Destination,
     bytes: &[u8],
 ) -> Result<(), AppError> {
-    let path = stage_file(root, id, manifest.artifacts.len())?;
+    stage_artifact(root, id, &mut manifest.artifacts, destination, bytes)
+}
+fn stage_artifact(
+    root: &Path,
+    id: &str,
+    artifacts: &mut Vec<Artifact>,
+    destination: Destination,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    let path = stage_file(root, id, artifacts.len())?;
     write_durable(&path, bytes)?;
-    manifest.artifacts.push(Artifact {
+    artifacts.push(Artifact {
         destination,
         digest: hash(bytes),
     });
@@ -1262,7 +1275,7 @@ fn finish(
         }
     }
     if let Some(skills) = &manifest.skills {
-        prepare_skills_install(root, &intent.id, next, manifest, skills)?;
+        prepare_skills_install(root, &intent.id, next, &manifest.artifacts, skills)?;
     }
     for (index, artifact) in manifest.artifacts.iter().enumerate() {
         let bytes = read_stage(root, &intent.id, index, artifact)?;
@@ -1388,8 +1401,9 @@ fn recover_with_device_root(
     store: &dyn KeyStore,
     password: Option<&str>,
 ) -> Result<(), AppError> {
-    recover_record(root, device_root, store, password, None)
+    recover_record(root, device_root, store, password, None).map(|_| ())
 }
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn recover_inspected(
     root: &Path,
     device_root: &Path,
@@ -1397,6 +1411,18 @@ pub(crate) fn recover_inspected(
     password: Option<&str>,
     expected: &[u8],
 ) -> Result<(), AppError> {
+    recover_record(root, device_root, store, password, Some(expected)).map(|_| ())
+}
+pub(crate) fn is_content_record(bytes: &[u8]) -> Result<bool, AppError> {
+    content::is_content(bytes)
+}
+pub(crate) fn recover_inspected_storage(
+    root: &Path,
+    device_root: &Path,
+    store: &dyn KeyStore,
+    password: Option<&str>,
+    expected: &[u8],
+) -> Result<Option<super::storage::StorageContext>, AppError> {
     recover_record(root, device_root, store, password, Some(expected))
 }
 fn recover_record(
@@ -1405,13 +1431,28 @@ fn recover_record(
     store: &dyn KeyStore,
     password: Option<&str>,
     expected: Option<&[u8]>,
-) -> Result<(), AppError> {
+) -> Result<Option<super::storage::StorageContext>, AppError> {
+    let pending = pending_record(root)?;
+    if let Some(bytes) = pending.as_deref() {
+        if content::is_content(bytes)? {
+            if expected.is_some_and(|value| value != bytes) {
+                return Err(AppError::Config("upgrade.source_changed".into()));
+            }
+            if super::reset::pending_record(root)?.is_some()
+                || super::bootstrap_restore::pending_record(root)?.is_some()
+                || super::rewrap::pending_record(root)?.is_some()
+            {
+                return Err(AppError::Config("secret.conflicting_transition".into()));
+            }
+            return content::recover(root, bytes, password).map(Some);
+        }
+    }
     ensure_legacy_generation_owner(root)?;
-    let Some(bytes) = pending_record(root)? else {
+    let Some(bytes) = pending else {
         return if expected.is_some() {
             Err(AppError::Config("upgrade.source_changed".into()))
         } else {
-            Ok(())
+            Ok(None)
         };
     };
     if expected.is_some_and(|expected| expected != bytes) {
@@ -1456,6 +1497,7 @@ fn recover_record(
         None,
         &mut |_| Ok(()),
     )
+    .map(|_| None)
 }
 
 fn skills_destination(root: &Path, skills: &SkillsTree) -> PathBuf {
@@ -1480,8 +1522,21 @@ fn capture_skills(
     manifest: &mut Manifest,
     replacement: &SkillsReplacement,
 ) -> Result<(), AppError> {
+    manifest.skills = Some(capture_skill_artifacts(
+        root,
+        id,
+        next,
+        &mut manifest.artifacts,
+        replacement,
+    )?);
+    Ok(())
+}
+fn visit_skills(
+    source: &Path,
+    visitor: &mut dyn FnMut(String, Zeroizing<Vec<u8>>) -> Result<(), AppError>,
+) -> Result<Vec<String>, AppError> {
     let mut directories = Vec::new();
-    let mut pending = vec![replacement.source.clone()];
+    let mut pending = vec![source.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let metadata =
             std::fs::symlink_metadata(&directory).map_err(|e| AppError::io(&directory, e))?;
@@ -1492,9 +1547,10 @@ fn capture_skills(
             let entry = entry.map_err(|e| AppError::io(&directory, e))?;
             let path = entry.path();
             let relative = path
-                .strip_prefix(&replacement.source)
+                .strip_prefix(source)
                 .map_err(|_| invalid())?
-                .to_string_lossy()
+                .to_str()
+                .ok_or_else(invalid)?
                 .replace('\\', "/");
             safe_relative(&relative)?;
             let kind = entry.file_type().map_err(|e| AppError::io(&path, e))?;
@@ -1502,35 +1558,50 @@ fn capture_skills(
                 directories.push(relative);
                 pending.push(path);
             } else if kind.is_file() {
-                let plaintext =
-                    Zeroizing::new(std::fs::read(&path).map_err(|e| AppError::io(&path, e))?);
-                let bytes = next
-                    .seal(&["local", "transition-skill", id, &relative], &plaintext)
-                    .map_err(inventory::secret_error)?;
-                stage_bytes(
-                    root,
-                    id,
-                    manifest,
-                    Destination::SkillFile { relative },
-                    bytes.as_bytes(),
-                )?;
+                let plaintext = crate::config_file_io::read_regular_file(
+                    &path,
+                    crate::services::sync_protocol::MAX_SYNC_ARTIFACT_BYTES,
+                )
+                .map_err(|e| AppError::io(&path, e))?
+                .ok_or_else(invalid)?;
+                visitor(relative, Zeroizing::new(plaintext))?;
             } else {
                 return Err(invalid());
             }
         }
     }
     directories.sort();
-    manifest.skills = Some(SkillsTree {
+    Ok(directories)
+}
+fn capture_skill_artifacts(
+    root: &Path,
+    id: &str,
+    auth: &VaultContext,
+    artifacts: &mut Vec<Artifact>,
+    replacement: &SkillsReplacement,
+) -> Result<SkillsTree, AppError> {
+    let directories = visit_skills(&replacement.source, &mut |relative, plaintext| {
+        let bytes = auth
+            .seal(&["local", "transition-skill", id, &relative], &plaintext)
+            .map_err(inventory::secret_error)?;
+        stage_artifact(
+            root,
+            id,
+            artifacts,
+            Destination::SkillFile { relative },
+            bytes.as_bytes(),
+        )
+    })?;
+    Ok(SkillsTree {
         location: replacement.location,
         directories,
-    });
-    Ok(())
+    })
 }
 fn prepare_skills_install(
     root: &Path,
     id: &str,
     next: &VaultContext,
-    manifest: &Manifest,
+    artifacts: &[Artifact],
     skills: &SkillsTree,
 ) -> Result<(), AppError> {
     let staging = skills_staging(root, id, skills)?;
@@ -1552,7 +1623,7 @@ fn prepare_skills_install(
         let path = ready.join(safe_relative(directory)?);
         std::fs::create_dir_all(&path).map_err(|e| AppError::io(&path, e))?;
     }
-    for (index, artifact) in manifest.artifacts.iter().enumerate() {
+    for (index, artifact) in artifacts.iter().enumerate() {
         if let Destination::SkillFile { relative } = &artifact.destination {
             let bytes = read_stage(root, id, index, artifact)?;
             let plaintext = next

@@ -23,6 +23,7 @@ impl CredentialFile {
         OwnedFile::registered(self.filename())?.encode(vault, plaintext)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn decode(
         self,
         vault: &VaultContext,

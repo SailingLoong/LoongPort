@@ -525,6 +525,9 @@ fn apply_snapshot_with_store(
     let next = db.secrets.read()?.encrypted()?.clone();
     let sql =
         std::str::from_utf8(db_sql).map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
+    if crate::secrets::protection::read(db.secrets.root())?.is_some() {
+        return install_storage_content(db, sql, manifest.vault_metadata()?, &next, skills_zip);
+    }
     let staged = db.validate_sync_snapshot_for_current(sql, manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
         db,
@@ -565,6 +568,15 @@ pub(crate) fn restore_from_sync(
     let next = authenticate_restore_source(snapshot.manifest.vault_metadata()?, password)?;
     let sql = std::str::from_utf8(&snapshot.db_sql)
         .map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
+    if crate::secrets::protection::read(db.secrets.root())?.is_some() {
+        return install_storage_content(
+            db,
+            sql,
+            snapshot.manifest.vault_metadata()?,
+            &next,
+            &snapshot.skills_zip,
+        );
+    }
     let staged =
         db.validate_sync_snapshot_for_current(sql, snapshot.manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
@@ -585,6 +597,33 @@ fn authenticate_restore_source(
 ) -> Result<crate::secrets::VaultContext, AppError> {
     crate::secrets::VaultContext::from_recovery_input(metadata.clone(), password)
         .map_err(crate::secrets::inventory::secret_error)
+}
+
+/// Same-storage restoration consumes the original receiver lease and joint transaction.
+fn install_storage_content(
+    db: &crate::database::Database,
+    sql: &str,
+    source: &VaultMetadata,
+    authenticated_source: &crate::secrets::VaultContext,
+    skills_zip: &[u8],
+) -> Result<(), AppError> {
+    let incoming = {
+        let current = db.secrets.read()?;
+        crate::secrets::protection::validate_runtime_storage(db.secrets.root(), &current)?;
+        db.prepare_sync_snapshot_for_storage(sql, source, authenticated_source, &current, &current)?
+    };
+    let prepared = super::webdav_sync::archive::stage_skills_zip(skills_zip)?;
+    let location = crate::settings::get_skill_storage_location();
+    let _skills = skill_state_write_guard();
+    crate::secrets::transition::install_sync_content(
+        db,
+        incoming,
+        authenticated_source,
+        crate::secrets::transition::SkillsReplacement {
+            source: prepared.source.clone(),
+            location,
+        },
+    )
 }
 
 fn install_sync_snapshot<F>(
@@ -697,7 +736,7 @@ where
 
 // ─── Tests ───────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn test_vault_metadata() -> VaultMetadata {
     static METADATA: OnceLock<VaultMetadata> = OnceLock::new();
     METADATA
@@ -712,7 +751,7 @@ fn test_vault_metadata() -> VaultMetadata {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
 
@@ -846,16 +885,32 @@ mod tests {
         assert!(validate_manifest_compat(&manifest, RemoteLayout::Current).is_err());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn encrypted_sync_foreign_source_is_rejected_before_skill_archive_work() {
-        let _home = crate::secrets::testing::TestHome::new().unwrap();
-        let db = crate::database::Database::memory().unwrap();
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn encrypted_sync_foreign_source_is_rejected_before_skill_archive_work() {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
+        let store = crate::secrets::testing::MemoryKeyStore::default();
+        // A real published receiver, not the memory helper's unmigrated version 0.
+        let db = adoption_tests::database_for_version(
+            &crate::config::get_app_config_dir(),
+            &store,
+            None,
+            20,
+        );
         crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
         db.set_setting("local-sentinel", "unchanged").unwrap();
         let sql = db.export_sql_string().unwrap();
         let manifest = manifest_with(PROTOCOL_FORMAT, PROTOCOL_VERSION, Some(DB_COMPAT_VERSION));
+        let before = adoption_tests::capture_tree(home.path());
+        let digest = crate::database::Database::content_digest(&db.conn.lock().unwrap()).unwrap();
         let error = apply_snapshot(&db, &manifest, sql.as_bytes(), b"invalid archive").unwrap_err();
+        assert_eq!(adoption_tests::capture_tree(home.path()), before);
+        assert_eq!(
+            crate::database::Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
+            digest
+        );
+        assert!(!db.secrets.root().join(".vault-transition").exists());
+        assert!(!db.secrets.root().join("skills").exists());
         assert!(
             error.to_string().contains("sync.vault_adoption_required"),
             "unexpected sync rejection: {error}"
@@ -1506,7 +1561,7 @@ mod publication_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod adoption_tests {
     use super::*;
     use crate::{
@@ -1546,7 +1601,7 @@ mod adoption_tests {
     fn database(root: &Path, store: &MemoryKeyStore, password: Option<&str>) -> Database {
         database_for_version(root, store, password, 20)
     }
-    fn database_for_version(
+    pub(super) fn database_for_version(
         root: &Path,
         store: &MemoryKeyStore,
         password: Option<&str>,
@@ -1565,6 +1620,21 @@ mod adoption_tests {
         }
         secrets.complete_migration().unwrap();
         Database::from_connection(conn, secrets)
+    }
+
+    pub(super) fn capture_tree(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
     }
 
     fn snapshot(db: &Database) -> DownloadedSnapshot {
@@ -1633,9 +1703,9 @@ mod adoption_tests {
         restore_preserves_local_facts(20);
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn upstream4_receiver_rejects_mixed_future_and_forged_images_before_mutation() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn upstream4_receiver_rejects_mixed_future_and_forged_images_before_mutation() {
         let _sync = crate::rt::block_on(sync_mutex().lock());
         for (local_version, source_version, source_loongport, forged) in [
             (17, 20, 24, false),
@@ -1699,6 +1769,7 @@ mod adoption_tests {
             std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
             let native = br#"{"synthetic-user-field":"rejected-image-retained"}"#;
             std::fs::write(&native_path, native).unwrap();
+            let original_tree = capture_tree(home.directory.path());
             let error = restore_from_sync(
                 &local,
                 &incoming,
@@ -1707,6 +1778,7 @@ mod adoption_tests {
                 &store,
             )
             .unwrap_err();
+            assert_eq!(capture_tree(home.directory.path()), original_tree);
             if forged {
                 assert!(
                     matches!(error, AppError::Config(ref code) if code == "secret.password_rejected")
@@ -1715,13 +1787,10 @@ mod adoption_tests {
                 assert!(
                     matches!(error, AppError::Config(ref code) if code == "secret.database_version_too_new")
                 );
-            } else if local_version == 17 {
-                assert!(
-                    matches!(error, AppError::Database(ref message) if message == "数据库版本过新（20），当前应用仅支持 17，请升级应用后再尝试。")
-                );
             } else {
                 assert!(
-                    matches!(error, AppError::Config(ref code) if code == "sync.database_version_incompatible")
+                    matches!(error, AppError::Config(ref code) if code == "sync.database_version_incompatible"),
+                    "receiver={local_version}, source={source_version}/{source_loongport}, forged={forged}: {error}"
                 );
             }
             assert!(std::sync::Arc::ptr_eq(&session, &local.secrets));
@@ -2073,3 +2142,12 @@ pub(crate) fn ensure_upgrade_sync_admitted() -> Result<(), AppError> {
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "sync_protocol/text_archive_tests.rs"]
 pub(crate) mod text_archive_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_sync_admission_case(case: &str) {
+    match case {
+        "foreign" => tests::encrypted_sync_foreign_source_is_rejected_before_skill_archive_work(),
+        "schema" => adoption_tests::upstream4_receiver_rejects_mixed_future_and_forged_images_before_mutation(),
+        _ => panic!("unknown original sync admission case"),
+    }
+}

@@ -1140,7 +1140,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
+            let dir = crate::secrets::testing::tempdir().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
             let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
@@ -1175,6 +1175,41 @@ mod tests {
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn temp_home_resolves_system_temp_alias_before_scope_bootstrap() {
+        const CHILD: &str = "LOONGPORT_TEMP_HOME_ALIAS_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let temp = crate::secrets::testing::tempdir().unwrap();
+            let physical = temp.path().join("physical-temp");
+            let alias = temp.path().join("system-temp-alias");
+            fs::create_dir(&physical).unwrap();
+            std::os::unix::fs::symlink(&physical, &alias).unwrap();
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .args(["--exact", "app_config::tests::temp_home_resolves_system_temp_alias_before_scope_bootstrap", "--nocapture"])
+                .env(CHILD, "1")
+                .env("TMPDIR", &alias)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let home = TempHome::new();
+        crate::app_store::initialize_active_scope()
+            .expect("physical TempHome must be admitted by strict scope bootstrap");
+        assert_eq!(home.dir.path(), fs::canonicalize(home.dir.path()).unwrap());
+        for name in ["HOME", "USERPROFILE", "CC_SWITCH_TEST_HOME"] {
+            assert_eq!(env::var_os(name).unwrap(), home.dir.path().as_os_str());
+        }
+        assert_eq!(crate::app_store::active_scope_root().unwrap(), None);
+        assert!(!crate::app_store::tauri_store_path().unwrap().exists());
     }
 
     fn write_prompt_file(app: AppType, content: &str) {

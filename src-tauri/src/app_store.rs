@@ -241,7 +241,7 @@ mod tests {
     ///    与 `read_override_from_store` 里那个 `store_builder("app_paths.json")` 同一个）
     #[test]
     fn legacy_direct_reader_cannot_bypass_managed_namespace_after_cache_init() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let store = temp.path().join("app_paths.json");
         let candidate = temp
             .path()
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn legacy_gui_file_override_keeps_its_original_error_path_not_home_fallback() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let file = temp.path().join("file-not-directory");
         std::fs::write(&file, b"preserved").unwrap();
         let store = temp.path().join("app_paths.json");
@@ -337,7 +337,7 @@ mod scope_integration_tests {
             }
             return;
         };
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
         let store = tauri_store_path().unwrap();
         assert!(

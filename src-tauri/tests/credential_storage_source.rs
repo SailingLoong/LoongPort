@@ -125,3 +125,39 @@ fn typed_preparation_is_bound_to_original_receiver_session() {
         "typed_preparation_is_bound_to_original_receiver_session",
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn receiver_join_returns_private_image_under_original_guards() {
+    cc_switch_lib::Database::verify_storage_source_case(
+        "receiver_join_returns_private_image_under_original_guards",
+    );
+}
+#[test]
+#[serial_test::serial]
+fn receiver_join_rejects_foreign_session_without_writes() {
+    cc_switch_lib::Database::verify_storage_source_case(
+        "receiver_join_rejects_foreign_session_without_writes",
+    );
+}
+#[test]
+#[serial_test::serial]
+fn receiver_join_rejects_expired_epoch_without_writes() {
+    cc_switch_lib::Database::verify_storage_source_case(
+        "receiver_join_rejects_expired_epoch_without_writes",
+    );
+}
+#[test]
+#[serial_test::serial]
+fn receiver_join_rejects_changed_scope_and_unbound_proof_without_writes() {
+    cc_switch_lib::Database::verify_storage_source_case(
+        "receiver_join_rejects_changed_scope_and_unbound_proof_without_writes",
+    );
+}
+#[test]
+#[serial_test::serial]
+fn receiver_join_reauthenticates_staged_secret_before_private_writes() {
+    cc_switch_lib::Database::verify_storage_source_case(
+        "receiver_join_reauthenticates_staged_secret_before_private_writes",
+    );
+}

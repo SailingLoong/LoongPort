@@ -80,6 +80,15 @@ impl RecoveryEvidence {
         password: &str,
     ) -> Result<UpgradeInspection, AppError> {
         self.verify_unchanged(root, token)?;
+        let content = self.records[2]
+            .as_deref()
+            .map(super::transition::is_content_record)
+            .transpose()?
+            .unwrap_or(false);
+        if content && [0, 1, 3].into_iter().any(|i| self.records[i].is_some()) {
+            return Err(AppError::Config("secret.conflicting_transition".into()));
+        }
+        let mut recovered_storage = None;
         if let Some(record) = &self.records[0] {
             super::reset::recover_inspected(root, Some(password), record)?;
         }
@@ -89,7 +98,7 @@ impl RecoveryEvidence {
         // Bootstrap recovery may have settled its child transition itself.
         if let Some(record) = &self.records[2] {
             if self.records[1].is_none() || super::transition::pending_record(root)?.is_some() {
-                super::transition::recover_inspected(
+                recovered_storage = super::transition::recover_inspected_storage(
                     root,
                     self.device.root(),
                     store,
@@ -106,6 +115,12 @@ impl RecoveryEvidence {
         let resumed_database = inspected.is_database_resume_candidate();
         if inspected.future_version().is_some() && !resumed_database {
             return Err(AppError::Config("upgrade.future_version".into()));
+        }
+        if let Some(context) = recovered_storage {
+            inspected.validate_storage_device_state(&context)?;
+            inspected.validate_storage_database(root, &context)?;
+            inspected.verify_unchanged(root)?;
+            return Ok(inspected);
         }
         let vault = session::authenticate_existing(root, store, Some(password))?;
         if resumed_database {

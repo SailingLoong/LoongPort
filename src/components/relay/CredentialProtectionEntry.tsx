@@ -12,10 +12,25 @@ import {
   credentialProtectionApi,
   credentialProtectionKey,
 } from "@/lib/api/credentialProtection";
+import { StartupRecoveryBoundary } from "./StartupRecoveryBoundary";
 import { CredentialProtectionPanel } from "./CredentialProtectionPanel";
 
 /** The native owner decides when a first-run/upgrade choice is due. Closing is not skipping. */
 export function CredentialProtectionEntry({
+  showInline = false,
+}: {
+  showInline?: boolean;
+}) {
+  return showInline ? (
+    <StartupRecoveryBoundary>
+      <ProtectionChoiceEntry showInline />
+    </StartupRecoveryBoundary>
+  ) : (
+    <ProtectionChoiceEntry />
+  );
+}
+
+function ProtectionChoiceEntry({
   showInline = false,
 }: {
   showInline?: boolean;

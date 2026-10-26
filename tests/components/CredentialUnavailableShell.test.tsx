@@ -7,7 +7,7 @@ import {
   act,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "@/App";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { UNIVERSAL_PROVIDER_SYNCED } from "@/lib/api/events";
@@ -23,6 +23,11 @@ import {
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
 } from "@/config/constants";
+import { startupRecoveryApi } from "@/lib/api/startupRecovery";
+beforeEach(() => {
+  // Existing non-fault scenarios have no original operation to recover.
+  vi.spyOn(startupRecoveryApi, "status").mockResolvedValue(null);
+});
 vi.mock("@/components/UpdateBadge", () => ({ UpdateBadge: () => null }));
 afterEach(() => {
   vi.restoreAllMocks();
@@ -294,4 +299,79 @@ it("offers local same-key recovery in the existing shell and waits for actual ru
   await screen.findByText("storageProtection.saved");
   expect(read).not.toHaveBeenCalled();
   expect(screen.getByText("secrets.runtimeUnavailable")).toBeVisible();
+});
+
+it("mounts original-operation recovery in the actual App tree without enabling credentials or blocking navigation", async () => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  );
+  server.use(
+    http.post("http://tauri.local/set_window_theme", () =>
+      HttpResponse.json(null),
+    ),
+  );
+  localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
+  const pending = {
+    token: "synthetic-original-journal",
+    status: "pending" as const,
+    canRecover: true,
+    restartRequired: false,
+  };
+  vi.mocked(startupRecoveryApi.status).mockResolvedValue(pending);
+  const recover = vi.spyOn(startupRecoveryApi, "recover").mockResolvedValue({
+    ...pending,
+    status: "completed",
+    canRecover: false,
+    restartRequired: true,
+  });
+  const protection = await import("@/lib/api/credentialProtection");
+  const unlock = vi.spyOn(protection.credentialProtectionApi, "unlock");
+  const credentialRead = vi.spyOn(providersApi, "getAll");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  client.setQueryData(["runtimeAvailability"], {
+    credentialRuntimeAvailable: false,
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <ThemeProvider>
+        <Suspense fallback={null}>
+          <App />
+        </Suspense>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  );
+  await screen.findByLabelText("startupRecovery.sourceKey");
+  expect(
+    document.querySelector('[data-client-shell="true"]'),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "common.settings" }));
+  expect(await screen.findByText("settings.theme")).toBeVisible();
+  const input = screen.getByLabelText("startupRecovery.sourceKey");
+  const text = " 来源🔑\r\n恢复 ";
+  fireEvent.paste(input, {
+    clipboardData: {
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "startupRecovery.resume" }),
+  );
+  expect(await screen.findByText("startupRecovery.completed")).toBeVisible();
+  expect(recover).toHaveBeenCalledExactlyOnceWith(pending.token, text);
+  expect(screen.getByRole("button", { name: "secrets.restart" })).toBeEnabled();
+  expect(screen.getByText("secrets.runtimeUnavailable")).toBeVisible();
+  expect(client.getQueryData(["runtimeAvailability"])).toEqual({
+    credentialRuntimeAvailable: false,
+  });
+  expect(unlock).not.toHaveBeenCalled();
+  expect(credentialRead).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

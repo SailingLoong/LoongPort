@@ -24,7 +24,7 @@ pub(crate) fn restore_sql(
     db.install_backup_content_for_storage(incoming)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
     use crate::secrets::{
@@ -144,22 +144,23 @@ mod tests {
         );
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials() {
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials() {
         let home = Home::new();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         Database::create_tables_on_conn(&conn).unwrap();
         Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
-        crate::database::loongport_schema::apply(&conn).unwrap();
-        let source = Database::from_connection(conn, SecretSession::ephemeral().unwrap());
-        {
-            let conn = source.conn.lock().unwrap();
-            conn.execute_batch("DROP TABLE IF EXISTS loongport_vault;
-                INSERT INTO providers(id,app_type,name,settings_config,meta)
-                VALUES ('legacy-provider','claude','Legacy provider','{\"apiKey\":\"legacy-backup-canary\"}','{}')").unwrap();
-        }
-        let sql = source.export_sql_string().unwrap();
+        // An actual pre-protection source has no modern LoongPort stamp.
+        // Applying today's schema and deleting its identity is damaged storage,
+        // not legacy plaintext admission.
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+            0
+        );
+        conn.execute_batch("INSERT INTO providers(id,app_type,name,settings_config,meta)
+            VALUES ('legacy-provider','claude','Legacy provider','{\"apiKey\":\"legacy-backup-canary\"}','{}')").unwrap();
+        let sql = Database::dump_sql(&conn, &[]).unwrap();
         let store = MemoryKeyStore::default();
         let db = local(&home, &store);
 
@@ -174,6 +175,41 @@ mod tests {
             .export_sql_string()
             .unwrap()
             .contains("legacy-backup-canary"));
+    }
+
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, serial_test::serial)]
+    pub(super) fn modern_unmarked_plaintext_backup_is_rejected_without_writes() {
+        let home = Home::new();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        assert!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap()
+                >= crate::database::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION
+        );
+        conn.execute_batch("DROP TABLE IF EXISTS loongport_vault;
+            INSERT INTO providers(id,app_type,name,settings_config,meta)
+            VALUES ('damaged-provider','claude','Damaged provider','{\"apiKey\":\"damaged-backup-canary\"}','{}')").unwrap();
+        let sql = Database::dump_sql(&conn, &[]).unwrap();
+        let store = MemoryKeyStore::default();
+        let db = local(&home, &store);
+        let before = crate::secrets::transition::fence_test_support::tree(home.temporary.path());
+        let digest = Database::content_digest(&db.conn.lock().unwrap()).unwrap();
+        let error = restore_sql(&db, &sql, None, &store).unwrap_err();
+        assert!(
+            matches!(error, AppError::Config(ref code) if code == "secret.metadata_missing"),
+            "modern missing metadata must not become legacy: {error}"
+        );
+        assert_eq!(
+            crate::secrets::transition::fence_test_support::tree(home.temporary.path()),
+            before
+        );
+        assert_eq!(
+            Database::content_digest(&db.conn.lock().unwrap()).unwrap(),
+            digest
+        );
     }
 
     #[test]
@@ -350,3 +386,13 @@ mod tests {
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "backup_transfer/storage_restore_tests.rs"]
 pub(crate) mod storage_restore_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_explicit_legacy_plaintext_file_restore() {
+    tests::explicit_legacy_plaintext_file_restore_encrypts_the_imported_credentials();
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_modern_unmarked_plaintext_backup() {
+    tests::modern_unmarked_plaintext_backup_is_rejected_without_writes();
+}

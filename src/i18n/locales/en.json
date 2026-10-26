@@ -5345,5 +5345,23 @@
     },
     "keyPlaceholder": "Enter your key exactly as you want it",
     "confirmKeyPlaceholder": "Enter the exact same text again"
+  },
+  "startupRecovery": {
+    "title": "Recover an unfinished local operation",
+    "checkTitle": "Check local recovery status",
+    "description": "An original operation is unfinished. Continue only that operation; do not start a new import, sync or model request.",
+    "sourceKey": "Key or recovery passphrase used for this operation",
+    "sourceHelp": "Enter the original operation’s source key or recovery passphrase exactly. It may differ from the current storage-protection key. A plaintext destination does not make the source archive keyless. System-store help applies only to the matching local entry; it cannot guarantee recovery of another device’s key or an old backup passphrase.",
+    "resume": "Resume the original operation",
+    "recheck": "Recheck the original operation",
+    "statusFailed": "Authoritative recovery status could not be read. Recovery and storage-protection changes will not start on this basis.",
+    "keyRejected": "The key or recovery passphrase was not accepted. Check the input used for the original operation, then inspect its status again.",
+    "sourceChanged": "The original operation has changed. The old input was cleared; review the latest status before deciding.",
+    "unknownResult": "The original operation’s outcome is unknown. Recheck its status; it will not be submitted again automatically.",
+    "notCompleted": "Completion has not been confirmed. Follow the latest authoritative status.",
+    "verificationRequired": "The result requires further verification; the original operation cannot continue. Preserve the original files and recheck.",
+    "completed": "The original operation was recovered. Restart to inspect and reopen the data.",
+    "restartDescription": "Recovery does not enable credential features in this process. Restart LoongPort.",
+    "restartFailed": "Restart could not complete. Close and reopen LoongPort manually."
   }
 }
