@@ -359,7 +359,154 @@ fn vendor(case: &str) {
         panic!("unknown vendor case");
     }
 }
+
+fn legacy_original_provider(case: &str) {
+    let _home = TestHome::new().unwrap();
+    let db = Arc::new(fresh());
+    let mut row = provider("legacy-original");
+    db.save_provider("codex", &row).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("ALTER TABLE providers DROP COLUMN credential_revision;")
+            .unwrap();
+        if case != "latest_missing" {
+            conn.execute_batch("ALTER TABLE loongport_vendor DROP COLUMN api_key_revision;")
+                .unwrap();
+            // LP31 adds only these two original-row columns. Removing them
+            // reconstructs the real LP30 shape, not a mislabeled current schema.
+            conn.execute(
+                "UPDATE loongport_schema_version SET version=30 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        }
+        if matches!(case, "mixed" | "mixed_case") {
+            let name = if case == "mixed_case" {
+                "CREDENTIAL_REVISION"
+            } else {
+                "credential_revision"
+            };
+            conn.execute_batch(&format!(
+                "ALTER TABLE providers ADD COLUMN {name} TEXT NOT NULL DEFAULT '';"
+            ))
+            .unwrap();
+            conn.execute(
+                "UPDATE providers SET credential_revision=?1 WHERE id=?2",
+                rusqlite::params![new_revision(), row.id],
+            )
+            .unwrap();
+            assert!(
+                provider_on(&conn, "codex", &row.id).is_ok(),
+                "SQLite column resolution is case-insensitive even in a mixed schema"
+            );
+        }
+    }
+    if matches!(case, "latest_missing" | "mixed" | "mixed_case") {
+        let before = db.get_provider_by_id(&row.id, "codex").unwrap().unwrap();
+        row.name = "Must not publish".into();
+        assert!(
+            db.save_provider("codex", &row).is_err(),
+            "a missing latest column or mixed-version schema is not an ordinary legacy owner"
+        );
+        assert_eq!(
+            db.get_provider_by_id(&row.id, "codex")
+                .unwrap()
+                .unwrap()
+                .name,
+            before.name
+        );
+        return;
+    }
+    assert_eq!(case, "write");
+    row.name = "Legacy label".into();
+    db.save_provider("codex", &row)
+        .expect("ordinary original legacy save stays available");
+    // This is the boolean emitted by the existing key-touched UI, not a new
+    // authority to mint shared credentials before the original migration.
+    db.save_provider_with_credential_intent("codex", &row, true)
+        .expect("ordinary legacy key-write intent retains the original save contract");
+    {
+        let storage = db.secrets.read().unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+            30
+        );
+        assert!(provider_on(&conn, "codex", &row.id).is_err());
+        assert!(
+            crate::services::openrouter_source::read_on(
+                &conn,
+                &storage,
+                &crate::services::openrouter_source::RowRef {
+                    origin_app: "codex".into(),
+                    provider_id: row.id.clone()
+                }
+            )
+            .is_err(),
+            "legacy original save never mints a shared source proof"
+        );
+        let before = conn.total_changes();
+        assert!(provider_on(&conn, "codex", &row.id).is_err());
+        assert_eq!(
+            conn.total_changes(),
+            before,
+            "failed proof read never migrates"
+        );
+        crate::database::loongport_schema::apply(&conn).unwrap();
+        assert!(valid(&provider_on(&conn, "codex", &row.id).unwrap()));
+        assert!(crate::services::openrouter_source::read_on(
+            &conn,
+            &storage,
+            &crate::services::openrouter_source::RowRef {
+                origin_app: "codex".into(),
+                provider_id: row.id.clone()
+            }
+        )
+        .unwrap()
+        .is_some());
+    }
+    let fresh_proof = {
+        let storage = db.secrets.read().unwrap();
+        let conn = db.conn.lock().unwrap();
+        crate::services::openrouter_source::capture_on(
+            &conn,
+            &storage,
+            db.secrets.lifecycle_epoch(),
+            &crate::services::openrouter_source::RowRef {
+                origin_app: "codex".into(),
+                provider_id: row.id.clone(),
+            },
+        )
+        .unwrap()
+    };
+    let (_, fresh_fence) = crate::services::openrouter_source::acquire_expected(
+        db.clone(),
+        &crate::app_config::AppType::Codex,
+        &fresh_proof,
+    )
+    .unwrap();
+    fresh_fence.check().unwrap();
+    let before = revision(&db, &row.id);
+    db.save_provider_with_credential_intent("codex", &row, true)
+        .unwrap();
+    assert_ne!(
+        revision(&db, &row.id),
+        before,
+        "modern same-key reissue still rotates the authoritative row revision"
+    );
+    assert!(fresh_fence.check().is_err());
+    assert!(crate::services::openrouter_source::acquire_expected(
+        db,
+        &crate::app_config::AppType::Codex,
+        &fresh_proof
+    )
+    .is_err());
+}
+
 pub(crate) fn verify(case: &str) {
+    if let Some(case) = case.strip_prefix("legacy_") {
+        return legacy_original_provider(case);
+    }
     if let Some(case) = case.strip_prefix("prior_checkpoint_") {
         return crate::secrets::upgrade::checkpoint::verify_prior_fixture(case);
     }

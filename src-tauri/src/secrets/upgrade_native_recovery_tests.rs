@@ -36,11 +36,41 @@ pub(super) fn native_runtime(
             }
             _ => unreachable!(),
         };
-        db.save_provider(
-            app.as_str(),
-            &Provider::with_id(id.into(), "Synthetic".into(), config, None),
+        // This is a retained deployed-v24 fixture, not a current provider write.
+        // Seed only its historical columns using the original credential codec;
+        // the current DAO requires the later credential-revision schema.
+        let context = crate::secrets::storage::StorageContext::Encrypted(f.vault.clone());
+        let settings = crate::secrets::inventory::seal_db(
+            &context,
+            "providers",
+            "settings_config",
+            &[id, app.as_str()],
+            &serde_json::to_string(&config).unwrap(),
         )
         .unwrap();
+        let meta = crate::secrets::inventory::seal_db(
+            &context,
+            "providers",
+            "meta",
+            &[id, app.as_str()],
+            "{}",
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+            24
+        );
+        assert!(!conn
+            .prepare("PRAGMA table_xinfo(providers)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|name| name.unwrap() == "credential_revision"));
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES (?1, ?2, 'Synthetic', ?3, ?4)",
+            rusqlite::params![id, app.as_str(), settings, meta],
+        ).unwrap();
     }
     db.set_current_provider(app.as_str(), "a").unwrap();
     let row = db.get_provider_by_id("a", app.as_str()).unwrap().unwrap();
@@ -1099,4 +1129,179 @@ fn retained_checkpoint_recovery_requires_committed_written() {
     )
     .unwrap()
     .is_some());
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+pub(super) fn retained_checkpoint_admitted_provider_creation_keeps_historical_owner() {
+    let f = Fixture::new();
+    let app = AppType::Claude;
+    let (inspected, review, token, runtime) = native_runtime(&f, &app);
+    let view = review.review_app(&inspected, &token, &app).unwrap();
+    assert!(
+        view.can_complete_app,
+        "the original per-app owner must be ready before probing a production write"
+    );
+    operation::admit_metadata_write(&runtime.proxy_service, &app)
+        .expect("the original retained-checkpoint gate admits this real metadata action");
+    let conn = runtime.db.conn.lock().unwrap();
+    assert_eq!(
+        crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+        24
+    );
+    drop(conn);
+    let mut provider = runtime
+        .db
+        .get_provider_by_id("b", app.as_str())
+        .unwrap()
+        .unwrap();
+    provider.id = "actual-admitted-create".into();
+    let result = crate::services::ProviderService::add(&runtime, app, provider, false);
+    assert!(
+        result.is_ok(),
+        "admitted original ProviderService::add failed: {result:?}"
+    );
+    assert_eq!(
+        crate::database::loongport_schema::read_stored_version(&runtime.db.conn.lock().unwrap())
+            .unwrap(),
+        24,
+        "ordinary write must not migrate or counterfeit the retained schema"
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+pub(super) fn retained_checkpoint_admitted_provider_key_edit_keeps_historical_owner() {
+    check_retained_provider_editor(false);
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+pub(super) fn retained_checkpoint_admitted_provider_same_key_reissue_keeps_historical_owner() {
+    check_retained_provider_editor(true);
+}
+
+fn check_retained_provider_editor(same_key: bool) {
+    use crate::services::provider::edit;
+    let f = Fixture::new();
+    let reactor = tokio::runtime::Runtime::new().unwrap();
+    let _context = reactor.enter();
+    let app = AppType::Claude;
+    let (inspected, review, token, runtime) = native_runtime(&f, &app);
+    assert!(
+        review
+            .review_app(&inspected, &token, &app)
+            .unwrap()
+            .can_complete_app
+    );
+    operation::admit_metadata_write(&runtime.proxy_service, &app).unwrap();
+    let mut provider = runtime
+        .db
+        .get_provider_by_id("a", app.as_str())
+        .unwrap()
+        .unwrap();
+    let expected_key = if same_key {
+        "synthetic-a"
+    } else {
+        "synthetic-explicit-edited-key"
+    };
+    provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!(expected_key);
+    let request_id = if same_key {
+        "d15d3030-2000-4000-8000-000000000241"
+    } else {
+        "d15d3030-2000-4000-8000-000000000242"
+    };
+    let before_preview = snapshot(f.home.path());
+    let preview = edit::preview_with_intent(
+        &runtime,
+        &app,
+        provider.clone(),
+        "a",
+        request_id,
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    super::attached_recovery_tests::assert_no_recovery_writes(
+        &before_preview,
+        &snapshot(f.home.path()),
+        "historical key-edit preview",
+    );
+    assert_eq!(
+        preview["status"], "ready",
+        "real legacy editor must accept explicit credential intent: {preview}"
+    );
+    let request: crate::mode::state::SaveRequest =
+        serde_json::from_value(preview["request"].clone()).unwrap();
+    let conflict = edit::confirm_with_intent(
+        &runtime,
+        &app,
+        provider.clone(),
+        "a",
+        request.clone(),
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        conflict["status"], "conflict",
+        "credential intent stays bound to the original preview"
+    );
+    super::attached_recovery_tests::assert_no_recovery_writes(
+        &before_preview,
+        &snapshot(f.home.path()),
+        "historical mismatched credential intent",
+    );
+    let result = edit::confirm_with_intent(
+        &runtime,
+        &app,
+        provider.clone(),
+        "a",
+        request.clone(),
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        result["status"], "completed",
+        "real historical editor must complete: {result}"
+    );
+    let saved = runtime
+        .db
+        .get_provider_by_id("a", app.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+        expected_key
+    );
+    let native: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(crate::config::get_claude_settings_path()).unwrap())
+            .unwrap();
+    assert_eq!(native["env"]["ANTHROPIC_AUTH_TOKEN"], expected_key);
+    let conn = runtime.db.conn.lock().unwrap();
+    assert_eq!(
+        crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
+        24
+    );
+    assert!(!conn
+        .prepare("PRAGMA table_xinfo(providers)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .any(|name| name.unwrap() == "credential_revision"));
+    drop(conn);
+    let before_retry = snapshot(f.home.path());
+    let repeated =
+        edit::confirm_with_intent(&runtime, &app, provider, "a", request, false, None, true)
+            .unwrap();
+    assert_eq!(repeated["status"], "completed");
+    super::attached_recovery_tests::assert_no_recovery_writes(
+        &before_retry,
+        &snapshot(f.home.path()),
+        "historical key-edit repeated confirmation",
+    );
 }

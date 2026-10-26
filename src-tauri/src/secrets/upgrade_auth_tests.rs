@@ -6602,3 +6602,16 @@ fn native_archive_publication_readback_failure_retains_authenticated_recovery() 
     .unwrap();
     assert_eq!(snapshot(f.home.path()), before);
 }
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_ci_retained_attached_case(case: &str) {
+    if case == "admitted_create" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_creation_keeps_historical_owner();
+    } else if case == "admitted_key_edit" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_key_edit_keeps_historical_owner();
+    } else if case == "admitted_same_key_reissue" {
+        native_recovery_tests::retained_checkpoint_admitted_provider_same_key_reissue_keeps_historical_owner();
+    } else {
+        attached_recovery_tests::verify_ci_retained_attached_case(case);
+    }
+}

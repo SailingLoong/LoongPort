@@ -211,6 +211,71 @@ async function mountActualApp(
 }
 
 describe("actual App with official Tauri mocks, not a recreated design", () => {
+  it("retains the approved C2 surface, type hierarchy, action colors and visible hide controls", async () => {
+    const { user } = await mountActualApp();
+    const workspace = screen.getByRole("region", { name: "应用路由工作台" });
+    // Explicit DOM style guards catch the reviewed regressions. The CI browser
+    // screenshots and unchanged geometry assertions remain the visual evidence.
+    expect
+      .soft(workspace.closest("[data-client-shell]"))
+      .toHaveClass("bg-[#edf0f5]");
+    const codexTab = screen.getByRole("button", { name: "Codex" });
+    expect.soft(codexTab.closest("header")).toHaveClass("bg-[#f5f7fb]");
+    expect
+      .soft(screen.getByRole("button", { name: "从主页面隐藏: Codex" }))
+      .toHaveClass("opacity-100");
+    expect
+      .soft(screen.getByText("配置指向本地网关"))
+      .toHaveClass("text-lg", "font-semibold", "leading-7");
+    const savedFact = screen.getByRole("heading", {
+      name: "02 · 已保存配置",
+    }).parentElement!;
+    expect.soft(savedFact).toHaveClass("bg-card");
+    expect
+      .soft(savedFact.querySelector("div.min-w-0"))
+      .toHaveClass("text-lg", "leading-7");
+    expect.soft(savedFact.querySelector("p")).toHaveClass("font-semibold");
+    expect
+      .soft(
+        within(screen.getByTestId("actual-request-fact")).getByText("未验证"),
+      )
+      .toHaveClass("text-lg", "font-semibold");
+    expect
+      .soft(screen.getByRole("heading", { name: "编辑路由" }))
+      .toHaveClass("text-xl", "font-bold", "leading-7");
+    expect
+      .soft(screen.getByRole("heading", { name: "保存前先比较" }))
+      .toHaveClass("text-xl", "font-bold", "leading-7");
+    const ordered = screen.getByRole("radio", { name: "省心 · 按顺序" });
+    await user.click(ordered);
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "共享组" }),
+      "synthetic-daily",
+    );
+    expect
+      .soft(ordered.closest("label"))
+      .toHaveClass(
+        "border-[#315feb]",
+        "bg-[#edf2ff]",
+        "has-[:focus-visible]:ring-2",
+      );
+    expect
+      .soft(ordered.closest("label"))
+      .not.toHaveClass("focus-within:ring-2");
+    const compare = screen.getByRole("heading", {
+      name: "保存前先比较",
+    }).parentElement!;
+    expect
+      .soft(within(compare).getByText("日常编码").closest("div.min-w-0"))
+      .toHaveClass("text-[17px]", "text-[#315feb]");
+    expect
+      .soft(screen.getByRole("button", { name: "预览变更" }))
+      .toHaveClass("bg-[#315feb]", "text-white");
+    expect
+      .soft(screen.getByRole("button", { name: "放弃草稿" }))
+      .toHaveClass("bg-white", "text-slate-900");
+    expect(screen.getByRole("button", { name: "预览变更" })).toBeEnabled();
+  });
   it("mounts four distinct facts, retains original add/hide semantics, and only applies after explicit review confirmation", async () => {
     const { fixture, client, user } = await mountActualApp();
     // The production 26px title needs its own 32px line box, rather than

@@ -1167,6 +1167,7 @@ function App() {
   const applicationSwitcher = (
     <AppSwitcher
       activeApp={activeApp}
+      variant={isC2View ? "workspace" : "default"}
       onSwitch={setActiveApp}
       visibleApps={visibleApps}
       applications={APP_IDS.filter((app) => app !== "codex-image")}
@@ -1459,7 +1460,12 @@ function App() {
   return (
     <div
       data-client-shell
-      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
+      className={cn(
+        "flex flex-col h-screen overflow-hidden selection:bg-primary/30 pl-[var(--sidebar-width)]",
+        isC2View
+          ? "bg-[#edf0f5] text-[#17212f] dark:bg-background dark:text-foreground"
+          : "bg-background text-foreground",
+      )}
       style={{
         overflowX: "hidden",
         paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
@@ -1572,7 +1578,10 @@ function App() {
 
       <header
         hidden={currentView === "addHub"}
-        className="fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default bg-background"
+        className={cn(
+          "fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default",
+          isC2View ? "bg-[#f5f7fb] dark:bg-background" : "bg-background",
+        )}
         {...DRAG_REGION_ATTR}
         style={
           {

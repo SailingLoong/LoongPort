@@ -801,18 +801,20 @@ pub(crate) fn save_row_locked_with_credential_intent(
         save_row_target(service, app, previous, provider, clear_model_preference)?;
     if reissue {
         let conn = service.database().conn.lock()?;
-        target
-            .saved_row
-            .as_mut()
-            .ok_or_else(invalid)?
-            .credential_write = Some(crate::database::credential_revision::WriteProof {
-            before: crate::database::credential_revision::provider_on(
-                &conn,
-                app.as_str(),
-                &previous.id,
-            )?,
-            next: crate::database::credential_revision::new_revision(),
-        });
+        if crate::database::credential_revision::original_provider_uses_revisions(&conn)? {
+            target
+                .saved_row
+                .as_mut()
+                .ok_or_else(invalid)?
+                .credential_write = Some(crate::database::credential_revision::WriteProof {
+                before: crate::database::credential_revision::provider_on(
+                    &conn,
+                    app.as_str(),
+                    &previous.id,
+                )?,
+                next: crate::database::credential_revision::new_revision(),
+            });
+        }
     }
     if in_use.as_deref() != Some(provider.id.as_str()) || (before.is_proxy() && !before.attached) {
         write_target_only(service, app, op::APPLY, target)?;
@@ -1300,7 +1302,7 @@ fn save_row_target(
 /// A request-local plan, not a second draft or persistent operation owner.
 pub(crate) struct SaveRowPlan {
     pub(crate) credential_reissue: bool,
-    credential_before: String,
+    credential_before: Option<String>,
     pub(crate) files: Vec<(LiveFile, crate::live::patch::Guarded)>,
     pub(crate) target: PendingTarget,
     pub(crate) revision: String,
@@ -1513,23 +1515,52 @@ pub(crate) fn plan_row_save_with_generation(
         .collect::<Vec<_>>();
     let credential_before = {
         let conn = service.database().conn.lock()?;
-        crate::database::credential_revision::provider_on(&conn, app.as_str(), &previous.id)?
+        if crate::database::credential_revision::original_provider_uses_revisions(&conn)? {
+            Some(crate::database::credential_revision::provider_on(
+                &conn,
+                app.as_str(),
+                &previous.id,
+            )?)
+        } else {
+            // No shared issuance proof exists in an original retained schema.
+            // Preserve that original plan image rather than adding a null field.
+            None
+        }
     };
-    let source = serde_json::to_vec(&(
-        &credential_before,
-        request_id,
-        app.as_str(),
-        service.database().secret_session().root(),
-        &target.saved_row,
-        &before,
-        &in_use,
-        &direct,
-        entry,
-        &file_versions,
-        &endpoint,
-        &codex_revision,
-        crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
-    ))
+    // Keep both pre-existing wire images exact: LP31 prefixes its authoritative
+    // revision; retained pre31 plans use the original tuple, not a new null field.
+    let source = if let Some(credential_before) = &credential_before {
+        serde_json::to_vec(&(
+            credential_before,
+            request_id,
+            app.as_str(),
+            service.database().secret_session().root(),
+            &target.saved_row,
+            &before,
+            &in_use,
+            &direct,
+            entry,
+            &file_versions,
+            &endpoint,
+            &codex_revision,
+            crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+        ))
+    } else {
+        serde_json::to_vec(&(
+            request_id,
+            app.as_str(),
+            service.database().secret_session().root(),
+            &target.saved_row,
+            &before,
+            &in_use,
+            &direct,
+            entry,
+            &file_versions,
+            &endpoint,
+            &codex_revision,
+            crate::proxy::auto_strategy::get_model_pref_checked(service.database(), app.as_str())?,
+        ))
+    }
     .map_err(|source| AppError::JsonSerialize { source })?;
     Ok(SaveRowPlan {
         credential_reissue: false,
@@ -1613,10 +1644,14 @@ pub(crate) fn consume_row_save(
             return Err(invalid());
         }
         let row = target.saved_row.as_mut().ok_or_else(invalid)?;
-        row.credential_write = Some(crate::database::credential_revision::WriteProof {
-            before: plan.credential_before,
-            next: crate::database::credential_revision::new_revision(),
-        });
+        if let Some(before) = plan.credential_before {
+            row.credential_write = Some(crate::database::credential_revision::WriteProof {
+                before,
+                next: crate::database::credential_revision::new_revision(),
+            });
+        }
+        // Legacy key-touched edits retain the original saved-row CAS and journal,
+        // without fabricating a future-schema issuance proof or shared authority.
     }
     // The private proof is persisted/authenticated by this original journal
     // before any native files or SQL row are published. Recovery never regenerates it.

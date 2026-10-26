@@ -271,3 +271,21 @@ storage_case!(credential_prior_legacy_v7, "revision_prior_v7");
 storage_case!(credential_prior_legacy_v16, "revision_prior_v16");
 
 storage_case!(credential_prior_legacy_v6, "revision_prior_v6");
+
+storage_case!(
+    credential_legacy_original_write_and_migration_boundary,
+    "revision_legacy_write"
+);
+storage_case!(
+    credential_legacy_latest_missing_column_is_rejected,
+    "revision_legacy_latest_missing"
+);
+storage_case!(
+    credential_legacy_mixed_schema_is_rejected,
+    "revision_legacy_mixed"
+);
+
+storage_case!(
+    credential_legacy_mixed_case_schema_is_rejected,
+    "revision_legacy_mixed_case"
+);

@@ -132,10 +132,10 @@ export function ApplicationRouteWorkspace({
       )}
       <div className="grid gap-3 md:grid-cols-[1fr_1fr_1.17fr]">
         <section className="rounded-xl border border-border-default bg-card p-4">
-          <h2 className="mb-3 text-xs font-medium text-muted-foreground">
+          <h2 className="mb-2 text-[11px] font-semibold leading-4 text-muted-foreground">
             01 · {t("routingWorkspace.connection")}
           </h2>
-          <p className="text-sm font-medium">
+          <p className="text-lg font-semibold leading-7">
             {t(
               mode?.attached === true
                 ? "routingWorkspace.attached"
@@ -153,11 +153,12 @@ export function ApplicationRouteWorkspace({
           </p>
         </section>
         <section className="rounded-xl border border-border-default bg-card p-4">
-          <h2 className="mb-3 text-xs font-medium text-muted-foreground">
+          <h2 className="mb-2 text-[11px] font-semibold leading-4 text-muted-foreground">
             02 · {t("routingWorkspace.savedConfiguration")}
           </h2>
           <RouteTargetSummary
             target={savedTarget}
+            className="text-lg leading-7"
             groups={groups}
             sources={sources}
           />
@@ -166,10 +167,10 @@ export function ApplicationRouteWorkspace({
           data-testid="actual-request-fact"
           className="rounded-xl border border-border-default bg-card p-4"
         >
-          <h2 className="mb-3 text-xs font-medium text-muted-foreground">
+          <h2 className="mb-2 text-[11px] font-semibold leading-4 text-muted-foreground">
             03 · {t("routingWorkspace.actualRequest")}
           </h2>
-          <p className="text-sm font-medium text-muted-foreground">
+          <p className="text-lg font-semibold leading-7">
             {t("routingWorkspace.requestUnknown")}
           </p>
           <p className="mt-2 text-xs text-muted-foreground">
@@ -180,7 +181,7 @@ export function ApplicationRouteWorkspace({
       <div className="grid items-start gap-6 lg:grid-cols-[1.66fr_1fr]">
         <section className="min-w-0 rounded-2xl border border-border-default bg-card p-5 sm:p-6">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">
+            <h2 className="text-xl font-bold leading-7">
               {t("routingWorkspace.edit")}
             </h2>
             <span
@@ -215,9 +216,9 @@ export function ApplicationRouteWorkspace({
               <label
                 key={kind}
                 className={cn(
-                  "flex cursor-pointer items-start gap-3 rounded-xl border p-4 focus-within:ring-2 focus-within:ring-ring",
+                  "flex cursor-pointer items-start gap-3 rounded-xl border p-4 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring has-[:focus-visible]:ring-offset-2",
                   current?.kind === kind
-                    ? "border-primary/50 bg-primary/5"
+                    ? "border-[#315feb] bg-[#edf2ff] text-[#315feb] dark:border-primary/50 dark:bg-primary/10 dark:text-blue-400"
                     : "border-border-default",
                   disabled && "cursor-not-allowed opacity-60",
                 )}
@@ -241,7 +242,7 @@ export function ApplicationRouteWorkspace({
                   )}
                 />
                 <span>
-                  <span className="block text-sm font-medium">
+                  <span className="block text-sm font-semibold">
                     {t(
                       kind === "manual"
                         ? "routingWorkspace.manual"
@@ -319,13 +320,13 @@ export function ApplicationRouteWorkspace({
                       return (
                         <li
                           key={`${index}:${member.sourceId}:${member.model}`}
-                          className="grid min-h-[45px] grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 rounded-lg bg-muted/40 px-3 py-2 md:grid-cols-[20px_minmax(0,1.3fr)_minmax(0,1fr)_auto]"
+                          className="grid min-h-[45px] grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 rounded-lg bg-[#f8f9fc] px-3 py-2 dark:bg-muted/40 md:grid-cols-[20px_minmax(0,1.3fr)_minmax(0,1fr)_auto]"
                         >
                           <span className="row-span-2 text-center text-xs text-muted-foreground md:row-span-1">
                             {index + 1}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <p className="break-words text-sm font-medium">
+                            <p className="break-words text-[13px] font-semibold leading-5">
                               {source?.name ?? member.sourceId}
                             </p>
                             {!source && (
@@ -489,27 +490,29 @@ export function ApplicationRouteWorkspace({
         </section>
         <aside className="min-w-0 space-y-4">
           <section className="rounded-xl border border-primary/10 bg-[#f5f8ff] p-5 dark:bg-primary/5 sm:p-6">
-            <h2 className="text-base font-semibold">
+            <h2 className="text-xl font-bold leading-7">
               {t("routingWorkspace.compare")}
             </h2>
             <div className="mt-5 border-b border-primary/10 pb-5">
-              <h3 className="mb-2 text-xs text-muted-foreground">
+              <h3 className="mb-2 text-[11px] font-semibold text-muted-foreground">
                 {t("routingWorkspace.saved")}
               </h3>
               <RouteTargetSummary
                 target={savedTarget}
+                className="text-[15px] leading-6"
                 groups={groups}
                 sources={sources}
                 inlineModel
               />
             </div>
             <div className="mt-5">
-              <h3 className="mb-2 text-xs text-primary">
+              <h3 className="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
                 {t("routingWorkspace.draft")}
               </h3>
               {draft ? (
                 <RouteTargetSummary
                   target={draft}
+                  className="text-[17px] leading-7 text-[#315feb] dark:text-blue-400"
                   groups={groups}
                   sources={sources}
                   inlineModel
@@ -531,7 +534,7 @@ export function ApplicationRouteWorkspace({
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
               <div>
-                <h2 className="text-sm font-medium">
+                <h2 className="text-sm font-semibold">
                   {t("routingWorkspace.unknownTitle")}
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -540,8 +543,8 @@ export function ApplicationRouteWorkspace({
               </div>
             </div>
           </section>
-          <section className="rounded-xl border border-border-default p-4">
-            <h2 className="text-sm font-medium">
+          <section className="rounded-xl border border-border-default bg-card p-4">
+            <h2 className="text-sm font-semibold">
               {t("routingWorkspace.recoveryTitle")}
             </h2>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -593,7 +596,7 @@ export function ApplicationRouteWorkspace({
       )}
       <footer className="flex flex-wrap items-center justify-between gap-4 rounded-xl bg-[#172b50] px-5 py-4 text-slate-50 dark:bg-slate-100 dark:text-slate-900">
         <div>
-          <h2 className="text-sm font-medium">
+          <h2 className="text-sm font-semibold">
             {t(
               workspace.hasPendingChanges
                 ? "routingWorkspace.draftUnsaved"
@@ -606,15 +609,17 @@ export function ApplicationRouteWorkspace({
         </div>
         <div className="flex gap-2">
           <Button
-            variant="ghost"
-            className="hover:bg-white/10 hover:text-white dark:hover:bg-black/10 dark:hover:text-black"
+            variant="outline"
+            size="lg"
+            className="bg-white font-semibold text-slate-900 hover:bg-slate-100 dark:bg-slate-900 dark:text-white dark:hover:bg-slate-800"
             disabled={busy || !workspace.hasPendingChanges}
             onClick={workspace.discard}
           >
             {t("routingWorkspace.discard")}
           </Button>
           <Button
-            className="bg-white text-slate-900 hover:bg-slate-200 dark:bg-slate-900 dark:text-white"
+            size="lg"
+            className="bg-[#315feb] text-white hover:bg-[#264ec9]"
             disabled={!workspace.canPreview}
             onClick={() => void workspace.prepare()}
           >
@@ -630,7 +635,7 @@ export function ApplicationRouteWorkspace({
             event.currentTarget.open = true;
           else setAdvancedOpen(event.currentTarget.open);
         }}
-        className="rounded-xl border border-border-default p-4"
+        className="rounded-xl border border-border-default bg-card p-4"
       >
         <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
           <Layers3 className="h-4 w-4" />

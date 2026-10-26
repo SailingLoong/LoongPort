@@ -425,3 +425,8 @@ pub async fn verify_zcode_routing_owner(case: &str) {
 pub async fn verify_shared_pool_storage(case: &str) {
     crate::services::native_source_guard::storage_fixture::verify(case).await;
 }
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_ci_retained_attached_case(case: &str) {
+    crate::secrets::upgrade::auth_tests::verify_ci_retained_attached_case(case);
+}

@@ -105,6 +105,36 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
     validate_schema(conn)
 }
 
+/// Compatibility of the original provider writer/planner, not shared-source admission.
+/// Authenticated retained checkpoints can legitimately keep the original 24..30
+/// schema. They have neither issuance column; never create/migrate one on a read.
+/// Modern or mixed/corrupt schemas cannot use this historical branch.
+pub(crate) fn original_provider_uses_revisions(conn: &Connection) -> Result<bool, AppError> {
+    let version = super::loongport_schema::read_stored_version(conn)?;
+    super::vault::preflight_structure(conn)?;
+    if (super::loongport_schema::MIN_AUTHENTICATED_SNAPSHOT_VERSION..31).contains(&version) {
+        for (table, column) in COLUMNS {
+            if !super::Database::table_exists(conn, table)? {
+                return Err(denied());
+            }
+            let mut statement = conn.prepare(&format!("PRAGMA table_xinfo({table})"))?;
+            let names = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if names.iter().any(|name| name.eq_ignore_ascii_case(column)) {
+                return Err(denied());
+            }
+        }
+        return Ok(false);
+    }
+    // The modern preflight above already validates both authoritative columns.
+    // Keep pre-authenticated/fresh construction paths strict as well.
+    if version < 31 {
+        validate_schema(conn)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn provider_on(conn: &Connection, app: &str, id: &str) -> Result<String, AppError> {
     let revision: String = conn.query_row(
         "SELECT credential_revision FROM providers WHERE id=?1 AND app_type=?2",

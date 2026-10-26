@@ -555,6 +555,8 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
+        let credential_revisions =
+            crate::database::credential_revision::original_provider_uses_revisions(&tx)?;
         let current =
             Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
         let mut replacement = provider.clone();
@@ -763,7 +765,9 @@ impl Database {
                     app_type, previous, provider,
                 )
             });
-        if credential_write.is_some() || rotate {
+        // Original admitted legacy writes keep their original CAS/journal contract;
+        // they cannot mint a shared proof before the schema owner's real migration.
+        if credential_revisions && (credential_write.is_some() || rotate) {
             let revision = credential_write
                 .map(|proof| proof.next.clone())
                 .unwrap_or_else(crate::database::credential_revision::new_revision);
