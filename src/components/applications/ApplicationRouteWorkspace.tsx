@@ -100,7 +100,7 @@ export function ApplicationRouteWorkspace({
     <section className="space-y-6" aria-label={t("routingWorkspace.workspace")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-[26px] font-semibold tracking-tight">
+          <h1 className="text-[26px] font-semibold leading-8 tracking-tight">
             {t("routingWorkspace.title", { app: t(`apps.${appId}`) })}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">

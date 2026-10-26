@@ -42,7 +42,9 @@ pub(crate) struct NativeReadGuard<'a> {
     minimax: Option<crate::minimax_code::routing_source::ReadGuard<'a>>,
     workbuddy: Vec<NativeFact>,
     workbuddy_unavailable: Vec<UnavailableNativeAccount>,
+    #[cfg(any(not(test), unix))]
     zcode: Vec<NativeFact>,
+    #[cfg(any(not(test), unix))]
     zcode_unavailable: Vec<UnavailableNativeAccount>,
     lock: NativeReadLock<'a>,
 }
@@ -77,15 +79,13 @@ impl<'a> NativeReadGuard<'a> {
         } else {
             (vec![], vec![])
         };
+        #[cfg(all(test, not(unix)))]
+        if zcode {
+            return Err(unavailable());
+        }
+        #[cfg(any(not(test), unix))]
         let (zcode, zcode_unavailable) = if zcode {
-            #[cfg(any(not(test), unix))]
-            {
-                crate::zcode_accounts::inference::routing_facts(session, vault, &lock)?
-            }
-            #[cfg(all(test, not(unix)))]
-            {
-                return Err(unavailable());
-            }
+            crate::zcode_accounts::inference::routing_facts(session, vault, &lock)?
         } else {
             (vec![], vec![])
         };
@@ -94,7 +94,9 @@ impl<'a> NativeReadGuard<'a> {
             minimax,
             workbuddy,
             workbuddy_unavailable,
+            #[cfg(any(not(test), unix))]
             zcode,
+            #[cfg(any(not(test), unix))]
             zcode_unavailable,
             lock,
         })
@@ -114,6 +116,7 @@ impl<'a> NativeReadGuard<'a> {
         self.check().ok()?;
         match platform {
             "minimax_code" => self.minimax.as_ref()?.local_unavailability(id),
+            #[cfg(any(not(test), unix))]
             "zcode_start_plan" => self
                 .zcode_unavailable
                 .iter()
@@ -134,6 +137,7 @@ impl<'a> NativeReadGuard<'a> {
                 stamp: NativeStamp::MiniMax(fact.stamp.clone()),
                 label: fact.label.clone(),
             }),
+            #[cfg(any(not(test), unix))]
             "zcode_start_plan" => {
                 let mut found = self.zcode.iter().filter(|fact| matches!(&fact.stamp, NativeStamp::ZCode(stamp) if stamp.account_id == id));
                 let row = found.next()?;

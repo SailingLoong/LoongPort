@@ -134,6 +134,20 @@ fn protocol(app: &AppType, provider: &Provider) -> Result<Option<WireProtocol>, 
     }
     Ok(Some(effective))
 }
+/// A well-shaped Claude default may intentionally omit every adapter endpoint.
+/// Presence is significant: null/non-string fields are damaged, not absent.
+fn claude_endpoint_is_absent(provider: &Provider) -> bool {
+    let Some(settings) = provider.settings_config.as_object() else {
+        return false;
+    };
+    settings.get("env").is_none_or(|env| {
+        env.as_object()
+            .is_some_and(|env| !env.contains_key("ANTHROPIC_BASE_URL"))
+    }) && ["base_url", "baseURL", "apiEndpoint"]
+        .iter()
+        .all(|key| !settings.contains_key(*key))
+}
+
 /// Caller holds original vault/connection. No discovery, locks, writes or HTTP.
 /// Only an explicit empty credential in an otherwise verified row is typed missing.
 pub(crate) fn inspect_on(
@@ -172,7 +186,15 @@ pub(crate) fn inspect_on(
         return Ok(None);
     };
     let adapter = providers::get_adapter(&app).ok_or_else(invalid)?;
-    let base = adapter.extract_base_url(&provider).map_err(|_| invalid())?;
+    let base = match adapter.extract_base_url(&provider) {
+        Ok(base) => base,
+        Err(_) if matches!(app, AppType::Claude) && claude_endpoint_is_absent(&provider) => {
+            // No OpenRouter destination was declared. Captured source owners
+            // still reject this None through their existing capture/fence checks.
+            return Ok(None);
+        }
+        Err(_) => return Err(invalid()),
+    };
     if !official_base(&base, protocol) {
         return Ok(None);
     }

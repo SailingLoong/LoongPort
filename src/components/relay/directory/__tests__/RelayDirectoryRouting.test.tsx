@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
@@ -112,9 +112,14 @@ describe("relay directory routing", () => {
     );
   });
 
-  it.each([["claude"], ["codex"], ["gemini"], ["openclaw"]])(
+  it.each([
+    ["claude", "loongport.addEntry.title"],
+    ["codex", "loongport.addEntry.title"],
+    ["gemini", "loongport.addEntry.title"],
+    ["openclaw", "applications.addService"],
+  ])(
     "opens the add hub from %s and reaches the relay directory",
-    async (appId) => {
+    async (appId, returnEntryName) => {
       localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
 
@@ -144,26 +149,43 @@ describe("relay directory routing", () => {
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
 
       fireEvent.click(screen.getByText("directory-back"));
-      expect(
-        await screen.findByRole("button", {
-          name: "applications.addService",
-        }),
-      ).toBeInTheDocument();
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: returnEntryName }),
+        ).toBeVisible(),
+      );
+      expect(document.querySelector("header")).toBeVisible();
+      expect(screen.getByTestId("relay-directory")).not.toBeVisible();
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe(appId);
     },
   );
 
-  it("reaches the relay directory from the overview add-service entry", async () => {
-    localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
-    renderApp();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "applications.addService" }),
-    );
+  it.each([
+    ["codex", "loongport.addEntry.title"],
+    ["openclaw", "applications.addService"],
+  ])(
+    "reaches the relay directory from the %s add-service entry",
+    async (appId, entryName) => {
+      localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
+      renderApp();
+      fireEvent.click(await screen.findByRole("button", { name: entryName }));
 
-    await userEvent.click(
-      await screen.findByRole("tab", { name: "loongport.sections.relay" }),
-    );
-    expect(await screen.findByTestId("directory-source-app")).toHaveTextContent(
-      "codex",
-    );
-  });
+      expect(await screen.findByRole("tab", { name: "账号" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await userEvent.click(
+        await screen.findByRole("tab", { name: "loongport.sections.relay" }),
+      );
+      expect(
+        await screen.findByTestId("directory-source-app"),
+      ).toHaveTextContent(appId);
+      fireEvent.click(screen.getByRole("button", { name: "common.back" }));
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: entryName })).toBeVisible(),
+      );
+      expect(screen.getByTestId("relay-directory")).not.toBeVisible();
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe(appId);
+    },
+  );
 });

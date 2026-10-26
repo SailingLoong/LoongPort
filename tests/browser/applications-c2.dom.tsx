@@ -213,6 +213,12 @@ async function mountActualApp(
 describe("actual App with official Tauri mocks, not a recreated design", () => {
   it("mounts four distinct facts, retains original add/hide semantics, and only applies after explicit review confirmation", async () => {
     const { fixture, client, user } = await mountActualApp();
+    // The production 26px title needs its own 32px line box, rather than
+    // inheriting body text-sm/20px and clipping Noto CJK at the scroll edge.
+    // This DOM guard does not replace the real-browser checkGeometry assertion.
+    expect(
+      screen.getByRole("heading", { level: 1, name: "调整 Codex 的路由" }),
+    ).toHaveClass("text-[26px]", "leading-8");
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
       "aria-pressed",
       "true",

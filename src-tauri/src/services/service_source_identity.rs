@@ -49,6 +49,8 @@ pub(crate) struct WorkBuddyStamp {
     pub session_epoch: u64,
 }
 /// Original ZCode account/session proof; no JWT or native path leaves its owner.
+// Match the original inference owner: non-Unix unit builds cannot mint this proof.
+#[cfg(any(not(test), unix))]
 #[derive(Clone, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct ZCodeStamp {
     pub account_id: String,
@@ -74,6 +76,7 @@ pub(crate) enum NativeStamp {
     MiniMax(MiniMaxStamp),
     WorkBuddy(WorkBuddyStamp),
     Qoder(QoderStamp),
+    #[cfg(any(not(test), unix))]
     ZCode(ZCodeStamp),
 }
 impl std::fmt::Debug for NativeStamp {
@@ -82,6 +85,7 @@ impl std::fmt::Debug for NativeStamp {
             Self::MiniMax(_) => "MiniMax(owner proof)",
             Self::WorkBuddy(_) => "WorkBuddy(owner proof)",
             Self::Qoder(_) => "Qoder(owner proof)",
+            #[cfg(any(not(test), unix))]
             Self::ZCode(_) => "ZCode(owner proof)",
         })
     }
@@ -410,7 +414,9 @@ pub(crate) fn binding_with_native_on(
             id: account_id,
             region: match &fact.stamp {
                 NativeStamp::MiniMax(stamp) => Some(stamp.region.clone()),
-                NativeStamp::WorkBuddy(_) | NativeStamp::Qoder(_) | NativeStamp::ZCode(_) => None,
+                NativeStamp::WorkBuddy(_) | NativeStamp::Qoder(_) => None,
+                #[cfg(any(not(test), unix))]
+                NativeStamp::ZCode(_) => None,
             },
         },
         app_id: app.as_str().into(),

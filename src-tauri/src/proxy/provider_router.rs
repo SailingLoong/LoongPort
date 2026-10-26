@@ -48,6 +48,7 @@ pub(crate) fn provider_supports_captured_model(
             Some((super::managed_accounts::AccountKind::WorkBuddy, id)),
             crate::services::service_source_identity::NativeStamp::WorkBuddy(s),
         ) => id == s.account_id,
+        #[cfg(any(not(test), unix))]
         (
             Some((super::managed_accounts::AccountKind::ZCode, id)),
             crate::services::service_source_identity::NativeStamp::ZCode(s),

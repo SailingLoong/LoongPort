@@ -78,6 +78,136 @@ fn original_rows_produce_opaque_credential_free_facts() {
     );
 }
 
+// Match the real Claude Official preset: ordinary local config has no endpoint.
+// The original overview must not mistake this for a damaged OpenRouter owner.
+#[cfg(feature = "gui")]
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn default_claude_official_keeps_original_overview_and_sources_readable() {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
+    let db = std::sync::Arc::new(Database::memory().unwrap());
+    let mut provider = Provider::with_id(
+        "synthetic-default-claude".into(),
+        "Claude Official".into(),
+        serde_json::json!({"env": {}}),
+        Some("https://www.anthropic.com/claude-code".into()),
+    );
+    provider.category = Some("official".into());
+    db.save_provider("claude", &provider).unwrap();
+    let state = crate::store::AppState::new(db.clone()).unwrap();
+    let overview = crate::commands::application_overview(&state, &AppType::Claude)
+        .expect("default Claude is not an OpenRouter owner");
+    let displayed = overview
+        .configurations
+        .iter()
+        .find(|row| row.provider_id == provider.id)
+        .expect("the original default provider must remain visible");
+    assert!(displayed.account.is_none());
+    assert!(crate::commands::get_service_sources_impl(&state)
+        .unwrap()
+        .is_empty());
+    assert!(read(
+        &db,
+        &RowRef {
+            origin_app: "claude".into(),
+            provider_id: provider.id,
+        }
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[cfg_attr(test, test)]
+fn malformed_endpoint_fields_and_original_credentials_remain_errors() {
+    let db = Database::memory().unwrap();
+    for (index, settings) in [
+        serde_json::json!({"env": {"ANTHROPIC_BASE_URL": 7}}),
+        serde_json::json!({"env": {"ANTHROPIC_BASE_URL": null}}),
+        serde_json::json!({"env": []}),
+        serde_json::json!({"env": {}, "base_url": false}),
+        serde_json::json!({"env": {}, "baseURL": null}),
+        serde_json::json!({"env": {}, "apiEndpoint": {}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = add(
+            &db,
+            "claude",
+            &format!("malformed-endpoint-{index}"),
+            "https://openrouter.ai/api",
+            "synthetic-secret",
+        );
+        let mut provider = db
+            .get_provider_by_id(&row.provider_id, "claude")
+            .unwrap()
+            .unwrap();
+        provider.settings_config = settings;
+        db.save_provider("claude", &provider).unwrap();
+        assert!(
+            read(&db, &row).is_err(),
+            "damaged fields are not absent fields"
+        );
+    }
+    for (index, key) in [
+        serde_json::json!("synthetic\ninvalid"),
+        serde_json::json!(7),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = add(
+            &db,
+            "claude",
+            &format!("malformed-auth-{index}"),
+            "https://openrouter.ai/api",
+            "synthetic-secret",
+        );
+        let mut provider = db
+            .get_provider_by_id(&row.provider_id, "claude")
+            .unwrap()
+            .unwrap();
+        provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = key;
+        db.save_provider("claude", &provider).unwrap();
+        assert!(
+            read(&db, &row).is_err(),
+            "verified OpenRouter auth corruption is not absence"
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+fn captured_openrouter_endpoint_removal_retires_request_and_response() {
+    let db = std::sync::Arc::new(Database::memory().unwrap());
+    let row = add(
+        &db,
+        "claude",
+        "removed-endpoint",
+        "https://openrouter.ai/api",
+        "synthetic-secret",
+    );
+    let expected = capture(&db, &row);
+    let (_, fence) = acquire_expected(db.clone(), &AppType::Claude, &expected).unwrap();
+    let mut provider = db
+        .get_provider_by_id(&row.provider_id, "claude")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["env"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ANTHROPIC_BASE_URL");
+    db.save_provider("claude", &provider).unwrap();
+    assert!(acquire_expected(db.clone(), &AppType::Claude, &expected).is_err());
+    assert!(fence.check().is_err());
+    {
+        let vault = db.secrets.read().unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert!(capture_on(&conn, &vault, db.secrets.lifecycle_epoch(), &row).is_err());
+    }
+    // A fresh inventory read may classify absence, but never revive a proof.
+    assert!(read(&db, &row).unwrap().is_none());
+}
+
 #[cfg_attr(test, test)]
 fn exact_official_destination_is_required_not_brand_or_substring() {
     let db = Database::memory().unwrap();
@@ -627,11 +757,19 @@ pub(crate) fn verify(case: &str) {
         }
         "fence_key" => acquired_fence_rejects_key_reissue(),
         "fence_epoch" => captured_and_acquired_leases_do_not_revive_after_session_unblock(),
-        "unsupported" => custom_endpoints_managed_bindings_and_unknown_formats_are_not_sources(),
+        "unsupported" => {
+            custom_endpoints_managed_bindings_and_unknown_formats_are_not_sources();
+            #[cfg(feature = "gui")]
+            default_claude_official_keeps_original_overview_and_sources_readable();
+        }
         "ready" => original_rows_produce_opaque_credential_free_facts(),
         "destination" => exact_official_destination_is_required_not_brand_or_substring(),
         "reseal" => normal_reseal_retires_evidence_not_the_local_source_reference(),
-        "invalid" => missing_and_empty_are_not_sources_but_corruption_is_not_absence(),
+        "invalid" => {
+            missing_and_empty_are_not_sources_but_corruption_is_not_absence();
+            malformed_endpoint_fields_and_original_credentials_remain_errors();
+            captured_openrouter_endpoint_removal_retires_request_and_response();
+        }
         _ => panic!("unknown synthetic OpenRouter owner fixture"),
     }
 }
